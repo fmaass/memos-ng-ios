@@ -1,3 +1,9 @@
+# Local overrides merge in order; later entries win, and this file wins over includes for any
+# key set here — which is why signing keys are NOT set here (see signing.default.yml).
+include:
+  - path: signing.default.yml
+  - path: signing.local.yml    # per-machine; bin/generate.sh stubs it when absent (xcodegen has no optional includes)
+
 # The Xcode project is generated from this file; MemosNG.xcodeproj is not committed.
 #
 # A hand-maintained .xcodeproj is an opaque, merge-hostile artefact: the agents that write this
@@ -70,12 +76,9 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: Memos
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        # No DEVELOPMENT_TEAM and no entitlements file: the Apple Developer Program is a Phase 4
-        # dependency, and a team id does not belong in a repository. Simulator builds still sign
-        # ad-hoc, which is not optional — an unsigned app has no keychain entitlement, and every
-        # Keychain call fails with errSecMissingEntitlement (-34018).
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGN_STYLE: Manual
+        # Signing lives in signing.default.yml (committed, ad-hoc, simulator-only) overridden by
+        # signing.local.yml (gitignored, per-machine device team) — see the include list at the
+        # top of this file. Never set signing here and never click it into the generated project.
 
   MemosAPITests:
     type: bundle.unit-test

@@ -12,7 +12,7 @@ come later. The architecture and its reasoning are in [`docs/ARCHITECTURE.md`](d
 The Xcode project is generated, not committed:
 
     brew install xcodegen
-    xcodegen generate
+    bin/generate.sh
     open MemosNG.xcodeproj
 
 Requires Xcode 26.6 and the iOS 26 simulator runtime. The three local packages under `Packages/`
@@ -26,7 +26,7 @@ Every build, test and lint runs on a Mac build host, driven from wherever you ar
     MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
 
 It mirrors the working tree to a disposable directory on that host and runs, in order and
-fail-fast: `xcodegen generate`, `swift format lint --strict --recursive .`, `xcodebuild test`
+fail-fast: `bin/generate.sh` (xcodegen), `swift format lint --strict --recursive .`, `xcodebuild test`
 (three test bundles), `swift build -warnings-as-errors` for `MemosAPI` and `MemosCore`, the
 dependency-rule check, and a per-bundle test-count check. It prints one summary line of every
 step's exit code and returns the first non-zero one; the result bundle and any screenshots are
@@ -55,3 +55,11 @@ the sign-in screen. The token is validated against `GET /api/auth/user` before i
 DEBUG builds only: if `MEMOS_SERVER` and `MEMOS_PAT` are both set in the environment at launch, the
 app signs in with them. That exists so a simulator with no keyboard can be driven for acceptance
 runs; release builds contain no code path that reads a credential from the environment.
+
+## Running on a device
+
+Simulator builds need nothing. For a physical iPhone: add your Apple ID in Xcode → Settings →
+Accounts (free personal team is fine, re-signs weekly), copy `signing.local.yml.example` over
+`signing.local.yml` (replacing the generated stub), fill in the team id, run `bin/generate.sh`, pick
+your device. Never set
+signing in the Xcode UI — the project file is generated and your click would be wiped.

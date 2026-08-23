@@ -16,3 +16,5 @@ Secrets*.xcconfig
 # gate evidence copied back from the build host
 .gate-artifacts/
 .phase-ledger.md
+# per-machine signing (see signing.local.yml.example)
+signing.local.yml

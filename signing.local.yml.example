@@ -1,0 +1,13 @@
+# Per-machine developer signing for RUNNING ON A DEVICE. Copy to signing.local.yml (gitignored),
+# fill in your team id, then run `xcodegen generate`.
+#   1. Xcode -> Settings -> Accounts -> add your Apple ID (a free personal team is created).
+#   2. Your team id shows under the account (or: defaults read com.apple.dt.Xcode IDEProvisioningTeams).
+# A free personal team re-signs every 7 days; the paid Developer Program removes that limit and
+# is required for the Phase 4 entitlements anyway. Never commit a team id.
+targets:
+  MemosNG:
+    settings:
+      base:
+        DEVELOPMENT_TEAM: YOUR_TEAM_ID
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development

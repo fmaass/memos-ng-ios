@@ -213,7 +213,7 @@ summary_and_exit() {
 # --- (3) mirror the worktree ------------------------------------------------------------------
 say "--- step: rsync ---"
 rsync -a --delete \
-  --exclude '.git' \
+  --exclude '.git' --exclude 'signing.local.yml' \
   --exclude '.build' \
   --exclude 'DerivedData' \
   --exclude '*.xcodeproj' \
@@ -268,7 +268,7 @@ step() {
 
 s_xcodegen() {
   [ -f project.yml ] || { echo "no project.yml in $GATE_TARGET — nothing to generate"; return 3; }
-  xcodegen generate --spec project.yml
+  bin/generate.sh --spec project.yml
 }
 
 s_format() { swift format lint --strict --recursive . ; }
