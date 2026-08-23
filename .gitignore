@@ -1,0 +1,15 @@
+# generated project (XcodeGen)
+*.xcodeproj
+*.xcworkspace
+# build products
+.build/
+DerivedData/
+*.xcresult
+# user state
+xcuserdata/
+*.xcuserstate
+.DS_Store
+# secrets / local config
+*.env
+.env.*
+Secrets*.xcconfig
