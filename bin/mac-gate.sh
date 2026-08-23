@@ -268,7 +268,7 @@ step() {
 
 s_xcodegen() {
   [ -f project.yml ] || { echo "no project.yml in $GATE_TARGET — nothing to generate"; return 3; }
-  xcodegen generate --spec project.yml
+  bin/generate.sh --spec project.yml
 }
 
 s_format() { swift format lint --strict --recursive . ; }

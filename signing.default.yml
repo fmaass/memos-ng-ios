@@ -1,0 +1,10 @@
+# Committed default: ad-hoc signing, no team — enough for every simulator build and for
+# bin/mac-gate.sh. A device build needs signing.local.yml (see its .example).
+# Simulator ad-hoc signing is not optional: an unsigned app has no keychain entitlement and
+# every Keychain call fails with errSecMissingEntitlement (-34018).
+targets:
+  MemosNG:
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
