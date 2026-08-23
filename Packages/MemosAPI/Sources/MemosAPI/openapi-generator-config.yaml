@@ -1,0 +1,7 @@
+# The client is generated, never hand-written: the server contract is memos-ng's openapi.json and
+# a hand-written client is a second, silently drifting copy of it.
+generate:
+  - types
+  - client
+accessModifier: public
+namingStrategy: idiomatic
