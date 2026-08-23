@@ -54,3 +54,59 @@ struct SignedMediaURLTests {
         #expect(signed(expiringIn: 600).cacheLifetime(at: now, serverMaxAge: -10) == 0)
     }
 }
+
+@Suite("MediaCache eviction")
+struct MediaCacheTests {
+    private let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func url(expiringIn seconds: TimeInterval) -> URL {
+        let exp = Int(now.timeIntervalSince1970 + seconds)
+        return URL(string: "https://memos.example.com/api/attachments/a/thumb?exp=\(exp)&sig=ab")!
+    }
+
+    private func cacheWithEntry(for url: URL) -> URLCache {
+        let cache = URLCache(memoryCapacity: 1 << 20, diskCapacity: 0, directory: nil)
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/jpeg"]
+        )!
+        cache.storeCachedResponse(
+            CachedURLResponse(response: response, data: Data([0xFF, 0xD8, 0xFF])),
+            for: URLRequest(url: url)
+        )
+        return cache
+    }
+
+    @Test("a cached response whose signature has lapsed is dropped")
+    func dropsExpired() {
+        let target = url(expiringIn: -1)
+        let cache = cacheWithEntry(for: target)
+        #expect(cache.cachedResponse(for: URLRequest(url: target)) != nil, "precondition")
+
+        #expect(MediaCache.evictExpired(target, at: now, cache: cache))
+
+        #expect(cache.cachedResponse(for: URLRequest(url: target)) == nil)
+    }
+
+    @Test("a cached response with a live signature is left alone")
+    func keepsLive() {
+        let target = url(expiringIn: 600)
+        let cache = cacheWithEntry(for: target)
+
+        #expect(!MediaCache.evictExpired(target, at: now, cache: cache))
+
+        #expect(cache.cachedResponse(for: URLRequest(url: target)) != nil)
+    }
+
+    @Test("an unsigned URL is never evicted on the signature's account")
+    func keepsUnsigned() {
+        let target = URL(string: "https://memos.example.com/logo.png")!
+        let cache = cacheWithEntry(for: target)
+
+        #expect(!MediaCache.evictExpired(target, at: now, cache: cache))
+
+        #expect(cache.cachedResponse(for: URLRequest(url: target)) != nil)
+    }
+}

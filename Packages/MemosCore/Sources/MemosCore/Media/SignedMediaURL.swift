@@ -59,6 +59,13 @@ public struct SignedMediaURL: Sendable, Equatable {
 }
 
 /// The image cache the timeline uses.
+///
+/// Two mechanisms, and it is worth being exact about which does what. The server's
+/// `Cache-Control: private, max-age` is what normally bounds an entry's life, and `URLCache`
+/// honours it without help. What it does NOT know is that the URL's signature can expire first,
+/// so `evictExpired` is the client's own enforcement: before an image is requested, an entry
+/// whose signature has already lapsed is dropped, because it can only be stale and re-serving it
+/// hides the moment the signature stopped working.
 public enum MediaCache {
     /// Sized for a scrolling timeline of thumbnails, not for an offline archive: an on-disk cache
     /// that outgrows the signatures in it is just a pile of URLs that no longer verify.
@@ -73,6 +80,23 @@ public enum MediaCache {
         )
     }
 
+    /// Drops a cached response whose signed URL has expired. Returns whether anything was dropped.
+    ///
+    /// `AsyncImage` loads through `URLSession.shared`, which reads `URLCache.shared`, and it takes
+    /// a `URL` rather than a `URLRequest` — so a per-request cache policy cannot be handed to it.
+    /// Evicting the entry first achieves the same thing from the other side.
+    @discardableResult
+    public static func evictExpired(
+        _ url: URL,
+        at now: Date = Date(),
+        cache: URLCache = .shared
+    ) -> Bool {
+        guard SignedMediaURL(url: url).isExpired(at: now) else { return false }
+        cache.removeCachedResponse(for: URLRequest(url: url))
+        return true
+    }
+
+    /// For a caller that wants its own session rather than the shared one.
     public static func makeSessionConfiguration(cache: URLCache) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.default
         configuration.urlCache = cache

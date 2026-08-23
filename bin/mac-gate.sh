@@ -21,8 +21,10 @@
 #   MAC_GATE_SIMULATOR   simulator device name (default: iPhone 17)
 #   MAC_GATE_ARTIFACTS   local directory for the copied-back .xcresult/screenshots/log
 #                        (default: <repo>/.gate-artifacts)
-#   MAC_GATE_TEST_BUNDLES  space-separated test bundles that must each run >= 1 test
-#                        (default: MemosCoreTests MemosAPITests MemosFeaturesTests)
+#   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The three
+#                        bundles below are always enforced and cannot be removed by setting
+#                        this — an override that could shrink the list would let a suite stop
+#                        being built without the gate noticing.
 #
 # Exit codes: 2 = refusal (unsafe or unusable inputs, nothing was copied or run);
 #             otherwise the exit code of the first failing step.
@@ -31,7 +33,15 @@ set -uo pipefail
 
 GATE_ROOT_REMOTE='$HOME/build/memos-ng-ios/gate'
 SIMULATOR="${MAC_GATE_SIMULATOR:-iPhone 17}"
-TEST_BUNDLES="${MAC_GATE_TEST_BUNDLES:-MemosCoreTests MemosAPITests MemosFeaturesTests}"
+# Always enforced. MAC_GATE_TEST_BUNDLES may only ADD to this list.
+MANDATORY_TEST_BUNDLES="MemosAPITests MemosCoreTests MemosFeaturesTests"
+TEST_BUNDLES="$MANDATORY_TEST_BUNDLES"
+for extra in ${MAC_GATE_TEST_BUNDLES:-}; do
+  case " $TEST_BUNDLES " in
+    *" $extra "*) ;;
+    *) TEST_BUNDLES="$TEST_BUNDLES $extra" ;;
+  esac
+done
 
 die_refuse() {
   printf 'mac-gate: REFUSED: %s\n' "$1" >&2
@@ -58,6 +68,21 @@ head_sha="$(git rev-parse --verify HEAD 2>/dev/null)" \
 branch="${MAC_GATE_BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
 [ -n "$branch" ] || die_refuse "cannot determine the branch name"
 [ "$branch" != "HEAD" ] || die_refuse "detached HEAD: set MAC_GATE_BRANCH to name the gate directory"
+
+# The branch names a directory that `rsync --delete` will empty, and it reaches the build host
+# inside a script. So it is validated HERE, before anything is sent or run: an unvalidated value
+# could carry a newline and append a line of its own to the build host's reply, naming a target
+# outside the gate root for rsync to delete.
+case "$branch" in
+  *[!A-Za-z0-9._/-]*)
+    die_refuse "branch name may only contain A-Z a-z 0-9 . _ - / (got: $(printf '%q' "$branch"))" ;;
+esac
+case "/$branch/" in
+  */../*) die_refuse "branch name may not contain a '..' segment: $branch" ;;
+esac
+case "$branch" in
+  /*) die_refuse "branch name may not be absolute: $branch" ;;
+esac
 
 artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
 mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
@@ -128,6 +153,7 @@ if [ -e "$target" ]; then
   fi
 fi
 mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
+echo "GATE_ROOT $gate_root"
 echo "TARGET $target"
 PRE_EOF
   } | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1
@@ -138,8 +164,35 @@ if [ "$preflight_rc" -ne 0 ]; then
   printf '%s\n' "$preflight_out" >&2
   exit 2
 fi
-target="$(printf '%s\n' "$preflight_out" | sed -n 's/^TARGET //p' | tail -1)"
+# The build host's reply is re-checked here rather than trusted. Exactly one of each line, the
+# root has to look like a path, and the target has to be the one this script would have computed.
+gate_root="$(printf '%s\n' "$preflight_out" | sed -n 's/^GATE_ROOT //p')"
+target="$(printf '%s\n' "$preflight_out" | sed -n 's/^TARGET //p')"
+[ -n "$gate_root" ] || die_refuse "the build host did not return a gate root"
 [ -n "$target" ] || die_refuse "the build host did not return a gate target"
+[ "$(printf '%s\n' "$gate_root" | wc -l)" -eq 1 ] || die_refuse "more than one gate root returned"
+[ "$(printf '%s\n' "$target" | wc -l)" -eq 1 ] || die_refuse "more than one gate target returned"
+case "$gate_root" in
+  /*) ;;
+  *) die_refuse "the gate root is not an absolute path: $(printf '%q' "$gate_root")" ;;
+esac
+case "$gate_root" in
+  *[!A-Za-z0-9._/-]*) die_refuse "the gate root contains unexpected characters" ;;
+esac
+expected_target="$gate_root/$branch"
+[ "$target" = "$expected_target" ] \
+  || die_refuse "the build host returned $target, not the expected $expected_target"
+[ "$target" != "$gate_root" ] || die_refuse "the target is the gate root itself"
+case "$target/" in
+  "$gate_root"/*) ;;
+  *) die_refuse "target $target is outside the gate root $gate_root" ;;
+esac
+case "/$target/" in
+  */../*) die_refuse "target $target contains a '..' segment" ;;
+esac
+case "$target/" in
+  */projects/*) die_refuse "target $target is inside a projects checkout" ;;
+esac
 say "gate target : $host:$target"
 
 # --- step bookkeeping -------------------------------------------------------------------------

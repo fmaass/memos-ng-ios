@@ -1,11 +1,12 @@
 import Foundation
 
+#if DEBUG
+
 /// A pair of environment variables that signs a DEBUG build in without typing.
 ///
 /// This exists for one reason: the acceptance run drives a simulator with no keyboard and no way
-/// to paste a token. It is compiled into DEBUG builds only: a release build has no code path
-/// that reads a credential out of the environment, and none that could be handed one by a launch
-/// argument.
+/// to paste a token. The whole type is inside `#if DEBUG`, so a release build does not merely
+/// avoid calling it — it does not contain it.
 public struct DebugCredentials: Sendable, Equatable {
     public var serverAddress: String
     public var token: String
@@ -21,3 +22,5 @@ public struct DebugCredentials: Sendable, Equatable {
         return DebugCredentials(serverAddress: server, token: token)
     }
 }
+
+#endif
