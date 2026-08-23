@@ -213,7 +213,7 @@ summary_and_exit() {
 # --- (3) mirror the worktree ------------------------------------------------------------------
 say "--- step: rsync ---"
 rsync -a --delete \
-  --exclude '.git' \
+  --exclude '.git' --exclude 'signing.local.yml' \
   --exclude '.build' \
   --exclude 'DerivedData' \
   --exclude '*.xcodeproj' \
