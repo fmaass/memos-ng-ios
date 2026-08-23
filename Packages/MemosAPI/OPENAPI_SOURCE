@@ -1,0 +1,9 @@
+# Provenance of the memos-ng artefacts vendored into this package.
+# Written by scripts/sync-openapi.sh — do not edit by hand.
+repo=memos-ng
+commit=c5b3d6be82e310e278338eaf8f5015fdd38cf5be
+subject=Add the markdown parity fixture shared with the native iOS client (#83)
+committed=2026-08-23T11:38:52+02:00
+files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md
+nullable_rewritten=69
+nullable_left_as_anyof_ref=5

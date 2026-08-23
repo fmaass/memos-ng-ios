@@ -13,3 +13,6 @@ xcuserdata/
 *.env
 .env.*
 Secrets*.xcconfig
+# gate evidence copied back from the build host
+.gate-artifacts/
+.phase-ledger.md
