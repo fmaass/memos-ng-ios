@@ -76,6 +76,11 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: Memos
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UIRequiresFullScreen: YES
+        # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
+        # classifies API calls as Local Network access; without this declaration iOS 18+ denies
+        # them silently (NSURLError -1009 with a satisfied path).
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Memos connects to your memos-ng server, which may live on your local network.
         # Signing lives in signing.default.yml (committed, ad-hoc, simulator-only) overridden by
         # signing.local.yml (gitignored, per-machine device team) — see the include list at the
         # top of this file. Never set signing here and never click it into the generated project.
