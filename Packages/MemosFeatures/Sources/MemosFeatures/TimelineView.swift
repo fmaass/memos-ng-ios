@@ -214,7 +214,11 @@ public struct TimelineView: View {
                         .contextMenu {
                             if memo.mine {
                                 Button {
-                                    composing = .edit(uid: memo.uid, content: memo.content)
+                                    composing = .edit(
+                                        uid: memo.uid,
+                                        content: memo.content,
+                                        createdAt: memo.createdAt
+                                    )
                                 } label: {
                                     Label("Edit", systemImage: "pencil")
                                 }
@@ -316,14 +320,23 @@ public struct TimelineView: View {
             posted = await outbox.enqueue(
                 content: submission.content,
                 visibility: submission.visibility?.rawValue,
+                // A backdated capture keeps the date it was given all the way through the queue:
+                // the job's capture stamp IS what the create call sends as `created_at`.
+                capturedAt: submission.capturedAt(),
                 sources: submission.attachments.map(\.stagedSource)
             )
-        case .edit(let uid, _):
+        case .edit(let uid, _, let createdAt):
             guard let client = session.api, let baseURL = session.serverBaseURL else {
                 return false
             }
+            // Only a date the editor actually moved is sent; an untouched one would be a rewrite
+            // of the memo's own value dressed up as an edit.
             posted = await timeline.edit(
-                uid: uid, content: submission.content, using: client, baseURL: baseURL
+                uid: uid,
+                content: submission.content,
+                createdAt: submission.createdAt == createdAt ? nil : submission.createdAt,
+                using: client,
+                baseURL: baseURL
             )
         }
         feedback.fire(posted ? .posted : .postFailed)
@@ -414,7 +427,7 @@ extension ComposeView.Mode: Identifiable {
     public var id: String {
         switch self {
         case .create: "create"
-        case .edit(let uid, _): "edit-\(uid)"
+        case .edit(let uid, _, _): "edit-\(uid)"
         }
     }
 }

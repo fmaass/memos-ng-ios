@@ -64,11 +64,12 @@ enum Stub {
         uid: String,
         content: String = "hello",
         pinned: Bool = false,
-        visibility: String = "PRIVATE"
+        visibility: String = "PRIVATE",
+        createdAt: String = "2026-08-23T09:00:00Z"
     ) -> String {
         """
         {"uid":"\(uid)","owner":"fabian","mine":true,"content":"\(jsonEscaped(content))",\
-        "visibility":"\(visibility)","pinned":\(pinned),"created_at":"2026-08-23T09:00:00Z",\
+        "visibility":"\(visibility)","pinned":\(pinned),"created_at":"\(createdAt)",\
         "updated_at":"2026-08-23T09:00:00.443000Z","archived_at":null,"tags":[],"attachments":[]}
         """
     }
@@ -110,12 +111,31 @@ enum Stub {
         return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
-    static func memoList(_ uids: [String], nextCursor: String?) -> String {
+    /// The same bytes, kept whole. A body has to be collected inside the transport handler, but a
+    /// test often wants to assert on it afterwards — above all that a key is ABSENT, which is
+    /// only meaningful once the body it is missing from has been read.
+    static func bytes(_ body: HTTPBody?) async throws -> Data {
+        guard let body else { return Data() }
+        return try await Data(collecting: body, upTo: 64 * 1024)
+    }
+
+    static func object(_ data: Data?) -> [String: Any] {
+        guard let data, !data.isEmpty else { return [:] }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    /// A page built from memo bodies the test wrote itself, for lists whose memos differ by more
+    /// than their uid.
+    static func page(_ memos: [String], nextCursor: String? = nil) -> String {
         let cursor = nextCursor.map { "\"\($0)\"" } ?? "null"
         return """
-            {"items":[\(uids.map { memo(uid: $0) }.joined(separator: ","))],\
+            {"items":[\(memos.joined(separator: ","))],\
             "nextCursor":\(cursor),"totalCount":null}
             """
+    }
+
+    static func memoList(_ uids: [String], nextCursor: String?) -> String {
+        page(uids.map { memo(uid: $0) }, nextCursor: nextCursor)
     }
 }
 

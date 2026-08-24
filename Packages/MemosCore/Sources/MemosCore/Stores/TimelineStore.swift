@@ -124,15 +124,27 @@ public final class TimelineStore {
         }
     }
 
-    /// Replaces a memo's content with what the editor produced.
+    /// Replaces a memo's content with what the editor produced, and — when the editor was given a
+    /// date — the display date it carries.
+    ///
+    /// `createdAt` is left OUT of the request when it is nil rather than sent as the memo's
+    /// current value: a PATCH is a partial update, and an edit that did not touch the date has no
+    /// business rewriting it. The web app sends the date on every edit because its editor always
+    /// holds one; here the absence is what says "unchanged".
     @discardableResult
     public func edit(
         uid: String,
         content: String,
+        createdAt: Date? = nil,
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
-        await patch(uid: uid, .init(content: content), using: client, baseURL: baseURL)
+        await patch(
+            uid: uid,
+            .init(content: content, createdAt: createdAt),
+            using: client,
+            baseURL: baseURL
+        )
     }
 
     /// Changes who can see a memo.
@@ -297,17 +309,39 @@ public final class TimelineStore {
         }
     }
 
-    /// Replaces the loaded copy of a memo with the server's, if it is on screen at all.
+    /// Replaces the loaded copy of a memo with the server's, if it is on screen at all — and
+    /// MOVES it when the server's copy no longer belongs where the old one sat.
+    ///
+    /// A memo whose display date changed has left the day it was filed under, and the timeline is
+    /// cut into days: replacing it in place would leave it printed under the old date, above
+    /// memos newer than it, until something else forced a refresh. So the same remove-and-reinsert
+    /// the pin routes do is applied here — and only when an ordering key actually moved, because
+    /// an ordinary content edit must not reshuffle the list.
     private func apply(_ memo: Memo) {
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
-        memos[position] = memo
+        let previous = memos[position]
+        let moved = previous.createdAt != memo.createdAt || previous.pinned != memo.pinned
+        memos.remove(at: position)
+        memos.insert(memo, at: moved ? Self.insertionIndex(for: memo, in: memos) : position)
     }
 
-    /// Where a new memo belongs in a list the server sorts pinned-first, then newest-first. Pure,
-    /// so the placement is asserted rather than eyeballed against a running server.
+    /// Where a memo belongs in a list the server sorts pinned-first, then newest-first — `memos`
+    /// must NOT already contain it. Pure, so the placement is asserted rather than eyeballed
+    /// against a running server.
+    ///
+    /// A memo backdated past the oldest page read so far belongs on a page nobody has asked for
+    /// yet; it lands at the end of what IS loaded and the next refresh files it properly. That is
+    /// deliberate: a memo one screen too high is a smaller lie than one that vanishes the moment
+    /// its date changes.
     static func insertionIndex(for memo: Memo, in memos: [Memo]) -> Int {
-        guard !memo.pinned else { return 0 }
-        return memos.firstIndex { !$0.pinned } ?? memos.count
+        let next = memos.firstIndex { other in
+            // The pinned block comes first whatever the dates say; inside a block, newest first.
+            if other.pinned != memo.pinned { return !other.pinned }
+            // Ties go to the memo being placed, because the server breaks them by id descending
+            // and the newer row is the one arriving here.
+            return other.createdAt <= memo.createdAt
+        }
+        return next ?? memos.count
     }
 
     static func page(

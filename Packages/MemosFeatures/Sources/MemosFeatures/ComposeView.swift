@@ -7,12 +7,30 @@ public struct ComposeSubmission: Sendable, Equatable {
     public var content: String
     public var visibility: MemoVisibility?
     public var attachments: [PickedMedia]
+    /// The display date the writer asked for, or nil for "whenever this is".
+    ///
+    /// Nil is not "now" spelled differently: a new capture is stamped when it is written and a
+    /// memo being edited keeps the date it already has, and neither of those is a date this sheet
+    /// gets to invent. Carrying the absence all the way through is what lets a test tell an
+    /// untouched date apart from one that happens to equal the clock.
+    public var createdAt: Date?
 
-    public init(content: String, visibility: MemoVisibility?, attachments: [PickedMedia] = []) {
+    public init(
+        content: String,
+        visibility: MemoVisibility?,
+        attachments: [PickedMedia] = [],
+        createdAt: Date? = nil
+    ) {
         self.content = content
         self.visibility = visibility
         self.attachments = attachments
+        self.createdAt = createdAt
     }
+
+    /// What the outbox stamps this capture with: the date the writer chose, or the moment it was
+    /// written. It is a function rather than a line inside the view's `submit` so that the one
+    /// step where a chosen date could silently be dropped is the one step a test can hold.
+    public func capturedAt(now: Date = Date()) -> Date { createdAt ?? now }
 }
 
 /// Writing a memo — new or edited, one screen.
@@ -31,7 +49,9 @@ public struct ComposeSubmission: Sendable, Equatable {
 public struct ComposeView: View {
     public enum Mode: Equatable {
         case create
-        case edit(uid: String, content: String)
+        /// An edit opens on the memo as it stands, its display date included — the date row is a
+        /// change to something that already has one, not a blank to fill in.
+        case edit(uid: String, content: String, createdAt: Date)
     }
 
     let mode: Mode
@@ -44,6 +64,9 @@ public struct ComposeView: View {
     @Environment(SessionStore.self) private var session: SessionStore?
     @State private var content: String
     @State private var visibility: MemoVisibility?
+    /// The chosen display date, or nil while the capture is simply "now" (an edit starts holding
+    /// the memo's own date, so on that path it is never nil).
+    @State private var date: Date?
     @State private var picked: [PhotosPickerItem] = []
     @State private var attachments: [PickedMedia] = []
     @State private var failedImports = 0
@@ -60,8 +83,13 @@ public struct ComposeView: View {
         self.submit = submit
         _content = State(
             initialValue: {
-                if case .edit(_, let content) = mode { return content }
+                if case .edit(_, let content, _) = mode { return content }
                 return ""
+            }())
+        _date = State(
+            initialValue: {
+                if case .edit(_, _, let createdAt) = mode { return createdAt }
+                return nil
             }())
     }
 
@@ -85,10 +113,8 @@ public struct ComposeView: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 0) {
                 editor
-                if !isEdit {
-                    Divider()
-                    attachRow
-                }
+                Divider()
+                controls
             }
             .navigationTitle(isEdit ? "Edit memo" : "New memo")
             .navigationBarTitleDisplayMode(.inline)
@@ -104,7 +130,8 @@ public struct ComposeView: View {
                             let submission = ComposeSubmission(
                                 content: content,
                                 visibility: visibility,
-                                attachments: attachments
+                                attachments: attachments,
+                                createdAt: date
                             )
                             if await submit(submission) { dismiss() }
                         }
@@ -142,46 +169,54 @@ public struct ComposeView: View {
             }
     }
 
+    /// Everything under the editor: what is attached, who will see it, and when it happened.
+    ///
+    /// An EDIT shows only the date row. Attachments are managed on the memo itself and visibility
+    /// is its own deliberate action (see the type comment) — but a wrong date is a typo like any
+    /// other, and fixing it is what this sheet is for.
     @ViewBuilder
-    private var attachRow: some View {
+    private var controls: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
-            if !attachments.isEmpty {
-                PickedThumbnailRow(attachments: attachments)
-            }
-            // At an accessibility text size the picker's label and the visibility pill cannot
-            // share a line without one of them being squeezed, so they stop trying to.
-            AttachControls(stacked: dynamicTypeSize.isAccessibilitySize) {
-                PhotosPicker(
-                    selection: $picked,
-                    selectionBehavior: .ordered,
-                    matching: .any(of: [.images, .videos]),
-                    preferredItemEncoding: .current
-                ) {
-                    Label("Add photos", systemImage: "photo.on.rectangle.angled")
-                        .font(.subheadline)
+            if !isEdit {
+                if !attachments.isEmpty {
+                    PickedThumbnailRow(attachments: attachments)
                 }
-                if isImporting {
-                    ProgressView()
+                // At an accessibility text size the picker's label and the visibility pill cannot
+                // share a line without one of them being squeezed, so they stop trying to.
+                AttachControls(stacked: dynamicTypeSize.isAccessibilitySize) {
+                    PhotosPicker(
+                        selection: $picked,
+                        selectionBehavior: .ordered,
+                        matching: .any(of: [.images, .videos]),
+                        preferredItemEncoding: .current
+                    ) {
+                        Label("Add photos", systemImage: "photo.on.rectangle.angled")
+                            .font(.subheadline)
+                    }
+                    if isImporting {
+                        ProgressView()
+                    }
+                } trailing: {
+                    VisibilityMenu(
+                        selection: $visibility,
+                        accountDefault: session?.defaultVisibility
+                    )
                 }
-            } trailing: {
-                VisibilityMenu(
-                    selection: $visibility,
-                    accountDefault: session?.defaultVisibility
-                )
-            }
-            if failedImports > 0,
-                let summary = ComposeAttachments.summary(
-                    imported: attachments.count, failed: failedImports
-                )
-            {
-                HStack(spacing: DesignTokens.Space.snug) {
-                    Text(summary)
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                    Button("Remove them") { clearPicked() }
-                        .font(.footnote)
+                if failedImports > 0,
+                    let summary = ComposeAttachments.summary(
+                        imported: attachments.count, failed: failedImports
+                    )
+                {
+                    HStack(spacing: DesignTokens.Space.snug) {
+                        Text(summary)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                        Button("Remove them") { clearPicked() }
+                            .font(.footnote)
+                    }
                 }
             }
+            MemoDateRow(date: $date, clearable: !isEdit)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DesignTokens.Space.regular)
@@ -342,5 +377,120 @@ struct AttachControls<Leading: View, Trailing: View>: View {
                 trailing
             }
         }
+    }
+}
+
+/// When the memo happened, as one pill that opens a picker.
+///
+/// A capture is dated the moment it is written, and that is right almost every time — so the row
+/// starts collapsed, saying "Now", and costs nothing to ignore. Tapping it opens the platform's
+/// own date picker; changing anything there is what actually chooses a date, so opening the picker
+/// out of curiosity does not silently backdate a memo. The ✕ puts it back to "Now".
+///
+/// There is no upper bound on what can be chosen. The web app's own picker sets none and the
+/// server stores what it is given, and a client that quietly refused a date the other client
+/// accepts would be the odd one out rather than the careful one.
+struct MemoDateRow: View {
+    @Binding var date: Date?
+    /// Whether "no date of its own" is still available. It is the default for a new capture; a
+    /// memo being edited already has a date, and there is nothing to clear it back to.
+    var clearable: Bool = true
+
+    @State private var isPicking = false
+    /// What the picker opens on when nothing has been chosen. Captured when the picker opens
+    /// rather than read inside `body`, which would move it on every redraw.
+    @State private var seed = Date()
+
+    /// The picker edits this rather than `date` directly, so that "no date chosen" survives merely
+    /// looking at the picker: the memo takes a date when the picker's value MOVES.
+    private var chosen: Binding<Date> {
+        Binding(get: { self.date ?? self.seed }, set: { self.date = $0 })
+    }
+
+    var body: some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            Button {
+                seed = date ?? Date()
+                isPicking = true
+            } label: {
+                MemoDatePill(date: date)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Memo date")
+            .accessibilityValue(MemoDateChoice.title(for: date))
+            if clearable, date != nil {
+                Button {
+                    date = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Use the time of writing")
+            }
+        }
+        .popover(isPresented: $isPicking) {
+            DatePicker(
+                "Memo date",
+                selection: chosen,
+                displayedComponents: [.date, .hourAndMinute]
+            )
+            .datePickerStyle(.graphical)
+            .labelsHidden()
+            .padding(DesignTokens.Space.regular)
+            // A popover rather than the sheet iOS would otherwise substitute on a phone: the
+            // compose sheet is already a sheet, and a second one over it hides the memo being
+            // dated behind the picker that dates it.
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// The date row's label — extracted so its fit at the largest text size is measured directly
+/// (`DynamicTypeFittingTests`), the same way the visibility pill is.
+struct MemoDatePill: View {
+    let date: Date?
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var title: String {
+        MemoDateChoice.title(for: date, compact: dynamicTypeSize.isAccessibilitySize)
+    }
+
+    var body: some View {
+        Label {
+            Text(title)
+        } icon: {
+            Image(systemName: "clock")
+        }
+        .labelStyle(.titleAndIcon)
+        .font(.subheadline.weight(.medium))
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, DesignTokens.Space.regular)
+        .padding(.vertical, DesignTokens.Space.snug)
+        .background(DesignTokens.accent.opacity(0.14), in: .capsule)
+        .foregroundStyle(DesignTokens.accent)
+    }
+}
+
+/// What the date row says.
+nonisolated enum MemoDateChoice {
+    /// `compact` keeps the day and the month and drops the year and the time. At an accessibility
+    /// text size the full date wants more width than a compose sheet has, and a pill that refuses
+    /// to truncate would run off the screen — so it says the part that answers "when", and the
+    /// picker behind it still shows the whole date. (The same trade the visibility pill makes.)
+    static func title(
+        for date: Date?,
+        compact: Bool = false,
+        locale: Locale = .autoupdatingCurrent
+    ) -> String {
+        guard let date else { return "Now" }
+        let style: Date.FormatStyle =
+            compact
+            ? .dateTime.day().month(.abbreviated)
+            : .dateTime.day().month(.abbreviated).year().hour().minute()
+        return date.formatted(style.locale(locale))
     }
 }

@@ -158,17 +158,121 @@ extension TimelineStoreTests {
         #expect(store.lastError != nil)
     }
 
-    @Test("an edit replaces the loaded copy with the server's")
-    func editApplies() async {
-        let client = Stub.client { _, _, operation in
-            operation == "patch_memo_api_memos__uid__patch"
-                ? Stub.json(Stub.memo(uid: "a", content: "edited"))
-                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+    @Test("an edit replaces the loaded copy with the server's, and says nothing about the date")
+    func editApplies() async throws {
+        let sent = LockedValue<Data?>(nil)
+        let client = Stub.client { _, body, operation in
+            guard operation == "patch_memo_api_memos__uid__patch" else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            sent.set(try await Stub.bytes(body))
+            return Stub.json(Stub.memo(uid: "a", content: "edited"))
         }
         let store = await seeded(["a"], client: client)
 
         #expect(await store.edit(uid: "a", content: "edited", using: client, baseURL: Stub.baseURL))
         #expect(store.memos.first?.content == "edited")
+        // A PATCH is a partial update: an edit that never touched the date must not carry one, or
+        // every typo fixed would rewrite the display date to whatever the editor happened to hold.
+        let body = Stub.object(sent.get())
+        #expect(body["content"] as? String == "edited", "positive control: the body was read")
+        #expect(body["created_at"] == nil)
+    }
+
+    /// Three memos on three days, newest first — the list before anything is re-dated.
+    private static let datedPage = Stub.page([
+        Stub.memo(uid: "a", createdAt: "2026-08-23T09:00:00Z"),
+        Stub.memo(uid: "b", createdAt: "2026-08-22T09:00:00Z"),
+        Stub.memo(uid: "c", createdAt: "2026-08-21T09:00:00Z"),
+    ])
+
+    private func instant(_ iso: String) throws -> Date {
+        try Date.ISO8601FormatStyle().parse(iso)
+    }
+
+    @Test("an edit that moves the date sends it and re-files the memo under its new day")
+    func editDateMovesTheMemo() async throws {
+        let sent = LockedValue<Data?>(nil)
+        let moved = "2026-08-20T14:30:00Z"
+        let page = Self.datedPage
+        let client = Stub.client { _, body, operation in
+            guard operation == "patch_memo_api_memos__uid__patch" else {
+                return Stub.json(page)
+            }
+            sent.set(try await Stub.bytes(body))
+            return Stub.json(Stub.memo(uid: "b", createdAt: moved))
+        }
+        let store = await seeded(["a", "b", "c"], client: client)
+        #expect(store.memos.map(\.uid) == ["a", "b", "c"])
+
+        let chosen = try instant(moved)
+        let edited = await store.edit(
+            uid: "b",
+            content: "same words",
+            createdAt: chosen,
+            using: client,
+            baseURL: Stub.baseURL
+        )
+        #expect(edited)
+
+        // The date the editor chose is what went on the wire, to the second.
+        let wire = try #require(Stub.object(sent.get())["created_at"] as? String)
+        let parsed = try instant(wire)
+        #expect(parsed == chosen, "sent \(wire)")
+        // And the memo has left the day it was under: it is the oldest one loaded now.
+        #expect(store.memos.map(\.uid) == ["a", "c", "b"])
+        #expect(store.memos.last?.createdAt == chosen)
+    }
+
+    @Test("a memo re-dated forward climbs back to the top of the list")
+    func editDateForwardMovesTheMemo() async throws {
+        let moved = "2026-08-24T08:00:00Z"
+        let page = Self.datedPage
+        let client = Stub.client { _, _, operation in
+            operation == "patch_memo_api_memos__uid__patch"
+                ? Stub.json(Stub.memo(uid: "c", createdAt: moved))
+                : Stub.json(page)
+        }
+        let store = await seeded(["a", "b", "c"], client: client)
+        let chosen = try instant(moved)
+
+        let edited = await store.edit(
+            uid: "c",
+            content: "same words",
+            createdAt: chosen,
+            using: client,
+            baseURL: Stub.baseURL
+        )
+        #expect(edited)
+        #expect(store.memos.map(\.uid) == ["c", "a", "b"])
+    }
+
+    @Test("a pinned memo that is re-dated stays in the pinned block")
+    func reDatingKeepsThePinnedBlock() async throws {
+        let moved = "2026-08-01T08:00:00Z"
+        let page = Stub.page([
+            Stub.memo(uid: "p", pinned: true, createdAt: "2026-08-23T09:00:00Z"),
+            Stub.memo(uid: "a", createdAt: "2026-08-22T09:00:00Z"),
+        ])
+        let client = Stub.client { _, _, operation in
+            operation == "patch_memo_api_memos__uid__patch"
+                ? Stub.json(Stub.memo(uid: "p", pinned: true, createdAt: moved))
+                : Stub.json(page)
+        }
+        let store = await seeded(["p", "a"], client: client)
+        let chosen = try instant(moved)
+
+        let edited = await store.edit(
+            uid: "p",
+            content: "same words",
+            createdAt: chosen,
+            using: client,
+            baseURL: Stub.baseURL
+        )
+        #expect(edited)
+        // Older than the memo below it and still above it: pinned-first outranks the date, which
+        // is how the server orders the page this list is a copy of.
+        #expect(store.memos.map(\.uid) == ["p", "a"])
     }
 
     @Test("a delete removes the row only on the server's word")
