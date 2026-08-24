@@ -124,6 +124,25 @@ struct SessionStoreTests {
         #expect(credentials.isEmpty)
     }
 
+    @Test("a revoke that never left the device also keeps the credential")
+    func signOutKeepsCredentialWhenTransportThrows() async {
+        struct Offline: Error {}
+        let credentials = InMemoryCredentials()
+        let session = store(credentials: credentials) { _, _, operation in
+            guard operation == whoamiOperation else { throw Offline() }
+            return Stub.json(Stub.user)
+        }
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let outcome = await session.signOut()
+
+        // Same rule as the 5xx case, different road there: the request THREW before any server
+        // verdict existed, which says even less about the token than a 500 does.
+        #expect(outcome.failureDescription != nil)
+        #expect(session.state != .signedOut)
+        #expect(!credentials.isEmpty)
+    }
+
     @Test("a stored credential is re-validated at launch, not trusted")
     func restoreRevalidates() async {
         let credentials = InMemoryCredentials()
