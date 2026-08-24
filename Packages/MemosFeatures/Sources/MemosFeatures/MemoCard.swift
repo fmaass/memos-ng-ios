@@ -178,19 +178,28 @@ struct VisibilityPill: View {
     let visibility: MemoVisibility
 
     var body: some View {
-        Label {
-            Text(visibility.label)
-        } icon: {
-            Image(systemName: visibility.symbolName)
+        Group {
+            if let word = visibility.pillLabel {
+                Label {
+                    Text(word)
+                } icon: {
+                    Image(systemName: visibility.symbolName)
+                }
+                .labelStyle(.titleAndIcon)
+                .padding(.horizontal, DesignTokens.Space.snug)
+                .padding(.vertical, DesignTokens.Space.hair)
+                .background(.quaternary, in: .capsule)
+            } else {
+                // No capsule either: a box drawn around a single glyph is heavier than the glyph,
+                // and the point of dropping the word was to stop the common case shouting.
+                Image(systemName: visibility.symbolName)
+            }
         }
-        .labelStyle(.titleAndIcon)
         .font(.caption.weight(.medium))
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, DesignTokens.Space.snug)
-        .padding(.vertical, DesignTokens.Space.hair)
-        .background(.quaternary, in: .capsule)
         .foregroundStyle(.secondary)
+        // The word leaves the SCREEN, not the app: a screen reader still hears which it is.
         .accessibilityLabel("Visibility: \(visibility.label)")
     }
 }

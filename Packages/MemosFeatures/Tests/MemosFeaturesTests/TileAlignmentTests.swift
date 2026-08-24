@@ -218,3 +218,88 @@ struct DetailFitTests {
         #expect(showing == 0, "blur visible in \(showing) pixels of a correctly measured photo")
     }
 }
+
+/// The r5 tour measured a portrait video's play frame at 877x658 inside a 402pt screen — a 4:3
+/// shape where a 9:16 one belonged. These assert the SIZE the detail view actually lays out, not
+/// just the number the projection returns, because that is the thing a person sees.
+@MainActor
+@Suite("A video is laid out at the shape it was shot in")
+struct VideoDetailLayoutTests {
+    private func video(width: Int?, height: Int?) -> MemoAttachment {
+        MemoAttachment(
+            uid: "v1",
+            mime: "video/quicktime",
+            status: .ready,
+            blurhash: "007Da1",
+            width: width,
+            height: height,
+            duration: 12,
+            thumbnailURL: URL(string: "https://memos.example.invalid/t"),
+            previewURL: URL(string: "https://memos.example.invalid/m"),
+            webURL: URL(string: "https://memos.example.invalid/w.mp4"),
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+    }
+
+    /// 370pt is the content width of a 402pt screen once the detail view's padding is taken —
+    /// the width the tour was measuring against.
+    private static let contentWidth: CGFloat = 370
+
+    @Test("a portrait video is taller than it is wide, and a landscape one is not")
+    func videosTakeTheirSourceShape() {
+        let portrait = video(width: 1080, height: 1920)
+        let tall = LayoutProbe.size(
+            AttachmentThumbnail(
+                attachment: portrait,
+                tier: .mobile,
+                slot: MemoPresentation.detailSlot(for: portrait)
+            ),
+            width: Self.contentWidth,
+            height: LayoutProbe.unbounded
+        )
+        #expect(abs(tall.width - Self.contentWidth) < 1)
+        #expect(
+            abs(tall.height - Self.contentWidth / 0.5625) < 1,
+            "portrait video laid out \(tall), expected ~370x658"
+        )
+        #expect(tall.height > tall.width, "a portrait video came out landscape")
+
+        let landscape = video(width: 1920, height: 1080)
+        let wide = LayoutProbe.size(
+            AttachmentThumbnail(
+                attachment: landscape,
+                tier: .mobile,
+                slot: MemoPresentation.detailSlot(for: landscape)
+            ),
+            width: Self.contentWidth,
+            height: LayoutProbe.unbounded
+        )
+        #expect(
+            abs(wide.height - Self.contentWidth / (16.0 / 9.0)) < 1,
+            "landscape video laid out \(wide), expected ~370x208"
+        )
+        // The 4:3 that the tour saw would be ~277pt tall. Nothing here may be that.
+        #expect(abs(wide.height - Self.contentWidth * 3 / 4) > 10)
+        #expect(abs(tall.height - Self.contentWidth * 3 / 4) > 10)
+    }
+
+    @Test("nothing overflows the width it was given")
+    func videoTilesDoNotOverflow() {
+        for (w, h) in [(1080, 1920), (1920, 1080), (nil as Int?, nil as Int?)] {
+            let attachment = video(width: w, height: h)
+            let slot = MemoPresentation.detailSlot(for: attachment)
+            let size = LayoutProbe.size(
+                ThumbnailContent(
+                    attachment: attachment,
+                    phase: .loading,
+                    image: nil,
+                    contentMode: slot.contentMode
+                ),
+                width: Self.contentWidth,
+                height: Self.contentWidth / slot.aspectRatio
+            )
+            // The tour's 877pt-wide frame on a 370pt slot is what this forbids.
+            #expect(abs(size.width - Self.contentWidth) < 1, "tile reported \(size)")
+        }
+    }
+}

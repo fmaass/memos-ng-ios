@@ -197,10 +197,7 @@ public struct ComposeView: View {
                         ProgressView()
                     }
                 } trailing: {
-                    VisibilityMenu(
-                        selection: $visibility,
-                        accountDefault: session?.defaultVisibility
-                    )
+                    metaPills
                 }
                 if failedImports > 0,
                     let summary = ComposeAttachments.summary(
@@ -215,8 +212,11 @@ public struct ComposeView: View {
                             .font(.footnote)
                     }
                 }
+            } else {
+                // An edit manages neither attachments nor visibility, so the date is the whole
+                // meta row on that path.
+                MemoDateRow(date: $date, clearable: false)
             }
-            MemoDateRow(date: $date, clearable: !isEdit)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DesignTokens.Space.regular)
@@ -227,6 +227,33 @@ public struct ComposeView: View {
             // Photos are the reason to want the room; the sheet takes it rather than making
             // someone drag it open to see what they just attached.
             if !isEmpty { detent = .large }
+        }
+    }
+
+    /// The two facts a capture carries besides its words: WHEN it happened and who can see it.
+    ///
+    /// Side by side, as two pills of the same idiom. The date used to sit on a line of its own
+    /// below the picker, styled quietly, and people looked straight past it — someone went hunting
+    /// for a control that was on the screen the whole time. A control nobody finds is not a
+    /// subtle control, it is a missing one.
+    @ViewBuilder
+    private var metaPills: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+                MemoDateRow(date: $date, clearable: true)
+                VisibilityMenu(
+                    selection: $visibility,
+                    accountDefault: session?.defaultVisibility
+                )
+            }
+        } else {
+            HStack(spacing: DesignTokens.Space.snug) {
+                MemoDateRow(date: $date, clearable: true)
+                VisibilityMenu(
+                    selection: $visibility,
+                    accountDefault: session?.defaultVisibility
+                )
+            }
         }
     }
 
@@ -274,8 +301,10 @@ struct VisibilityMenu: View {
     var body: some View {
         Menu {
             Picker("Visibility", selection: $selection) {
+                // The MENU always spells it out: a row you are choosing between has to say what
+                // it is, however little the pill needs to.
                 Label(
-                    VisibilityChoice.title(selection: nil, accountDefault: accountDefault),
+                    accountDefault.map { "Default (\($0.label))" } ?? "Default",
                     systemImage: VisibilityChoice.symbol(
                         selection: nil, accountDefault: accountDefault
                     )
@@ -289,7 +318,14 @@ struct VisibilityMenu: View {
         } label: {
             VisibilityChoicePill(selection: selection, accountDefault: accountDefault)
         }
-        .accessibilityLabel("Visibility")
+        // The MENU is the element VoiceOver lands on, and a label here replaces whatever the pill
+        // inside says — so this is the one that has to name the resolved visibility. Without it
+        // the icon-only public state would announce itself as the bare word "Visibility".
+        .accessibilityLabel(
+            VisibilityChoice.accessibilityLabel(
+                selection: selection, accountDefault: accountDefault
+            )
+        )
     }
 }
 
@@ -301,7 +337,7 @@ struct VisibilityChoicePill: View {
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    var title: String {
+    var title: String? {
         VisibilityChoice.title(
             selection: selection,
             accountDefault: accountDefault,
@@ -313,12 +349,18 @@ struct VisibilityChoicePill: View {
     }
 
     var body: some View {
-        Label {
-            Text(title)
-        } icon: {
-            Image(systemName: symbol)
+        Group {
+            if let title {
+                Label {
+                    Text(title)
+                } icon: {
+                    Image(systemName: symbol)
+                }
+                .labelStyle(.titleAndIcon)
+            } else {
+                Image(systemName: symbol)
+            }
         }
-        .labelStyle(.titleAndIcon)
         .font(.subheadline.weight(.medium))
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
@@ -326,6 +368,11 @@ struct VisibilityChoicePill: View {
         .padding(.vertical, DesignTokens.Space.snug)
         .background(DesignTokens.accent.opacity(0.14), in: .capsule)
         .foregroundStyle(DesignTokens.accent)
+        .accessibilityLabel(
+            VisibilityChoice.accessibilityLabel(
+                selection: selection, accountDefault: accountDefault
+            )
+        )
     }
 }
 
@@ -337,23 +384,58 @@ struct VisibilityChoicePill: View {
 /// that setting yet, it says "Default" rather than inventing one, because a wrong promise about
 /// who can read a memo is worse than a vague one.
 enum VisibilityChoice {
+    /// What will actually happen to this memo: the explicit choice, or the account's setting when
+    /// there is no explicit choice. `nil` only while the app has not been told the setting.
+    static func resolved(
+        selection: MemoVisibility?,
+        accountDefault: MemoVisibility?
+    ) -> MemoVisibility? {
+        selection ?? accountDefault
+    }
+
+    /// The word on the pill, or `nil` when the globe says it alone.
+    ///
+    /// Public gets no word for the same reason it gets none on a card: it is what nearly every
+    /// memo is, so the word never distinguishes anything. That covers BOTH ways of arriving at
+    /// public — chosen outright, or inherited from the account — and the two are deliberately not
+    /// told apart here. For this memo they mean the identical thing, the menu's checkmark still
+    /// shows which row is active, and inventing a visual difference for a distinction with no
+    /// consequence is how a control starts looking like it is saying something it is not.
+    ///
     /// `compact` drops the framing and keeps the answer. At an accessibility text size
     /// "Default (Protected)" wants 518pt of the 369 a compose sheet has, and a pill that refuses
     /// to truncate would simply run off the screen — so at those sizes it says "Protected", which
-    /// is the part that was worth saying. The word it loses is the one the menu's checkmark
-    /// already carries.
+    /// is the part that was worth saying.
     static func title(
         selection: MemoVisibility?,
         accountDefault: MemoVisibility?,
         compact: Bool = false
-    ) -> String {
+    ) -> String? {
+        if resolved(selection: selection, accountDefault: accountDefault) == .public {
+            return nil
+        }
         if let selection { return selection.label }
         guard let accountDefault else { return "Default" }
         return compact ? accountDefault.label : "Default (\(accountDefault.label))"
     }
 
     static func symbol(selection: MemoVisibility?, accountDefault: MemoVisibility?) -> String {
-        selection?.symbolName ?? accountDefault?.symbolName ?? "person.crop.circle"
+        resolved(selection: selection, accountDefault: accountDefault)?.symbolName
+            ?? "person.crop.circle"
+    }
+
+    /// What a screen reader hears, which is never abbreviated and never icon-only. The pill can
+    /// drop a word; the app may not drop the fact.
+    static func accessibilityLabel(
+        selection: MemoVisibility?,
+        accountDefault: MemoVisibility?
+    ) -> String {
+        guard let resolved = resolved(selection: selection, accountDefault: accountDefault) else {
+            return "Visibility: the account default"
+        }
+        return selection == nil
+            ? "Visibility: \(resolved.label), the account default"
+            : "Visibility: \(resolved.label)"
     }
 }
 
@@ -462,7 +544,7 @@ struct MemoDatePill: View {
         Label {
             Text(title)
         } icon: {
-            Image(systemName: "clock")
+            Image(systemName: "calendar")
         }
         .labelStyle(.titleAndIcon)
         .font(.subheadline.weight(.medium))

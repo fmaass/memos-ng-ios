@@ -72,6 +72,17 @@ extension MemoVisibility {
         }
     }
 
+    /// The word a pill shows, or `nil` when the glyph carries it alone.
+    ///
+    /// Public is the household norm: nearly every memo is one, so a pill repeating the word on
+    /// every card is a label that never once distinguishes anything — it just adds a box of text
+    /// beside every photo. The globe still says it, and the EXCEPTIONS are what deserve words,
+    /// because those are the memos where who can see it is news.
+    ///
+    /// The full `label` is unchanged and is what the menus and the accessibility labels use: this
+    /// drops the word from the pill, never from what the app can say.
+    public var pillLabel: String? { self == .public ? nil : label }
+
     /// The glyph beside it. Locked, shared, open — the same three ideas every other app on the
     /// phone uses for the same three states.
     public var symbolName: String {
