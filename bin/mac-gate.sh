@@ -19,10 +19,23 @@
 # Usage:
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
 #
+# Two gates for two branches can run at the same time. They must not share a simulator: the
+# device holds ONE installation per bundle id, so a second branch installing over the first
+# leaves an app whose frameworks belong to the other branch — dyld "Symbol not found" at launch
+# and a red gate that says nothing about the code under test (observed 2026-08-24, three
+# concurrent gates, two false reds). So by default this script gives each run its own device:
+# created on the build host before the build, named for the branch and the local process, and
+# deleted again on every exit path (see the trap in the remote script).
+#
 # Environment:
 #   MAC_GATE_HOST        (required) ssh alias/host of the Mac build host
 #   MAC_GATE_BRANCH      override the branch that names the gate directory (default: current)
-#   MAC_GATE_SIMULATOR   simulator device name (default: iPhone 17)
+#   MAC_GATE_SIMULATOR   run on this EXISTING, shared device by name instead of a private one.
+#                        Only for reproducing a device-specific failure — it gives up the
+#                        isolation above, so two runs set to the same name can cross-install.
+#   MAC_GATE_DEVICE_TYPE device type identifier for the private device
+#                        (e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro). Default:
+#                        chosen on the build host from the newest installed iOS runtime.
 #   MAC_GATE_ARTIFACTS   local directory for the copied-back .xcresult/screenshots/log
 #                        (default: <repo>/.gate-artifacts)
 #   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The three
@@ -30,13 +43,24 @@
 #                        this — an override that could shrink the list would let a suite stop
 #                        being built without the gate noticing.
 #
+# Two gates for the SAME branch are a different matter: they share the gate directory, the work
+# directory, the DerivedData and the result bundle, so the second one's `rsync --delete` rewrites
+# the tree the first is building and the verdict belongs to neither. Those runs are serialised by
+# a lock on the branch's gate directory, taken before anything is copied. The loser does not
+# wait: it says who holds the lock and stops.
+#
 # Exit codes: 2 = refusal (unsafe or unusable inputs, nothing was copied or run);
+#             3 = another run of this branch holds the gate lock (nothing was copied or run);
+#             4 = the lock this run held was reaped while the run was starting, and the build host
+#                 half stopped before touching anything;
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
 
 GATE_ROOT_REMOTE='$HOME/build/memos-ng-ios/gate'
-SIMULATOR="${MAC_GATE_SIMULATOR:-iPhone 17}"
+# Empty means "create a private device for this run" — the default. A name here is the opt-out.
+SIMULATOR="${MAC_GATE_SIMULATOR:-}"
+DEVICE_TYPE="${MAC_GATE_DEVICE_TYPE:-}"
 # Always enforced. MAC_GATE_TEST_BUNDLES may only ADD to this list.
 MANDATORY_TEST_BUNDLES="MemosAPITests MemosCoreTests MemosOutboxTests MemosFeaturesTests MemosShareKitTests"
 TEST_BUNDLES="$MANDATORY_TEST_BUNDLES"
@@ -88,12 +112,81 @@ case "$branch" in
   /*) die_refuse "branch name may not be absolute: $branch" ;;
 esac
 
+# The private device is named here, where the branch and this process are known: the branch so a
+# stray device says which run left it behind, the pid so two runs of the SAME branch (a re-run
+# started before the first one let go) still cannot land on one device. Reduced to the character
+# set the branch validation above already allows, minus '/', and cut short enough to stay a
+# readable name in `simctl list`.
+branch_slug="$(printf '%s' "$branch" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-')"
+branch_slug="${branch_slug:0:40}"
+DEVICE_NAME="gate-${branch_slug}-$$"
+
+# Who this run is, for the gate lock below. The host is in it because the pid alone is only
+# meaningful to the machine that issued it, and the lock is read by whoever comes next.
+LOCK_DIR=""
+# A token, because a pid is not proof of identity to the far side: the remote half of this run has
+# to be able to ask "is the lock in that directory still MINE", and a reap replaces the directory
+# with one that carries somebody else's token.
+RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
+LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) token=$RUN_TOKEN"
+
 artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
 mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
 log="$artifacts/mac-gate.log"
 : > "$log" || die_refuse "cannot write $log"
 
 say() { printf '%s\n' "$*" | tee -a "$log"; }
+
+# The build host deletes the device when the remote script ends, however it ends. That covers a
+# failing step and a refusal — it does NOT cover this script being interrupted: a remote shell
+# whose ssh client has gone away is not signalled, it runs on until a write to the dead
+# connection kills it, and a shell killed that way runs no trap (measured 2026-08-24: after the
+# local ssh was killed the device was still there). So the device is claimed from this side too,
+# by a name only this run can have produced. Deleting a name that is already gone is a no-op, so
+# the two claims cannot fight; the message below is printed only when this side found something
+# still standing.
+remove_gate_device() {
+  [ -z "$SIMULATOR" ] || return 0   # a device this run did not create is not this run's to delete
+  [ -n "${DEVICE_NAME:-}" ] || return 0
+  local name; name="$(esc "$DEVICE_NAME")"
+  timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+    "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH
+     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+     xcrun simctl shutdown '$name' >/dev/null 2>&1
+     xcrun simctl delete '$name' >/dev/null 2>&1" \
+    && say "simulator   : removed the leftover device $DEVICE_NAME from the build host"
+  return 0
+}
+# The lock goes back the same way the device does, and for the same reason: every exit path,
+# including the interrupted one. It is removed only while this run still owns it — a lock taken
+# over by a later run after this one was killed is that run's, not this one's to drop.
+release_gate_lock() {
+  [ -n "${LOCK_DIR:-}" ] || return 0
+  local dir="$LOCK_DIR"
+  # Cleared first: a signal arm and the EXIT trap both reach here.
+  LOCK_DIR=""
+  {
+    printf "lock='%s'\n" "$(esc "$dir")"
+    printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
+    cat <<'REL_EOF'
+[ -d "$lock" ] || exit 0
+if [ "$(cat "$lock/owner" 2>/dev/null)" = "$owner" ]; then rm -rf "$lock"; fi
+REL_EOF
+  } | timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' >/dev/null 2>&1
+  return 0
+}
+
+die_locked() {
+  printf 'mac-gate: REFUSED: %s\n' "$1" >&2
+  printf 'mac-gate: REFUSED: %s\n' "$1" >> "$log" 2>/dev/null
+  exit 3
+}
+
+trap 'remove_gate_device; release_gate_lock' EXIT
+trap 'remove_gate_device; release_gate_lock; exit 130' INT
+trap 'remove_gate_device; release_gate_lock; exit 143' TERM
+trap 'remove_gate_device; release_gate_lock; exit 129' HUP
 
 # --- (5) provenance ---------------------------------------------------------------------------
 {
@@ -103,7 +196,11 @@ say() { printf '%s\n' "$*" | tee -a "$log"; }
   printf 'branch      : %s\n' "$branch"
   printf 'HEAD        : %s\n' "$head_sha"
   printf 'HEAD subject: %s\n' "$(git log -1 --pretty=%s)"
-  printf 'simulator   : %s\n' "$SIMULATOR"
+  if [ -n "$SIMULATOR" ]; then
+    printf 'simulator   : %s (MAC_GATE_SIMULATOR — shared device, no per-run isolation)\n' "$SIMULATOR"
+  else
+    printf 'simulator   : %s (created on the build host for this run, deleted on exit)\n' "$DEVICE_NAME"
+  fi
   printf -- '--- git status --porcelain (full) ---\n'
   git status --porcelain
   printf -- '--- git diff --stat (working tree vs HEAD) ---\n'
@@ -117,6 +214,7 @@ say() { printf '%s\n' "$*" | tee -a "$log"; }
 preflight_out="$(
   {
     printf "branch='%s'\n" "$(esc "$branch")"
+    printf "lock_owner='%s'\n" "$(esc "$LOCK_OWNER")"
     cat <<'PRE_EOF'
 set -uo pipefail
 gate_root_raw="$HOME/build/memos-ng-ios/gate"
@@ -157,6 +255,23 @@ if [ -e "$target" ]; then
   fi
 fi
 mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
+# The lock is a directory, because mkdir is the one atomic "claim it or find it claimed" this
+# host has in every shell it runs: /bin/bash here is 3.2 and has no flock. It is taken now,
+# before a single byte is rsync'd, since the copy is what a concurrent same-branch run destroys.
+lock="$target.lock"
+if mkdir "$lock" 2>/dev/null; then
+  printf '%s\n' "$lock_owner" > "$lock/owner" 2>/dev/null
+  # Read back, because the claim is only as good as what the next run will find in there.
+  lock_back="$(cat "$lock/owner" 2>/dev/null)"
+  if [ "$lock_back" = "$lock_owner" ]; then
+    echo "LOCK ACQUIRED"
+  else
+    echo "LOCK MISMATCH $lock_back"
+  fi
+else
+  echo "LOCK HELD $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
+fi
+echo "LOCKDIR $lock"
 echo "GATE_ROOT $gate_root"
 echo "TARGET $target"
 PRE_EOF
@@ -199,6 +314,126 @@ case "$target/" in
 esac
 say "gate target : $host:$target"
 
+# --- (2b) the gate lock -------------------------------------------------------------------------
+# The build host either handed this run the lock or named who holds it. A live holder is a
+# refusal, not a wait: two runs of one branch cannot be ordered by patience, and a gate that sits
+# silent for ten minutes reads as a hang. A holder that is gone is reaped once, out loud.
+lockdir="$(printf '%s\n' "$preflight_out" | sed -n 's/^LOCKDIR //p')"
+[ -n "$lockdir" ] || die_refuse "the build host did not return a gate lock path"
+[ "$(printf '%s\n' "$lockdir" | wc -l)" -eq 1 ] || die_refuse "more than one gate lock path returned"
+[ "$lockdir" = "$target.lock" ] \
+  || die_refuse "the build host returned the lock $lockdir, not the expected $target.lock"
+
+if printf '%s\n' "$preflight_out" | grep -q '^LOCK MISMATCH'; then
+  die_locked "the gate lock of $branch was written but reads back as somebody else's: $(printf '%s\n' "$preflight_out" | sed -n 's/^LOCK MISMATCH //p')"
+elif printf '%s\n' "$preflight_out" | grep -q '^LOCK ACQUIRED$'; then
+  LOCK_DIR="$lockdir"
+  say "gate lock   : taken ($LOCK_OWNER)"
+else
+  holder="$(printf '%s\n' "$preflight_out" | sed -n 's/^LOCK HELD //p')"
+  holder_host="$(printf '%s\n' "$holder" | sed -n 's/.*host=\([^ ]*\).*/\1/p')"
+  holder_pid="$(printf '%s\n' "$holder" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+  # Only this machine's pids can be asked about; a lock from another machine is taken at its word.
+  holder_alive=yes
+  if [ -n "$holder_pid" ] && [ "$holder_host" = "$(hostname -s)" ] \
+     && ! kill -0 "$holder_pid" 2>/dev/null; then
+    holder_alive=no
+  fi
+  if [ "$holder_alive" = yes ]; then
+    die_locked "another run of $branch holds the gate lock on $host (${holder:-owner unknown}) — nothing was copied. Wait for it to finish, or clear it with: ssh $host rm -rf '$lockdir'"
+  fi
+
+  # A dead controlling pid is only half the question. The tree this lock protects lives on the
+  # BUILD HOST, and a remote script whose ssh client was killed is not signalled — it keeps
+  # building until a write to the dead connection kills it. Reaping on the pid alone would hand
+  # this run an rsync --delete over a tree an orphaned build is still reading. So the build host
+  # is asked as well, and it has to answer twice: once about a control it can see (or its silence
+  # about this branch proves nothing), once about this branch.
+  branch_re="$(printf '%s' "$branch" | sed 's/[.[]/\\&/g')"
+  probe_out="$(
+    {
+      printf "lock='%s'\n" "$(esc "$lockdir")"
+      printf "branch_re='%s'\n" "$(esc "$branch_re")"
+      cat <<'PROBE_EOF'
+# The exact question: is the remote half of the run that took this lock still going? It writes
+# its pid in here, and it is this host's pid, so this host can answer.
+remote_pid="$(cat "$lock/remote-pid" 2>/dev/null | tr -d '[:space:]')"
+remote_alive=0
+if [ -n "$remote_pid" ] && kill -0 "$remote_pid" 2>/dev/null; then remote_alive=1; fi
+
+# And the wider question, for an orphan that lost its note: anything at all still working inside
+# this branch's gate or work tree. A search that finds nothing has to prove it can find
+# something, so it starts a process carrying a path of exactly that shape and looks for it first.
+control_dir="$HOME/build/memos-ng-ios/gate/PROBECONTROL-$$"
+mkdir -p "$control_dir" && : > "$control_dir/live"
+tail -f "$control_dir/live" >/dev/null 2>&1 &
+control_pid=$!
+sleep 1
+control_hits="$(pgrep -f "memos-ng-ios/gate/PROBECONTROL-$$/live" | wc -l | tr -d ' ')"
+live_hits="$(pgrep -f "memos-ng-ios/(gate|work)/$branch_re(/| |$)" | wc -l | tr -d ' ')"
+kill "$control_pid" >/dev/null 2>&1
+rm -rf "$control_dir"
+echo "PROBE control=$control_hits live=$live_hits remote_pid=${remote_pid:-none} remote_alive=$remote_alive"
+PROBE_EOF
+    } | ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' 2>&1
+  )"
+  probe_rc=$?
+  control_hits="$(printf '%s\n' "$probe_out" | sed -n 's/.*control=\([0-9][0-9]*\).*/\1/p')"
+  live_hits="$(printf '%s\n' "$probe_out" | sed -n 's/.*live=\([0-9][0-9]*\).*/\1/p')"
+  remote_alive="$(printf '%s\n' "$probe_out" | sed -n 's/.*remote_alive=\([0-9]\).*/\1/p')"
+  remote_pid="$(printf '%s\n' "$probe_out" | sed -n 's/.*remote_pid=\([^ ]*\).*/\1/p')"
+  if [ "$probe_rc" -ne 0 ] || [ -z "$control_hits" ] || [ -z "$live_hits" ] || [ -z "$remote_alive" ]; then
+    die_locked "could not ask $host whether a build of $branch is still running, so the lock stays where it is: ${probe_out:-no answer}"
+  fi
+  if [ "$control_hits" -lt 1 ]; then
+    die_locked "the liveness probe on $host could not even see its own control process, so its silence about $branch proves nothing — the lock stays where it is"
+  fi
+  if [ "$remote_alive" -ne 0 ]; then
+    die_locked "the run that took the lock on $branch lost its controlling shell (pid $holder_pid is gone here), but its build is still running on $host as pid $remote_pid — reaping now would rsync --delete the tree out from under it. Let it finish, or clear it with: ssh $host rm -rf '$lockdir'"
+  fi
+  if [ "$live_hits" -ne 0 ]; then
+    die_locked "the lock of $branch names a pid that is gone, but $live_hits process(es) on $host are still working in that branch's gate/work tree — an orphaned build outlives the ssh client that started it, so the lock stays. Let it finish, or clear it with: ssh $host rm -rf '$lockdir'"
+  fi
+
+  # The reap itself is one rename, because two runs can reach this point together: mv is atomic,
+  # so exactly one of them carries the old lock away and the other finds it gone. rm -rf followed
+  # by mkdir is not — the second run's rm would delete the first run's fresh lock.
+  takeover_out="$(
+    {
+      printf "lock='%s'\n" "$(esc "$lockdir")"
+      printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
+      printf "stamp='%s'\n" "$(esc "$$-$(date -u +%H%M%S)")"
+      cat <<'TAKE_EOF'
+aside="$lock.reaped-$stamp"
+if mv "$lock" "$aside" 2>/dev/null; then
+  if mkdir "$lock" 2>/dev/null; then
+    printf '%s\n' "$owner" > "$lock/owner"
+    back="$(cat "$lock/owner" 2>/dev/null)"
+    if [ "$back" = "$owner" ]; then
+      rm -rf "$aside"
+      echo TAKEOVER_OK
+    else
+      echo "TAKEOVER_LOST the lock reads back as: $back"
+    fi
+  else
+    rm -rf "$aside"
+    echo "TAKEOVER_LOST another run claimed it: $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
+  fi
+else
+  echo "TAKEOVER_LOST another run reaped it first"
+fi
+TAKE_EOF
+    } | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1
+  )"
+  case "$takeover_out" in
+    *TAKEOVER_OK*)
+      LOCK_DIR="$lockdir"
+      say "gate lock   : reaped a stale lock left by ${holder:-an unknown run} — pid $holder_pid is gone and no build of $branch is running on $host — and took it" ;;
+    *)
+      die_locked "the stale lock of $branch was claimed by another run first: $takeover_out" ;;
+  esac
+fi
+
 # --- step bookkeeping -------------------------------------------------------------------------
 declare -a STEP_NAMES=() STEP_RCS=()
 first_fail=0
@@ -233,9 +468,33 @@ say "--- step: remote ---"
 {
   printf "GATE_TARGET='%s'\n" "$(esc "$target")"
   printf "GATE_SIMULATOR='%s'\n" "$(esc "$SIMULATOR")"
+  printf "GATE_DEVICE_NAME='%s'\n" "$(esc "$DEVICE_NAME")"
+  printf "GATE_DEVICE_TYPE='%s'\n" "$(esc "$DEVICE_TYPE")"
+  printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
   cat <<'REMOTE_EOF'
 set -uo pipefail
+
+# The first thing this shell does, before a directory is entered or a byte is removed: check that
+# the lock this run was given is still this run's. A controller can be killed between the copy and
+# this line, and the lock it left behind can be judged stale and reaped in that moment — in which
+# case another run now owns the tree, and the only correct move here is to stop having touched
+# nothing. What remains is the few milliseconds between ssh handing this script to bash and this
+# check: in that window this shell has mutated nothing, so a reap there costs the reaper nothing
+# and costs this run only the run itself.
+GATE_LOCK="$GATE_TARGET.lock"
+gate_lock_owner="$(cat "$GATE_LOCK/owner" 2>/dev/null)"
+case "$gate_lock_owner" in
+  *"token=$GATE_RUN_TOKEN"*) ;;
+  *)
+    echo "remote: the gate lock of this run was taken over while it was starting" \
+         "(the lock now reads: ${gate_lock_owner:-gone}) — stopping, nothing was touched"
+    exit 4 ;;
+esac
+# Only now, and only into a lock that answered with this run's token: the note that says a build
+# is running on this host, which is what tells the next run not to reap while it is.
+printf '%s\n' "$$" > "$GATE_LOCK/remote-pid" 2>/dev/null
+
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 # xcode-select still points at the Command Line Tools on this host, so the full Xcode is named
 # explicitly rather than assumed.
@@ -252,6 +511,194 @@ GATE_WORK="$(printf '%s' "$GATE_TARGET" \
 [ "$GATE_WORK" != "$GATE_TARGET" ] || { echo "remote: cannot derive a work directory"; exit 2; }
 mkdir -p "$GATE_WORK" || { echo "remote: cannot create $GATE_WORK"; exit 2; }
 DERIVED="$GATE_WORK/DerivedData"
+
+# --- the simulator this run gets ----------------------------------------------------------------
+# A simulator holds ONE installation per bundle id, so two branches building on the same device
+# overwrite each other's app and the loser launches against the winner's frameworks — dyld
+# "Symbol not found", a red gate, and nothing wrong with the code. Each run therefore gets a
+# device of its own and gives it back. The trap is the giving back, and it has to hold on the
+# paths nobody plans for: a failing step, a refusal, the SIGHUP this shell gets when the ssh
+# connection goes away. An undeleted device is disk on a build host that has little to spare.
+GATE_DEVICE_UDID=""
+device_cleanup() {
+  [ -n "$GATE_DEVICE_UDID" ] || return 0
+  local udid="$GATE_DEVICE_UDID" attempt=1
+  # Cleared first: a signal handler and the EXIT trap both reach here, and the second one in
+  # must not try to delete a device the first one already took away.
+  GATE_DEVICE_UDID=""
+  while : ; do
+    xcrun simctl shutdown "$udid" >/dev/null 2>&1
+    if xcrun simctl delete "$udid" >/dev/null 2>&1; then
+      echo "MAC_GATE_DEVICE deleted $udid"
+      return 0
+    fi
+    [ "$attempt" -lt 5 ] || break
+    attempt=$((attempt + 1))
+    sleep 3
+  done
+  echo "MAC_GATE_DEVICE DELETE-FAILED $udid (delete by hand: xcrun simctl delete $udid)"
+  return 1
+}
+# Everything this run took on the build host goes back together: the device, and the note in the
+# lock that says a build is still running here. The note is removed only while it is still ours.
+gate_give_back() {
+  device_cleanup
+  local rc=$?
+  if [ -n "${GATE_LOCK:-}" ] && [ "$(cat "$GATE_LOCK/remote-pid" 2>/dev/null)" = "$$" ]; then
+    rm -f "$GATE_LOCK/remote-pid"
+  fi
+  return $rc
+}
+trap 'gate_give_back' EXIT
+trap 'gate_give_back; exit 130' INT
+trap 'gate_give_back; exit 143' TERM
+trap 'gate_give_back; exit 129' HUP
+
+if [ -n "$GATE_SIMULATOR" ]; then
+  GATE_DESTINATION="platform=iOS Simulator,name=$GATE_SIMULATOR"
+  echo "MAC_GATE_DEVICE shared '$GATE_SIMULATOR' (MAC_GATE_SIMULATOR is set — no per-run isolation)"
+else
+  # Written out and then run, rather than fed to python on a pipe inside "$( … )": the build
+  # host's /bin/bash is 3.2, and its command-substitution scanner reads a quoted here-document as
+  # shell text — a stray parenthesis or quote inside the program becomes a syntax error before
+  # anything runs. Every helper below is spelled this way for that reason.
+  cat > "$GATE_WORK/choose-device.py" <<'PY'
+import json, re, subprocess, sys
+
+wanted = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+
+proc = subprocess.run(["xcrun", "simctl", "list", "runtimes", "-j"],
+                      capture_output=True, text=True)
+if proc.returncode != 0:
+    sys.stderr.write(proc.stderr)
+    sys.exit(1)
+
+# A runtime's own supportedDeviceTypes is the only honest answer to "can this device type run
+# this iOS": the device type list on its own says nothing about which runtimes accept it, and a
+# create against a pair the host does not support fails after the gate has already started.
+runtimes = [r for r in json.loads(proc.stdout).get("runtimes", [])
+            if r.get("isAvailable") and "SimRuntime.iOS-" in r.get("identifier", "")]
+
+def version(runtime):
+    return tuple(int(part) for part in re.findall(r"\d+", runtime.get("version", "0")))
+
+runtimes.sort(key=version, reverse=True)
+
+def rank(name):
+    # Newest generation first. Within a generation the Pro is preferred, and that is not taste:
+    # the hosted-window accessibility probes in MemoEditWiringTests vend an empty tree on some
+    # models (iPhone 17e, 2026-08-24) and pass on the Pro. Until that is fixed in the probe, the
+    # gate picks the model the suite is known to pass on rather than whichever name sorts first.
+    generation = re.match(r"iPhone (\d+)", name)
+    if name.endswith(" Pro"):
+        variant = 3
+    elif name.endswith(" Pro Max"):
+        variant = 2
+    elif re.fullmatch(r"iPhone \d+", name):
+        variant = 1
+    else:
+        variant = 0
+    return (int(generation.group(1)) if generation else 0, variant)
+
+for runtime in runtimes:
+    devices = [d for d in runtime.get("supportedDeviceTypes", [])
+               if d.get("name", "").startswith("iPhone")]
+    if wanted:
+        devices = [d for d in devices if d.get("identifier") == wanted]
+    if not devices:
+        continue
+    best = max(devices, key=lambda device: rank(device["name"]))
+    print("%s|%s|%s on %s" % (best["identifier"], runtime["identifier"], best["name"],
+                              runtime.get("name", runtime["identifier"])))
+    sys.exit(0)
+
+sys.stderr.write("no iPhone device type%s is supported by any installed iOS runtime\n"
+                 % ((" matching " + wanted) if wanted else ""))
+sys.exit(1)
+PY
+  device_pick="$(/usr/bin/python3 "$GATE_WORK/choose-device.py" "$GATE_DEVICE_TYPE")"
+  [ -n "$device_pick" ] || { echo "remote: cannot choose a simulator device type"; exit 2; }
+  device_type="${device_pick%%|*}"
+  device_rest="${device_pick#*|}"
+  device_runtime="${device_rest%%|*}"
+  device_label="${device_rest##*|}"
+  GATE_DEVICE_UDID="$(xcrun simctl create "$GATE_DEVICE_NAME" "$device_type" "$device_runtime")"
+  GATE_DEVICE_UDID="$(printf '%s' "$GATE_DEVICE_UDID" | tr -d '[:space:]')"
+  case "$GATE_DEVICE_UDID" in
+    [0-9A-Fa-f]*-*-*-*-*) ;;
+    *)
+      echo "remote: could not create the simulator $GATE_DEVICE_NAME ($device_label)"
+      # Best effort by name: if a device WAS made and only its id came back unreadable, it still
+      # has to go.
+      xcrun simctl delete "$GATE_DEVICE_NAME" >/dev/null 2>&1
+      GATE_DEVICE_UDID=""
+      exit 2 ;;
+  esac
+  # Addressed by id, never by name: the name is the thing two runs could collide on.
+  GATE_DESTINATION="platform=iOS Simulator,id=$GATE_DEVICE_UDID"
+  echo "MAC_GATE_DEVICE created $GATE_DEVICE_NAME $GATE_DEVICE_UDID ($device_label)"
+  # It is booted HERE, and waited for. xcodebuild boots a device it needs, but it does
+  # not wait for the system inside to finish coming up, and a simulator that is still booting
+  # vends an empty accessibility tree: the hosted-window probes in MemoEditWiringTests see no
+  # labels at all and the suite fails for a reason that has nothing to do with the code
+  # (measured 2026-08-24 on a newly created iPhone 17 Pro — "labels → []"). Nobody saw this while
+  # the gate ran on a shared device, because that device had been up for days. A private device
+  # is cold every time, so the wait belongs to the gate.
+  xcrun simctl bootstatus "$GATE_DEVICE_UDID" -b || {
+    echo "remote: the created simulator never finished booting"
+    exit 2
+  }
+
+  # A factory-fresh simulator has accessibility switched OFF — com.apple.Accessibility has
+  # neither AccessibilityEnabled nor ApplicationAccessibilityEnabled — and with those absent a
+  # hosted UIWindow vends an EMPTY accessibility tree: MemoEditWiringTests reads back no labels
+  # at all and fails on the device rather than on the code. The long-lived devices this gate used
+  # to share had been switched on at some point, which is the only reason nobody saw it while
+  # every run landed on the same device (found 2026-08-24 across two rounds; the model has
+  # nothing to do with it).
+  #
+  # The write goes THROUGH the booted device. Writing the plist under the device's data directory
+  # from this side looks like it worked — `defaults read` on that file returns 1 — and changes
+  # nothing: the simulator does not read that file, `simctl spawn … defaults read` still answers
+  # "does not exist", and the suite still fails. Measured on this host, three devices, one
+  # suite: no keys -> fail, host-side file -> fail, spawn write -> pass.
+  for a11y_key in AccessibilityEnabled ApplicationAccessibilityEnabled; do
+    xcrun simctl spawn "$GATE_DEVICE_UDID" defaults write com.apple.Accessibility "$a11y_key" -bool true
+  done
+  # Read back from INSIDE the device, which is the only reader whose answer means anything here.
+  for a11y_key in AccessibilityEnabled ApplicationAccessibilityEnabled; do
+    a11y_value="$(xcrun simctl spawn "$GATE_DEVICE_UDID" defaults read com.apple.Accessibility "$a11y_key" 2>/dev/null | tr -d '[:space:]')"
+    [ "$a11y_value" = "1" ] || {
+      echo "remote: $a11y_key reads '${a11y_value:-unset}' inside $GATE_DEVICE_NAME —" \
+           "hosted-window accessibility would vend an empty tree, so the gate stops here"
+      exit 2
+    }
+  done
+  echo "MAC_GATE_DEVICE accessibility on ($GATE_DEVICE_NAME: AccessibilityEnabled=1 ApplicationAccessibilityEnabled=1, read back inside the device)"
+fi
+
+# --- the version this gate expects --------------------------------------------------------------
+# project.yml is where the version is written, so it is also where the checks below take their
+# expectation from. A second copy in this script would be a copy to forget on the next bump, and
+# forgetting it reads as a failed gate rather than as an out-of-date script.
+cat > "$GATE_WORK/read-marketing-version.py" <<'PY'
+import re, sys
+try:
+    text = open(sys.argv[1], encoding="utf-8").read()
+except OSError as error:
+    sys.stderr.write("cannot read %s: %s\n" % (sys.argv[1], error))
+    sys.exit(1)
+values = set(re.findall(r'^[ \t]*MARKETING_VERSION:[ \t]*"?([^"\s#]+)"?[ \t]*(?:#.*)?$', text, re.M))
+if not values:
+    sys.stderr.write("project.yml declares no MARKETING_VERSION\n")
+    sys.exit(1)
+if len(values) != 1:
+    sys.stderr.write("project.yml declares more than one MARKETING_VERSION: %s\n" % sorted(values))
+    sys.exit(1)
+print(values.pop())
+PY
+GATE_MARKETING_VERSION="$(/usr/bin/python3 "$GATE_WORK/read-marketing-version.py" project.yml)" \
+  || GATE_MARKETING_VERSION=""
 
 first_fail=0
 summary=""
@@ -277,11 +724,15 @@ s_xcodegen() {
   # differs from its host's cannot be installed, and a marketing version that differs between
   # them is a TestFlight build that says two things at once. Checked on the generated project,
   # here, because it costs nothing and the build that would surface it costs ten minutes.
-  echo "--- version keys in the generated project ---"
-  /usr/bin/python3 - <<'PY'
+  [ -n "$GATE_MARKETING_VERSION" ] || {
+    echo "VERSION FAIL: project.yml does not name exactly one MARKETING_VERSION to expect"
+    return 1
+  }
+  echo "--- version keys in the generated project (expected from project.yml: $GATE_MARKETING_VERSION) ---"
+  /usr/bin/python3 - "$GATE_MARKETING_VERSION" <<'PY'
 import re, sys
 
-EXPECTED_MARKETING = "0.1.0"
+EXPECTED_MARKETING = sys.argv[1]
 pbxproj = "MemosNG.xcodeproj/project.pbxproj"
 try:
     text = open(pbxproj, encoding="utf-8").read()
@@ -380,7 +831,7 @@ s_entitlements() {
 s_xcodebuild() {
   xcodebuild test \
     -scheme MemosNG \
-    -destination "platform=iOS Simulator,name=$GATE_SIMULATOR" \
+    -destination "$GATE_DESTINATION" \
     -derivedDataPath "$DERIVED" \
     -resultBundlePath "$XCRESULT" \
     -skipPackagePluginValidation
@@ -391,15 +842,77 @@ s_bundlecheck() {
   # still not put it where Apple looks, an INFOPLIST_KEY_ can land as the string "NO" where a
   # Boolean is read, and a deprecated key can survive a deletion in the wrong block — none of
   # which a green build says anything about. So the built product is opened and read.
-  local app="$DERIVED/Build/Products/Debug-iphonesimulator/MemosNG.app"
-  local appex="$app/PlugIns/MemosShare.appex"
-  [ -d "$app" ] || { echo "BUNDLE FAIL: no built app at $app"; return 1; }
+  #
+  # WHERE the product is is asked of xcodebuild rather than spelled out here: the configuration
+  # and the product name are the project's to change, and a path written down in this script
+  # would then point at nothing and read as a broken build instead of an out-of-date gate.
+  local settings="$GATE_WORK/build-settings.json" app appex
+  xcodebuild -showBuildSettings -json \
+    -scheme MemosNG \
+    -destination "$GATE_DESTINATION" \
+    -derivedDataPath "$DERIVED" \
+    -skipPackagePluginValidation > "$settings" 2>"$GATE_WORK/build-settings.err" || {
+      echo "BUNDLE FAIL: xcodebuild -showBuildSettings failed"
+      sed -n '1,20p' "$GATE_WORK/build-settings.err"
+      return 1
+    }
+  cat > "$GATE_WORK/read-product-path.py" <<'PY'
+import json, sys
+
+path, target = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+# xcodebuild is free to print package-resolution chatter before the JSON, so the array is found
+# rather than assumed to start at byte zero.
+start = text.find("[")
+if start < 0:
+    sys.stderr.write("no JSON array in %s\n" % path)
+    sys.exit(1)
+try:
+    entries, _ = json.JSONDecoder().raw_decode(text[start:])
+except ValueError as error:
+    sys.stderr.write("build settings do not parse: %s\n" % error)
+    sys.exit(1)
+
+for entry in entries:
+    if entry.get("target") != target:
+        continue
+    settings = entry.get("buildSettings", {})
+    build_dir = settings.get("TARGET_BUILD_DIR")
+    product = settings.get("FULL_PRODUCT_NAME")
+    if not build_dir or not product:
+        sys.stderr.write("target %s declares no TARGET_BUILD_DIR/FULL_PRODUCT_NAME\n" % target)
+        sys.exit(1)
+    sys.stderr.write("product path from TARGET_BUILD_DIR + FULL_PRODUCT_NAME (%s / %s)\n"
+                     % (build_dir, product))
+    print(build_dir.rstrip("/") + "/" + product)
+    sys.exit(0)
+
+sys.stderr.write("no build settings for target %s (targets: %s)\n"
+                 % (target, ", ".join(sorted(e.get("target", "?") for e in entries))))
+sys.exit(1)
+PY
+  app="$(/usr/bin/python3 "$GATE_WORK/read-product-path.py" "$settings" MemosNG)" \
+    || { echo "BUNDLE FAIL: cannot read the product path out of the build settings"; return 1; }
+  [ -n "$app" ] || { echo "BUNDLE FAIL: empty product path"; return 1; }
+  appex="$app/PlugIns/MemosShare.appex"
+  echo "--- built product: $app"
+  if [ ! -d "$app" ]; then
+    echo "BUNDLE FAIL: no built app at $app"
+    echo "    built products present:"
+    ls -1 "$DERIVED/Build/Products" 2>&1 | sed 's/^/      /'
+    return 1
+  fi
   [ -d "$appex" ] || { echo "BUNDLE FAIL: no embedded extension at $appex"; return 1; }
-  /usr/bin/python3 - "$app" "$appex" <<'PY'
+  [ -n "$GATE_MARKETING_VERSION" ] || {
+    echo "BUNDLE FAIL: project.yml does not name exactly one MARKETING_VERSION to expect"
+    return 1
+  }
+  /usr/bin/python3 - "$app" "$appex" "$GATE_MARKETING_VERSION" <<'PY'
 import plistlib, os, sys
 
 app, appex = sys.argv[1], sys.argv[2]
-EXPECTED_SHORT_VERSION = "0.1.0"
+# The expectation comes from project.yml, the one place the version is written.
+EXPECTED_SHORT_VERSION = sys.argv[3]
 rc = 0
 
 def fail(msg):
