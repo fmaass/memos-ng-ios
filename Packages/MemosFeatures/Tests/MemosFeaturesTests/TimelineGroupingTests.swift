@@ -114,6 +114,36 @@ struct TimelineGroupingTests {
         #expect(sections[1].memos.map(\.uid) == ["sunday"])
     }
 
+    /// What a date change looks like on screen, driven by the rule that actually moves the memo.
+    ///
+    /// The list is NOT hand-written into its post-edit shape — that would assert the fixture
+    /// rather than the code. It is produced by `TimelineStore.placed`, the one placement rule the
+    /// store puts every server answer through (a create, a pin, an edited date), and only then
+    /// grouped. Take the remove-and-reinsert out of that rule and the day below prints its memos
+    /// in the wrong order.
+    @Test("a memo re-dated onto another day leaves its old day and joins the new one")
+    func aReDatedMemoChangesDay() {
+        let calendar = berlin()
+        let before = [
+            memo("a", "2026-03-03T10:00:00Z"),
+            memo("b", "2026-03-02T10:00:00Z"),
+            memo("c", "2026-03-01T10:00:00Z"),
+        ]
+        #expect(TimelineGrouping.sections(for: before, calendar: calendar).count == 3)
+
+        // b is re-dated onto the 1st, an hour before c — the memo the server would hand back.
+        let reDated = memo("b", "2026-03-01T08:00:00Z")
+        let after = TimelineStore.placed(reDated, in: before, tie: .alreadyExisted)
+        let sections = TimelineGrouping.sections(for: after, calendar: calendar)
+
+        #expect(sections.count == 2)
+        #expect(sections[0].memos.map(\.uid) == ["a"])
+        // The new day gained it, in the position its hour earns — not where it used to sit.
+        #expect(sections[1].memos.map(\.uid) == ["c", "b"])
+        // And the 2nd is gone entirely: an empty day must not keep its header.
+        #expect(!sections.contains { calendar.component(.day, from: $0.day) == 2 })
+    }
+
     @Test("an empty list has no days")
     func emptyList() {
         #expect(TimelineGrouping.sections(for: [], calendar: berlin()).isEmpty)

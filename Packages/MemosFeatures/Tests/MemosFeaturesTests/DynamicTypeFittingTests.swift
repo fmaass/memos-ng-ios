@@ -44,6 +44,32 @@ struct DynamicTypeFittingTests {
         }
     }
 
+    @Test("the date row fits without truncating at the largest text size")
+    func dateRowFitsAtAccessibility5() {
+        // Both things the row can be: the default, and a date long enough to be the widest label
+        // it ever draws (a December in a four-figure year with a two-digit day).
+        let chosen = Date(timeIntervalSince1970: 1_766_000_000)
+        for date in [nil, chosen] as [Date?] {
+            let pill = MemoDatePill(date: date)
+            let atLargest = LayoutProbe.idealWidth(pill, typeSize: .accessibility5)
+            let atDefault = LayoutProbe.idealWidth(pill, typeSize: .large)
+            #expect(
+                atLargest <= Self.composeContentWidth,
+                "the date pill wants \(atLargest)pt of \(Self.composeContentWidth)"
+            )
+            // It fits because it is small enough, not because it was pinned: a control that
+            // ignored the text size would measure the same at both.
+            #expect(atLargest > atDefault)
+        }
+        // And the whole row — pill plus the control that puts it back to "Now" — still fits.
+        let row = MemoDateRow(date: .constant(chosen))
+        let rowAtLargest = LayoutProbe.idealWidth(row, typeSize: .accessibility5)
+        #expect(
+            rowAtLargest <= Self.composeContentWidth,
+            "the date row wants \(rowAtLargest)pt of \(Self.composeContentWidth)"
+        )
+    }
+
     @Test("the timeline card's visibility pill also survives the largest text size")
     func timelinePillFitsAtAccessibility5() {
         for visibility in MemoVisibility.allCases {

@@ -1,6 +1,25 @@
 import Foundation
 import MemosAPI
 
+/// How a tie in `created_at` is settled, which is the one part of the server's ordering the app
+/// cannot read off a memo.
+///
+/// memos-ng orders `-created_at` by `created_at DESC, id DESC` (`app/services/memos.py:326-330`,
+/// and its cursor carries the same pair, `:43-51`). That `id` is the autoincrement primary key and
+/// it is NOT part of `MemoOut`: the only identifier the API sends is `uid`, and a uid is
+/// `secrets.token_urlsafe(12)` (`app/services/memos.py:40`) — random, with no relation to the
+/// order rows were inserted in. Sorting a tie by uid would therefore INVENT an order rather than
+/// mirror one, so the app says only what it actually knows about the memo it is placing.
+public enum TimelineTie: Sendable, Equatable {
+    /// The server created this memo a moment ago, so it holds the highest id there is and leads at
+    /// an identical timestamp — which is what `id DESC` will say on the next page too.
+    case justCreated
+    /// This memo already existed and its id did not change when its date did. The app is not told
+    /// that id, so it does not jump the memo ahead of rows already sitting on that timestamp; a
+    /// genuine tie is settled by the next refresh, which is read from the server.
+    case alreadyExisted
+}
+
 /// The timeline: one cursor-paginated page at a time.
 ///
 /// The cursor comes from the server (`nextCursor`) rather than from an offset the client keeps:
@@ -100,7 +119,7 @@ public final class TimelineStore {
             switch response {
             case .created(let created):
                 let memo = Memo(try created.body.json, baseURL: baseURL)
-                memos.insert(memo, at: Self.insertionIndex(for: memo, in: memos))
+                memos = Self.placed(memo, in: memos, tie: .justCreated)
                 lastError = nil
                 return true
             // Declared since the strict linking contract: the server refuses to create a memo
@@ -124,15 +143,27 @@ public final class TimelineStore {
         }
     }
 
-    /// Replaces a memo's content with what the editor produced.
+    /// Replaces a memo's content with what the editor produced, and — when the editor was given a
+    /// date — the display date it carries.
+    ///
+    /// `createdAt` is left OUT of the request when it is nil rather than sent as the memo's
+    /// current value: a PATCH is a partial update, and an edit that did not touch the date has no
+    /// business rewriting it. The web app sends the date on every edit because its editor always
+    /// holds one; here the absence is what says "unchanged".
     @discardableResult
     public func edit(
         uid: String,
         content: String,
+        createdAt: Date? = nil,
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
-        await patch(uid: uid, .init(content: content), using: client, baseURL: baseURL)
+        await patch(
+            uid: uid,
+            .init(content: content, createdAt: createdAt),
+            using: client,
+            baseURL: baseURL
+        )
     }
 
     /// Changes who can see a memo.
@@ -181,9 +212,8 @@ public final class TimelineStore {
             // the position its new flag earns. (Fine-grained recency ordering is the server's;
             // the next refresh settles it.)
             let updated = Memo(json, baseURL: baseURL)
-            if let position = memos.firstIndex(where: { $0.uid == updated.uid }) {
-                memos.remove(at: position)
-                memos.insert(updated, at: Self.insertionIndex(for: updated, in: memos))
+            if memos.contains(where: { $0.uid == updated.uid }) {
+                memos = Self.placed(updated, in: memos, tie: .alreadyExisted)
             }
             lastError = nil
             return true
@@ -297,17 +327,62 @@ public final class TimelineStore {
         }
     }
 
-    /// Replaces the loaded copy of a memo with the server's, if it is on screen at all.
+    /// Replaces the loaded copy of a memo with the server's, if it is on screen at all — and
+    /// MOVES it when the server's copy no longer belongs where the old one sat.
+    ///
+    /// A memo whose display date changed has left the day it was filed under, and the timeline is
+    /// cut into days: replacing it in place would leave it printed under the old date, above
+    /// memos newer than it, until something else forced a refresh. So it is re-placed — and only
+    /// when an ordering key actually moved, because an ordinary content edit must not reshuffle
+    /// a list whose exact order came from the server.
     private func apply(_ memo: Memo) {
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
-        memos[position] = memo
+        let previous = memos[position]
+        guard previous.createdAt != memo.createdAt || previous.pinned != memo.pinned else {
+            memos[position] = memo
+            return
+        }
+        memos = Self.placed(memo, in: memos, tie: .alreadyExisted)
     }
 
-    /// Where a new memo belongs in a list the server sorts pinned-first, then newest-first. Pure,
-    /// so the placement is asserted rather than eyeballed against a running server.
-    static func insertionIndex(for memo: Memo, in memos: [Memo]) -> Int {
-        guard !memo.pinned else { return 0 }
-        return memos.firstIndex { !$0.pinned } ?? memos.count
+    /// The loaded list with one memo put where the server's own ordering puts it, replacing any
+    /// copy of it that was already there.
+    ///
+    /// This is the app's single placement rule — a created memo, a pinned one and a re-dated one
+    /// all come through here — and it is `public` because the day-grouped timeline built on top
+    /// of this layer is only correct while it agrees with it, which is a thing a test should be
+    /// able to hold directly rather than infer from a screen.
+    public nonisolated static func placed(
+        _ memo: Memo,
+        in memos: [Memo],
+        tie: TimelineTie
+    ) -> [Memo] {
+        var placed = memos
+        placed.removeAll { $0.uid == memo.uid }
+        placed.insert(memo, at: insertionIndex(for: memo, in: placed, tie: tie))
+        return placed
+    }
+
+    /// Where a memo belongs in a list the server sorts pinned-first, then newest-first — `memos`
+    /// must NOT already contain it. Pure, so the placement is asserted rather than eyeballed
+    /// against a running server.
+    ///
+    /// A memo backdated past the oldest page read so far belongs on a page nobody has asked for
+    /// yet; it lands at the end of what IS loaded and the next refresh files it properly. That is
+    /// deliberate: a memo one screen too high is a smaller lie than one that vanishes the moment
+    /// its date changes.
+    nonisolated static func insertionIndex(
+        for memo: Memo,
+        in memos: [Memo],
+        tie: TimelineTie
+    ) -> Int {
+        let next = memos.firstIndex { other in
+            // The pinned block comes first whatever the dates say; inside a block, newest first.
+            if other.pinned != memo.pinned { return !other.pinned }
+            if other.createdAt == memo.createdAt { return tie == .justCreated }
+            return other.createdAt < memo.createdAt
+        }
+        return next ?? memos.count
     }
 
     static func page(
