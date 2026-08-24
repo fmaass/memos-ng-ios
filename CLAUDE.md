@@ -74,14 +74,17 @@ the parity fixture are synced from ONE memos-ng commit:
 
     MEMOS_NG_REPO=/path/to/memos-ng scripts/sync-openapi.sh <40-char-sha>
 
-The commit and what the sync did are recorded in `Packages/MemosAPI/OPENAPI_SOURCE`. Never
-hand-write a client method: if something will not generate, fix the contract.
+The commit, its subject and the files it wrote are recorded in `Packages/MemosAPI/OPENAPI_SOURCE`.
+Never hand-write a client method: if something will not generate, fix the contract.
 
-`scripts/normalize-openapi.py` rewrites FastAPI's `anyOf: [X, {"type": "null"}]` into OAS 3.1 type
-arrays during the sync. Without it swift-openapi-generator silently DROPS every nullable property —
-`MemoList.nextCursor` included, which makes pagination impossible to write. It reports how many
-properties it rewrote; the day that number is 0, memos-ng emits type arrays itself and the script
-can go.
+The sync vendors `openapi.json` VERBATIM: the committed file is byte-for-byte
+`git show <sha>:openapi.json` in memos-ng, so provenance is checkable with one command. Keep it
+that way — memos-ng emits OAS 3.1 nullable type arrays (`type: ["string", "null"]`) natively, so
+no rewrite is needed. It was not always so: swift-openapi-generator silently DROPS a property
+written as `anyOf: [X, {"type": "null"}]`, `MemoList.nextCursor` included, which is why a
+`scripts/normalize-openapi.py` step canonicalised the idiom until memos-ng 433a3fe. If nullable
+properties ever vanish from the generated types again, fix the contract in memos-ng rather than
+reintroducing a transform here.
 
 If a test bundle needs `OpenAPIRuntime` or `HTTPTypes` directly, it is declared twice — in
 `project.yml` and in the package manifest. Keep the versions in step; SwiftPM resolves one graph
