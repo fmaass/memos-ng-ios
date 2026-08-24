@@ -230,10 +230,17 @@ extension TimelineStoreTests {
         #expect(store.memos.first?.visibility == .public)
     }
 
-    @Test("a task toggle is optimistic and rolls back when the server refuses")
-    func toggleRollsBack() async {
+    @Test("a task toggle shows immediately and rolls back when the server refuses")
+    func toggleRollsBack() async throws {
+        let patchEntered = LockedValue<Bool>(false)
+        let patchRelease = LockedValue<Bool>(false)
         let client = Stub.client { _, _, operation in
             if operation == "patch_memo_api_memos__uid__patch" {
+                patchEntered.set(true)
+                // Hold the request open so the test can look at the screen mid-flight.
+                while !patchRelease.get() {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
                 return Stub.empty(.internalServerError)
             }
             let list = """
@@ -245,11 +252,42 @@ extension TimelineStoreTests {
         let store = await seeded(["a"], client: client)
         let before = store.memos.first?.content
 
-        let toggled = await store.toggleTask(at: 0, in: "a", using: client, baseURL: Stub.baseURL)
+        let inFlight = Task {
+            await store.toggleTask(at: 0, in: "a", using: client, baseURL: Stub.baseURL)
+        }
+        while !patchEntered.get() {
+            await Task.yield()
+        }
+        // The whole point of optimism: the checkbox flipped BEFORE the server answered.
+        #expect(store.memos.first?.content == "- [x] milk")
+
+        patchRelease.set(true)
+        let toggled = await inFlight.value
 
         #expect(!toggled)
         #expect(store.memos.first?.content == before, "the flip is undone when the PATCH fails")
         #expect(store.lastError != nil)
+    }
+
+    @Test("unpinning routes through the unpin endpoint and leaves the pinned section")
+    func unpinRoutesAndReorders() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, operation in
+            paths.set(paths.get() + [request.path ?? ""])
+            if operation == "unpin_memo_api_memos__uid__unpin_post" {
+                return Stub.json(Stub.memo(uid: "a", pinned: false))
+            }
+            let list = """
+                {"items":[\(Stub.memo(uid: "a", pinned: true)),\(Stub.memo(uid: "b"))],\
+                "nextCursor":null,"totalCount":null}
+                """
+            return Stub.json(list)
+        }
+        let store = await seeded(["a", "b"], client: client)
+
+        #expect(await store.setPinned(false, uid: "a", using: client, baseURL: Stub.baseURL))
+        #expect(paths.get().contains { $0.hasSuffix("/a/unpin") })
+        #expect(store.memos.first?.pinned == false)
     }
 
     @Test("a 403 on a write reports without ending the session")

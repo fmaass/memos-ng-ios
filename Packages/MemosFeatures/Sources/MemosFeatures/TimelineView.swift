@@ -71,6 +71,12 @@ public struct TimelineView: View {
     @ViewBuilder
     private func content(_ timeline: TimelineStore) -> some View {
         List {
+            // Session-level notices (a credential that could not be saved, a failed revoke)
+            // must survive into the signed-in surface — a warning nobody can see is not one.
+            if let notice = session.lastError {
+                Label(notice, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
             if let error = timeline.lastError {
                 Text(error).foregroundStyle(.red)
             }

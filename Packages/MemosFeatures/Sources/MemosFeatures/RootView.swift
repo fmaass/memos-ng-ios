@@ -20,18 +20,21 @@ public struct RootView: View {
         }
         .task {
             guard session.state.user == nil else { return }
+            // The stored credential always gets the first word — the debug shortcut must not
+            // overwrite or bypass a real session, even on a development device.
+            await session.restore()
             #if DEBUG
-            if let credentials = DebugCredentials.fromEnvironment(
-                ProcessInfo.processInfo.environment
-            ) {
+            if case .signedOut = session.state,
+                let credentials = DebugCredentials.fromEnvironment(
+                    ProcessInfo.processInfo.environment
+                )
+            {
                 await session.signIn(
                     serverAddress: credentials.serverAddress,
                     token: credentials.token
                 )
-                return
             }
             #endif
-            await session.restore()
         }
     }
 }
