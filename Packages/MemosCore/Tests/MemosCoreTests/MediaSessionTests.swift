@@ -124,3 +124,39 @@ struct MediaImageKeyTests {
         )
     }
 }
+
+/// The wiring the media layer's whole account-safety story rests on: the clock has to actually be
+/// rotated, at both of the two moments the device changes who it is. Asserted through the real
+/// `SessionStore` rather than by calling `rotate()` directly, because what could break here is
+/// somebody adding a third path in or out of a session and not rotating it.
+@MainActor
+@Suite("SessionStore rotates the media identity")
+struct SessionIdentityRotationTests {
+    @Test("signing in rotates it, and signing out rotates it again")
+    func bothLifecycleSitesRotate() async {
+        let identity = MediaIdentity()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    operation == "whoami_api_auth_user_get"
+                        ? Stub.json(Stub.user) : Stub.empty(.noContent)
+                }
+            },
+            identity: identity
+        )
+        #expect(identity.generation == 0)
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        #expect(session.state.user != nil, "precondition: the sign-in has to have happened")
+        let afterSignIn = identity.generation
+        #expect(afterSignIn > 0, "signing in did not rotate the media identity")
+
+        await session.signOut()
+        #expect(session.state == .signedOut, "precondition: the sign-out has to have happened")
+        #expect(
+            identity.generation > afterSignIn,
+            "signing out did not rotate the media identity — the next account inherits the cache"
+        )
+    }
+}

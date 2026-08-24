@@ -12,21 +12,52 @@ import UIKit
 /// holding twelve 800 px tiles.
 final class MediaImageStore {
     private let cache = NSCache<NSString, UIImage>()
+    private let identity: MediaIdentity
+    private var filledFor: Int
 
-    init(countLimit: Int, totalCostLimit: Int) {
+    init(countLimit: Int, totalCostLimit: Int, identity: MediaIdentity = .shared) {
         cache.countLimit = countLimit
         cache.totalCostLimit = totalCostLimit
+        self.identity = identity
+        self.filledFor = identity.generation
+    }
+
+    /// Emptied the moment the device is a different device, checked on EVERY access rather than
+    /// pushed from the sign-out. Pushing it would work too, right up until a path that changes
+    /// identity forgets to call it — and the failure then is silent and wrong-looking: another
+    /// account's photo, painted instantly, out of memory, with no request to notice in a log. A
+    /// pull cannot be forgotten, and the check is an integer compare.
+    private func syncToIdentity() {
+        let current = identity.generation
+        guard current != filledFor else { return }
+        cache.removeAllObjects()
+        filledFor = current
+    }
+
+    /// The generation this store is currently holding images for. A fetch reads it when it starts
+    /// and hands it back when it stores, so an answer that outlived its session is refused.
+    var generation: Int {
+        identity.generation
     }
 
     var countLimit: Int { cache.countLimit }
     var totalCostLimit: Int { cache.totalCostLimit }
 
     func image(forKey key: MediaImageKey) -> UIImage? {
-        cache.object(forKey: key.storageKey as NSString)
+        syncToIdentity()
+        return cache.object(forKey: key.storageKey as NSString)
     }
 
-    func store(_ image: UIImage, forKey key: MediaImageKey) {
+    /// `generation` is what the CALLER read before it went to the network. A store for a
+    /// generation that has since moved is dropped: that is the in-flight fetch from the previous
+    /// account, arriving after the switch, and keeping it would put the old server's photo back
+    /// into a cache that was just emptied for exactly that reason.
+    @discardableResult
+    func store(_ image: UIImage, forKey key: MediaImageKey, generation: Int) -> Bool {
+        syncToIdentity()
+        guard generation == identity.generation else { return false }
         cache.setObject(image, forKey: key.storageKey as NSString, cost: Self.cost(of: image))
+        return true
     }
 
     func purge() {
@@ -89,7 +120,10 @@ public enum MediaImageLoader {
     /// and when one arrives anyway, `NSCache` sheds the lot without being asked.
     static let totalCostLimit = 64 * 1024 * 1024
 
-    static let store = MediaImageStore(countLimit: countLimit, totalCostLimit: totalCostLimit)
+    /// A `var` so a test can work in a store of its own: this one is process-wide and bound to the
+    /// process-wide identity clock, and a suite asserting what a sign-out empties cannot share it
+    /// with a suite asserting what a fetch caches.
+    static var store = MediaImageStore(countLimit: countLimit, totalCostLimit: totalCostLimit)
 
     /// Substituted in tests. Never `URLSession.shared`: that is the session whose cache this app
     /// cannot guarantee, and the reason this layer has one of its own.
@@ -124,6 +158,11 @@ public enum MediaImageLoader {
         // keeps a second view of the same photo off the wire entirely.
         if let hit = store.image(forKey: key) { return hit }
 
+        // Read BEFORE the network, checked after it. Between these two lines the person can sign
+        // out of one server and into another, and this answer would then be about a uid that
+        // belongs to somebody else's photo.
+        let generation = store.generation
+
         var request = URLRequest(url: url)
         // A URL whose signature has already lapsed must not be answered out of the URLCache: the
         // entry can only be stale, and the request is going to be refused anyway.
@@ -140,7 +179,9 @@ public enum MediaImageLoader {
         }.value
         guard let decoded else { return nil }
 
-        store.store(decoded, forKey: key)
+        // Not stored AND not handed back: the caller would paint it, which is the same mistake
+        // one frame earlier.
+        guard store.store(decoded, forKey: key, generation: generation) else { return nil }
         return decoded
     }
 

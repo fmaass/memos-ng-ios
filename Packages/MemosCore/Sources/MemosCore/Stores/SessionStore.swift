@@ -67,6 +67,12 @@ public final class SessionStore {
     /// own — the share extension. Nil unless the app composes one, so a test never writes into
     /// the real app group container.
     private let account: (any OutboxAccountPublishing)?
+    /// The clock the MEDIA layer fences its decoded-image cache against. Rotated at the same two
+    /// sites as the account licence below, because it scopes to identity in exactly the same way:
+    /// a decoded photo is filed under an attachment uid, and a uid means nothing across servers.
+    /// Kept separate from `sessionGeneration` deliberately — that one fences this store's own
+    /// in-flight replies, and merging the two would couple a media decision to a settings one.
+    private let identity: MediaIdentity
     /// A licence that would not delete. It is kept because the thing it describes — a revoked
     /// identity that can still queue captures — outlives the call that failed to remove it, and
     /// the next `restore()` is where it is tried again.
@@ -94,11 +100,13 @@ public final class SessionStore {
             ) -> any APIProtocol = { configuration, token in
                 APIClientFactory.make(configuration: configuration, token: token)
             },
-        account: (any OutboxAccountPublishing)? = nil
+        account: (any OutboxAccountPublishing)? = nil,
+        identity: MediaIdentity = .shared
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
         self.account = account
+        self.identity = identity
     }
 
     /// The client every feature talks through, or `nil` while signed out.
@@ -337,6 +345,9 @@ public final class SessionStore {
         // where that is revoked, and never anywhere else.
         defaultVisibility = nil
         sessionGeneration += 1
+        // Same lifecycle, one layer over: whatever the previous account's photos were, they are
+        // not this one's, and a uid is only unique within one server.
+        identity.rotate()
         state = .signedIn(user)
         account?.publish(
             AccountBinding(serverBaseURL: configuration.baseURL, ownerSubject: user.subject)
@@ -425,6 +436,7 @@ public final class SessionStore {
         // licence this method revokes, because they scope to the identity together.
         defaultVisibility = nil
         sessionGeneration += 1
+        identity.rotate()
         state = .signedOut
     }
 

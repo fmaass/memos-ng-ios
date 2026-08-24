@@ -53,6 +53,50 @@ actor RefusingTransport: MediaTransport {
     }
 }
 
+/// A transport that stops in the middle, so a test can act while a fetch is on the wire. The two
+/// gates are the whole point: `waitUntilStarted` says the request has begun, `release` lets it
+/// finish, and between them the test can change who the device is signed in as.
+actor GatedTransport: MediaTransport {
+    private let payload: Data
+    private var hasStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+
+    func waitUntilStarted() async {
+        if hasStarted { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        let waiting = releaseWaiters
+        releaseWaiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        hasStarted = true
+        let waiting = startWaiters
+        startWaiters = []
+        for waiter in waiting { waiter.resume() }
+        if !isReleased {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://memos.example.invalid/")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/png"]
+        )!
+        return (payload, response)
+    }
+}
+
 @MainActor
 enum MediaFixture {
     /// Real PNG bytes, encoded here and decoded by the loader — so the decode under test is a
@@ -100,6 +144,26 @@ struct MediaImageLoaderTests {
     /// every pixel. The same vector `ThumbnailTests` uses, and it is what makes the expected
     /// pixel a number rather than a judgement.
     private static let flatGreenHash = "007Da1"
+
+    /// This test's own identity clock. Swift Testing builds a fresh suite value per test, so the
+    /// store installed below is this test's alone.
+    let identity = MediaIdentity()
+
+    /// The process-wide store is bound to the process-wide clock, and the sign-out suites rotate
+    /// that clock for their own reasons — every rotation emptying the store. Sharing it would make
+    /// these assertions depend on what another suite happened to be doing at the time. Everything
+    /// that touches the loader lives in THIS suite, and the suite is `.serialized`, so one
+    /// installed store is in force for exactly one test at a time.
+    init() {
+        MediaImageLoader.store = MediaImageStore(
+            countLimit: MediaImageLoader.countLimit,
+            totalCostLimit: MediaImageLoader.totalCostLimit,
+            identity: identity
+        )
+        // Reset rather than restored afterwards: a test that fails part-way through still leaves
+        // the next one a real transport, instead of whatever stub it was holding.
+        MediaImageLoader.transport = MediaSession.shared
+    }
 
     private func withTransport(_ transport: any MediaTransport, _ body: () async -> Void) async {
         let previous = MediaImageLoader.transport
@@ -251,6 +315,61 @@ struct MediaImageLoaderTests {
         #expect(abs(Int(pixel.b) - 0x4F) <= 8, "blue was \(pixel.b)")
     }
 
+    /// Server A's photo, then a switch to server B, then B asking for the SAME uid.
+    @Test("after a change of account the previous server's photo is not answered for its uid")
+    func aChangeOfAccountEmptiesTheStore() async {
+        // A uid both servers use — the case the key alone cannot tell apart.
+        let key = MediaImageKey(uid: "shared-uid", tier: "thumb")
+        let url = MediaFixture.signed(uid: "shared-uid")
+        MediaImageLoader.transport = ScriptedTransport(payload: MediaFixture.png(.red))
+        #expect(await MediaImageLoader.uiImage(for: key, url: url) != nil)
+        #expect(MediaImageLoader.cached(for: key) != nil, "precondition: A's photo is held")
+
+        identity.rotate()
+
+        #expect(
+            MediaImageLoader.cached(for: key) == nil,
+            "server A's photo would have been painted for server B's attachment"
+        )
+    }
+
+    /// The half that emptying the cache cannot fix on its own. The fetch is already on the wire
+    /// when the account changes; it lands afterwards, and it must neither be kept nor handed back.
+    @Test("an answer that arrives after the account changed is neither cached nor returned")
+    func anInFlightAnswerFromTheOldAccountIsDropped() async {
+        let key = MediaImageKey(uid: "in-flight", tier: "thumb")
+        let url = MediaFixture.signed(uid: "in-flight")
+        let gated = GatedTransport(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = gated
+
+        let load = Task { await MediaImageLoader.uiImage(for: key, url: url) }
+        await gated.waitUntilStarted()
+        identity.rotate()
+        await gated.release()
+        let answer = await load.value
+
+        #expect(answer == nil, "the previous account's photo was handed back to be painted")
+        #expect(MediaImageLoader.cached(for: key) == nil, "and it repopulated the cache")
+    }
+
+    /// The control the test above is worthless without: the identical race, with no change of
+    /// account in it, still stores and still answers.
+    @Test("the same fetch, with no change of account, is kept exactly as before")
+    func anInFlightAnswerForTheSameAccountIsKept() async {
+        let key = MediaImageKey(uid: "in-flight-control", tier: "thumb")
+        let url = MediaFixture.signed(uid: "in-flight-control")
+        let gated = GatedTransport(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = gated
+
+        let load = Task { await MediaImageLoader.uiImage(for: key, url: url) }
+        await gated.waitUntilStarted()
+        await gated.release()
+        let answer = await load.value
+
+        #expect(answer != nil)
+        #expect(MediaImageLoader.cached(for: key) != nil)
+    }
+
     /// An expired signature must not be answered out of the URLCache — the entry can only be
     /// stale and the request is going to be refused anyway.
     @Test("the request policy follows the signature")
@@ -265,10 +384,17 @@ struct MediaImageLoaderTests {
 @MainActor
 @Suite("The decoded-image store")
 struct MediaImageStoreTests {
-    @Test("the shared store is bounded on both count and cost")
+    @Test("the store the loader builds is bounded on both count and cost")
     func limitsAreSet() {
-        #expect(MediaImageLoader.store.countLimit == 96)
-        #expect(MediaImageLoader.store.totalCostLimit == 64 * 1024 * 1024)
+        #expect(MediaImageLoader.countLimit == 96)
+        #expect(MediaImageLoader.totalCostLimit == 64 * 1024 * 1024)
+        let store = MediaImageStore(
+            countLimit: MediaImageLoader.countLimit,
+            totalCostLimit: MediaImageLoader.totalCostLimit,
+            identity: MediaIdentity()
+        )
+        #expect(store.countLimit == 96)
+        #expect(store.totalCostLimit == 64 * 1024 * 1024)
     }
 
     /// The cost is the DECODED size. Fed the length of the JPEG instead, a 64 MB limit would hold
@@ -287,17 +413,87 @@ struct MediaImageStoreTests {
     /// memory is short; this asserts that emptying it does what the tiles depend on.
     @Test("a purged store answers nothing, and can be filled again")
     func purging() throws {
-        let store = MediaImageStore(countLimit: 4, totalCostLimit: 1 << 20)
+        let store = MediaImageStore(
+            countLimit: 4,
+            totalCostLimit: 1 << 20,
+            identity: MediaIdentity()
+        )
         let key = MediaImageKey(uid: "purge", tier: "thumb")
         let image = try #require(UIImage(data: MediaFixture.png(.red)))
 
-        store.store(image, forKey: key)
+        store.store(image, forKey: key, generation: store.generation)
         #expect(store.image(forKey: key) === image)
 
         store.purge()
         #expect(store.image(forKey: key) == nil)
 
-        store.store(image, forKey: key)
+        store.store(image, forKey: key, generation: store.generation)
         #expect(store.image(forKey: key) === image)
+    }
+}
+
+/// What a tile paints when its own capture and the shared cache disagree.
+@MainActor
+@Suite("What a tile paints")
+struct PaintedImageTests {
+    private func image(_ color: UIColor) -> UIImage {
+        UIImage(data: MediaFixture.png(color))!
+    }
+
+    /// The eviction-under-a-mounted-row case. `NSCache` may drop an entry whenever the system is
+    /// short of memory, and a row that is still on screen gets no second `.task` — its `id` has
+    /// not changed. Without the capture it would fall back to its blurhash and stay there.
+    @Test("a captured photo keeps painting after the shared cache has dropped it")
+    func aCapturedPhotoSurvivesEviction() {
+        let key = MediaImageKey(uid: "mounted", tier: "thumb")
+        let captured = image(.red)
+
+        let painted = AttachmentThumbnail.painted(
+            captured: (key: key, image: captured),
+            for: key,
+            cached: nil
+        )
+
+        #expect(painted === captured)
+    }
+
+    @Test("a capture for another attachment is never painted for this one")
+    func aCaptureForAnotherKeyIsIgnored() {
+        let mine = MediaImageKey(uid: "mine", tier: "thumb")
+        let theirs = MediaImageKey(uid: "theirs", tier: "thumb")
+        let fromTheCache = image(.green)
+
+        let painted = AttachmentThumbnail.painted(
+            captured: (key: theirs, image: image(.red)),
+            for: mine,
+            cached: fromTheCache
+        )
+
+        #expect(painted === fromTheCache)
+    }
+
+    @Test("with nothing captured yet, the shared cache is what paints")
+    func withoutACaptureTheCacheIsRead() {
+        let key = MediaImageKey(uid: "fresh", tier: "thumb")
+        let fromTheCache = image(.green)
+        #expect(
+            AttachmentThumbnail.painted(captured: nil, for: key, cached: fromTheCache)
+                === fromTheCache
+        )
+        #expect(AttachmentThumbnail.painted(captured: nil, for: key, cached: nil) == nil)
+    }
+
+    /// The tier is part of the key, so a preview must not be painted where a thumb was captured.
+    @Test("a capture of another tier of the same attachment is not painted either")
+    func tiersDoNotSubstituteForEachOther() {
+        let thumb = MediaImageKey(uid: "same", tier: "thumb")
+        let mobile = MediaImageKey(uid: "same", tier: "mobile")
+        #expect(
+            AttachmentThumbnail.painted(
+                captured: (key: mobile, image: image(.red)),
+                for: thumb,
+                cached: nil
+            ) == nil
+        )
     }
 }

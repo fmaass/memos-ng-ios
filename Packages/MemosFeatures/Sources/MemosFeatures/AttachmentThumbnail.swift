@@ -1,5 +1,6 @@
 import MemosCore
 import SwiftUI
+import UIKit
 
 /// Which of the three things a tile can be showing. Named separately from the loader so a stalled
 /// load can be rendered and asserted without a network.
@@ -38,18 +39,35 @@ struct AttachmentThumbnail: View {
     /// bookkeeping: a tile whose attachment or tier changes under it would otherwise keep painting
     /// the previous photo until the new one arrived, which is the one wrong picture a cache is
     /// able to show.
-    @State private var loaded: (key: MediaImageKey, image: Image)?
+    @State private var loaded: (key: MediaImageKey, image: UIImage)?
     /// The key whose load came back with nothing. Also tagged, for the same reason.
     @State private var failedKey: MediaImageKey?
 
     private var url: URL? { MemoPresentation.url(for: attachment, tier: tier) }
     private var key: MediaImageKey { MediaImageLoader.key(for: attachment, tier: tier) }
 
+    /// What a tile paints, given what this instance captured and what the loader still holds.
+    ///
+    /// The capture has to win, and not merely as an optimisation. `NSCache` may drop an entry at
+    /// any moment — a memory warning does not ask which rows are on screen — and a row that is
+    /// still mounted gets no second `.task`, because its `id` has not changed. Reading the cache
+    /// alone, such a row would fall back to its blurhash and stay there for as long as it lived.
+    ///
+    /// Pure and static so it can be asserted directly rather than through a hosted view.
+    static func painted(
+        captured: (key: MediaImageKey, image: UIImage)?,
+        for key: MediaImageKey,
+        cached: UIImage?
+    ) -> UIImage? {
+        if let captured, captured.key == key { return captured.image }
+        return cached
+    }
+
     /// Read in `body`, and synchronous on both paths. The cache lookup is what makes a scroll-back
-    /// free; `loaded` is only how an async arrival gets a frame to be drawn in.
+    /// free; the capture is what keeps it painted afterwards.
     private var image: Image? {
-        if let loaded, loaded.key == key { return loaded.image }
-        return MediaImageLoader.cached(for: key)
+        Self.painted(captured: loaded, for: key, cached: MediaImageLoader.cachedUIImage(for: key))
+            .map(Image.init(uiImage:))
     }
 
     private var phase: ThumbnailPhase {
@@ -76,14 +94,26 @@ struct AttachmentThumbnail: View {
     private func load() async {
         guard let url else { return }
         MediaCache.evictExpired(url)
-        // Already decoded: `body` has painted it already, and there is nothing to fetch, nothing
-        // to decode and no state to change.
-        if MediaImageLoader.cached(for: key) != nil { return }
 
         // Captured before the await: the view can be handed a different attachment while the
         // fetch is in flight, and the answer belongs to the key it was asked for.
         let requested = key
-        let image = await MediaImageLoader.image(for: requested, url: url)
+        // Already decoded — `body` has painted it in this very frame, and there is nothing to
+        // fetch. It is still taken INTO this view's own state: the frame is already right, and
+        // this is what keeps it right if the cache is emptied under a row that stays mounted.
+        if let hit = MediaImageLoader.cachedUIImage(for: requested) {
+            loaded = (requested, hit)
+            if failedKey == requested { failedKey = nil }
+            return
+        }
+
+        let generation = MediaImageLoader.store.generation
+        let image = await MediaImageLoader.uiImage(for: requested, url: url)
+        // The same fence the loader applies to its cache, applied to the screen: an answer about
+        // the account that was signed in when this started must not be painted for the one signed
+        // in now. Nothing is assigned at all — not even a failure, which would put a warning
+        // triangle on a tile whose memo is already being replaced.
+        guard generation == MediaImageLoader.store.generation else { return }
         if let image {
             loaded = (requested, image)
             if failedKey == requested { failedKey = nil }
