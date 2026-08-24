@@ -17,6 +17,10 @@ public struct ComposeSubmission: Sendable, Equatable {
 
 /// Writing a memo — new or edited, one screen.
 ///
+/// It is a SHEET with detents: capturing a thought is a half-screen act, and the keyboard is
+/// already taking the other half. It opens at `.medium` and grows to `.large` when there is
+/// something worth the room.
+///
 /// Visibility offers "server default" as the unmarked choice on a NEW memo: the account already
 /// has an answer for who sees things, and a compose screen that demands the decision every time
 /// teaches people to stop reading it. An EDIT never touches visibility here — that is its own
@@ -44,6 +48,7 @@ public struct ComposeView: View {
     @State private var importGeneration = 0
     @State private var isImporting = false
     @State private var isSaving = false
+    @State private var detent: PresentationDetent = .medium
     @FocusState private var editorFocused: Bool
 
     public init(mode: Mode, submit: @escaping (ComposeSubmission) async -> Bool) {
@@ -74,21 +79,11 @@ public struct ComposeView: View {
 
     public var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                TextEditor(text: $content)
-                    .focused($editorFocused)
-                    .font(.body)
-                    .padding(8)
+            VStack(alignment: .leading, spacing: 0) {
+                editor
                 if !isEdit {
+                    Divider()
                     attachRow
-                    Picker("Visibility", selection: $visibility) {
-                        Text("Server default").tag(MemoVisibility?.none)
-                        Text("Private").tag(MemoVisibility?.some(.private))
-                        Text("Protected").tag(MemoVisibility?.some(.protected))
-                        Text("Public").tag(MemoVisibility?.some(.public))
-                    }
-                    .pickerStyle(.segmented)
-                    .padding()
                 }
             }
             .navigationTitle(isEdit ? "Edit memo" : "New memo")
@@ -111,46 +106,83 @@ public struct ComposeView: View {
                         }
                     }
                     .disabled(!canSave)
+                    .fontWeight(.semibold)
                 }
             }
             .task { editorFocused = true }
         }
+        .tint(DesignTokens.accent)
+        .presentationDetents([.medium, .large], selection: $detent)
+        .presentationDragIndicator(.visible)
+        .presentationContentInteraction(.scrolls)
+    }
+
+    /// A prompt rather than an empty grey rectangle. `TextEditor` has no placeholder, so it is one
+    /// overlay, and it is `allowsHitTesting(false)` so tapping the words still lands in the field.
+    private var editor: some View {
+        TextEditor(text: $content)
+            .focused($editorFocused)
+            .font(.body)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, DesignTokens.Space.regular)
+            .padding(.top, DesignTokens.Space.snug)
+            .overlay(alignment: .topLeading) {
+                if content.isEmpty {
+                    Text("What happened?")
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, DesignTokens.Space.roomy)
+                        .padding(.top, DesignTokens.Space.regular)
+                        .allowsHitTesting(false)
+                }
+            }
     }
 
     @ViewBuilder
     private var attachRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
+            if !attachments.isEmpty {
+                PickedThumbnailRow(attachments: attachments)
+            }
+            HStack(spacing: DesignTokens.Space.regular) {
                 PhotosPicker(
                     selection: $picked,
                     selectionBehavior: .ordered,
                     matching: .any(of: [.images, .videos]),
                     preferredItemEncoding: .current
                 ) {
-                    Label("Add photos or videos", systemImage: "photo.on.rectangle.angled")
+                    Label("Add photos", systemImage: "photo.on.rectangle.angled")
+                        .font(.subheadline)
                 }
                 if isImporting {
                     ProgressView()
                 }
+                Spacer(minLength: DesignTokens.Space.snug)
+                VisibilityMenu(selection: $visibility)
             }
-            if let summary = ComposeAttachments.summary(
-                imported: attachments.count, failed: failedImports
-            ) {
-                HStack(spacing: 8) {
+            if failedImports > 0,
+                let summary = ComposeAttachments.summary(
+                    imported: attachments.count, failed: failedImports
+                )
+            {
+                HStack(spacing: DesignTokens.Space.snug) {
                     Text(summary)
                         .font(.footnote)
-                        .foregroundStyle(failedImports > 0 ? .orange : .secondary)
-                    if failedImports > 0 {
-                        Button("Remove them") { clearPicked() }
-                            .font(.footnote)
-                    }
+                        .foregroundStyle(.orange)
+                    Button("Remove them") { clearPicked() }
+                        .font(.footnote)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal)
+        .padding(DesignTokens.Space.regular)
         .onChange(of: picked) { _, items in
             Task { await importPicked(items) }
+        }
+        .onChange(of: attachments.isEmpty) { _, isEmpty in
+            // Photos are the reason to want the room; the sheet takes it rather than making
+            // someone drag it open to see what they just attached.
+            if !isEmpty { detent = .large }
         }
     }
 
@@ -183,5 +215,55 @@ public struct ComposeView: View {
         attachments = []
         failedImports = 0
         isImporting = false
+    }
+}
+
+/// Who will see it, as a pill that opens a menu.
+///
+/// It replaces a segmented control, which had four segments that each had to be short enough to
+/// fit a quarter of the screen — so at any accessibility text size the words became stumps. A
+/// menu shows one choice at a time, at whatever width that choice needs.
+struct VisibilityMenu: View {
+    @Binding var selection: MemoVisibility?
+
+    var body: some View {
+        Menu {
+            Picker("Visibility", selection: $selection) {
+                Label("Server default", systemImage: "person.crop.circle")
+                    .tag(MemoVisibility?.none)
+                ForEach(MemoVisibility.allCases, id: \.self) { option in
+                    Label(option.label, systemImage: option.symbolName)
+                        .tag(MemoVisibility?.some(option))
+                }
+            }
+        } label: {
+            VisibilityChoicePill(selection: selection)
+        }
+        .accessibilityLabel("Visibility")
+    }
+}
+
+/// The label of the visibility menu — extracted so its fit at the largest text size can be
+/// measured directly (`DynamicTypeFittingTests`) rather than eyeballed in a screenshot.
+struct VisibilityChoicePill: View {
+    let selection: MemoVisibility?
+
+    var title: String { selection?.label ?? "Default" }
+    var symbol: String { selection?.symbolName ?? "person.crop.circle" }
+
+    var body: some View {
+        Label {
+            Text(title)
+        } icon: {
+            Image(systemName: symbol)
+        }
+        .labelStyle(.titleAndIcon)
+        .font(.subheadline.weight(.medium))
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, DesignTokens.Space.regular)
+        .padding(.vertical, DesignTokens.Space.snug)
+        .background(DesignTokens.accent.opacity(0.14), in: .capsule)
+        .foregroundStyle(DesignTokens.accent)
     }
 }

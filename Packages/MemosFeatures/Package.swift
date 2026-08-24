@@ -22,6 +22,14 @@ let package = Package(
                 .product(name: "MemosOutbox", package: "MemosOutbox"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ],
+            // The accent lives in an asset catalogue rather than a literal because it has to
+            // answer differently in light and dark. It is declared here as well as in the app's
+            // own catalogue: the app's copy is what the SYSTEM reads for the global tint, this
+            // one is what `Color(_:bundle: .module)` resolves. `DesignTokensTests` asserts the
+            // two are the same colour, so the pair cannot drift.
+            resources: [
+                .process("Resources/DesignTokens.xcassets")
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .defaultIsolation(MainActor.self),

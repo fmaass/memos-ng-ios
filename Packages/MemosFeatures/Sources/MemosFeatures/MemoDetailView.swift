@@ -13,7 +13,10 @@ public struct MemoDetailView: View {
     let timeline: TimelineStore
 
     @Environment(SessionStore.self) private var session
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var playing: VideoPlayback?
+    @State private var feedback = MemoFeedbackTrigger()
+    @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
 
     public init(uid: String, initial: Memo, timeline: TimelineStore) {
         self.uid = uid
@@ -31,36 +34,13 @@ public struct MemoDetailView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(memo.createdAt, format: .dateTime.day().month().year().hour().minute())
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: DesignTokens.Space.roomy) {
+                header
 
                 MemoMarkdownView(content: memo.content)
 
                 if !tasks.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Tasks").font(.headline)
-                        ForEach(Array(tasks.enumerated()), id: \.offset) { index, task in
-                            // Someone else's checklist is read: a 403 round trip teaches
-                            // nothing a disabled row does not.
-                            Button {
-                                Task { await toggle(index) }
-                            } label: {
-                                Label {
-                                    Text(task.text)
-                                } icon: {
-                                    Image(
-                                        systemName: task.checked
-                                            ? "checkmark.square" : "square"
-                                    )
-                                }
-                                .foregroundStyle(task.checked ? .secondary : .primary)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!memo.mine)
-                        }
-                    }
+                    taskList
                 }
 
                 ForEach(memo.attachments) { attachment in
@@ -77,8 +57,12 @@ public struct MemoDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            .padding(DesignTokens.Space.roomy)
         }
+        .background(Color(.systemGroupedBackground))
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .tint(DesignTokens.accent)
+        .sensoryFeedback(trigger: feedback) { _, latest in latest.act?.feedback }
         .fullScreenCover(item: $playing) { playback in
             VideoPlayerView(playback: playback)
         }
@@ -86,8 +70,64 @@ public struct MemoDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func toggle(_ index: Int) async {
+    @ViewBuilder
+    private var header: some View {
+        let identity = VStack(alignment: .leading, spacing: 0) {
+            Text(MemoCardPresentation.displayName(forOwner: memo.owner))
+                .font(.subheadline.weight(.semibold))
+            Text(memo.createdAt, format: .dateTime.day().month().year().hour().minute())
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+                HStack(spacing: DesignTokens.Space.snug) {
+                    OwnerAvatar(owner: memo.owner, size: avatar)
+                    identity
+                }
+                VisibilityPill(visibility: memo.visibility)
+            }
+        } else {
+            HStack(spacing: DesignTokens.Space.snug) {
+                OwnerAvatar(owner: memo.owner, size: avatar)
+                identity
+                Spacer(minLength: DesignTokens.Space.snug)
+                VisibilityPill(visibility: memo.visibility)
+            }
+        }
+    }
+
+    private var taskList: some View {
+        VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+            Text("Tasks").font(.headline)
+            ForEach(Array(tasks.enumerated()), id: \.offset) { index, task in
+                // Someone else's checklist is read: a 403 round trip teaches nothing a disabled
+                // row does not.
+                Button {
+                    Task { await toggle(index, to: !task.checked) }
+                } label: {
+                    Label {
+                        Text(task.text)
+                    } icon: {
+                        Image(systemName: task.checked ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(
+                                task.checked ? AnyShapeStyle(DesignTokens.accent)
+                                    : AnyShapeStyle(.secondary)
+                            )
+                            .symbolEffect(.bounce, value: task.checked)
+                    }
+                    .foregroundStyle(task.checked ? .secondary : .primary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!memo.mine)
+            }
+        }
+    }
+
+    private func toggle(_ index: Int, to checked: Bool) async {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        await timeline.toggleTask(at: index, in: uid, using: client, baseURL: baseURL)
+        guard await timeline.toggleTask(at: index, in: uid, using: client, baseURL: baseURL)
+        else { return }
+        feedback.fire(checked ? .taskChecked : .taskUnchecked)
     }
 }
