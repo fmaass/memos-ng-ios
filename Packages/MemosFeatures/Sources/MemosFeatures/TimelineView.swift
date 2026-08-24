@@ -190,6 +190,12 @@ public struct TimelineView: View {
             if let error = timeline.lastError {
                 NoticeCard(text: error, tone: .error).cardRow()
             }
+            // A capture the outbox REFUSED never becomes a pending row, so this is the only place
+            // it can be seen at all. Without it, Post closed nothing, queued nothing, sent nothing
+            // and said nothing — which is what "writing a memo does not work" looked like.
+            if let error = outbox?.lastError {
+                NoticeCard(text: error, tone: .error).cardRow()
+            }
             ForEach(TimelineGrouping.sections(for: timeline.memos)) { section in
                 Section {
                     ForEach(section.memos) { memo in
@@ -354,12 +360,12 @@ public struct TimelineView: View {
             guard let client = session.api, let baseURL = session.serverBaseURL else {
                 return false
             }
-            // Only a date the editor actually moved is sent; an untouched one would be a rewrite
-            // of the memo's own value dressed up as an edit.
             posted = await timeline.edit(
                 uid: uid,
                 content: submission.content,
-                createdAt: submission.createdAt == createdAt ? nil : submission.createdAt,
+                createdAt: MemoDetailPresentation.editedDate(
+                    chosen: submission.createdAt, original: createdAt
+                ),
                 using: client,
                 baseURL: baseURL
             )

@@ -162,6 +162,7 @@ enum MemoFixture {
         uid: String = "m1",
         owner: String = "fabian@example.invalid",
         content: String = "A memo.",
+        mine: Bool = true,
         visibility: MemoVisibility = .protected,
         pinned: Bool = false,
         createdAt: Date = Date(timeIntervalSince1970: 1_750_000_000),
@@ -171,7 +172,7 @@ enum MemoFixture {
         Memo(
             uid: uid,
             owner: owner,
-            mine: true,
+            mine: mine,
             content: content,
             visibility: visibility,
             pinned: pinned,

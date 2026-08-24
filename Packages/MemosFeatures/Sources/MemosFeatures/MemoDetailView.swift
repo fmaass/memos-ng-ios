@@ -12,10 +12,15 @@ public struct MemoDetailView: View {
     let initial: Memo
     let timeline: TimelineStore
 
-    @Environment(SessionStore.self) private var session
+    // Optional for the same reason the timeline's outbox is: a missing environment value must be
+    // a screen that does less, never a crash. It is also what lets this screen be HOSTED — the
+    // Edit affordance is a toolbar item, and the only way to assert that one is really there is to
+    // put the whole screen up and read it back (`MemoEditWiringTests`).
+    @Environment(SessionStore.self) private var session: SessionStore?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var playing: VideoPlayback?
     @State private var viewing: MediaViewerSelection?
+    @State private var edit = MemoEditFlow()
     @State private var feedback = MemoFeedbackTrigger()
     /// What the zoom transition matches the full-screen viewer to: the picture that was tapped.
     @Namespace private var mediaZoom
@@ -39,6 +44,13 @@ public struct MemoDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DesignTokens.Space.roomy) {
                 header
+
+                // A save that failed used to be a haptic and nothing else: the sheet stayed open
+                // and never said why. The store's own message when it has one, a plain sentence
+                // when it does not, and only ever after a save actually failed.
+                if let failure = edit.lastError {
+                    NoticeCard(text: timeline.lastError ?? failure, tone: .error)
+                }
 
                 MemoMarkdownView(content: memo.content)
 
@@ -96,6 +108,44 @@ public struct MemoDetailView: View {
         }
         .navigationTitle(memo.pinned ? "Pinned memo" : "Memo")
         .navigationBarTitleDisplayMode(.inline)
+        // The only place editing is visible on the memo's own screen. Until this, changing a memo
+        // meant knowing to long-press its card back in the timeline — see MemoDetailPresentation.
+        .toolbar {
+            if let mode = MemoDetailPresentation.editMode(for: memo) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        edit.begin(mode)
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .accessibilityLabel("Edit memo")
+                }
+            }
+        }
+        .sheet(item: edit.sheet) { mode in
+            ComposeView(mode: mode) { submission in
+                await edit.submit(submission, save: save)
+            }
+        }
+    }
+
+    /// The same edit the timeline submits, from the screen the memo is already open on.
+    private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> Bool {
+        guard case .edit(let uid, _, let createdAt) = mode,
+            let client = session?.api,
+            let baseURL = session?.serverBaseURL
+        else { return false }
+        let saved = await timeline.edit(
+            uid: uid,
+            content: submission.content,
+            createdAt: MemoDetailPresentation.editedDate(
+                chosen: submission.createdAt, original: createdAt
+            ),
+            using: client,
+            baseURL: baseURL
+        )
+        feedback.fire(saved ? .posted : .postFailed)
+        return saved
     }
 
     @ViewBuilder
@@ -160,7 +210,7 @@ public struct MemoDetailView: View {
     }
 
     private func toggle(_ index: Int, to checked: Bool) async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        guard let client = session?.api, let baseURL = session?.serverBaseURL else { return }
         guard await timeline.toggleTask(at: index, in: uid, using: client, baseURL: baseURL)
         else { return }
         feedback.fire(checked ? .taskChecked : .taskUnchecked)

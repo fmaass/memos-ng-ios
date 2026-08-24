@@ -6,7 +6,12 @@ import Testing
 /// the update-or-insert path actually work, which only a real round trip can show.
 @Suite("Keychain", .serialized)
 struct KeychainTests {
-    private let keychain = Keychain(service: "live.discomarder.memosng.tests")
+    // Named, like every other keychain query in the app: `Keychain` has no ungrouped form any
+    // more, because a query with no access group reaches into every group the app can see.
+    private let keychain = Keychain(
+        service: "live.discomarder.memosng.tests",
+        accessGroup: KeychainAccessGroup.appDefault ?? "live.discomarder.memosng.unresolved"
+    )
     private let account = "round-trip"
 
     @Test("stores, reads back, overwrites and removes")

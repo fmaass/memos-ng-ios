@@ -293,6 +293,12 @@ final class RecordingCredentials: CredentialStore, @unchecked Sendable {
         log.record("credential.set")
     }
 
+    func add(_ value: String, for account: String) throws -> Bool {
+        let stored = try inner.add(value, for: account)
+        if stored { log.record("credential.set") }
+        return stored
+    }
+
     func string(for account: String) throws -> String? { try inner.string(for: account) }
 
     func remove(_ account: String) throws {

@@ -63,7 +63,9 @@ struct DynamicTypeFittingTests {
             // ignored the text size would measure the same at both.
             #expect(atLargest > atDefault)
         }
-        // And the whole row — pill plus the control that puts it back to "Now" — still fits.
+        // And the interactive row, which is now the pill and nothing else: putting the date back
+        // to the time of writing moved INSIDE the picker, because a control that appears beside
+        // another one is a control that moves it.
         let row = MemoDateRow(date: .constant(chosen))
         let rowAtLargest = LayoutProbe.idealWidth(row, typeSize: .accessibility5)
         #expect(
@@ -99,19 +101,151 @@ struct DynamicTypeFittingTests {
         }
     }
 
-    /// Both meta pills on one line is the normal-size layout; at accessibility sizes they stack,
-    /// but the pair still may not want more width than the sheet has.
-    @Test("the date and visibility pills fit side by side")
-    func theMetaPillsFitTogether() {
-        let row = HStack(spacing: DesignTokens.Space.snug) {
-            MemoDatePill(date: nil)
-            VisibilityChoicePill(selection: nil, accountDefault: .protected)
-        }
-        let atDefault = LayoutProbe.idealWidth(row, typeSize: .large)
-        #expect(
-            atDefault <= Self.composeContentWidth,
-            "the meta row wants \(atDefault)pt of \(Self.composeContentWidth)"
+    // MARK: - the compose sheet's meta row
+
+    /// A date the writer chose, long enough to be the widest short form the pill ever draws.
+    private static let chosenDate = Date(timeIntervalSince1970: 1_766_000_000)
+
+    private static func row(
+        _ verbosity: ComposeMetaRow.Verbosity,
+        count: Int,
+        date: Date?,
+        visibility: MemoVisibility?
+    ) -> ComposeMetaPills {
+        ComposeMetaPills(
+            verbosity: verbosity,
+            picked: .constant([]),
+            attachmentCount: count,
+            date: .constant(date),
+            visibility: .constant(visibility),
+            accountDefault: .protected
         )
+    }
+
+    /// Each of the three pills on its own, at the size where a layout stops being a matter of
+    /// taste. They are `fixedSize`, so a pill that does not fit is not truncated — it is drawn off
+    /// the edge of the sheet.
+    @Test("all three meta pills fit at the largest text size")
+    func metaPillsFitAtAccessibility5() {
+        let budget = Self.composeContentWidth
+        for spelling in [ComposeMetaRow.Spelling.glyph, .short] {
+            let photos = PhotosPill(count: 12, spelling: spelling)
+            let photosLargest = LayoutProbe.idealWidth(photos, typeSize: .accessibility5)
+            #expect(photosLargest <= budget, "the photos pill wants \(photosLargest)pt")
+            #expect(photosLargest > LayoutProbe.idealWidth(photos, typeSize: .large))
+
+            let date = MemoDatePill(date: Self.chosenDate, spelling: spelling)
+            let dateLargest = LayoutProbe.idealWidth(date, typeSize: .accessibility5)
+            #expect(dateLargest <= budget, "the date pill wants \(dateLargest)pt")
+            #expect(dateLargest > LayoutProbe.idealWidth(date, typeSize: .large))
+        }
+        for spelling in [ComposeMetaRow.Spelling.glyph, .short, .spelledOut] {
+            let pill = VisibilityChoicePill(
+                selection: .protected, accountDefault: .protected, spelling: spelling
+            )
+            let largest = LayoutProbe.idealWidth(pill, typeSize: .accessibility5)
+            #expect(largest <= budget, "the visibility pill wants \(largest)pt")
+            #expect(largest > LayoutProbe.idealWidth(pill, typeSize: .large))
+        }
+    }
+
+    /// The promise the whole row rests on. `ViewThatFits` walks the spellings widest-first, so the
+    /// LAST one is the one that has to fit when nothing else does — at the largest text size, with
+    /// everything on it. If it does not, the row runs off the sheet instead of quietening down.
+    @Test("the row's last spelling fits at the largest text size, whatever is on it")
+    func metaRowFallbackFitsAtAccessibility5() throws {
+        let fallback = try #require(ComposeMetaRow.Verbosity.allCases.last)
+        #expect(fallback == .bare)
+        let states: [(Int, Date?, MemoVisibility?)] = [
+            (0, nil, nil),
+            (12, Self.chosenDate, .private),
+            (1, Self.chosenDate, .public),
+        ]
+        for (count, date, visibility) in states {
+            let width = LayoutProbe.idealWidth(
+                Self.row(fallback, count: count, date: date, visibility: visibility),
+                typeSize: .accessibility5
+            )
+            #expect(
+                width <= Self.composeContentWidth,
+                "the fallback row wants \(width)pt of \(Self.composeContentWidth)"
+            )
+        }
+        // And the widest spelling is the one the sheet gets at the ordinary text size.
+        let full = LayoutProbe.idealWidth(
+            Self.row(.plain, count: 12, date: Self.chosenDate, visibility: .protected),
+            typeSize: .large
+        )
+        #expect(full <= Self.composeContentWidth, "the spelled-out row wants \(full)pt")
+    }
+
+    /// The row is its three pills and the two gaps between them — nothing else, in any state.
+    ///
+    /// This is the assertion the old layout failed. A ✕ arrived beside the date once one was
+    /// chosen and a spinner arrived beside the picker while photos loaded, and everything to the
+    /// right of each moved when it did. Measuring the row against the sum of its three pills is
+    /// how a fourth thing gets caught, whatever it is.
+    @Test("the meta row is exactly its three pills, in every state")
+    func metaRowIsExactlyThreePills() {
+        for verbosity in ComposeMetaRow.Verbosity.allCases {
+            for (count, date) in [(0, nil as Date?), (12, Self.chosenDate)] {
+                let pills = [
+                    LayoutProbe.idealWidth(
+                        PhotosPill(count: count, spelling: verbosity.count), typeSize: .large),
+                    LayoutProbe.idealWidth(
+                        MemoDatePill(date: date, spelling: verbosity.date), typeSize: .large),
+                    LayoutProbe.idealWidth(
+                        VisibilityChoicePill(
+                            selection: .protected,
+                            accountDefault: .protected,
+                            spelling: verbosity.visibility
+                        ),
+                        typeSize: .large
+                    ),
+                ]
+                let expected = pills.reduce(0, +) + 2 * DesignTokens.Space.snug
+                let measured = LayoutProbe.idealWidth(
+                    Self.row(verbosity, count: count, date: date, visibility: .protected),
+                    typeSize: .large
+                )
+                #expect(
+                    abs(measured - expected) < 1,
+                    "\(verbosity) row is \(measured)pt where its three pills are \(expected)pt"
+                )
+            }
+        }
+    }
+
+    /// Loading a photo must not resize anything. The spinner is drawn ON the glyph rather than
+    /// beside it for exactly this reason — beside it, every pill to the right would shift for as
+    /// long as the import took.
+    @Test("importing photos does not change the photos pill's width")
+    func importingDoesNotResizeThePill() {
+        for count in [0, 3] {
+            let idle = LayoutProbe.idealWidth(
+                PhotosPill(count: count, isImporting: false), typeSize: .large)
+            let busy = LayoutProbe.idealWidth(
+                PhotosPill(count: count, isImporting: true), typeSize: .large)
+            #expect(abs(idle - busy) < 0.5, "idle \(idle)pt vs importing \(busy)pt")
+        }
+    }
+
+    /// The defect this measures shipped: the date popover presented as a 68-point sliver with one
+    /// column of the calendar in it, because a popover takes the size its content ASKS for and a
+    /// graphical `DatePicker` asks for nothing at all. At a zero proposal the unframed picker
+    /// wanted 24pt — its own padding.
+    @Test("the date picker asks for a calendar's width, not a sliver")
+    func theDatePickerIsNotASliver() {
+        let picker = MemoDatePicker(
+            date: .constant(nil), seed: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+        for typeSize in [DynamicTypeSize.large, .accessibility5] {
+            let asked = LayoutProbe.size(picker, width: 0, typeSize: typeSize)
+            #expect(asked.width >= 300, "the picker asks for \(asked.width)pt, not a calendar")
+            #expect(asked.height >= 300, "the picker asks for \(asked.height)pt of height")
+            // And it still fits the narrowest sheet it can be opened from.
+            #expect(asked.width <= 393, "the picker wants \(asked.width)pt of a 393pt screen")
+        }
     }
 
     /// The clipping assertion. A card with a fixed height, or a line limit on the body, measures

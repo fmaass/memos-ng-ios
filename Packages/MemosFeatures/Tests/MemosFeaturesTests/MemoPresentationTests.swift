@@ -249,4 +249,32 @@ struct AttachmentSlotTests {
         // The old accessor keeps its square fallback for the callers that want one.
         #expect(attachment(width: nil, height: nil).aspectRatio == 1)
     }
+
+    // MARK: - the Edit affordance on the memo's own screen
+
+    @Test("my own memo offers Edit, opened on the memo as it stands")
+    func editModeCarriesTheMemo() throws {
+        let created = Date(timeIntervalSince1970: 1_750_000_000)
+        let memo = MemoFixture.memo(
+            uid: "m7", content: "- [ ] ring the plumber", createdAt: created
+        )
+
+        let mode = try #require(MemoDetailPresentation.editMode(for: memo))
+        #expect(mode == .edit(uid: "m7", content: "- [ ] ring the plumber", createdAt: created))
+    }
+
+    @Test("someone else's memo offers no Edit at all")
+    func notMineHasNoEditMode() {
+        let memo = MemoFixture.memo(uid: "m8", mine: false)
+        #expect(MemoDetailPresentation.editMode(for: memo) == nil)
+    }
+
+    @Test("an edit sends a date only when the editor moved it")
+    func editedDateIsOnlyEverAMovedOne() {
+        let original = Date(timeIntervalSince1970: 1_750_000_000)
+        let moved = Date(timeIntervalSince1970: 1_700_000_000)
+        #expect(MemoDetailPresentation.editedDate(chosen: original, original: original) == nil)
+        #expect(MemoDetailPresentation.editedDate(chosen: nil, original: original) == nil)
+        #expect(MemoDetailPresentation.editedDate(chosen: moved, original: original) == moved)
+    }
 }

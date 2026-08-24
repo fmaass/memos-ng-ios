@@ -171,8 +171,13 @@ public struct ComposeView: View {
 
     /// Everything under the editor: what is attached, who will see it, and when it happened.
     ///
-    /// An EDIT shows only the date row. Attachments are managed on the memo itself and visibility
-    /// is its own deliberate action (see the type comment) — but a wrong date is a typo like any
+    /// The meta row is LAST, and everything that can appear — the thumbnails, the notice about
+    /// files that would not read — is above it. The row's own bottom edge is the sheet's, so
+    /// nothing arriving above it can move it: attaching a photo grows the block upwards into the
+    /// editor's space and the three pills stay exactly where they were.
+    ///
+    /// An EDIT shows only the date. Attachments are managed on the memo itself and visibility is
+    /// its own deliberate action (see the type comment) — but a wrong date is a typo like any
     /// other, and fixing it is what this sheet is for.
     @ViewBuilder
     private var controls: some View {
@@ -180,24 +185,6 @@ public struct ComposeView: View {
             if !isEdit {
                 if !attachments.isEmpty {
                     PickedThumbnailRow(attachments: attachments)
-                }
-                // At an accessibility text size the picker's label and the visibility pill cannot
-                // share a line without one of them being squeezed, so they stop trying to.
-                AttachControls(stacked: dynamicTypeSize.isAccessibilitySize) {
-                    PhotosPicker(
-                        selection: $picked,
-                        selectionBehavior: .ordered,
-                        matching: .any(of: [.images, .videos]),
-                        preferredItemEncoding: .current
-                    ) {
-                        Label("Add photos", systemImage: "photo.on.rectangle.angled")
-                            .font(.subheadline)
-                    }
-                    if isImporting {
-                        ProgressView()
-                    }
-                } trailing: {
-                    metaPills
                 }
                 if failedImports > 0,
                     let summary = ComposeAttachments.summary(
@@ -212,9 +199,8 @@ public struct ComposeView: View {
                             .font(.footnote)
                     }
                 }
+                metaRow
             } else {
-                // An edit manages neither attachments nor visibility, so the date is the whole
-                // meta row on that path.
                 MemoDateRow(date: $date, clearable: false)
             }
         }
@@ -230,31 +216,41 @@ public struct ComposeView: View {
         }
     }
 
-    /// The two facts a capture carries besides its words: WHEN it happened and who can see it.
+    /// The three things a capture carries besides its words: what is attached, when it happened,
+    /// and who will see it. Always three pills, always in that order, always on one line.
     ///
-    /// Side by side, as two pills of the same idiom. The date used to sit on a line of its own
-    /// below the picker, styled quietly, and people looked straight past it — someone went hunting
-    /// for a control that was on the screen the whole time. A control nobody finds is not a
-    /// subtle control, it is a missing one.
-    @ViewBuilder
-    private var metaPills: some View {
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-                MemoDateRow(date: $date, clearable: true)
-                VisibilityMenu(
-                    selection: $visibility,
-                    accountDefault: session?.defaultVisibility
-                )
-            }
-        } else {
-            HStack(spacing: DesignTokens.Space.snug) {
-                MemoDateRow(date: $date, clearable: true)
-                VisibilityMenu(
-                    selection: $visibility,
-                    accountDefault: session?.defaultVisibility
-                )
-            }
+    /// The row this replaced grew and shrank CONTROLS. A ✕ appeared beside the date once one was
+    /// chosen, a spinner appeared beside the picker while photos loaded, and the "Add photos or
+    /// videos" button moved every time — people reported it as the button jumping, which is
+    /// exactly what it was. Something ARRIVING in a row is what makes the thing next to it move,
+    /// so nothing arrives any more: the pills are always all three, and the only thing that gives
+    /// when the text gets large is how much each of them spells out.
+    ///
+    /// `ViewThatFits` walks `ComposeMetaRow.Verbosity.allCases` widest-first and takes the first
+    /// that fits the sheet. The last one is glyphs alone, and `DynamicTypeFittingTests` holds it
+    /// to fitting at `.accessibility5` — that is what makes "the row never reflows" a fact rather
+    /// than a hope.
+    private var metaRow: some View {
+        ViewThatFits(in: .horizontal) {
+            pills(.full)
+            pills(.plain)
+            pills(.quiet)
+            pills(.glyphs)
+            pills(.bare)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func pills(_ verbosity: ComposeMetaRow.Verbosity) -> some View {
+        ComposeMetaPills(
+            verbosity: verbosity,
+            picked: $picked,
+            attachmentCount: attachments.count,
+            isImporting: isImporting,
+            date: $date,
+            visibility: $visibility,
+            accountDefault: session?.defaultVisibility
+        )
     }
 
     /// The picker hands back its own temporary export; each one is copied here, in order, and the
@@ -297,6 +293,8 @@ public struct ComposeView: View {
 struct VisibilityMenu: View {
     @Binding var selection: MemoVisibility?
     var accountDefault: MemoVisibility?
+    /// How much the PILL says. The menu itself always spells everything out.
+    var spelling: ComposeMetaRow.Spelling = .spelledOut
 
     var body: some View {
         Menu {
@@ -316,7 +314,9 @@ struct VisibilityMenu: View {
                 }
             }
         } label: {
-            VisibilityChoicePill(selection: selection, accountDefault: accountDefault)
+            VisibilityChoicePill(
+                selection: selection, accountDefault: accountDefault, spelling: spelling
+            )
         }
         // The MENU is the element VoiceOver lands on, and a label here replaces whatever the pill
         // inside says — so this is the one that has to name the resolved visibility. Without it
@@ -334,14 +334,19 @@ struct VisibilityMenu: View {
 struct VisibilityChoicePill: View {
     let selection: MemoVisibility?
     var accountDefault: MemoVisibility?
+    /// The MOST this pill may say. The text size can still shorten it below that — a spelling the
+    /// row picked because it fits at one size must not be honoured into running off the screen at
+    /// another.
+    var spelling: ComposeMetaRow.Spelling = .spelledOut
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var title: String? {
-        VisibilityChoice.title(
+        guard spelling != .glyph else { return nil }
+        return VisibilityChoice.title(
             selection: selection,
             accountDefault: accountDefault,
-            compact: dynamicTypeSize.isAccessibilitySize
+            compact: spelling == .short || dynamicTypeSize.isAccessibilitySize
         )
     }
     var symbol: String {
@@ -349,30 +354,12 @@ struct VisibilityChoicePill: View {
     }
 
     var body: some View {
-        Group {
-            if let title {
-                Label {
-                    Text(title)
-                } icon: {
-                    Image(systemName: symbol)
-                }
-                .labelStyle(.titleAndIcon)
-            } else {
-                Image(systemName: symbol)
-            }
-        }
-        .font(.subheadline.weight(.medium))
-        .lineLimit(1)
-        .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, DesignTokens.Space.regular)
-        .padding(.vertical, DesignTokens.Space.snug)
-        .background(DesignTokens.accent.opacity(0.14), in: .capsule)
-        .foregroundStyle(DesignTokens.accent)
-        .accessibilityLabel(
-            VisibilityChoice.accessibilityLabel(
-                selection: selection, accountDefault: accountDefault
+        MetaPill(symbol: symbol, title: title, isSet: selection != nil)
+            .accessibilityLabel(
+                VisibilityChoice.accessibilityLabel(
+                    selection: selection, accountDefault: accountDefault
+                )
             )
-        )
     }
 }
 
@@ -439,35 +426,14 @@ enum VisibilityChoice {
     }
 }
 
-/// The compose sheet's controls: side by side while they fit, stacked when the text is large
-/// enough that they would otherwise fight over the width.
-struct AttachControls<Leading: View, Trailing: View>: View {
-    let stacked: Bool
-    @ViewBuilder let leading: Leading
-    @ViewBuilder let trailing: Trailing
-
-    var body: some View {
-        if stacked {
-            VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
-                HStack(spacing: DesignTokens.Space.regular) { leading }
-                trailing
-            }
-        } else {
-            HStack(spacing: DesignTokens.Space.regular) {
-                leading
-                Spacer(minLength: DesignTokens.Space.snug)
-                trailing
-            }
-        }
-    }
-}
-
 /// When the memo happened, as one pill that opens a picker.
 ///
-/// A capture is dated the moment it is written, and that is right almost every time — so the row
-/// starts collapsed, saying "Now", and costs nothing to ignore. Tapping it opens the platform's
+/// A capture is dated the moment it is written, and that is right almost every time — so the pill
+/// starts as a bare calendar glyph and costs nothing to ignore. Tapping it opens the platform's
 /// own date picker; changing anything there is what actually chooses a date, so opening the picker
-/// out of curiosity does not silently backdate a memo. The ✕ puts it back to "Now".
+/// out of curiosity does not silently backdate a memo. Putting it back to the time of writing is
+/// inside the picker, not beside the pill: a control that appears next to another one is a control
+/// that moves it.
 ///
 /// There is no upper bound on what can be chosen. The web app's own picker sets none and the
 /// server stores what it is given, and a client that quietly refused a date the other client
@@ -477,11 +443,49 @@ struct MemoDateRow: View {
     /// Whether "no date of its own" is still available. It is the default for a new capture; a
     /// memo being edited already has a date, and there is nothing to clear it back to.
     var clearable: Bool = true
+    /// Whether the pill carries the date beside its glyph.
+    var spelling: ComposeMetaRow.Spelling = .short
 
     @State private var isPicking = false
     /// What the picker opens on when nothing has been chosen. Captured when the picker opens
     /// rather than read inside `body`, which would move it on every redraw.
     @State private var seed = Date()
+
+    var body: some View {
+        Button {
+            seed = date ?? Date()
+            isPicking = true
+        } label: {
+            MemoDatePill(date: date, spelling: spelling)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Memo date")
+        .accessibilityValue(MemoDateChoice.title(for: date))
+        .popover(isPresented: $isPicking) {
+            MemoDatePicker(date: $date, seed: seed, clearable: clearable) { isPicking = false }
+                // A popover rather than the sheet iOS would otherwise substitute on a phone: the
+                // compose sheet is already a sheet, and a second one over it hides the memo being
+                // dated behind the picker that dates it.
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// The calendar the date pill opens.
+///
+/// The WIDTH is why this is its own view rather than three modifiers at the call site. A graphical
+/// `DatePicker` has no width of its own: asked what it wants it answers zero (measured: 24pt, the
+/// padding alone), and asked for everything it takes everything. A popover sizes itself to what
+/// its content asks for — so the picker SHIPPED as a 68-point sliver showing one column of the
+/// calendar, with the month header cut to "26 >" and no way to pick a date at all. The frame is
+/// the fix, and `DynamicTypeFittingTests` holds it.
+struct MemoDatePicker: View {
+    @Binding var date: Date?
+    /// What the picker opens on when no date has been chosen — passed in, so that merely LOOKING
+    /// at the picker does not date the memo.
+    let seed: Date
+    var clearable: Bool = true
+    var onDone: () -> Void = {}
 
     /// The picker edits this rather than `date` directly, so that "no date chosen" survives merely
     /// looking at the picker: the memo takes a date when the picker's value MOVES.
@@ -489,30 +493,13 @@ struct MemoDateRow: View {
         Binding(get: { self.date ?? self.seed }, set: { self.date = $0 })
     }
 
+    /// The calendar's own width. A number rather than a `@ScaledMetric` because the control is a
+    /// UIKit date picker that lays out at the same size whatever the text size — measured 390pt
+    /// tall at both `.large` and `.accessibility5` — so scaling this would only pad the popover.
+    static let width: CGFloat = 320
+
     var body: some View {
-        HStack(spacing: DesignTokens.Space.snug) {
-            Button {
-                seed = date ?? Date()
-                isPicking = true
-            } label: {
-                MemoDatePill(date: date)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Memo date")
-            .accessibilityValue(MemoDateChoice.title(for: date))
-            if clearable, date != nil {
-                Button {
-                    date = nil
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Use the time of writing")
-            }
-        }
-        .popover(isPresented: $isPicking) {
+        VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
             DatePicker(
                 "Memo date",
                 selection: chosen,
@@ -520,12 +507,20 @@ struct MemoDateRow: View {
             )
             .datePickerStyle(.graphical)
             .labelsHidden()
-            .padding(DesignTokens.Space.regular)
-            // A popover rather than the sheet iOS would otherwise substitute on a phone: the
-            // compose sheet is already a sheet, and a second one over it hides the memo being
-            // dated behind the picker that dates it.
-            .presentationCompactAdaptation(.popover)
+            if clearable {
+                Button {
+                    date = nil
+                    onDone()
+                } label: {
+                    Label("Now", systemImage: "clock")
+                        .font(.subheadline)
+                }
+                .disabled(date == nil)
+                .accessibilityLabel("Use the time of writing")
+            }
         }
+        .frame(width: Self.width)
+        .padding(DesignTokens.Space.regular)
     }
 }
 
@@ -533,27 +528,14 @@ struct MemoDateRow: View {
 /// (`DynamicTypeFittingTests`), the same way the visibility pill is.
 struct MemoDatePill: View {
     let date: Date?
+    var spelling: ComposeMetaRow.Spelling = .short
 
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    var title: String {
-        MemoDateChoice.title(for: date, compact: dynamicTypeSize.isAccessibilitySize)
+    var title: String? {
+        spelling == .glyph ? nil : MemoDateChoice.pillTitle(for: date)
     }
 
     var body: some View {
-        Label {
-            Text(title)
-        } icon: {
-            Image(systemName: "calendar")
-        }
-        .labelStyle(.titleAndIcon)
-        .font(.subheadline.weight(.medium))
-        .lineLimit(1)
-        .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, DesignTokens.Space.regular)
-        .padding(.vertical, DesignTokens.Space.snug)
-        .background(DesignTokens.accent.opacity(0.14), in: .capsule)
-        .foregroundStyle(DesignTokens.accent)
+        MetaPill(symbol: "calendar", title: title, isSet: date != nil)
     }
 }
 
@@ -574,5 +556,201 @@ nonisolated enum MemoDateChoice {
             ? .dateTime.day().month(.abbreviated)
             : .dateTime.day().month(.abbreviated).year().hour().minute()
         return date.formatted(style.locale(locale))
+    }
+
+    /// What the PILL carries beside its calendar, or nil while the capture is simply "now".
+    ///
+    /// Nil rather than the word "Now" because the glyph already says it: a row of three pills has
+    /// room for the answers that differ from the default, and no room for the ones that do not.
+    /// And always the SHORT form — the whole date is in the picker behind it and in what a screen
+    /// reader hears (`accessibilityValue`), so spelling it out here would only cost the row its
+    /// other two pills.
+    static func pillTitle(for date: Date?, locale: Locale = .autoupdatingCurrent) -> String? {
+        guard date != nil else { return nil }
+        return title(for: date, compact: true, locale: locale)
+    }
+}
+
+// MARK: - the meta row
+
+/// The compose sheet's meta row, as a model rather than a layout.
+///
+/// It exists so that "the row is always these three, in this order, and this is the least it can
+/// say" is something a test can hold, rather than something a body happens to do this week.
+nonisolated public enum ComposeMetaRow {
+    /// How much a pill says beside its glyph.
+    public enum Spelling: Sendable, Equatable {
+        /// The glyph alone.
+        case glyph
+        /// The short answer: a day and a month, a count, a single word.
+        case short
+        /// The whole thing, framing included ("Default (Protected)").
+        case spelledOut
+    }
+
+    /// The spellings the row tries, WIDEST FIRST. `ViewThatFits` takes the first that fits, so the
+    /// last one is a promise: it has to fit at any text size, in any locale, on the narrowest
+    /// phone. Nothing here changes the ORDER or the NUMBER of pills — only how much each says.
+    public enum Verbosity: CaseIterable, Sendable {
+        /// Count, short date, and the visibility spelled out with its framing.
+        case full
+        /// Count, short date, and the visibility as a single word.
+        case plain
+        /// Count, short date, and the visibility as its glyph.
+        case quiet
+        /// Count, and both of the others as glyphs.
+        case glyphs
+        /// Three glyphs. The fallback that must always fit.
+        case bare
+
+        public var count: Spelling { self == .bare ? .glyph : .short }
+        public var date: Spelling { self == .glyphs || self == .bare ? .glyph : .short }
+        public var visibility: Spelling {
+            switch self {
+            case .full: .spelledOut
+            case .plain: .short
+            case .quiet, .glyphs, .bare: .glyph
+            }
+        }
+    }
+
+    /// The number beside the photo glyph, or nil when there is nothing attached — an empty pill is
+    /// the invitation to attach something, and a "0" is noise.
+    public static func photosTitle(count: Int) -> String? {
+        count > 0 ? count.formatted() : nil
+    }
+
+    /// What a screen reader hears on the photos pill. Never a bare number: the count is only half
+    /// the fact, and the other half is that tapping it opens the picker.
+    public static func photosAccessibilityLabel(count: Int, isImporting: Bool) -> String {
+        if isImporting { return "Adding photos or videos" }
+        switch count {
+        case 0: return "Add photos or videos"
+        case 1: return "1 photo or video attached. Add photos or videos"
+        default: return "\(count) photos or videos attached. Add photos or videos"
+        }
+    }
+}
+
+/// The three pills, in the one order they are ever in.
+///
+/// Its width is exactly its three pills and the two gaps between them, which is what lets a test
+/// assert that nothing else has crept into the row.
+struct ComposeMetaPills: View {
+    let verbosity: ComposeMetaRow.Verbosity
+    @Binding var picked: [PhotosPickerItem]
+    let attachmentCount: Int
+    var isImporting: Bool = false
+    @Binding var date: Date?
+    @Binding var visibility: MemoVisibility?
+    var accountDefault: MemoVisibility?
+
+    var body: some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            PhotosPickerPill(
+                picked: $picked,
+                count: attachmentCount,
+                isImporting: isImporting,
+                spelling: verbosity.count
+            )
+            MemoDateRow(date: $date, spelling: verbosity.date)
+            VisibilityMenu(
+                selection: $visibility,
+                accountDefault: accountDefault,
+                spelling: verbosity.visibility
+            )
+        }
+    }
+}
+
+/// The photos pill, which IS the picker: it replaced an "Add photos or videos" button that sat
+/// apart from the meta row and moved whenever anything in that row changed.
+struct PhotosPickerPill: View {
+    @Binding var picked: [PhotosPickerItem]
+    let count: Int
+    var isImporting: Bool = false
+    var spelling: ComposeMetaRow.Spelling = .short
+
+    var body: some View {
+        PhotosPicker(
+            selection: $picked,
+            selectionBehavior: .ordered,
+            matching: .any(of: [.images, .videos]),
+            preferredItemEncoding: .current
+        ) {
+            PhotosPill(count: count, isImporting: isImporting, spelling: spelling)
+        }
+        .accessibilityLabel(
+            ComposeMetaRow.photosAccessibilityLabel(count: count, isImporting: isImporting)
+        )
+    }
+}
+
+/// The photos pill's label — extracted for the same reason the other two are: so its fit is
+/// measured rather than eyeballed.
+struct PhotosPill: View {
+    let count: Int
+    var isImporting: Bool = false
+    var spelling: ComposeMetaRow.Spelling = .short
+
+    var title: String? {
+        spelling == .glyph ? nil : ComposeMetaRow.photosTitle(count: count)
+    }
+
+    var body: some View {
+        MetaPill(
+            symbol: "photo.on.rectangle.angled",
+            title: title,
+            isSet: count > 0,
+            isBusy: isImporting
+        )
+    }
+}
+
+/// One pill: a glyph, and a word beside it when the row has room for one.
+///
+/// Every control in the meta row is this shape, which is what makes the row read as a row rather
+/// than as three unrelated controls — and what makes "it fits" a measurement of one thing.
+///
+/// `isBusy` draws the spinner ON the glyph rather than beside it. A spinner that arrives next to
+/// something is a spinner that moves it, and the whole point of this row is that nothing moves.
+struct MetaPill: View {
+    let symbol: String
+    var title: String?
+    /// Whether this pill stands for a choice somebody made, rather than the default. It is the
+    /// only thing that still says "there is a date on this memo" once the row is down to glyphs.
+    var isSet: Bool = false
+    var isBusy: Bool = false
+
+    var body: some View {
+        Group {
+            if let title {
+                Label {
+                    Text(title)
+                } icon: {
+                    glyph
+                }
+                .labelStyle(.titleAndIcon)
+            } else {
+                glyph
+            }
+        }
+        .font(.subheadline.weight(.medium))
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, DesignTokens.Space.regular)
+        .padding(.vertical, DesignTokens.Space.snug)
+        .background(DesignTokens.accent.opacity(isSet ? 0.3 : 0.14), in: .capsule)
+        .foregroundStyle(DesignTokens.accent)
+    }
+
+    private var glyph: some View {
+        Image(systemName: symbol)
+            .opacity(isBusy ? 0 : 1)
+            .overlay {
+                if isBusy {
+                    ProgressView().controlSize(.mini)
+                }
+            }
     }
 }

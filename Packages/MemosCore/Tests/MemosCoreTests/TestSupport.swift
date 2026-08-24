@@ -182,6 +182,14 @@ final class InMemoryCredentials: CredentialStore, @unchecked Sendable {
         lock.withLock { storage[account] = value }
     }
 
+    func add(_ value: String, for account: String) throws -> Bool {
+        lock.withLock {
+            guard storage[account] == nil else { return false }
+            storage[account] = value
+            return true
+        }
+    }
+
     func string(for account: String) throws -> String? {
         lock.withLock { storage[account] }
     }
@@ -204,6 +212,7 @@ final class RefusingCredentials: CredentialStore, @unchecked Sendable {
     private var reads = 0
 
     func set(_ value: String, for account: String) throws { throw Refused() }
+    func add(_ value: String, for account: String) throws -> Bool { throw Refused() }
     func string(for account: String) throws -> String? {
         lock.withLock { reads += 1 }
         return nil
@@ -220,4 +229,148 @@ final class Counter: @unchecked Sendable {
 
     func increment() { lock.withLock { value += 1 } }
     var count: Int { lock.withLock { value } }
+}
+
+/// The two keychain namespaces, each addressed BY NAME, over one item table.
+///
+/// One table is the honest model: the Security framework has one keychain, and an item carries the
+/// access group it was written under. What separates the namespaces is that every query names a
+/// group — which is exactly the property the production code now has by type, and exactly the
+/// property it lacked when the token was written to one namespace and deleted by a query that
+/// named none.
+final class KeychainNamespaces: @unchecked Sendable {
+    /// The two groups a device actually has: the app group the extensions share, and the
+    /// `<team id>.<bundle id>` one a pre-entitlement sign-in wrote to.
+    static let shared = "group.live.discomarder.memosng"
+    static let appDefault = "ABCDE12345.live.discomarder.memosng"
+
+    private struct Key: Hashable {
+        var group: String
+        var account: String
+    }
+
+    private let lock = NSLock()
+    private var items: [Key: String] = [:]
+
+    func grouped(_ group: String) -> any CredentialStore { Namespace(table: self, group: group) }
+
+    func value(_ group: String, _ account: String) -> String? {
+        lock.withLock { items[Key(group: group, account: account)] }
+    }
+
+    var isEmpty: Bool { lock.withLock { items.isEmpty } }
+
+    fileprivate func write(_ value: String, group: String, account: String) {
+        lock.withLock { items[Key(group: group, account: account)] = value }
+    }
+
+    fileprivate func add(_ value: String, group: String, account: String) -> Bool {
+        lock.withLock {
+            let key = Key(group: group, account: account)
+            guard items[key] == nil else { return false }
+            items[key] = value
+            return true
+        }
+    }
+
+    fileprivate func read(group: String, account: String) -> String? {
+        lock.withLock { items[Key(group: group, account: account)] }
+    }
+
+    /// Scoped, because every query names its group. A delete in one namespace leaves the other
+    /// alone — which is the whole of the fix, and what these tests are here to keep true.
+    fileprivate func delete(group: String, account: String) {
+        lock.withLock { items[Key(group: group, account: account)] = nil }
+    }
+
+    private struct Namespace: CredentialStore {
+        let table: KeychainNamespaces
+        let group: String
+
+        func set(_ value: String, for account: String) throws {
+            table.write(value, group: group, account: account)
+        }
+
+        func add(_ value: String, for account: String) throws -> Bool {
+            table.add(value, group: group, account: account)
+        }
+
+        func string(for account: String) throws -> String? {
+            table.read(group: group, account: account)
+        }
+
+        func remove(_ account: String) throws {
+            table.delete(group: group, account: account)
+        }
+    }
+}
+
+/// A namespace that accepts every write and then has nothing — `SecItemAdd` answering
+/// `errSecSuccess` for an item the next `SecItemCopyMatching` cannot find. It is the only failure
+/// here that a status code does not report, which is why the store has to read back.
+final class ForgetfulCredentials: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var writes = 0
+
+    func set(_ value: String, for account: String) throws { lock.withLock { writes += 1 } }
+    func add(_ value: String, for account: String) throws -> Bool {
+        lock.withLock { writes += 1 }
+        return true
+    }
+    func string(for account: String) throws -> String? { nil }
+    func remove(_ account: String) throws {}
+
+    var writeCount: Int { lock.withLock { writes } }
+}
+
+/// Stops a store's FIRST read halfway, so another thread can be let past it.
+///
+/// The migration reads the old namespace and then acts on what it read, and the interesting
+/// question is what happens when a sign-in lands in that gap. This holds the gap open: the reader
+/// signals `entered` with the stale value already in hand and blocks on `proceed`.
+final class GatedCredentialStore: CredentialStore, @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let proceed = DispatchSemaphore(value: 0)
+
+    private let wrapped: any CredentialStore
+    private let lock = NSLock()
+    private var armed = true
+
+    init(wrapping wrapped: any CredentialStore) { self.wrapped = wrapped }
+
+    func string(for account: String) throws -> String? {
+        let value = try wrapped.string(for: account)
+        if takeGate() {
+            entered.signal()
+            proceed.wait()
+        }
+        return value
+    }
+
+    func set(_ value: String, for account: String) throws { try wrapped.set(value, for: account) }
+    func add(_ value: String, for account: String) throws -> Bool {
+        try wrapped.add(value, for: account)
+    }
+    func remove(_ account: String) throws { try wrapped.remove(account) }
+
+    private func takeGate() -> Bool {
+        lock.withLock {
+            guard armed else { return false }
+            armed = false
+            return true
+        }
+    }
+}
+
+/// One value written on one thread and read on another, without tripping strict concurrency.
+final class Box<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+
+    init(_ value: Value) { stored = value }
+
+    var value: Value {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
 }
