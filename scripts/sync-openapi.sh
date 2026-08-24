@@ -47,17 +47,9 @@ fetch() {
 }
 
 echo "syncing from $src at $sha"
-fetch openapi.json "$api_dest.upstream"
+fetch openapi.json "$api_dest"
 fetch fixtures/markdown-parity.json "$fixture_dest"
 fetch fixtures/markdown-parity.schema.md "$schema_doc_dest"
-
-# See scripts/normalize-openapi.py: without this the generator drops every nullable property,
-# `nextCursor` included, and pagination cannot be written at all. The counts are recorded below so
-# the day memos-ng emits OAS 3.1 type arrays itself is visible rather than assumed.
-normalized="$(python3 "$repo_root/scripts/normalize-openapi.py" "$api_dest.upstream" "$api_dest")" \
-  || die "normalising openapi.json failed" 1
-rm -f "$api_dest.upstream"
-echo "$normalized" | sed 's/^/  /'
 
 {
   echo "# Provenance of the memos-ng artefacts vendored into this package."
@@ -67,7 +59,6 @@ echo "$normalized" | sed 's/^/  /'
   echo "subject=$(git -C "$src" log -1 --pretty=%s "$sha")"
   echo "committed=$(git -C "$src" log -1 --pretty=%cI "$sha")"
   echo "files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md"
-  echo "$normalized"
 } > "$provenance" || die "cannot write $provenance" 1
 
 echo "recorded $provenance:"

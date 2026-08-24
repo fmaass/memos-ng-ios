@@ -1,3964 +1,3964 @@
 {
- "components": {
-  "schemas": {
-   "AttachmentListItem": {
-    "properties": {
-     "blurhash": {
-      "title": "Blurhash",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "downloadUrl": {
-      "title": "Downloadurl",
-      "type": "string"
-     },
-     "hasLegacyPrint": {
-      "title": "Haslegacyprint",
-      "type": "boolean"
-     },
-     "hasPrint": {
-      "title": "Hasprint",
-      "type": "boolean"
-     },
-     "height": {
-      "title": "Height",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "mine": {
-      "title": "Mine",
-      "type": "boolean"
-     },
-     "orphan": {
-      "title": "Orphan",
-      "type": "boolean"
-     },
-     "posterUrl": {
-      "title": "Posterurl",
-      "type": "string"
-     },
-     "previewUrl": {
-      "title": "Previewurl",
-      "type": "string"
-     },
-     "printUrl": {
-      "title": "Printurl",
-      "type": "string"
-     },
-     "renditions": {
-      "items": {
-       "$ref": "#/components/schemas/RenditionItem"
-      },
-      "title": "Renditions",
-      "type": "array"
-     },
-     "status": {
-      "$ref": "#/components/schemas/AttachmentStatus"
-     },
-     "thumbnailUrl": {
-      "title": "Thumbnailurl",
-      "type": "string"
-     },
-     "uid": {
-      "title": "Uid",
-      "type": "string"
-     },
-     "webUrl": {
-      "title": "Weburl",
-      "type": "string"
-     },
-     "width": {
-      "title": "Width",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "uid",
-     "mime",
-     "status",
-     "blurhash",
-     "width",
-     "height",
-     "mine",
-     "hasPrint",
-     "hasLegacyPrint",
-     "renditions",
-     "orphan",
-     "thumbnailUrl",
-     "previewUrl",
-     "webUrl",
-     "posterUrl",
-     "downloadUrl",
-     "printUrl"
-    ],
-    "title": "AttachmentListItem",
-    "type": "object"
-   },
-   "AttachmentMeta": {
-    "properties": {
-     "blurhash": {
-      "title": "Blurhash",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "captured_at": {
-      "format": "date-time",
-      "title": "Captured At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "downloadUrl": {
-      "title": "Downloadurl",
-      "type": "string"
-     },
-     "duration": {
-      "title": "Duration",
-      "type": [
-       "number",
-       "null"
-      ]
-     },
-     "hasLegacyPrint": {
-      "title": "Haslegacyprint",
-      "type": "boolean"
-     },
-     "hasPrint": {
-      "title": "Hasprint",
-      "type": "boolean"
-     },
-     "height": {
-      "title": "Height",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "mine": {
-      "title": "Mine",
-      "type": "boolean"
-     },
-     "posterUrl": {
-      "title": "Posterurl",
-      "type": "string"
-     },
-     "previewUrl": {
-      "title": "Previewurl",
-      "type": "string"
-     },
-     "printUrl": {
-      "title": "Printurl",
-      "type": "string"
-     },
-     "renditions": {
-      "items": {
-       "$ref": "#/components/schemas/RenditionItem"
-      },
-      "title": "Renditions",
-      "type": "array"
-     },
-     "size": {
-      "title": "Size",
-      "type": "integer"
-     },
-     "status": {
-      "$ref": "#/components/schemas/AttachmentStatus"
-     },
-     "thumbnailUrl": {
-      "title": "Thumbnailurl",
-      "type": "string"
-     },
-     "uid": {
-      "title": "Uid",
-      "type": "string"
-     },
-     "webUrl": {
-      "title": "Weburl",
-      "type": "string"
-     },
-     "width": {
-      "title": "Width",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "uid",
-     "mime",
-     "size",
-     "status",
-     "width",
-     "height",
-     "duration",
-     "blurhash",
-     "captured_at",
-     "mine",
-     "hasPrint",
-     "hasLegacyPrint",
-     "renditions",
-     "downloadUrl",
-     "printUrl",
-     "thumbnailUrl",
-     "previewUrl",
-     "webUrl",
-     "posterUrl"
-    ],
-    "title": "AttachmentMeta",
-    "type": "object"
-   },
-   "AttachmentOut": {
-    "properties": {
-     "captured_at": {
-      "format": "date-time",
-      "title": "Captured At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "duration": {
-      "title": "Duration",
-      "type": [
-       "number",
-       "null"
-      ]
-     },
-     "filename": {
-      "title": "Filename",
-      "type": "string"
-     },
-     "height": {
-      "title": "Height",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "size": {
-      "title": "Size",
-      "type": "integer"
-     },
-     "status": {
-      "$ref": "#/components/schemas/AttachmentStatus"
-     },
-     "uid": {
-      "title": "Uid",
-      "type": "string"
-     },
-     "width": {
-      "title": "Width",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "uid",
-     "filename",
-     "mime",
-     "size",
-     "status",
-     "captured_at",
-     "width",
-     "height",
-     "duration"
-    ],
-    "title": "AttachmentOut",
-    "type": "object"
-   },
-   "AttachmentRef": {
-    "properties": {
-     "blurhash": {
-      "title": "Blurhash",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "downloadUrl": {
-      "title": "Downloadurl",
-      "type": "string"
-     },
-     "duration": {
-      "title": "Duration",
-      "type": [
-       "number",
-       "null"
-      ]
-     },
-     "hasLegacyPrint": {
-      "title": "Haslegacyprint",
-      "type": "boolean"
-     },
-     "hasPrint": {
-      "title": "Hasprint",
-      "type": "boolean"
-     },
-     "height": {
-      "title": "Height",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "mine": {
-      "title": "Mine",
-      "type": "boolean"
-     },
-     "posterUrl": {
-      "title": "Posterurl",
-      "type": "string"
-     },
-     "previewUrl": {
-      "title": "Previewurl",
-      "type": "string"
-     },
-     "printUrl": {
-      "title": "Printurl",
-      "type": "string"
-     },
-     "renditions": {
-      "items": {
-       "$ref": "#/components/schemas/RenditionItem"
-      },
-      "title": "Renditions",
-      "type": "array"
-     },
-     "status": {
-      "$ref": "#/components/schemas/AttachmentStatus"
-     },
-     "thumbnailUrl": {
-      "title": "Thumbnailurl",
-      "type": "string"
-     },
-     "uid": {
-      "title": "Uid",
-      "type": "string"
-     },
-     "webUrl": {
-      "title": "Weburl",
-      "type": "string"
-     },
-     "width": {
-      "title": "Width",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "uid",
-     "mime",
-     "status",
-     "blurhash",
-     "width",
-     "height",
-     "duration",
-     "mine",
-     "hasPrint",
-     "hasLegacyPrint",
-     "renditions",
-     "thumbnailUrl",
-     "previewUrl",
-     "webUrl",
-     "posterUrl",
-     "downloadUrl",
-     "printUrl"
-    ],
-    "title": "AttachmentRef",
-    "type": "object"
-   },
-   "AttachmentStatus": {
-    "enum": [
-     "uploading",
-     "pending",
-     "processing",
-     "ready",
-     "failed"
-    ],
-    "title": "AttachmentStatus",
-    "type": "string"
-   },
-   "Body_upload_print_api_attachments__uid__print_post": {
-    "properties": {
-     "file": {
-      "contentMediaType": "application/octet-stream",
-      "title": "File",
-      "type": "string"
-     }
-    },
-    "required": [
-     "file"
-    ],
-    "title": "Body_upload_print_api_attachments__uid__print_post",
-    "type": "object"
-   },
-   "CreateRacedDetail": {
-    "description": "Why a keyed create could not be resolved (MEMNG-110): concurrent writes raced it and the\nmemo they raced for was deleted before it could be read back. Retrying with the same key is\nsafe \u2014 that is what the key is for \u2014 which is why this is a 5xx the client may repeat and not\na 4xx telling it to stop.",
-    "properties": {
-     "code": {
-      "const": "create_raced",
-      "title": "Code",
-      "type": "string"
-     },
-     "message": {
-      "title": "Message",
-      "type": "string"
-     }
-    },
-    "required": [
-     "code",
-     "message"
-    ],
-    "title": "CreateRacedDetail",
-    "type": "object"
-   },
-   "CreateRacedError": {
-    "properties": {
-     "detail": {
-      "$ref": "#/components/schemas/CreateRacedDetail"
-     }
-    },
-    "required": [
-     "detail"
-    ],
-    "title": "CreateRacedError",
-    "type": "object"
-   },
-   "HTTPValidationError": {
-    "properties": {
-     "detail": {
-      "items": {
-       "$ref": "#/components/schemas/ValidationError"
-      },
-      "title": "Detail",
-      "type": "array"
-     }
-    },
-    "title": "HTTPValidationError",
-    "type": "object"
-   },
-   "HealthResponse": {
-    "properties": {
-     "db": {
-      "title": "Db",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "status": {
-      "title": "Status",
-      "type": "string"
-     },
-     "version": {
-      "title": "Version",
-      "type": "string"
-     }
-    },
-    "required": [
-     "status",
-     "version"
-    ],
-    "title": "HealthResponse",
-    "type": "object"
-   },
-   "MemoCreate": {
-    "properties": {
-     "attachment_uids": {
-      "default": [],
-      "items": {
-       "type": "string"
-      },
-      "title": "Attachment Uids",
-      "type": "array"
-     },
-     "content": {
-      "title": "Content",
-      "type": "string"
-     },
-     "created_at": {
-      "format": "date-time",
-      "title": "Created At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "idempotency_key": {
-      "description": "Optional client-generated retry token: a UUID, or any opaque 8-64 character token of [A-Za-z0-9_-], unique per logical create. Posting it a second time returns the memo the first call stored \u2014 same uid, same attachments \u2014 and returns it with **201, the same status as the original create**. The body is the whole answer (the uid tells a client which memo is now stored), so the status is not used as a second channel, and a safe retry looks exactly like the success it is repeating. Two owners may reuse one token. Without a key, a retry stores a SECOND memo.",
-      "maxLength": 64,
-      "minLength": 8,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "title": "Idempotency Key",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "pinned": {
-      "default": false,
-      "title": "Pinned",
-      "type": "boolean"
-     },
-     "upload_uids": {
-      "default": [],
-      "items": {
-       "type": "string"
-      },
-      "title": "Upload Uids",
-      "type": "array"
-     },
-     "visibility": {
-      "$ref": "#/components/schemas/Visibility"
-     }
-    },
-    "required": [
-     "content"
-    ],
-    "title": "MemoCreate",
-    "type": "object"
-   },
-   "MemoList": {
-    "properties": {
-     "items": {
-      "items": {
-       "$ref": "#/components/schemas/MemoOut"
-      },
-      "title": "Items",
-      "type": "array"
-     },
-     "nextCursor": {
-      "title": "Nextcursor",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "totalCount": {
-      "title": "Totalcount",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "items",
-     "nextCursor",
-     "totalCount"
-    ],
-    "title": "MemoList",
-    "type": "object"
-   },
-   "MemoOut": {
-    "properties": {
-     "archived_at": {
-      "format": "date-time",
-      "title": "Archived At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "attachments": {
-      "default": [],
-      "items": {
-       "$ref": "#/components/schemas/AttachmentRef"
-      },
-      "title": "Attachments",
-      "type": "array"
-     },
-     "content": {
-      "title": "Content",
-      "type": "string"
-     },
-     "created_at": {
-      "format": "date-time",
-      "title": "Created At",
-      "type": "string"
-     },
-     "mine": {
-      "title": "Mine",
-      "type": "boolean"
-     },
-     "owner": {
-      "title": "Owner",
-      "type": "string"
-     },
-     "pinned": {
-      "title": "Pinned",
-      "type": "boolean"
-     },
-     "reactions": {
-      "default": [],
-      "items": {
-       "$ref": "#/components/schemas/ReactionSummary"
-      },
-      "title": "Reactions",
-      "type": "array"
-     },
-     "tags": {
-      "items": {
-       "type": "string"
-      },
-      "title": "Tags",
-      "type": "array"
-     },
-     "total_size": {
-      "default": 0,
-      "title": "Total Size",
-      "type": "integer"
-     },
-     "uid": {
-      "title": "Uid",
-      "type": "string"
-     },
-     "updated_at": {
-      "format": "date-time",
-      "title": "Updated At",
-      "type": "string"
-     },
-     "visibility": {
-      "$ref": "#/components/schemas/Visibility"
-     }
-    },
-    "required": [
-     "uid",
-     "owner",
-     "mine",
-     "content",
-     "visibility",
-     "pinned",
-     "created_at",
-     "updated_at",
-     "archived_at",
-     "tags"
-    ],
-    "title": "MemoOut",
-    "type": "object"
-   },
-   "MemoPatch": {
-    "properties": {
-     "archived": {
-      "title": "Archived",
-      "type": [
-       "boolean",
-       "null"
-      ]
-     },
-     "content": {
-      "title": "Content",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "created_at": {
-      "format": "date-time",
-      "title": "Created At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "pinned": {
-      "title": "Pinned",
-      "type": [
-       "boolean",
-       "null"
-      ]
-     },
-     "upload_uids": {
-      "items": {
-       "type": "string"
-      },
-      "title": "Upload Uids",
-      "type": [
-       "array",
-       "null"
-      ]
-     },
-     "visibility": {
-      "$ref": "#/components/schemas/Visibility"
-     }
-    },
-    "title": "MemoPatch",
-    "type": "object"
-   },
-   "NativeExchangeIn": {
-    "properties": {
-     "code": {
-      "maxLength": 512,
-      "minLength": 1,
-      "title": "Code",
-      "type": "string"
-     },
-     "code_verifier": {
-      "maxLength": 128,
-      "minLength": 43,
-      "title": "Code Verifier",
-      "type": "string"
-     }
-    },
-    "required": [
-     "code",
-     "code_verifier"
-    ],
-    "title": "NativeExchangeIn",
-    "type": "object"
-   },
-   "NativeExchangeOut": {
-    "properties": {
-     "expires_at": {
-      "format": "date-time",
-      "title": "Expires At",
-      "type": "string"
-     },
-     "token": {
-      "title": "Token",
-      "type": "string"
-     },
-     "user": {
-      "$ref": "#/components/schemas/UserOut"
-     }
-    },
-    "required": [
-     "token",
-     "expires_at",
-     "user"
-    ],
-    "title": "NativeExchangeOut",
-    "type": "object"
-   },
-   "PatCreate": {
-    "properties": {
-     "expires_in_days": {
-      "maximum": 365.0,
-      "minimum": 1.0,
-      "title": "Expires In Days",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "name": {
-      "maxLength": 255,
-      "minLength": 1,
-      "title": "Name",
-      "type": "string"
-     }
-    },
-    "required": [
-     "name"
-    ],
-    "title": "PatCreate",
-    "type": "object"
-   },
-   "PatCreated": {
-    "properties": {
-     "created_at": {
-      "format": "date-time",
-      "title": "Created At",
-      "type": "string"
-     },
-     "expires_at": {
-      "format": "date-time",
-      "title": "Expires At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "id": {
-      "title": "Id",
-      "type": "integer"
-     },
-     "last_used": {
-      "format": "date-time",
-      "title": "Last Used",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "name": {
-      "title": "Name",
-      "type": "string"
-     },
-     "token": {
-      "title": "Token",
-      "type": "string"
-     }
-    },
-    "required": [
-     "id",
-     "name",
-     "last_used",
-     "created_at",
-     "expires_at",
-     "token"
-    ],
-    "title": "PatCreated",
-    "type": "object"
-   },
-   "PatOut": {
-    "properties": {
-     "created_at": {
-      "format": "date-time",
-      "title": "Created At",
-      "type": "string"
-     },
-     "expires_at": {
-      "format": "date-time",
-      "title": "Expires At",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "id": {
-      "title": "Id",
-      "type": "integer"
-     },
-     "last_used": {
-      "format": "date-time",
-      "title": "Last Used",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "name": {
-      "title": "Name",
-      "type": "string"
-     }
-    },
-    "required": [
-     "id",
-     "name",
-     "last_used",
-     "created_at",
-     "expires_at"
-    ],
-    "title": "PatOut",
-    "type": "object"
-   },
-   "PhotobookManifestOut": {
-    "description": "The book's manifest: the question that was asked, the tally, and every photo in it.",
-    "properties": {
-     "dpi": {
-      "title": "Dpi",
-      "type": "integer"
-     },
-     "max_pages": {
-      "title": "Max Pages",
-      "type": "number"
-     },
-     "page_cm": {
-      "title": "Page Cm",
-      "type": "string"
-     },
-     "photos": {
-      "items": {
-       "$ref": "#/components/schemas/PhotobookPhotoOut"
-      },
-      "title": "Photos",
-      "type": "array"
-     },
-     "profile": {
-      "const": "print-4096",
-      "title": "Profile",
-      "type": "string"
-     },
-     "tag": {
-      "title": "Tag",
-      "type": "string"
-     },
-     "totals": {
-      "$ref": "#/components/schemas/PhotobookTotalsOut"
-     }
-    },
-    "required": [
-     "profile",
-     "tag",
-     "page_cm",
-     "max_pages",
-     "dpi",
-     "totals",
-     "photos"
-    ],
-    "title": "PhotobookManifestOut",
-    "type": "object"
-   },
-   "PhotobookPhotoOut": {
-    "description": "One photo's page in the book. `width`/`height` are the print rendition's real pixels once it\nexists and a projection from the source until then \u2014 `projected` says which.",
-    "properties": {
-     "attachment": {
-      "title": "Attachment",
-      "type": "string"
-     },
-     "effective_dpi": {
-      "title": "Effective Dpi",
-      "type": [
-       "number",
-       "null"
-      ]
-     },
-     "filename": {
-      "title": "Filename",
-      "type": "string"
-     },
-     "height": {
-      "title": "Height",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "meets_dpi": {
-      "title": "Meets Dpi",
-      "type": [
-       "boolean",
-       "null"
-      ]
-     },
-     "memo": {
-      "title": "Memo",
-      "type": "string"
-     },
-     "memo_date": {
-      "format": "date",
-      "title": "Memo Date",
-      "type": "string"
-     },
-     "projected": {
-      "title": "Projected",
-      "type": "boolean"
-     },
-     "sequence": {
-      "title": "Sequence",
-      "type": "integer"
-     },
-     "source": {
-      "enum": [
-       "print-master",
-       "original"
-      ],
-      "title": "Source",
-      "type": "string"
-     },
-     "status": {
-      "enum": [
-       "ready",
-       "pending",
-       "failed",
-       "unavailable"
-      ],
-      "title": "Status",
-      "type": "string"
-     },
-     "width": {
-      "title": "Width",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "sequence",
-     "attachment",
-     "memo",
-     "memo_date",
-     "filename",
-     "source",
-     "status",
-     "width",
-     "height",
-     "projected",
-     "effective_dpi",
-     "meets_dpi"
-    ],
-    "title": "PhotobookPhotoOut",
-    "type": "object"
-   },
-   "PhotobookTotalsOut": {
-    "properties": {
-     "failed": {
-      "title": "Failed",
-      "type": "integer"
-     },
-     "pending": {
-      "title": "Pending",
-      "type": "integer"
-     },
-     "ready": {
-      "title": "Ready",
-      "type": "integer"
-     },
-     "selected": {
-      "title": "Selected",
-      "type": "integer"
-     },
-     "unavailable": {
-      "title": "Unavailable",
-      "type": "integer"
-     }
-    },
-    "required": [
-     "selected",
-     "ready",
-     "pending",
-     "failed",
-     "unavailable"
-    ],
-    "title": "PhotobookTotalsOut",
-    "type": "object"
-   },
-   "PushKeys": {
-    "properties": {
-     "auth": {
-      "title": "Auth",
-      "type": "string"
-     },
-     "p256dh": {
-      "title": "P256Dh",
-      "type": "string"
-     }
-    },
-    "required": [
-     "p256dh",
-     "auth"
-    ],
-    "title": "PushKeys",
-    "type": "object"
-   },
-   "ReactionIn": {
-    "properties": {
-     "emoji": {
-      "title": "Emoji",
-      "type": "string"
-     }
-    },
-    "required": [
-     "emoji"
-    ],
-    "title": "ReactionIn",
-    "type": "object"
-   },
-   "ReactionSummary": {
-    "properties": {
-     "count": {
-      "title": "Count",
-      "type": "integer"
-     },
-     "emoji": {
-      "title": "Emoji",
-      "type": "string"
-     },
-     "reacted": {
-      "title": "Reacted",
-      "type": "boolean"
-     }
-    },
-    "required": [
-     "emoji",
-     "count",
-     "reacted"
-    ],
-    "title": "ReactionSummary",
-    "type": "object"
-   },
-   "RenditionAttach": {
-    "properties": {
-     "upload_uid": {
-      "title": "Upload Uid",
-      "type": "string"
-     },
-     "variant_key": {
-      "title": "Variant Key",
-      "type": [
-       "string",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "upload_uid"
-    ],
-    "title": "RenditionAttach",
-    "type": "object"
-   },
-   "RenditionDetail": {
-    "description": "One master with its pixel size \u2014 the shape the per-photo route returns.\n\nDimensions are NOT on RenditionItem because they are not in the database: learning them means\nopening the file, and RenditionItem rides along on every feed page and library listing. This\nsubclass exists so the one place that needs them (the print row in the viewer, opened for a\nsingle photo) can pay for them without putting a file read behind the feed.",
-    "properties": {
-     "downloadUrl": {
-      "title": "Downloadurl",
-      "type": "string"
-     },
-     "height": {
-      "title": "Height",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "label": {
-      "title": "Label",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "rev": {
-      "title": "Rev",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "size": {
-      "title": "Size",
-      "type": "integer"
-     },
-     "variant_key": {
-      "title": "Variant Key",
-      "type": "string"
-     },
-     "width": {
-      "title": "Width",
-      "type": [
-       "integer",
-       "null"
-      ]
-     }
-    },
-    "required": [
-     "variant_key",
-     "label",
-     "mime",
-     "size",
-     "downloadUrl",
-     "rev",
-     "width",
-     "height"
-    ],
-    "title": "RenditionDetail",
-    "type": "object"
-   },
-   "RenditionItem": {
-    "properties": {
-     "downloadUrl": {
-      "title": "Downloadurl",
-      "type": "string"
-     },
-     "label": {
-      "title": "Label",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "rev": {
-      "title": "Rev",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "size": {
-      "title": "Size",
-      "type": "integer"
-     },
-     "variant_key": {
-      "title": "Variant Key",
-      "type": "string"
-     }
-    },
-    "required": [
-     "variant_key",
-     "label",
-     "mime",
-     "size",
-     "downloadUrl",
-     "rev"
-    ],
-    "title": "RenditionItem",
-    "type": "object"
-   },
-   "SettingsOut": {
-    "properties": {
-     "avatar": {
-      "title": "Avatar",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "default_visibility": {
-      "$ref": "#/components/schemas/Visibility"
-     },
-     "theme": {
-      "title": "Theme",
-      "type": "string"
-     }
-    },
-    "required": [
-     "default_visibility",
-     "theme",
-     "avatar"
-    ],
-    "title": "SettingsOut",
-    "type": "object"
-   },
-   "SettingsPatch": {
-    "properties": {
-     "avatar": {
-      "title": "Avatar",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "default_visibility": {
-      "$ref": "#/components/schemas/Visibility",
-      "title": "Default Visibility"
-     },
-     "theme": {
-      "title": "Theme",
-      "type": [
-       "string",
-       "null"
-      ]
-     }
-    },
-    "title": "SettingsPatch",
-    "type": "object"
-   },
-   "SubscriptionIn": {
-    "properties": {
-     "endpoint": {
-      "title": "Endpoint",
-      "type": "string"
-     },
-     "keys": {
-      "$ref": "#/components/schemas/PushKeys"
-     }
-    },
-    "required": [
-     "endpoint",
-     "keys"
-    ],
-    "title": "SubscriptionIn",
-    "type": "object"
-   },
-   "TagCount": {
-    "properties": {
-     "count": {
-      "title": "Count",
-      "type": "integer"
-     },
-     "name": {
-      "title": "Name",
-      "type": "string"
-     }
-    },
-    "required": [
-     "name",
-     "count"
-    ],
-    "title": "TagCount",
-    "type": "object"
-   },
-   "UploadCreate": {
-    "properties": {
-     "filename": {
-      "title": "Filename",
-      "type": "string"
-     },
-     "last_modified": {
-      "title": "Last Modified",
-      "type": [
-       "integer",
-       "null"
-      ]
-     },
-     "mime": {
-      "title": "Mime",
-      "type": "string"
-     },
-     "size": {
-      "title": "Size",
-      "type": "integer"
-     }
-    },
-    "required": [
-     "filename",
-     "mime",
-     "size"
-    ],
-    "title": "UploadCreate",
-    "type": "object"
-   },
-   "UploadOut": {
-    "properties": {
-     "bytes_received": {
-      "title": "Bytes Received",
-      "type": "integer"
-     },
-     "chunk_size": {
-      "title": "Chunk Size",
-      "type": "integer"
-     },
-     "upload_uid": {
-      "title": "Upload Uid",
-      "type": "string"
-     }
-    },
-    "required": [
-     "upload_uid",
-     "chunk_size",
-     "bytes_received"
-    ],
-    "title": "UploadOut",
-    "type": "object"
-   },
-   "UploadsUnlinkableDetail": {
-    "description": "Why a memo write was refused: the requested uploads cannot become attachments (MEMNG-113).\n\nA dedicated 409 with a machine-readable `code`, NOT the 422 FastAPI already uses for a malformed\nrequest \u2014 a retrying client has to tell \"that upload is gone, re-upload the bytes\" apart from\n\"this request is malformed, never send it again\", and a body it cannot classify is how an outbox\nloops forever. The two buckets carry different remedies: `missing` (never existed, or expired\nand reaped \u2014 an upload owned by another user reads as missing too) needs a fresh upload;\n`incomplete` (bytes_received < declared size) needs the transfer resumed from HEAD.",
-    "properties": {
-     "code": {
-      "const": "uploads_unlinkable",
-      "title": "Code",
-      "type": "string"
-     },
-     "incomplete_upload_uids": {
-      "items": {
-       "type": "string"
-      },
-      "title": "Incomplete Upload Uids",
-      "type": "array"
-     },
-     "missing_upload_uids": {
-      "items": {
-       "type": "string"
-      },
-      "title": "Missing Upload Uids",
-      "type": "array"
-     }
-    },
-    "required": [
-     "code",
-     "missing_upload_uids",
-     "incomplete_upload_uids"
-    ],
-    "title": "UploadsUnlinkableDetail",
-    "type": "object"
-   },
-   "UploadsUnlinkableError": {
-    "properties": {
-     "detail": {
-      "$ref": "#/components/schemas/UploadsUnlinkableDetail"
-     }
-    },
-    "required": [
-     "detail"
-    ],
-    "title": "UploadsUnlinkableError",
-    "type": "object"
-   },
-   "UserOut": {
-    "properties": {
-     "auth_kind": {
-      "title": "Auth Kind",
-      "type": "string"
-     },
-     "avatar": {
-      "title": "Avatar",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "display_name": {
-      "title": "Display Name",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "email": {
-      "title": "Email",
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "role": {
-      "title": "Role",
-      "type": "string"
-     },
-     "subject": {
-      "title": "Subject",
-      "type": "string"
-     }
-    },
-    "required": [
-     "subject",
-     "display_name",
-     "email",
-     "role",
-     "auth_kind"
-    ],
-    "title": "UserOut",
-    "type": "object"
-   },
-   "ValidationError": {
-    "properties": {
-     "ctx": {
-      "title": "Context",
-      "type": "object"
-     },
-     "input": {
-      "title": "Input"
-     },
-     "loc": {
-      "items": {
-       "anyOf": [
-        {
-         "type": "string"
-        },
-        {
-         "type": "integer"
-        }
-       ]
-      },
-      "title": "Location",
-      "type": "array"
-     },
-     "msg": {
-      "title": "Message",
-      "type": "string"
-     },
-     "type": {
-      "title": "Error Type",
-      "type": "string"
-     }
-    },
-    "required": [
-     "loc",
-     "msg",
-     "type"
-    ],
-    "title": "ValidationError",
-    "type": "object"
-   },
-   "VapidKeyOut": {
-    "properties": {
-     "key": {
-      "title": "Key",
-      "type": "string"
-     }
-    },
-    "required": [
-     "key"
-    ],
-    "title": "VapidKeyOut",
-    "type": "object"
-   },
-   "Visibility": {
-    "enum": [
-     "PRIVATE",
-     "PROTECTED",
-     "PUBLIC"
-    ],
-    "title": "Visibility",
-    "type": "string"
-   }
-  },
-  "securitySchemes": {
-   "bearerAuth": {
-    "bearerFormat": "memos_pat",
-    "description": "A personal access token (`memos_pat_\u2026`). Accepted on every /api/* route except /api/pats/*, which is browser-session-only, and POST /api/auth/native/exchange, which is anonymous by construction \u2014 it is how a device obtains a token in the first place, so requiring one would be circular.",
-    "scheme": "bearer",
-    "type": "http"
-   },
-   "sessionCookie": {
-    "description": "The BFF session cookie set by the OIDC login flow.",
-    "in": "cookie",
-    "name": "memosng_sid",
-    "type": "apiKey"
-   }
-  }
- },
- "info": {
-  "title": "memos-ng",
-  "version": "dev"
- },
- "openapi": "3.1.0",
- "paths": {
-  "/api/attachments": {
-   "get": {
-    "description": "The household media library the user can see, newest first: their own attachments\n(including orphans) PLUS media on any memo visible to them (non-PRIVATE). ?type=image|video\nfilters by mime prefix; `orphan` flags media not attached to any memo. Another user's PRIVATE\nor orphan media is excluded \u2014 mirrors `_viewable` / memo visibility.",
-    "operationId": "list_attachments_api_attachments_get",
-    "parameters": [
-     {
-      "in": "query",
-      "name": "type",
-      "required": false,
-      "schema": {
-       "title": "Type",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "limit",
-      "required": false,
-      "schema": {
-       "default": 200,
-       "title": "Limit",
-       "type": "integer"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "items": {
-          "$ref": "#/components/schemas/AttachmentListItem"
-         },
-         "title": "Response List Attachments Api Attachments Get",
-         "type": "array"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "List Attachments",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/attachments/{uid}": {
-   "delete": {
-    "description": "Delete an attachment \u2014 OWNER-only (a mutation, unlike viewing). Removes its media jobs,\nDB row, and all on-disk files (original + derived tiers). If it was linked to a memo, the\nmemo keeps its text; only the media is removed.",
-    "operationId": "delete_attachment_api_attachments__uid__delete",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Delete Attachment",
-    "tags": [
-     "assets"
-    ]
-   },
-   "get": {
-    "operationId": "attachment_meta_api_attachments__uid__get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AttachmentMeta"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Attachment Meta",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/attachments/{uid}/print": {
-   "post": {
-    "description": "Attach a print-quality master to an OWNED image attachment (a separate Lightroom print\nexport \u2014 see ADR web/print renditions). The web rendition keeps displaying; this file is\nhidden from the feed and download-only via the `print` tier.",
-    "operationId": "upload_print_api_attachments__uid__print_post",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "requestBody": {
-     "content": {
-      "multipart/form-data": {
-       "schema": {
-        "$ref": "#/components/schemas/Body_upload_print_api_attachments__uid__print_post"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AttachmentMeta"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Upload Print",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/attachments/{uid}/rendition/{variant_key}": {
-   "delete": {
-    "description": "Remove one print master \u2014 OWNER-only (a mutation; viewing a master is household-wide). The\nscreen photo and every derived tier are untouched: only the archive master goes.",
-    "operationId": "delete_rendition_api_attachments__uid__rendition__variant_key__delete",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     },
-     {
-      "in": "path",
-      "name": "variant_key",
-      "required": true,
-      "schema": {
-       "title": "Variant Key",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Delete Rendition",
-    "tags": [
-     "assets"
-    ]
-   },
-   "get": {
-    "description": "Download a single print rendition \u2014 download-only, household-visible, on the short-session\nauth path (never the signed/public fast path; prints are low fan-out, not public-by-uid).",
-    "operationId": "serve_rendition_api_attachments__uid__rendition__variant_key__get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     },
-     {
-      "in": "path",
-      "name": "variant_key",
-      "required": true,
-      "schema": {
-       "title": "Variant Key",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Serve Rendition",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/attachments/{uid}/renditions": {
-   "get": {
-    "description": "A photo's hidden print renditions, WITH their pixel dimensions (household-visible, like the\nlegacy print tier). Registered BEFORE the generic /{uid}/{tier} route so the literal\n`renditions` segment isn't a tier.",
-    "operationId": "list_renditions_api_attachments__uid__renditions_get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "items": {
-          "$ref": "#/components/schemas/RenditionDetail"
-         },
-         "title": "Response List Renditions Api Attachments  Uid  Renditions Get",
-         "type": "array"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "List Renditions",
-    "tags": [
-     "assets"
-    ]
-   },
-   "post": {
-    "description": "Attach \u2014 or replace \u2014 the print master of an OWNED image, from a finished resumable upload.\n\nTakes an upload_uid rather than a multipart body so a multi-hundred-MB master gets the chunked,\nresumable, progress-reporting path every other upload in this app uses. The legacy multipart\n`/print` route, which writes the separate print_path column, is untouched (MEMNG-51 retires it).",
-    "operationId": "attach_rendition_api_attachments__uid__renditions_post",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/RenditionAttach"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "201": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AttachmentMeta"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Attach Rendition",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/attachments/{uid}/{tier}": {
-   "get": {
-    "operationId": "serve_asset_api_attachments__uid___tier__get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     },
-     {
-      "in": "path",
-      "name": "tier",
-      "required": true,
-      "schema": {
-       "title": "Tier",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "exp",
-      "required": false,
-      "schema": {
-       "title": "Exp",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "scope",
-      "required": false,
-      "schema": {
-       "title": "Scope",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "sig",
-      "required": false,
-      "schema": {
-       "title": "Sig",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "format",
-      "required": false,
-      "schema": {
-       "title": "Format",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     },
-     {}
-    ],
-    "summary": "Serve Asset",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/auth/logout": {
-   "post": {
-    "operationId": "logout_api_auth_logout_post",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "summary": "Logout",
-    "tags": [
-     "auth"
-    ]
-   }
-  },
-  "/api/auth/native/exchange": {
-   "post": {
-    "description": "Trade a handoff code plus its PKCE verifier for a device PAT.\n\nAnonymous by construction \u2014 this is how a device gets its first credential, so requiring one\nwould be circular. It is also cookie-free, which is what keeps CSRF out of the picture: the\nrequest carries no ambient authority a browser could be tricked into attaching.\n\nEvery failure is a 400 with a stable machine-readable `detail`; none of them distinguishes\n\"wrong\" from \"not yours\", and all of them are terminal \u2014 the client starts a new login rather\nthan retrying, because a code is burned by the attempt whatever its outcome.",
-    "operationId": "native_exchange_api_auth_native_exchange_post",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/NativeExchangeIn"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/NativeExchangeOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "summary": "Native Exchange",
-    "tags": [
-     "auth"
-    ]
-   }
-  },
-  "/api/auth/native/logout": {
-   "post": {
-    "description": "Revoke the presenting device token, and only that one.\n\nA bearer may revoke ITSELF and nothing else (Decision 5): the rest of token management stays\nbehind a browser session, so a leaked device token can neither mint successors that outlive its\nrevocation nor take another device offline. A session cookie is refused here for the same\nreason from the other side \u2014 the SPA revokes through `/api/pats/{id}`, which knows which token\nit is talking about.",
-    "operationId": "native_logout_api_auth_native_logout_post",
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Native Logout",
-    "tags": [
-     "auth"
-    ]
-   }
-  },
-  "/api/auth/native/renew": {
-   "post": {
-    "description": "Rotate the presenting device token: mint a successor and revoke the presenter, atomically.\n\nA device token is deliberately bounded \u2014 it lives on hardware that gets lost, and nobody\nrevokes what they have not noticed is gone \u2014 which without this route means every phone set up\na year ago signs out one morning with no warning and no way back except a full login. Renewal\nrefreshes that lifetime from USE instead of removing the bound.\n\nIt ROTATES rather than extends: the successor is a new secret and the presenter is gone in the\nsame statement, so a token copied out of a backup or a log stops working at the owner's next\nrenewal instead of living the full year twice over.\n\nRestricted to a token that carries an expiry. `pats` has no column that tells a device token\nfrom an SPA-created one \u2014 carrying `expires_at` is the only thing that does, imperfectly \u2014 and\nonly a token that expires can silently sign out, so an unbounded PAT is refused\n(`token_not_renewable`) rather than rotated: token management stays behind a browser session\n(Decision 5), and this route reaches no further than the class it exists for.\n\nBearer-only, like `native/logout`: the presenting token is the subject of the request, and a\nsession cookie names no token at all.",
-    "operationId": "native_renew_api_auth_native_renew_post",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/NativeExchangeOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Native Renew",
-    "tags": [
-     "auth"
-    ]
-   }
-  },
-  "/api/auth/user": {
-   "get": {
-    "operationId": "whoami_api_auth_user_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/UserOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Whoami",
-    "tags": [
-     "auth"
-    ]
-   }
-  },
-  "/api/events": {
-   "get": {
-    "operationId": "events_api_events_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Events",
-    "tags": [
-     "assets"
-    ]
-   }
-  },
-  "/api/export": {
-   "get": {
-    "description": "Stream the matching memos as a zip: `<memo-uid>.md` per memo plus a manifest.\n\nWith `include_media`, each memo's attachments are carried alongside its text under\n`media/<memo-uid>/`, in the rendition the `tier` names (the same tier keys the asset routes\nserve). A rendition that isn't on disk is skipped and noted in the manifest.",
-    "operationId": "export_memos_api_export_get",
-    "parameters": [
-     {
-      "in": "query",
-      "name": "created_before",
-      "required": false,
-      "schema": {
-       "format": "date-time",
-       "title": "Created Before",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "created_after",
-      "required": false,
-      "schema": {
-       "format": "date-time",
-       "title": "Created After",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "tag",
-      "required": false,
-      "schema": {
-       "items": {
-        "type": "string"
-       },
-       "title": "Tag",
-       "type": [
-        "array",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "visibility",
-      "required": false,
-      "schema": {
-       "$ref": "#/components/schemas/Visibility"
-      }
-     },
-     {
-      "in": "query",
-      "name": "owner",
-      "required": false,
-      "schema": {
-       "title": "Owner",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "q",
-      "required": false,
-      "schema": {
-       "title": "Q",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "include_media",
-      "required": false,
-      "schema": {
-       "default": false,
-       "title": "Include Media",
-       "type": "boolean"
-      }
-     },
-     {
-      "in": "query",
-      "name": "tier",
-      "required": false,
-      "schema": {
-       "default": "original",
-       "enum": [
-        "original",
-        "thumb",
-        "mobile",
-        "web",
-        "poster",
-        "print"
-       ],
-       "title": "Tier",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Export Memos",
-    "tags": [
-     "export"
-    ]
-   }
-  },
-  "/api/exports/photobook": {
-   "get": {
-    "description": "The photo book for a tag and date range: a print-readiness manifest, or the archive itself.\n\nSelection is `tag` (default `curated`) joined to the owner's image attachments, in memo-date\norder; `from`/`to` bound the memo date and are inclusive whole days. `profile` names the single\nrung the book is printed at.\n\n**Requesting a book schedules it.** Both formats enqueue a print rendition for every member\nthat lacks a current one, so the first request starts the work and later requests report on it;\nthe enqueue is idempotent, so polling costs nothing (app/services/photobook.py:build).\n\n`format=manifest` (the default) answers with one record per photo \u2014 the name it will carry in\nthe archive, whether its rendition is `ready`/`pending`/`failed`/`unavailable`, its pixel size,\nand the **effective dpi** it will print at for the given `page_cm`/`max_pages` geometry, judged\nagainst `dpi`. That is the field worth having: it names the photos a layout program will flag,\nbefore the import rather than after it. Re-fetching it is also how progress is followed.\n\n`format=zip` streams the ready renditions as `0001_<date>_<uid>.jpg`, numbered in book order so\na folder import lands in sequence. Photos that are not ready yet are left out and recorded in\nthe archive's manifest.json, exactly as the generic export treats a rendition that is missing.",
-    "operationId": "export_photobook_api_exports_photobook_get",
-    "parameters": [
-     {
-      "in": "query",
-      "name": "from",
-      "required": false,
-      "schema": {
-       "format": "date",
-       "title": "From",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "to",
-      "required": false,
-      "schema": {
-       "format": "date",
-       "title": "To",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "tag",
-      "required": false,
-      "schema": {
-       "default": "curated",
-       "title": "Tag",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "profile",
-      "required": false,
-      "schema": {
-       "const": "print-4096",
-       "default": "print-4096",
-       "title": "Profile",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "format",
-      "required": false,
-      "schema": {
-       "default": "manifest",
-       "enum": [
-        "manifest",
-        "zip"
-       ],
-       "title": "Format",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "page_cm",
-      "required": false,
-      "schema": {
-       "default": "21x21",
-       "title": "Page Cm",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "max_pages",
-      "required": false,
-      "schema": {
-       "default": 1.5,
-       "title": "Max Pages",
-       "type": "number"
-      }
-     },
-     {
-      "in": "query",
-      "name": "dpi",
-      "required": false,
-      "schema": {
-       "default": 300,
-       "title": "Dpi",
-       "type": "integer"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/PhotobookManifestOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Export Photobook",
-    "tags": [
-     "export"
-    ]
-   }
-  },
-  "/api/memos": {
-   "get": {
-    "operationId": "list_memos_api_memos_get",
-    "parameters": [
-     {
-      "in": "query",
-      "name": "created_before",
-      "required": false,
-      "schema": {
-       "format": "date-time",
-       "title": "Created Before",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "created_after",
-      "required": false,
-      "schema": {
-       "format": "date-time",
-       "title": "Created After",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "tag",
-      "required": false,
-      "schema": {
-       "items": {
-        "type": "string"
-       },
-       "title": "Tag",
-       "type": [
-        "array",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "visibility",
-      "required": false,
-      "schema": {
-       "$ref": "#/components/schemas/Visibility"
-      }
-     },
-     {
-      "in": "query",
-      "name": "owner",
-      "required": false,
-      "schema": {
-       "title": "Owner",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "q",
-      "required": false,
-      "schema": {
-       "title": "Q",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "include_archived",
-      "required": false,
-      "schema": {
-       "default": false,
-       "title": "Include Archived",
-       "type": "boolean"
-      }
-     },
-     {
-      "in": "query",
-      "name": "archived_only",
-      "required": false,
-      "schema": {
-       "default": false,
-       "title": "Archived Only",
-       "type": "boolean"
-      }
-     },
-     {
-      "in": "query",
-      "name": "sort",
-      "required": false,
-      "schema": {
-       "default": "-created_at",
-       "title": "Sort",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "cursor",
-      "required": false,
-      "schema": {
-       "title": "Cursor",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "limit",
-      "required": false,
-      "schema": {
-       "default": 20,
-       "maximum": 100,
-       "minimum": 1,
-       "title": "Limit",
-       "type": "integer"
-      }
-     },
-     {
-      "in": "query",
-      "name": "with_total",
-      "required": false,
-      "schema": {
-       "default": false,
-       "title": "With Total",
-       "type": "boolean"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoList"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "List Memos",
-    "tags": [
-     "memos"
-    ]
-   },
-   "post": {
-    "operationId": "create_memo_api_memos_post",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/MemoCreate"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "201": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "409": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/UploadsUnlinkableError"
-        }
-       }
-      },
-      "description": "A requested upload_uid is missing, expired or incomplete. No memo is created and no attachment is linked \u2014 resolve the named uploads and retry."
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     },
-     "503": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CreateRacedError"
-        }
-       }
-      },
-      "description": "Concurrent writes raced this keyed create. Nothing was stored under the key \u2014 retry the same request, idempotency_key included."
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Create Memo",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/memos/{uid}": {
-   "delete": {
-    "operationId": "delete_memo_api_memos__uid__delete",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Delete Memo",
-    "tags": [
-     "memos"
-    ]
-   },
-   "get": {
-    "operationId": "get_memo_api_memos__uid__get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Get Memo",
-    "tags": [
-     "memos"
-    ]
-   },
-   "patch": {
-    "operationId": "patch_memo_api_memos__uid__patch",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/MemoPatch"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "409": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/UploadsUnlinkableError"
-        }
-       }
-      },
-      "description": "A requested upload_uid is missing, expired or incomplete. No memo is created and no attachment is linked \u2014 resolve the named uploads and retry."
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Patch Memo",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/memos/{uid}/pin": {
-   "post": {
-    "operationId": "pin_memo_api_memos__uid__pin_post",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Pin Memo",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/memos/{uid}/reactions": {
-   "post": {
-    "operationId": "react_api_memos__uid__reactions_post",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/ReactionIn"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "React",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/memos/{uid}/reactions/{emoji}": {
-   "delete": {
-    "operationId": "unreact_api_memos__uid__reactions__emoji__delete",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     },
-     {
-      "in": "path",
-      "name": "emoji",
-      "required": true,
-      "schema": {
-       "title": "Emoji",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Unreact",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/memos/{uid}/unpin": {
-   "post": {
-    "operationId": "unpin_memo_api_memos__uid__unpin_post",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/MemoOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Unpin Memo",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/pats": {
-   "get": {
-    "operationId": "list_pats_api_pats_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "items": {
-          "$ref": "#/components/schemas/PatOut"
-         },
-         "title": "Response List Pats Api Pats Get",
-         "type": "array"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "List Pats",
-    "tags": [
-     "pats"
-    ]
-   },
-   "post": {
-    "operationId": "create_pat_api_pats_post",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/PatCreate"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "201": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/PatCreated"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Create Pat",
-    "tags": [
-     "pats"
-    ]
-   }
-  },
-  "/api/pats/{pat_id}": {
-   "delete": {
-    "operationId": "revoke_pat_api_pats__pat_id__delete",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "pat_id",
-      "required": true,
-      "schema": {
-       "title": "Pat Id",
-       "type": "integer"
-      }
-     }
-    ],
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Revoke Pat",
-    "tags": [
-     "pats"
-    ]
-   }
-  },
-  "/api/push/subscribe": {
-   "delete": {
-    "operationId": "unsubscribe_api_push_subscribe_delete",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/SubscriptionIn"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Unsubscribe",
-    "tags": [
-     "push"
-    ]
-   },
-   "post": {
-    "operationId": "subscribe_api_push_subscribe_post",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/SubscriptionIn"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "204": {
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Subscribe",
-    "tags": [
-     "push"
-    ]
-   }
-  },
-  "/api/push/vapid-public-key": {
-   "get": {
-    "description": "The VAPID public key the service worker needs to subscribe. Public by definition.",
-    "operationId": "vapid_public_key_api_push_vapid_public_key_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/VapidKeyOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "summary": "Vapid Public Key",
-    "tags": [
-     "push"
-    ]
-   }
-  },
-  "/api/settings": {
-   "get": {
-    "operationId": "get_settings_api_settings_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/SettingsOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Get Settings",
-    "tags": [
-     "settings"
-    ]
-   },
-   "patch": {
-    "operationId": "update_settings_api_settings_patch",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/SettingsPatch"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/SettingsOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Update Settings",
-    "tags": [
-     "settings"
-    ]
-   }
-  },
-  "/api/stats/heatmap": {
-   "get": {
-    "operationId": "stats_heatmap_api_stats_heatmap_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "additionalProperties": {
-          "type": "integer"
-         },
-         "title": "Response Stats Heatmap Api Stats Heatmap Get",
-         "type": "object"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Stats Heatmap",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/tags": {
-   "get": {
-    "operationId": "list_tags_api_tags_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "items": {
-          "$ref": "#/components/schemas/TagCount"
-         },
-         "title": "Response List Tags Api Tags Get",
-         "type": "array"
-        }
-       }
-      },
-      "description": "Successful Response"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "List Tags",
-    "tags": [
-     "memos"
-    ]
-   }
-  },
-  "/api/uploads": {
-   "post": {
-    "operationId": "start_upload_api_uploads_post",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/UploadCreate"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "201": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/UploadOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Start Upload",
-    "tags": [
-     "uploads"
-    ]
-   }
-  },
-  "/api/uploads/{upload_uid}": {
-   "head": {
-    "operationId": "upload_offset_api_uploads__upload_uid__head",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "upload_uid",
-      "required": true,
-      "schema": {
-       "title": "Upload Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response",
-      "headers": {
-       "Upload-Offset": {
-        "description": "Bytes the server now holds for this upload session \u2014 the offset the next chunk must start at.",
-        "schema": {
-         "type": "integer"
-        }
-       }
-      }
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Upload Offset",
-    "tags": [
-     "uploads"
-    ]
-   },
-   "patch": {
-    "operationId": "append_chunk_api_uploads__upload_uid__patch",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "upload_uid",
-      "required": true,
-      "schema": {
-       "title": "Upload Uid",
-       "type": "string"
-      }
-     },
-     {
-      "in": "header",
-      "name": "Upload-Offset",
-      "required": false,
-      "schema": {
-       "default": 0,
-       "title": "Upload-Offset",
-       "type": "integer"
-      }
-     }
-    ],
-    "requestBody": {
-     "content": {
-      "application/octet-stream": {
-       "schema": {
-        "format": "binary",
-        "type": "string"
-       }
-      }
-     },
-     "required": true
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/UploadOut"
-        }
-       }
-      },
-      "description": "Successful Response",
-      "headers": {
-       "Upload-Offset": {
-        "description": "Bytes the server now holds for this upload session \u2014 the offset the next chunk must start at.",
-        "schema": {
-         "type": "integer"
-        }
-       }
-      }
-     },
-     "409": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "properties": {
-          "detail": {
-           "type": "string"
+  "components": {
+    "schemas": {
+      "AttachmentListItem": {
+        "properties": {
+          "blurhash": {
+            "title": "Blurhash",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "downloadUrl": {
+            "title": "Downloadurl",
+            "type": "string"
+          },
+          "hasLegacyPrint": {
+            "title": "Haslegacyprint",
+            "type": "boolean"
+          },
+          "hasPrint": {
+            "title": "Hasprint",
+            "type": "boolean"
+          },
+          "height": {
+            "title": "Height",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "mine": {
+            "title": "Mine",
+            "type": "boolean"
+          },
+          "orphan": {
+            "title": "Orphan",
+            "type": "boolean"
+          },
+          "posterUrl": {
+            "title": "Posterurl",
+            "type": "string"
+          },
+          "previewUrl": {
+            "title": "Previewurl",
+            "type": "string"
+          },
+          "printUrl": {
+            "title": "Printurl",
+            "type": "string"
+          },
+          "renditions": {
+            "items": {
+              "$ref": "#/components/schemas/RenditionItem"
+            },
+            "title": "Renditions",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttachmentStatus"
+          },
+          "thumbnailUrl": {
+            "title": "Thumbnailurl",
+            "type": "string"
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "webUrl": {
+            "title": "Weburl",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": [
+              "integer",
+              "null"
+            ]
           }
-         },
-         "type": "object"
-        }
-       }
+        },
+        "required": [
+          "uid",
+          "mime",
+          "status",
+          "blurhash",
+          "width",
+          "height",
+          "mine",
+          "hasPrint",
+          "hasLegacyPrint",
+          "renditions",
+          "orphan",
+          "thumbnailUrl",
+          "previewUrl",
+          "webUrl",
+          "posterUrl",
+          "downloadUrl",
+          "printUrl"
+        ],
+        "title": "AttachmentListItem",
+        "type": "object"
       },
-      "description": "Offset gap \u2014 re-sync with HEAD and resend from the offset it reports."
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
+      "AttachmentMeta": {
+        "properties": {
+          "blurhash": {
+            "title": "Blurhash",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "downloadUrl": {
+            "title": "Downloadurl",
+            "type": "string"
+          },
+          "duration": {
+            "title": "Duration",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "hasLegacyPrint": {
+            "title": "Haslegacyprint",
+            "type": "boolean"
+          },
+          "hasPrint": {
+            "title": "Hasprint",
+            "type": "boolean"
+          },
+          "height": {
+            "title": "Height",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "mine": {
+            "title": "Mine",
+            "type": "boolean"
+          },
+          "posterUrl": {
+            "title": "Posterurl",
+            "type": "string"
+          },
+          "previewUrl": {
+            "title": "Previewurl",
+            "type": "string"
+          },
+          "printUrl": {
+            "title": "Printurl",
+            "type": "string"
+          },
+          "renditions": {
+            "items": {
+              "$ref": "#/components/schemas/RenditionItem"
+            },
+            "title": "Renditions",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttachmentStatus"
+          },
+          "thumbnailUrl": {
+            "title": "Thumbnailurl",
+            "type": "string"
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "webUrl": {
+            "title": "Weburl",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "uid",
+          "mime",
+          "size",
+          "status",
+          "width",
+          "height",
+          "duration",
+          "blurhash",
+          "captured_at",
+          "mine",
+          "hasPrint",
+          "hasLegacyPrint",
+          "renditions",
+          "downloadUrl",
+          "printUrl",
+          "thumbnailUrl",
+          "previewUrl",
+          "webUrl",
+          "posterUrl"
+        ],
+        "title": "AttachmentMeta",
+        "type": "object"
       },
-      "description": "Validation Error"
-     }
+      "AttachmentOut": {
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration": {
+            "title": "Duration",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "height": {
+            "title": "Height",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttachmentStatus"
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "uid",
+          "filename",
+          "mime",
+          "size",
+          "status",
+          "captured_at",
+          "width",
+          "height",
+          "duration"
+        ],
+        "title": "AttachmentOut",
+        "type": "object"
+      },
+      "AttachmentRef": {
+        "properties": {
+          "blurhash": {
+            "title": "Blurhash",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "downloadUrl": {
+            "title": "Downloadurl",
+            "type": "string"
+          },
+          "duration": {
+            "title": "Duration",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "hasLegacyPrint": {
+            "title": "Haslegacyprint",
+            "type": "boolean"
+          },
+          "hasPrint": {
+            "title": "Hasprint",
+            "type": "boolean"
+          },
+          "height": {
+            "title": "Height",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "mine": {
+            "title": "Mine",
+            "type": "boolean"
+          },
+          "posterUrl": {
+            "title": "Posterurl",
+            "type": "string"
+          },
+          "previewUrl": {
+            "title": "Previewurl",
+            "type": "string"
+          },
+          "printUrl": {
+            "title": "Printurl",
+            "type": "string"
+          },
+          "renditions": {
+            "items": {
+              "$ref": "#/components/schemas/RenditionItem"
+            },
+            "title": "Renditions",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttachmentStatus"
+          },
+          "thumbnailUrl": {
+            "title": "Thumbnailurl",
+            "type": "string"
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "webUrl": {
+            "title": "Weburl",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "uid",
+          "mime",
+          "status",
+          "blurhash",
+          "width",
+          "height",
+          "duration",
+          "mine",
+          "hasPrint",
+          "hasLegacyPrint",
+          "renditions",
+          "thumbnailUrl",
+          "previewUrl",
+          "webUrl",
+          "posterUrl",
+          "downloadUrl",
+          "printUrl"
+        ],
+        "title": "AttachmentRef",
+        "type": "object"
+      },
+      "AttachmentStatus": {
+        "enum": [
+          "uploading",
+          "pending",
+          "processing",
+          "ready",
+          "failed"
+        ],
+        "title": "AttachmentStatus",
+        "type": "string"
+      },
+      "Body_upload_print_api_attachments__uid__print_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_print_api_attachments__uid__print_post",
+        "type": "object"
+      },
+      "CreateRacedDetail": {
+        "description": "Why a keyed create could not be resolved (MEMNG-110): concurrent writes raced it and the\nmemo they raced for was deleted before it could be read back. Retrying with the same key is\nsafe \u2014 that is what the key is for \u2014 which is why this is a 5xx the client may repeat and not\na 4xx telling it to stop.",
+        "properties": {
+          "code": {
+            "const": "create_raced",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "CreateRacedDetail",
+        "type": "object"
+      },
+      "CreateRacedError": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/CreateRacedDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "CreateRacedError",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "db": {
+            "title": "Db",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "MemoCreate": {
+        "properties": {
+          "attachment_uids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Attachment Uids",
+            "type": "array"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "description": "Optional client-generated retry token: a UUID, or any opaque 8-64 character token of [A-Za-z0-9_-], unique per logical create. Posting it a second time returns the memo the first call stored \u2014 same uid, same attachments \u2014 and returns it with **201, the same status as the original create**. The body is the whole answer (the uid tells a client which memo is now stored), so the status is not used as a second channel, and a safe retry looks exactly like the success it is repeating. Two owners may reuse one token. Without a key, a retry stores a SECOND memo.",
+            "maxLength": 64,
+            "minLength": 8,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "default": false,
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "upload_uids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Upload Uids",
+            "type": "array"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "MemoCreate",
+        "type": "object"
+      },
+      "MemoList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "nextCursor": {
+            "title": "Nextcursor",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "totalCount": {
+            "title": "Totalcount",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor",
+          "totalCount"
+        ],
+        "title": "MemoList",
+        "type": "object"
+      },
+      "MemoOut": {
+        "properties": {
+          "archived_at": {
+            "format": "date-time",
+            "title": "Archived At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attachments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AttachmentRef"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "mine": {
+            "title": "Mine",
+            "type": "boolean"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "reactions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ReactionSummary"
+            },
+            "title": "Reactions",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "total_size": {
+            "default": 0,
+            "title": "Total Size",
+            "type": "integer"
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "required": [
+          "uid",
+          "owner",
+          "mine",
+          "content",
+          "visibility",
+          "pinned",
+          "created_at",
+          "updated_at",
+          "archived_at",
+          "tags"
+        ],
+        "title": "MemoOut",
+        "type": "object"
+      },
+      "MemoPatch": {
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "content": {
+            "title": "Content",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "upload_uids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Upload Uids",
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "title": "MemoPatch",
+        "type": "object"
+      },
+      "NativeExchangeIn": {
+        "properties": {
+          "code": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "code_verifier": {
+            "maxLength": 128,
+            "minLength": 43,
+            "title": "Code Verifier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "code_verifier"
+        ],
+        "title": "NativeExchangeIn",
+        "type": "object"
+      },
+      "NativeExchangeOut": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at",
+          "user"
+        ],
+        "title": "NativeExchangeOut",
+        "type": "object"
+      },
+      "PatCreate": {
+        "properties": {
+          "expires_in_days": {
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Expires In Days",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PatCreate",
+        "type": "object"
+      },
+      "PatCreated": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_used": {
+            "format": "date-time",
+            "title": "Last Used",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "last_used",
+          "created_at",
+          "expires_at",
+          "token"
+        ],
+        "title": "PatCreated",
+        "type": "object"
+      },
+      "PatOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_used": {
+            "format": "date-time",
+            "title": "Last Used",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "last_used",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "PatOut",
+        "type": "object"
+      },
+      "PhotobookManifestOut": {
+        "description": "The book's manifest: the question that was asked, the tally, and every photo in it.",
+        "properties": {
+          "dpi": {
+            "title": "Dpi",
+            "type": "integer"
+          },
+          "max_pages": {
+            "title": "Max Pages",
+            "type": "number"
+          },
+          "page_cm": {
+            "title": "Page Cm",
+            "type": "string"
+          },
+          "photos": {
+            "items": {
+              "$ref": "#/components/schemas/PhotobookPhotoOut"
+            },
+            "title": "Photos",
+            "type": "array"
+          },
+          "profile": {
+            "const": "print-4096",
+            "title": "Profile",
+            "type": "string"
+          },
+          "tag": {
+            "title": "Tag",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/PhotobookTotalsOut"
+          }
+        },
+        "required": [
+          "profile",
+          "tag",
+          "page_cm",
+          "max_pages",
+          "dpi",
+          "totals",
+          "photos"
+        ],
+        "title": "PhotobookManifestOut",
+        "type": "object"
+      },
+      "PhotobookPhotoOut": {
+        "description": "One photo's page in the book. `width`/`height` are the print rendition's real pixels once it\nexists and a projection from the source until then \u2014 `projected` says which.",
+        "properties": {
+          "attachment": {
+            "title": "Attachment",
+            "type": "string"
+          },
+          "effective_dpi": {
+            "title": "Effective Dpi",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "height": {
+            "title": "Height",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "meets_dpi": {
+            "title": "Meets Dpi",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "memo": {
+            "title": "Memo",
+            "type": "string"
+          },
+          "memo_date": {
+            "format": "date",
+            "title": "Memo Date",
+            "type": "string"
+          },
+          "projected": {
+            "title": "Projected",
+            "type": "boolean"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "print-master",
+              "original"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "pending",
+              "failed",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sequence",
+          "attachment",
+          "memo",
+          "memo_date",
+          "filename",
+          "source",
+          "status",
+          "width",
+          "height",
+          "projected",
+          "effective_dpi",
+          "meets_dpi"
+        ],
+        "title": "PhotobookPhotoOut",
+        "type": "object"
+      },
+      "PhotobookTotalsOut": {
+        "properties": {
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "integer"
+          },
+          "selected": {
+            "title": "Selected",
+            "type": "integer"
+          },
+          "unavailable": {
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "selected",
+          "ready",
+          "pending",
+          "failed",
+          "unavailable"
+        ],
+        "title": "PhotobookTotalsOut",
+        "type": "object"
+      },
+      "PushKeys": {
+        "properties": {
+          "auth": {
+            "title": "Auth",
+            "type": "string"
+          },
+          "p256dh": {
+            "title": "P256Dh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "p256dh",
+          "auth"
+        ],
+        "title": "PushKeys",
+        "type": "object"
+      },
+      "ReactionIn": {
+        "properties": {
+          "emoji": {
+            "title": "Emoji",
+            "type": "string"
+          }
+        },
+        "required": [
+          "emoji"
+        ],
+        "title": "ReactionIn",
+        "type": "object"
+      },
+      "ReactionSummary": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "emoji": {
+            "title": "Emoji",
+            "type": "string"
+          },
+          "reacted": {
+            "title": "Reacted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "emoji",
+          "count",
+          "reacted"
+        ],
+        "title": "ReactionSummary",
+        "type": "object"
+      },
+      "RenditionAttach": {
+        "properties": {
+          "upload_uid": {
+            "title": "Upload Uid",
+            "type": "string"
+          },
+          "variant_key": {
+            "title": "Variant Key",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "upload_uid"
+        ],
+        "title": "RenditionAttach",
+        "type": "object"
+      },
+      "RenditionDetail": {
+        "description": "One master with its pixel size \u2014 the shape the per-photo route returns.\n\nDimensions are NOT on RenditionItem because they are not in the database: learning them means\nopening the file, and RenditionItem rides along on every feed page and library listing. This\nsubclass exists so the one place that needs them (the print row in the viewer, opened for a\nsingle photo) can pay for them without putting a file read behind the feed.",
+        "properties": {
+          "downloadUrl": {
+            "title": "Downloadurl",
+            "type": "string"
+          },
+          "height": {
+            "title": "Height",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "label": {
+            "title": "Label",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "rev": {
+            "title": "Rev",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "variant_key": {
+            "title": "Variant Key",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "variant_key",
+          "label",
+          "mime",
+          "size",
+          "downloadUrl",
+          "rev",
+          "width",
+          "height"
+        ],
+        "title": "RenditionDetail",
+        "type": "object"
+      },
+      "RenditionItem": {
+        "properties": {
+          "downloadUrl": {
+            "title": "Downloadurl",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "rev": {
+            "title": "Rev",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "variant_key": {
+            "title": "Variant Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "variant_key",
+          "label",
+          "mime",
+          "size",
+          "downloadUrl",
+          "rev"
+        ],
+        "title": "RenditionItem",
+        "type": "object"
+      },
+      "SettingsOut": {
+        "properties": {
+          "avatar": {
+            "title": "Avatar",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          },
+          "theme": {
+            "title": "Theme",
+            "type": "string"
+          }
+        },
+        "required": [
+          "default_visibility",
+          "theme",
+          "avatar"
+        ],
+        "title": "SettingsOut",
+        "type": "object"
+      },
+      "SettingsPatch": {
+        "properties": {
+          "avatar": {
+            "title": "Avatar",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_visibility": {
+            "$ref": "#/components/schemas/Visibility",
+            "title": "Default Visibility"
+          },
+          "theme": {
+            "title": "Theme",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "SettingsPatch",
+        "type": "object"
+      },
+      "SubscriptionIn": {
+        "properties": {
+          "endpoint": {
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "keys": {
+            "$ref": "#/components/schemas/PushKeys"
+          }
+        },
+        "required": [
+          "endpoint",
+          "keys"
+        ],
+        "title": "SubscriptionIn",
+        "type": "object"
+      },
+      "TagCount": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "count"
+        ],
+        "title": "TagCount",
+        "type": "object"
+      },
+      "UploadCreate": {
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "last_modified": {
+            "title": "Last Modified",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "filename",
+          "mime",
+          "size"
+        ],
+        "title": "UploadCreate",
+        "type": "object"
+      },
+      "UploadOut": {
+        "properties": {
+          "bytes_received": {
+            "title": "Bytes Received",
+            "type": "integer"
+          },
+          "chunk_size": {
+            "title": "Chunk Size",
+            "type": "integer"
+          },
+          "upload_uid": {
+            "title": "Upload Uid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_uid",
+          "chunk_size",
+          "bytes_received"
+        ],
+        "title": "UploadOut",
+        "type": "object"
+      },
+      "UploadsUnlinkableDetail": {
+        "description": "Why a memo write was refused: the requested uploads cannot become attachments (MEMNG-113).\n\nA dedicated 409 with a machine-readable `code`, NOT the 422 FastAPI already uses for a malformed\nrequest \u2014 a retrying client has to tell \"that upload is gone, re-upload the bytes\" apart from\n\"this request is malformed, never send it again\", and a body it cannot classify is how an outbox\nloops forever. The two buckets carry different remedies: `missing` (never existed, or expired\nand reaped \u2014 an upload owned by another user reads as missing too) needs a fresh upload;\n`incomplete` (bytes_received < declared size) needs the transfer resumed from HEAD.",
+        "properties": {
+          "code": {
+            "const": "uploads_unlinkable",
+            "title": "Code",
+            "type": "string"
+          },
+          "incomplete_upload_uids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Incomplete Upload Uids",
+            "type": "array"
+          },
+          "missing_upload_uids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Upload Uids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "missing_upload_uids",
+          "incomplete_upload_uids"
+        ],
+        "title": "UploadsUnlinkableDetail",
+        "type": "object"
+      },
+      "UploadsUnlinkableError": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/UploadsUnlinkableDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "UploadsUnlinkableError",
+        "type": "object"
+      },
+      "UserOut": {
+        "properties": {
+          "auth_kind": {
+            "title": "Auth Kind",
+            "type": "string"
+          },
+          "avatar": {
+            "title": "Avatar",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "title": "Email",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "display_name",
+          "email",
+          "role",
+          "auth_kind"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VapidKeyOut": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "VapidKeyOut",
+        "type": "object"
+      },
+      "Visibility": {
+        "enum": [
+          "PRIVATE",
+          "PROTECTED",
+          "PUBLIC"
+        ],
+        "title": "Visibility",
+        "type": "string"
+      }
     },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Append Chunk",
-    "tags": [
-     "uploads"
-    ]
-   }
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "memos_pat",
+        "description": "A personal access token (`memos_pat_\u2026`). Accepted on every /api/* route except /api/pats/*, which is browser-session-only, and POST /api/auth/native/exchange, which is anonymous by construction \u2014 it is how a device obtains a token in the first place, so requiring one would be circular.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "sessionCookie": {
+        "description": "The BFF session cookie set by the OIDC login flow.",
+        "in": "cookie",
+        "name": "memosng_sid",
+        "type": "apiKey"
+      }
+    }
   },
-  "/api/uploads/{upload_uid}/finalize": {
-   "post": {
-    "operationId": "finalize_upload_api_uploads__upload_uid__finalize_post",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "upload_uid",
-      "required": true,
-      "schema": {
-       "title": "Upload Uid",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AttachmentOut"
-        }
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {
-      "sessionCookie": []
-     }
-    ],
-    "summary": "Finalize Upload",
-    "tags": [
-     "uploads"
-    ]
-   }
+  "info": {
+    "title": "memos-ng",
+    "version": "dev"
   },
-  "/api/v1/memos": {
-   "get": {
-    "operationId": "list_memos_compat_api_v1_memos_get",
-    "parameters": [
-     {
-      "in": "query",
-      "name": "pageSize",
-      "required": false,
-      "schema": {
-       "default": 10,
-       "title": "Pagesize",
-       "type": "integer"
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/attachments": {
+      "get": {
+        "description": "The household media library the user can see, newest first: their own attachments\n(including orphans) PLUS media on any memo visible to them (non-PRIVATE). ?type=image|video\nfilters by mime prefix; `orphan` flags media not attached to any memo. Another user's PRIVATE\nor orphan media is excluded \u2014 mirrors `_viewable` / memo visibility.",
+        "operationId": "list_attachments_api_attachments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "title": "Type",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentListItem"
+                  },
+                  "title": "Response List Attachments Api Attachments Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Attachments",
+        "tags": [
+          "assets"
+        ]
       }
-     },
-     {
-      "in": "query",
-      "name": "pageToken",
-      "required": false,
-      "schema": {
-       "title": "Pagetoken",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     },
-     {
-      "in": "query",
-      "name": "filter",
-      "required": false,
-      "schema": {
-       "title": "Filter",
-       "type": [
-        "string",
-        "null"
-       ]
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
     },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {}
-    ],
-    "summary": "List Memos Compat",
-    "tags": [
-     "compat"
-    ]
-   }
-  },
-  "/api/v1/memos/{memo_id}": {
-   "get": {
-    "operationId": "get_memo_compat_api_v1_memos__memo_id__get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "memo_id",
-      "required": true,
-      "schema": {
-       "title": "Memo Id",
-       "type": "string"
+    "/api/attachments/{uid}": {
+      "delete": {
+        "description": "Delete an attachment \u2014 OWNER-only (a mutation, unlike viewing). Removes its media jobs,\nDB row, and all on-disk files (original + derived tiers). If it was linked to a memo, the\nmemo keeps its text; only the media is removed.",
+        "operationId": "delete_attachment_api_attachments__uid__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Delete Attachment",
+        "tags": [
+          "assets"
+        ]
+      },
+      "get": {
+        "operationId": "attachment_meta_api_attachments__uid__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Attachment Meta",
+        "tags": [
+          "assets"
+        ]
       }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
     },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {}
-    ],
-    "summary": "Get Memo Compat",
-    "tags": [
-     "compat"
-    ]
-   }
-  },
-  "/file/attachments/{uid}/{filename}": {
-   "get": {
-    "description": "Derived tiers only (F2): ?thumbnail=true \u2192 thumb, mobile UA \u2192 mobile, video \u2192 web.\nThe original path stays 404, as prod is today. Visibility-gated like the memo surfaces:\nanonymous callers get derived tiers of PUBLIC memos only, a PAT widens to that user's\nvisible set, and anything else (private, orphaned, deleted) is 404 \u2014 never 403, so the\ndenial does not disclose that the uid exists.",
-    "operationId": "serve_file_compat_file_attachments__uid___filename__get",
-    "parameters": [
-     {
-      "in": "path",
-      "name": "uid",
-      "required": true,
-      "schema": {
-       "title": "Uid",
-       "type": "string"
+    "/api/attachments/{uid}/print": {
+      "post": {
+        "description": "Attach a print-quality master to an OWNED image attachment (a separate Lightroom print\nexport \u2014 see ADR web/print renditions). The web rendition keeps displaying; this file is\nhidden from the feed and download-only via the `print` tier.",
+        "operationId": "upload_print_api_attachments__uid__print_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_print_api_attachments__uid__print_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Upload Print",
+        "tags": [
+          "assets"
+        ]
       }
-     },
-     {
-      "in": "path",
-      "name": "filename",
-      "required": true,
-      "schema": {
-       "title": "Filename",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "thumbnail",
-      "required": false,
-      "schema": {
-       "default": false,
-       "title": "Thumbnail",
-       "type": "boolean"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Successful Response"
-     },
-     "422": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      },
-      "description": "Validation Error"
-     }
     },
-    "security": [
-     {
-      "bearerAuth": []
-     },
-     {}
-    ],
-    "summary": "Serve File Compat",
-    "tags": [
-     "compat"
-    ]
-   }
-  },
-  "/health": {
-   "get": {
-    "operationId": "health_health_get",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HealthResponse"
-        }
-       }
+    "/api/attachments/{uid}/rendition/{variant_key}": {
+      "delete": {
+        "description": "Remove one print master \u2014 OWNER-only (a mutation; viewing a master is household-wide). The\nscreen photo and every derived tier are untouched: only the archive master goes.",
+        "operationId": "delete_rendition_api_attachments__uid__rendition__variant_key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "variant_key",
+            "required": true,
+            "schema": {
+              "title": "Variant Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Delete Rendition",
+        "tags": [
+          "assets"
+        ]
       },
-      "description": "Successful Response"
-     }
+      "get": {
+        "description": "Download a single print rendition \u2014 download-only, household-visible, on the short-session\nauth path (never the signed/public fast path; prints are low fan-out, not public-by-uid).",
+        "operationId": "serve_rendition_api_attachments__uid__rendition__variant_key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "variant_key",
+            "required": true,
+            "schema": {
+              "title": "Variant Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Serve Rendition",
+        "tags": [
+          "assets"
+        ]
+      }
     },
-    "summary": "Health"
-   }
+    "/api/attachments/{uid}/renditions": {
+      "get": {
+        "description": "A photo's hidden print renditions, WITH their pixel dimensions (household-visible, like the\nlegacy print tier). Registered BEFORE the generic /{uid}/{tier} route so the literal\n`renditions` segment isn't a tier.",
+        "operationId": "list_renditions_api_attachments__uid__renditions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RenditionDetail"
+                  },
+                  "title": "Response List Renditions Api Attachments  Uid  Renditions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Renditions",
+        "tags": [
+          "assets"
+        ]
+      },
+      "post": {
+        "description": "Attach \u2014 or replace \u2014 the print master of an OWNED image, from a finished resumable upload.\n\nTakes an upload_uid rather than a multipart body so a multi-hundred-MB master gets the chunked,\nresumable, progress-reporting path every other upload in this app uses. The legacy multipart\n`/print` route, which writes the separate print_path column, is untouched (MEMNG-51 retires it).",
+        "operationId": "attach_rendition_api_attachments__uid__renditions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenditionAttach"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Attach Rendition",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/attachments/{uid}/{tier}": {
+      "get": {
+        "operationId": "serve_asset_api_attachments__uid___tier__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tier",
+            "required": true,
+            "schema": {
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exp",
+            "required": false,
+            "schema": {
+              "title": "Exp",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "title": "Scope",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "sig",
+            "required": false,
+            "schema": {
+              "title": "Sig",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "title": "Format",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          },
+          {}
+        ],
+        "summary": "Serve Asset",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/native/exchange": {
+      "post": {
+        "description": "Trade a handoff code plus its PKCE verifier for a device PAT.\n\nAnonymous by construction \u2014 this is how a device gets its first credential, so requiring one\nwould be circular. It is also cookie-free, which is what keeps CSRF out of the picture: the\nrequest carries no ambient authority a browser could be tricked into attaching.\n\nEvery failure is a 400 with a stable machine-readable `detail`; none of them distinguishes\n\"wrong\" from \"not yours\", and all of them are terminal \u2014 the client starts a new login rather\nthan retrying, because a code is burned by the attempt whatever its outcome.",
+        "operationId": "native_exchange_api_auth_native_exchange_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeExchangeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeExchangeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Native Exchange",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/native/logout": {
+      "post": {
+        "description": "Revoke the presenting device token, and only that one.\n\nA bearer may revoke ITSELF and nothing else (Decision 5): the rest of token management stays\nbehind a browser session, so a leaked device token can neither mint successors that outlive its\nrevocation nor take another device offline. A session cookie is refused here for the same\nreason from the other side \u2014 the SPA revokes through `/api/pats/{id}`, which knows which token\nit is talking about.",
+        "operationId": "native_logout_api_auth_native_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Native Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/native/renew": {
+      "post": {
+        "description": "Rotate the presenting device token: mint a successor and revoke the presenter, atomically.\n\nA device token is deliberately bounded \u2014 it lives on hardware that gets lost, and nobody\nrevokes what they have not noticed is gone \u2014 which without this route means every phone set up\na year ago signs out one morning with no warning and no way back except a full login. Renewal\nrefreshes that lifetime from USE instead of removing the bound.\n\nIt ROTATES rather than extends: the successor is a new secret and the presenter is gone in the\nsame statement, so a token copied out of a backup or a log stops working at the owner's next\nrenewal instead of living the full year twice over.\n\nRestricted to a token that carries an expiry. `pats` has no column that tells a device token\nfrom an SPA-created one \u2014 carrying `expires_at` is the only thing that does, imperfectly \u2014 and\nonly a token that expires can silently sign out, so an unbounded PAT is refused\n(`token_not_renewable`) rather than rotated: token management stays behind a browser session\n(Decision 5), and this route reaches no further than the class it exists for.\n\nBearer-only, like `native/logout`: the presenting token is the subject of the request, and a\nsession cookie names no token at all.",
+        "operationId": "native_renew_api_auth_native_renew_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeExchangeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Native Renew",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/user": {
+      "get": {
+        "operationId": "whoami_api_auth_user_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Whoami",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/events": {
+      "get": {
+        "operationId": "events_api_events_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Events",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/export": {
+      "get": {
+        "description": "Stream the matching memos as a zip: `<memo-uid>.md` per memo plus a manifest.\n\nWith `include_media`, each memo's attachments are carried alongside its text under\n`media/<memo-uid>/`, in the rendition the `tier` names (the same tier keys the asset routes\nserve). A rendition that isn't on disk is skipped and noted in the manifest.",
+        "operationId": "export_memos_api_export_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_before",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "title": "Created Before",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_after",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "title": "Created After",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tag",
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "visibility",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Visibility"
+            }
+          },
+          {
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "title": "Owner",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "title": "Q",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_media",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Media",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tier",
+            "required": false,
+            "schema": {
+              "default": "original",
+              "enum": [
+                "original",
+                "thumb",
+                "mobile",
+                "web",
+                "poster",
+                "print"
+              ],
+              "title": "Tier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Export Memos",
+        "tags": [
+          "export"
+        ]
+      }
+    },
+    "/api/exports/photobook": {
+      "get": {
+        "description": "The photo book for a tag and date range: a print-readiness manifest, or the archive itself.\n\nSelection is `tag` (default `curated`) joined to the owner's image attachments, in memo-date\norder; `from`/`to` bound the memo date and are inclusive whole days. `profile` names the single\nrung the book is printed at.\n\n**Requesting a book schedules it.** Both formats enqueue a print rendition for every member\nthat lacks a current one, so the first request starts the work and later requests report on it;\nthe enqueue is idempotent, so polling costs nothing (app/services/photobook.py:build).\n\n`format=manifest` (the default) answers with one record per photo \u2014 the name it will carry in\nthe archive, whether its rendition is `ready`/`pending`/`failed`/`unavailable`, its pixel size,\nand the **effective dpi** it will print at for the given `page_cm`/`max_pages` geometry, judged\nagainst `dpi`. That is the field worth having: it names the photos a layout program will flag,\nbefore the import rather than after it. Re-fetching it is also how progress is followed.\n\n`format=zip` streams the ready renditions as `0001_<date>_<uid>.jpg`, numbered in book order so\na folder import lands in sequence. Photos that are not ready yet are left out and recorded in\nthe archive's manifest.json, exactly as the generic export treats a rendition that is missing.",
+        "operationId": "export_photobook_api_exports_photobook_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "date",
+              "title": "From",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "date",
+              "title": "To",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "default": "curated",
+              "title": "Tag",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "const": "print-4096",
+              "default": "print-4096",
+              "title": "Profile",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "manifest",
+              "enum": [
+                "manifest",
+                "zip"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_cm",
+            "required": false,
+            "schema": {
+              "default": "21x21",
+              "title": "Page Cm",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_pages",
+            "required": false,
+            "schema": {
+              "default": 1.5,
+              "title": "Max Pages",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "dpi",
+            "required": false,
+            "schema": {
+              "default": 300,
+              "title": "Dpi",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotobookManifestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Export Photobook",
+        "tags": [
+          "export"
+        ]
+      }
+    },
+    "/api/memos": {
+      "get": {
+        "operationId": "list_memos_api_memos_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_before",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "title": "Created Before",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_after",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "title": "Created After",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tag",
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "visibility",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Visibility"
+            }
+          },
+          {
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "title": "Owner",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "title": "Q",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Archived",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "archived_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Archived Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "-created_at",
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "title": "Cursor",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "with_total",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "With Total",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Memos",
+        "tags": [
+          "memos"
+        ]
+      },
+      "post": {
+        "operationId": "create_memo_api_memos_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadsUnlinkableError"
+                }
+              }
+            },
+            "description": "A requested upload_uid is missing, expired or incomplete. No memo is created and no attachment is linked \u2014 resolve the named uploads and retry."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateRacedError"
+                }
+              }
+            },
+            "description": "Concurrent writes raced this keyed create. Nothing was stored under the key \u2014 retry the same request, idempotency_key included."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Create Memo",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/memos/{uid}": {
+      "delete": {
+        "operationId": "delete_memo_api_memos__uid__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Delete Memo",
+        "tags": [
+          "memos"
+        ]
+      },
+      "get": {
+        "operationId": "get_memo_api_memos__uid__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Get Memo",
+        "tags": [
+          "memos"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_memo_api_memos__uid__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadsUnlinkableError"
+                }
+              }
+            },
+            "description": "A requested upload_uid is missing, expired or incomplete. No memo is created and no attachment is linked \u2014 resolve the named uploads and retry."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Patch Memo",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/memos/{uid}/pin": {
+      "post": {
+        "operationId": "pin_memo_api_memos__uid__pin_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Pin Memo",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/memos/{uid}/reactions": {
+      "post": {
+        "operationId": "react_api_memos__uid__reactions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReactionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "React",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/memos/{uid}/reactions/{emoji}": {
+      "delete": {
+        "operationId": "unreact_api_memos__uid__reactions__emoji__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "emoji",
+            "required": true,
+            "schema": {
+              "title": "Emoji",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Unreact",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/memos/{uid}/unpin": {
+      "post": {
+        "operationId": "unpin_memo_api_memos__uid__unpin_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Unpin Memo",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/pats": {
+      "get": {
+        "operationId": "list_pats_api_pats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PatOut"
+                  },
+                  "title": "Response List Pats Api Pats Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Pats",
+        "tags": [
+          "pats"
+        ]
+      },
+      "post": {
+        "operationId": "create_pat_api_pats_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Create Pat",
+        "tags": [
+          "pats"
+        ]
+      }
+    },
+    "/api/pats/{pat_id}": {
+      "delete": {
+        "operationId": "revoke_pat_api_pats__pat_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pat_id",
+            "required": true,
+            "schema": {
+              "title": "Pat Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Revoke Pat",
+        "tags": [
+          "pats"
+        ]
+      }
+    },
+    "/api/push/subscribe": {
+      "delete": {
+        "operationId": "unsubscribe_api_push_subscribe_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubscriptionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Unsubscribe",
+        "tags": [
+          "push"
+        ]
+      },
+      "post": {
+        "operationId": "subscribe_api_push_subscribe_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubscriptionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Subscribe",
+        "tags": [
+          "push"
+        ]
+      }
+    },
+    "/api/push/vapid-public-key": {
+      "get": {
+        "description": "The VAPID public key the service worker needs to subscribe. Public by definition.",
+        "operationId": "vapid_public_key_api_push_vapid_public_key_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VapidKeyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Vapid Public Key",
+        "tags": [
+          "push"
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "get_settings_api_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Get Settings",
+        "tags": [
+          "settings"
+        ]
+      },
+      "patch": {
+        "operationId": "update_settings_api_settings_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Update Settings",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/stats/heatmap": {
+      "get": {
+        "operationId": "stats_heatmap_api_stats_heatmap_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Stats Heatmap Api Stats Heatmap Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Stats Heatmap",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/tags": {
+      "get": {
+        "operationId": "list_tags_api_tags_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TagCount"
+                  },
+                  "title": "Response List Tags Api Tags Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Tags",
+        "tags": [
+          "memos"
+        ]
+      }
+    },
+    "/api/uploads": {
+      "post": {
+        "operationId": "start_upload_api_uploads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Start Upload",
+        "tags": [
+          "uploads"
+        ]
+      }
+    },
+    "/api/uploads/{upload_uid}": {
+      "head": {
+        "operationId": "upload_offset_api_uploads__upload_uid__head",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_uid",
+            "required": true,
+            "schema": {
+              "title": "Upload Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "Upload-Offset": {
+                "description": "Bytes the server now holds for this upload session \u2014 the offset the next chunk must start at.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Upload Offset",
+        "tags": [
+          "uploads"
+        ]
+      },
+      "patch": {
+        "operationId": "append_chunk_api_uploads__upload_uid__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_uid",
+            "required": true,
+            "schema": {
+              "title": "Upload Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Upload-Offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Upload-Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadOut"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "Upload-Offset": {
+                "description": "Bytes the server now holds for this upload session \u2014 the offset the next chunk must start at.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Offset gap \u2014 re-sync with HEAD and resend from the offset it reports."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Append Chunk",
+        "tags": [
+          "uploads"
+        ]
+      }
+    },
+    "/api/uploads/{upload_uid}/finalize": {
+      "post": {
+        "operationId": "finalize_upload_api_uploads__upload_uid__finalize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_uid",
+            "required": true,
+            "schema": {
+              "title": "Upload Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Finalize Upload",
+        "tags": [
+          "uploads"
+        ]
+      }
+    },
+    "/api/v1/memos": {
+      "get": {
+        "operationId": "list_memos_compat_api_v1_memos_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": "Pagesize",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "title": "Pagetoken",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "title": "Filter",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "summary": "List Memos Compat",
+        "tags": [
+          "compat"
+        ]
+      }
+    },
+    "/api/v1/memos/{memo_id}": {
+      "get": {
+        "operationId": "get_memo_compat_api_v1_memos__memo_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memo_id",
+            "required": true,
+            "schema": {
+              "title": "Memo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "summary": "Get Memo Compat",
+        "tags": [
+          "compat"
+        ]
+      }
+    },
+    "/file/attachments/{uid}/{filename}": {
+      "get": {
+        "description": "Derived tiers only (F2): ?thumbnail=true \u2192 thumb, mobile UA \u2192 mobile, video \u2192 web.\nThe original path stays 404, as prod is today. Visibility-gated like the memo surfaces:\nanonymous callers get derived tiers of PUBLIC memos only, a PAT widens to that user's\nvisible set, and anything else (private, orphaned, deleted) is 404 \u2014 never 403, so the\ndenial does not disclose that the uid exists.",
+        "operationId": "serve_file_compat_file_attachments__uid___filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "thumbnail",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Thumbnail",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "summary": "Serve File Compat",
+        "tags": [
+          "compat"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    }
   }
- }
 }
