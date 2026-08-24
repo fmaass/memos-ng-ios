@@ -35,6 +35,100 @@ enum ProductionMarkdownProjection {
         MarkdownContent(MemoMarkdownSource.prepare(markdown)).renderHTML()
     }
 
+    /// Every destination the RENDERER resolved out of this memo, prepared exactly as the view
+    /// prepares it.
+    ///
+    /// Read off `renderMarkdown()` rather than `renderHTML()` on purpose: cmark's HTML renderer is
+    /// safe by default and blanks an unsafe `href`, which would hide the very thing this is for.
+    /// The CommonMark round trip keeps the destination the parser resolved, verbatim.
+    static func destinations(in markdown: String) -> [String] {
+        let prepared = MemoMarkdownSource.prepare(markdown)
+        return destinations(ofRendered: MarkdownContent(prepared).renderMarkdown())
+    }
+
+    /// The same reading of a document the source layer never touched — what the renderer resolves
+    /// when nothing has prepared it, which is the only thing a parser divergence can produce.
+    static func destinations(ofRendered rendered: String) -> [String] {
+        let chars = Array(rendered)
+        var found: [String] = []
+        var index = 0
+
+        while index < chars.count {
+            if chars[index] == "\\" {
+                index += 2
+                continue
+            }
+            if chars[index] == "]", index + 1 < chars.count, chars[index + 1] == "(" {
+                let destination = readParenthesised(chars, from: index + 1)
+                found.append(destination.text)
+                index = destination.end
+                continue
+            }
+            if chars[index] == "<", let autolink = readAutolink(chars, from: index) {
+                found.append(autolink.text)
+                index = autolink.end
+                continue
+            }
+            index += 1
+        }
+        return found
+    }
+
+    private static func readParenthesised(
+        _ chars: [Character],
+        from start: Int
+    ) -> (text: String, end: Int) {
+        var depth = 0
+        var destination = ""
+        var index = start
+        while index < chars.count {
+            let character = chars[index]
+            if character == "\\", index + 1 < chars.count {
+                destination.append(chars[index + 1])
+                index += 2
+                continue
+            }
+            if character == "(" {
+                depth += 1
+                if depth > 1 { destination.append(character) }
+                index += 1
+                continue
+            }
+            if character == ")" {
+                depth -= 1
+                if depth == 0 {
+                    index += 1
+                    break
+                }
+                destination.append(character)
+                index += 1
+                continue
+            }
+            destination.append(character)
+            index += 1
+        }
+        let trimmed = destination.trimmingCharacters(in: .whitespaces)
+        let href = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+        return (href.trimmingCharacters(in: CharacterSet(charactersIn: "<>")), index)
+    }
+
+    /// `<https://example.com>` — how the CommonMark writer puts a bare URL back.
+    private static func readAutolink(
+        _ chars: [Character],
+        from start: Int
+    ) -> (text: String, end: Int)? {
+        var index = start + 1
+        var destination = ""
+        while index < chars.count, chars[index] != ">", !chars[index].isWhitespace {
+            destination.append(chars[index])
+            index += 1
+        }
+        guard index < chars.count, chars[index] == ">", destination.contains(":") else {
+            return nil
+        }
+        return (destination, index + 1)
+    }
+
     /// An empty paragraph is invisible in both clients, and the two renderers disagree on whether
     /// one is there at all: the SPA's sanitiser removes an image and leaves the `<p>` behind,
     /// while dropping the same construct from the source leaves cmark with no paragraph to make.
