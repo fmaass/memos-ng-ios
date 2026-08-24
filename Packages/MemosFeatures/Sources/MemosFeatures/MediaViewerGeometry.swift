@@ -135,6 +135,31 @@ public enum MediaZoom {
         )
     }
 
+    /// The transform re-fitted to a viewport that changed UNDER it — a rotation, a size class,
+    /// a split view.
+    ///
+    /// Clamping only what is drawn is not enough: the stored offset would keep its pre-rotation
+    /// value, and the next pan would spend itself absorbing that stale delta before the picture
+    /// moved at all — which reads as a picture stuck against an edge it is not against. The
+    /// stored value is brought into the new geometry instead, so the next drag starts where the
+    /// picture actually is.
+    public static func renormalized(
+        _ transform: Transform,
+        fitted: CGSize,
+        viewport: CGSize
+    ) -> Transform {
+        let scale = clamped(scale: transform.scale)
+        return Transform(
+            scale: scale,
+            offset: clampedOffset(
+                transform.offset,
+                scale: scale,
+                fitted: fitted,
+                viewport: viewport
+            )
+        )
+    }
+
     /// The transform a double tap leaves behind. Zooming out always recentres: the picture is
     /// whole again, so there is nothing left to be off-centre about.
     public static func doubleTapped(_ transform: Transform) -> Transform {

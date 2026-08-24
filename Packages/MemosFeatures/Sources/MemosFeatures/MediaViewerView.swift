@@ -118,7 +118,7 @@ struct MediaViewerCloseButton: View {
 /// limits are the ones a test asserts rather than whatever the gesture happened to report. The
 /// blurhash is underneath from the first frame — the 2048 px rendition is a real download, and
 /// the picture's own colours in the picture's own frame is what fills that second.
-private struct MediaViewerPage: View {
+struct MediaViewerPage: View {
     let page: MediaPage
     let onZoomChange: (Bool) -> Void
     let play: (URL) -> Void
@@ -167,6 +167,17 @@ private struct MediaViewerPage: View {
                 playControl
             }
             .frame(width: viewport.width, height: viewport.height)
+            // A rotation or a size-class change re-fits the picture under a transform that was
+            // clamped against the OLD geometry. Only the drawn offset is corrected above; the
+            // stored one has to be brought across too, or the next pan spends itself absorbing
+            // the stale delta before the picture moves.
+            .onChange(of: viewport, initial: false) { _, changed in
+                transform = MediaZoom.renormalized(
+                    transform,
+                    fitted: MediaZoom.fittedSize(aspectRatio: page.aspectRatio, in: changed),
+                    viewport: changed
+                )
+            }
         }
         .onChange(of: transform.isZoomed, initial: false) { _, zoomed in
             onZoomChange(zoomed)
@@ -178,18 +189,18 @@ private struct MediaViewerPage: View {
             BlurHashBackdrop(blurhash: page.blurhash)
             if let url = page.stillURL {
                 AsyncImage(url: url) { phase in
-                    switch ThumbnailPhase.of(phase) {
-                    case .loaded:
-                        if let image = phase.image {
-                            AspectPinnedLayer { image.resizable().scaledToFit() }
-                        }
-                    case .failed:
+                    switch phase {
+                    case .success(let image):
+                        AspectPinnedLayer { image.resizable().scaledToFit() }
+                    case .failure:
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.largeTitle)
                             .foregroundStyle(.white)
                             .shadow(radius: 4)
-                    case .loading:
+                    default:
                         // The blurhash IS the loading state. A spinner over it would only hide it.
+                        // `default` rather than `.empty`: a phase this SwiftUI has not shipped yet
+                        // must read as still loading, never as a warning triangle.
                         EmptyView()
                     }
                 }

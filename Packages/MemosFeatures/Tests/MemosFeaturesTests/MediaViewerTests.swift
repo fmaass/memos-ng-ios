@@ -3,6 +3,7 @@ import Foundation
 import MemosCore
 import SwiftUI
 import Testing
+import UIKit
 
 @testable import MemosFeatures
 
@@ -175,9 +176,11 @@ struct FullScreenTierTests {
     }
 
     /// The bigger tier is fetched over the same signed URL as everything else, so the same rule
-    /// binds it: a cached copy may not outlive the signature that authorised it.
-    @Test("the full-screen rendition is cached no longer than its signature")
-    func cacheIsBoundedByTheSignature() throws {
+    /// binds it: a cached copy may not outlive the signature that authorised it. That the PAGE
+    /// actually enforces it is asserted end to end in "Viewer loading" below; this holds the half
+    /// that is a property of the URL the tier choice produced.
+    @Test("the full-screen rendition carries the expiry its cache is bounded by")
+    func theRenditionCarriesItsExpiry() throws {
         let exp = 1_800_000_000
         var attachment = MediaViewerPageTests.image("a1")
         attachment.previewURL = MediaViewerPageTests.url("a1", "mobile", exp: exp)
@@ -188,23 +191,6 @@ struct FullScreenTierTests {
         #expect(signed.expiresAt == Date(timeIntervalSince1970: TimeInterval(exp)))
         #expect(!signed.isExpired(at: Date(timeIntervalSince1970: TimeInterval(exp - 60))))
         #expect(signed.isExpired(at: Date(timeIntervalSince1970: TimeInterval(exp + 1))))
-        // What the viewer does before it asks for the picture: drop a lapsed entry rather than
-        // re-serve it (the same call `AttachmentThumbnail` makes for the grid tier).
-        let cache = URLCache(memoryCapacity: 4096, diskCapacity: 0, directory: nil)
-        #expect(
-            MediaCache.evictExpired(
-                url,
-                at: Date(timeIntervalSince1970: TimeInterval(exp + 1)),
-                cache: cache
-            )
-        )
-        #expect(
-            !MediaCache.evictExpired(
-                url,
-                at: Date(timeIntervalSince1970: TimeInterval(exp - 60)),
-                cache: cache
-            )
-        )
     }
 }
 
@@ -396,6 +382,60 @@ struct MediaZoomTests {
         #expect(abs(second.offset.height - 20) < 0.001)
     }
 
+    /// The stale-transform bug, stated: a rotation re-fits the picture under a transform that was
+    /// clamped against the OLD screen. Clamping only what is DRAWN leaves the stored offset in the
+    /// previous geometry, and the next pan spends itself absorbing that delta before the picture
+    /// moves — which feels like a picture stuck against an edge it is not against.
+    @Test("a viewport change brings the stored transform with it")
+    func viewportChangeRenormalisesTheStoredTransform() {
+        let portrait = CGSize(width: 390, height: 844)
+        let landscape = CGSize(width: 844, height: 390)
+        let ratio = 4.0 / 3.0
+
+        // Zoomed and panned hard against the right-hand edge of the PORTRAIT screen.
+        let fittedPortrait = MediaZoom.fittedSize(aspectRatio: ratio, in: portrait)
+        let atTheEdge = MediaZoom.panned(
+            MediaZoom.Transform(scale: 2, offset: .zero),
+            by: CGSize(width: 4000, height: 0),
+            fitted: fittedPortrait,
+            viewport: portrait
+        )
+        let portraitLimit = MediaZoom.panLimit(
+            scale: 2,
+            fitted: fittedPortrait,
+            viewport: portrait
+        )
+        #expect(abs(atTheEdge.offset.width - portraitLimit.width) < 0.001)
+
+        // The screen turns, and the picture is re-fitted with far less room to move sideways. The
+        // STORED offset has to land inside the new limits, not merely be drawn inside them.
+        let fittedLandscape = MediaZoom.fittedSize(aspectRatio: ratio, in: landscape)
+        let landscapeLimit = MediaZoom.panLimit(
+            scale: 2,
+            fitted: fittedLandscape,
+            viewport: landscape
+        )
+        #expect(landscapeLimit.width < portraitLimit.width, "the fixture proves nothing otherwise")
+
+        let carried = MediaZoom.renormalized(
+            atTheEdge,
+            fitted: fittedLandscape,
+            viewport: landscape
+        )
+        #expect(abs(carried.offset.width - landscapeLimit.width) < 0.001)
+        #expect(carried.scale == atTheEdge.scale)
+
+        // And the symptom itself: the very next pan moves the picture instead of being eaten by
+        // the stale delta.
+        let nudged = MediaZoom.panned(
+            carried,
+            by: CGSize(width: -30, height: 0),
+            fitted: fittedLandscape,
+            viewport: landscape
+        )
+        #expect(abs(nudged.offset.width - (landscapeLimit.width - 30)) < 0.001)
+    }
+
     @Test("a double tap out puts the picture back in the middle")
     func doubleTapRecentres() {
         let zoomed = MediaZoom.Transform(scale: 2.5, offset: CGSize(width: 80, height: 30))
@@ -492,23 +532,104 @@ struct MediaViewerChromeTests {
         }
     }
 
-    /// A viewer built out of a `GeometryReader` inside a paging scroll view is exactly the shape
-    /// that collapses to nothing when a frame goes missing — and a black screen looks like a
-    /// loading state rather than a bug.
-    @Test("the viewer fills the screen it is given")
-    func fillsTheScreen() throws {
-        let selection = try #require(
-            MediaViewerPresentation.viewer(
-                for: [MediaViewerPageTests.image("a1"), MediaViewerPageTests.image("a2")],
-                startingAt: "a1"
+    /// The page's own sizing, measured where it can be seen: a picture is drawn at ITS shape
+    /// inside the screen, not stretched over the whole of it.
+    ///
+    /// Measuring the viewer's outer frame proved nothing — the black backdrop fills that frame
+    /// whatever the pager does. What is load-bearing is the band the picture occupies, so that is
+    /// what is counted: a 4:3 photo on a 390x844 screen is 292 rows of picture with black above
+    /// and below it. Drop the fitted frame and the blur floods the screen; drop the outer frame
+    /// and the band moves off centre.
+    @Test("a page draws the picture at its own shape, not stretched over the screen")
+    func pictureIsDrawnAtItsOwnShape() async throws {
+        _ = await BlurHashImage.image(for: Self.flatGreenHash)
+        var attachment = MediaViewerPageTests.image("a1", width: 4000, height: 3000)
+        attachment.blurhash = Self.flatGreenHash
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+
+        let viewport = CGSize(width: 390, height: 844)
+        let grid = try #require(
+            PixelGrid.of(
+                MediaViewerPage(page: page, onZoomChange: { _ in }, play: { _ in })
+                    .background(.black),
+                size: viewport
             )
         )
-        let size = LayoutProbe.size(
-            MediaViewerView(selection: selection),
-            width: 390,
-            height: 844
+        let middleColumn = Int(viewport.width) / 2
+        let column = grid.map { $0[middleColumn] }
+        let band = column.filter { isBlur($0) }.count
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+
+        #expect(
+            abs(Double(band) - fitted.height) <= 4,
+            "the picture covers \(band) rows, expected about \(fitted.height)"
         )
-        #expect(abs(size.width - 390) < 0.5, "viewer reported \(size)")
-        #expect(abs(size.height - 844) < 0.5, "viewer reported \(size)")
+        #expect(isBlur(grid[Int(viewport.height) / 2][middleColumn]), "no picture in the middle")
+        #expect(!isBlur(grid[8][middleColumn]), "the picture reached the top of the screen")
+        #expect(
+            !isBlur(grid[Int(viewport.height) - 8][middleColumn]),
+            "the picture reached the bottom of the screen"
+        )
+    }
+
+    /// Flat `#3E7C4F` in every pixel, so any picture that shows is unmistakable.
+    private static let flatGreenHash = "007Da1"
+
+    private func isBlur(_ pixel: (r: UInt8, g: UInt8, b: UInt8)) -> Bool {
+        abs(Int(pixel.r) - 0x3E) <= 24 && abs(Int(pixel.g) - 0x7C) <= 24
+            && abs(Int(pixel.b) - 0x4F) <= 24
+    }
+}
+
+/// What a page does before it asks the network for its picture.
+///
+/// Driven through the page's REAL appearance path — hosted in a window, its own `task` — because
+/// the rule only holds if the wiring holds: calling `MediaCache.evictExpired` from a test proves
+/// the cache helper works, not that anything ever calls it.
+@MainActor
+@Suite("Viewer loading")
+struct MediaViewerLoadingTests {
+    @Test("a page drops a lapsed signature before it asks for the picture")
+    func lapsedEntryIsEvictedOnAppear() async throws {
+        // Long past whatever clock the simulator runs on: the page evicts against `Date()`.
+        let lapsed = 1_700_000_000
+        var attachment = MediaViewerPageTests.image("evict1")
+        attachment.previewURL = MediaViewerPageTests.url("evict1", "mobile", exp: lapsed)
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+        let url = try #require(page.stillURL)
+
+        let cache = URLCache.shared
+        cache.memoryCapacity = max(cache.memoryCapacity, 4 * 1024 * 1024)
+        let request = URLRequest(url: url)
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "image/jpeg"]
+            )
+        )
+        cache.storeCachedResponse(
+            CachedURLResponse(response: response, data: Data([0xFF, 0xD8, 0xFF, 0xE0])),
+            for: request
+        )
+        // The entry really is there before the page appears — otherwise this asserts nothing.
+        #expect(cache.cachedResponse(for: request) != nil)
+
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(
+            rootView: MediaViewerPage(page: page, onZoomChange: { _ in }, play: { _ in })
+        )
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+
+        var dropped = false
+        for _ in 0..<60 where !dropped {
+            try await Task.sleep(for: .milliseconds(50))
+            dropped = cache.cachedResponse(for: request) == nil
+        }
+        cache.removeCachedResponse(for: request)
+        window.isHidden = true
+        #expect(dropped, "the page never dropped the entry whose signature had lapsed")
     }
 }
