@@ -15,7 +15,10 @@ public struct MemoDetailView: View {
     @Environment(SessionStore.self) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var playing: VideoPlayback?
+    @State private var viewing: MediaViewerSelection?
     @State private var feedback = MemoFeedbackTrigger()
+    /// What the zoom transition matches the full-screen viewer to: the picture that was tapped.
+    @Namespace private var mediaZoom
     @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
 
     public init(uid: String, initial: Memo, timeline: TimelineStore) {
@@ -63,12 +66,26 @@ public struct MemoDetailView: View {
                         }
                         .buttonStyle(.plain)
                     } else {
+                        // A picture opens full screen, where it can be zoomed — and grows out of
+                        // exactly this frame on the way there.
                         AttachmentThumbnail(attachment: attachment, tier: .mobile, slot: slot)
+                            .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
+                            .contentShape(.rect)
+                            .onTapGesture { open(attachment) }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityLabel("Photo")
+                            .accessibilityHint("Opens full screen")
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(DesignTokens.Space.roomy)
+        }
+        // On the scroll view rather than beside the video cover below: two presentations attached
+        // to the SAME view is how one of them silently stops appearing.
+        .fullScreenCover(item: $viewing) { selection in
+            MediaViewerView(selection: selection)
+                .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .background(Color(.systemGroupedBackground))
         .scrollEdgeEffectStyle(.soft, for: .top)
@@ -134,6 +151,12 @@ public struct MemoDetailView: View {
                 .disabled(!memo.mine)
             }
         }
+    }
+
+    /// The viewer, opened at the picture that was tapped. A memo carries its other pictures with
+    /// it, so the swipe order is the memo's — not just the one photo under the finger.
+    private func open(_ attachment: MemoAttachment) {
+        viewing = MediaViewerPresentation.viewer(for: memo, startingAt: attachment.uid)
     }
 
     private func toggle(_ index: Int, to checked: Bool) async {

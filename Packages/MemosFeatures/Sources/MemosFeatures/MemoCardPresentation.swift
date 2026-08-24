@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import MemosCore
 
@@ -59,6 +60,43 @@ public enum MemoCardPresentation {
         let trimmed = owner.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let at = trimmed.firstIndex(of: "@") else { return trimmed }
         return String(trimmed[trimmed.startIndex..<at])
+    }
+}
+
+/// Where a tap on a card goes.
+///
+/// The card used to be one target from edge to edge, because the alternative at the time was a
+/// photo strip that swallowed the tap and left the memo unreachable. The photos have their own
+/// destination now — full screen — so the card has two regions, and which one a tap landed in is
+/// decided HERE from the tiles' own frames rather than by nesting one button inside another and
+/// hoping the inner one wins. A rule a test can state is the only kind that stays true.
+public enum MemoCardTap {
+    /// A drawn photo tile and the frame it occupies in the card's coordinate space.
+    public struct Tile: Equatable, Sendable {
+        public let uid: String
+        public let frame: CGRect
+
+        public init(uid: String, frame: CGRect) {
+            self.uid = uid
+            self.frame = frame
+        }
+    }
+
+    public enum Destination: Equatable, Sendable {
+        /// The memo itself — the detail screen.
+        case memo
+        /// One picture, full screen.
+        case attachment(uid: String)
+    }
+
+    /// A tap inside a tile opens that picture; everywhere else on the card — the name, the text,
+    /// the tags, the gaps between tiles — still opens the memo. Tiles do not overlap, so the first
+    /// frame that contains the point is the answer.
+    public static func destination(at point: CGPoint, tiles: [Tile]) -> Destination {
+        for tile in tiles where tile.frame.contains(point) {
+            return .attachment(uid: tile.uid)
+        }
+        return .memo
     }
 }
 

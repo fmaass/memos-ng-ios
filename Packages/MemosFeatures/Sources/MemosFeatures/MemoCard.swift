@@ -1,19 +1,50 @@
+import CoreGraphics
 import MemosCore
 import SwiftUI
 
 /// One memo, as a card.
 ///
-/// The card is the whole target. There is no chevron and no separately-scrollable photo strip,
-/// which is what made the photos dead to the touch before: a horizontal `ScrollView` inside a row
-/// eats the tap, so the only way into a memo was the disclosure arrow at the far edge. The photos
-/// are laid out now instead of scrolled, so anywhere on the card opens the memo.
+/// The card has TWO targets, not one. It used to be a single one edge to edge, because the
+/// alternative then was a horizontal `ScrollView` that ate every tap and left the memo reachable
+/// only through a chevron. The photos are laid out rather than scrolled now, and since they have
+/// somewhere of their own to go — full screen — a tap on a tile opens the picture while the rest
+/// of the card still opens the memo.
+///
+/// Which of the two a tap is depends on where it landed, and that is decided by `MemoCardTap` from
+/// the tiles' measured frames rather than by nesting a button inside a button. Nested buttons make
+/// the answer a property of SwiftUI's gesture arbitration, which no test in this repo can state;
+/// a point and a list of rectangles is a rule that can be asserted.
 struct MemoCard: View {
     let memo: Memo
+    /// The namespace the full-screen zoom transition matches in — `nil` in a preview or a fitting
+    /// test, where there is no viewer to animate into.
+    let mediaZoom: Namespace.ID?
+    let openMemo: () -> Void
+    let openAttachment: (MemoAttachment) -> Void
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
     @ScaledMetric(relativeTo: .body) private var stripHeight = DesignTokens.Metric.photoStrip
     @ScaledMetric(relativeTo: .body) private var soloHeight = DesignTokens.Metric.photoSolo
+    /// Where each drawn tile ended up, in the card's own coordinate space. Kept per card rather
+    /// than globally so scrolling the timeline does not rewrite it on every frame.
+    @State private var tileFrames: [String: CGRect] = [:]
+
+    private static let tapSpace = "memo-card"
+
+    /// Spelled out rather than synthesised so a card can still be built with nothing but a memo —
+    /// which is what a fitting test and a preview do.
+    init(
+        memo: Memo,
+        mediaZoom: Namespace.ID? = nil,
+        openMemo: @escaping () -> Void = {},
+        openAttachment: @escaping (MemoAttachment) -> Void = { _ in }
+    ) {
+        self.memo = memo
+        self.mediaZoom = mediaZoom
+        self.openMemo = openMemo
+        self.openAttachment = openAttachment
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
@@ -31,6 +62,50 @@ struct MemoCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+        .contentShape(.rect)
+        .gesture(
+            SpatialTapGesture(coordinateSpace: .named(Self.tapSpace))
+                .onEnded { value in handleTap(at: value.location) }
+        )
+        // Declared on the wrapper OUTSIDE the gesture and the tiles, so both resolve the same
+        // space: a named space is looked up in a view's ancestors.
+        .coordinateSpace(.named(Self.tapSpace))
+        // A gesture carries no meaning to VoiceOver, so the card says what it is and what it does.
+        // The combined element is what a single card-wide button used to produce.
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, openMemo)
+        .accessibilityActions {
+            let openable = memo.attachments.first { MediaViewerPresentation.isViewable($0) }
+            if let openable {
+                Button("Open photo") { openAttachment(openable) }
+            }
+        }
+    }
+
+    /// The drawn tiles, in card order, as the router sees them. A tile that has not reported its
+    /// frame yet is simply not a target — the memo is, which is what the whole card did before.
+    private var tiles: [MemoCardTap.Tile] {
+        let layout = MemoCardPresentation.photoLayout(for: memo.attachments.count)
+        let shown = MemoCardPresentation.tileCount(for: layout)
+        return memo.attachments.prefix(shown).compactMap { attachment in
+            tileFrames[attachment.uid].map {
+                MemoCardTap.Tile(uid: attachment.uid, frame: $0)
+            }
+        }
+    }
+
+    private func handleTap(at point: CGPoint) {
+        switch MemoCardTap.destination(at: point, tiles: tiles) {
+        case .memo:
+            openMemo()
+        case .attachment(let uid):
+            guard let attachment = memo.attachments.first(where: { $0.uid == uid }) else {
+                openMemo()
+                return
+            }
+            openAttachment(attachment)
+        }
     }
 
     /// At an accessibility text size a row of avatar, name and pill cannot share a line without
@@ -96,6 +171,12 @@ struct MemoCard: View {
                 slot: MemoPresentation.timelineSlot(for: memo.attachments[0])
             )
             .frame(maxHeight: soloHeight)
+            .mediaTapTarget(
+                memo.attachments[0],
+                in: $tileFrames,
+                space: Self.tapSpace,
+                zoom: mediaZoom
+            )
             .padding(.horizontal, DesignTokens.Space.roomy)
         case .pair, .strip:
             HStack(spacing: DesignTokens.Space.snug) {
@@ -113,6 +194,14 @@ struct MemoCard: View {
                             overflowBadge(overflow)
                         }
                     }
+                    // The badge tile is a target like any other: it opens the viewer at the
+                    // third picture, and the ones it counts are a swipe away from there.
+                    .mediaTapTarget(
+                        attachment,
+                        in: $tileFrames,
+                        space: Self.tapSpace,
+                        zoom: mediaZoom
+                    )
                 }
             }
             .frame(maxHeight: stripHeight)
@@ -249,5 +338,27 @@ struct PendingCard: View {
                     style: StrokeStyle(lineWidth: 1, dash: row.needsAttention ? [] : [4, 3])
                 )
         }
+    }
+}
+
+extension View {
+    /// A photo tile that reports the frame it occupies and can be zoomed out of.
+    ///
+    /// The frame is read in the CARD's coordinate space rather than the screen's: a card-local
+    /// rectangle is stable while the timeline scrolls, so this writes state when the layout
+    /// changes and not once per scrolled frame.
+    func mediaTapTarget(
+        _ attachment: MemoAttachment,
+        in frames: Binding<[String: CGRect]>,
+        space: String,
+        zoom: Namespace.ID?
+    ) -> some View {
+        self
+            .mediaTransitionSource(id: attachment.uid, in: zoom)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(space))
+            } action: { frame in
+                frames.wrappedValue[attachment.uid] = frame
+            }
     }
 }

@@ -41,6 +41,20 @@ public enum MemoPresentation {
         width * scale <= 320 ? .thumb : .mobile
     }
 
+    /// What the full-screen viewer asks for: the largest rendition of this picture that exists.
+    ///
+    /// The server derives exactly two image tiers — `thumb` (800 px) and `mobile` (2048 px) — and
+    /// they are the only ones a client can fetch over a signed URL. `web` is the video mp4, and
+    /// the ORIGINAL is never fetched at all: it is the archive master (ADR-0008), a 60 MP HEIC
+    /// over a household connection, and nothing on a phone screen is better for having it.
+    ///
+    /// So the answer is `mobile` wherever a mobile rendition exists, and `thumb` where one does
+    /// not — a picture whose 2048 px tier is missing still opens, at the tier it has, rather than
+    /// showing a warning triangle in a full-screen black frame.
+    public static func fullScreenTier(for attachment: MemoAttachment) -> MediaTier {
+        attachment.previewURL == nil ? .thumb : .mobile
+    }
+
     /// The detail view: the whole picture, at the proportions the server measured.
     ///
     /// The ratio comes from the metadata rather than from the decoded image so the container is

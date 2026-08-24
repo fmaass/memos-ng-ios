@@ -25,6 +25,10 @@ public struct TimelineView: View {
     @State private var signOutStage = SignOutFlow.Stage.idle
     @State private var path: [MemoRoute] = []
     @State private var feedback = MemoFeedbackTrigger()
+    /// The picture a tile tap opened, full screen.
+    @State private var viewing: MediaViewerSelection?
+    /// What the zoom transition matches the viewer to: the tile it grew out of.
+    @Namespace private var mediaZoom
 
     public init() {}
 
@@ -83,6 +87,13 @@ public struct TimelineView: View {
                     .accessibilityLabel("More")
                 }
             }
+        }
+        // On the navigation stack rather than further down the chain, so it is a different view
+        // from the one presenting the compose sheet — two presentations on one view is how one of
+        // them silently stops appearing.
+        .fullScreenCover(item: $viewing) { selection in
+            MediaViewerView(selection: selection)
+                .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
         .sensoryFeedback(trigger: feedback) { _, latest in latest.act?.feedback }
@@ -182,12 +193,15 @@ public struct TimelineView: View {
             ForEach(TimelineGrouping.sections(for: timeline.memos)) { section in
                 Section {
                     ForEach(section.memos) { memo in
-                        Button {
-                            path.append(MemoRoute(uid: memo.uid))
-                        } label: {
-                            MemoCard(memo: memo)
-                        }
-                        .buttonStyle(.plain)
+                        // Not a card-wide Button any more: the photos have their own destination,
+                        // so the card routes a tap by where it landed (MemoCardTap) — tile to the
+                        // full-screen viewer, anywhere else to the memo.
+                        MemoCard(
+                            memo: memo,
+                            mediaZoom: mediaZoom,
+                            openMemo: { path.append(MemoRoute(uid: memo.uid)) },
+                            openAttachment: { open($0, of: memo) }
+                        )
                         .cardRow()
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             if memo.mine {
@@ -289,6 +303,17 @@ public struct TimelineView: View {
 
     private func memo(_ uid: String, in timeline: TimelineStore) -> Memo? {
         timeline.memos.first { $0.uid == uid }
+    }
+
+    /// A tapped tile opens that picture full screen, on the page it was tapped at. An attachment
+    /// the viewer cannot show — an upload that is neither picture nor video — falls back to the
+    /// memo, because a tap that does nothing at all reads as a broken card.
+    private func open(_ attachment: MemoAttachment, of memo: Memo) {
+        if let selection = MediaViewerPresentation.viewer(for: memo, startingAt: attachment.uid) {
+            viewing = selection
+        } else {
+            path.append(MemoRoute(uid: memo.uid))
+        }
     }
 
     private func delete(_ memo: Memo, in timeline: TimelineStore) async {
