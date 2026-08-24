@@ -448,54 +448,139 @@ struct MediaZoomTests {
     }
 }
 
-/// Which of a card's two targets a tap landed on.
+/// Which of a card's targets a tap landed on.
 ///
-/// This reverses a deliberate earlier decision — the card used to be one target edge to edge —
-/// and the reversal is only safe while BOTH halves hold: a tile opens the picture, and every
-/// other part of the card still opens the memo.
+/// This reverses a deliberate earlier decision — the card used to be one target edge to edge — and
+/// the reversal is only safe while BOTH halves hold: a tile opens the picture, and every other part
+/// of the card still opens the memo.
+///
+/// The tiles here are the ones the CARD MEASURED, not rectangles this file worked out for itself.
+/// That distinction is the whole point: the frames come from `mediaTapTarget`'s `onGeometryChange`
+/// through the card's own state, so deleting that reporting empties these tests rather than leaving
+/// them quietly green — and a tap is routed against the geometry a finger would actually meet.
+@MainActor
 @Suite("Card tap routing")
 struct MemoCardTapTests {
-    /// A three-tile strip laid out the way the card lays one out: the card's own horizontal inset,
-    /// square tiles, the card's gap between them.
-    private func strip(cardWidth: CGFloat = 358, top: CGFloat = 120) -> [MemoCardTap.Tile] {
-        let inset: CGFloat = 16
-        let gap: CGFloat = 8
-        let side = (cardWidth - 2 * inset - 2 * gap) / 3
-        return (0..<3).map { index in
-            MemoCardTap.Tile(
+    /// Photos the server measured, with no URLs at all: the layout comes from the metadata, so
+    /// these lay out exactly as real ones do while touching no network.
+    private func photos(_ shapes: [(Int, Int)]) -> [MemoAttachment] {
+        shapes.enumerated().map { index, shape in
+            MemoAttachment(
                 uid: "a\(index + 1)",
-                frame: CGRect(
-                    x: inset + CGFloat(index) * (side + gap),
-                    y: top,
-                    width: side,
-                    height: side
-                )
+                mime: "image/jpeg",
+                status: .ready,
+                width: shape.0,
+                height: shape.1
             )
         }
     }
 
-    @Test("a tap on a tile opens that picture")
+    /// Hosts a real card and hands back the tiles it reported.
+    private func measuredTiles(
+        of attachments: [MemoAttachment],
+        width: CGFloat = 402
+    ) -> [MemoCardTap.Tile] {
+        let seen = Box<[MemoCardTap.Tile]>([])
+        let memo = MemoFixture.memo(content: "A day out.", attachments: attachments)
+        ScreenProbe.settle(
+            MemoCard(memo: memo, reportTiles: { seen.value = $0 })
+                .frame(width: width),
+            size: CGSize(width: width, height: 874)
+        )
+        return seen.value
+    }
+
+    @Test("the card reports a frame for every photo it drew")
+    func everyPhotoIsMeasured() {
+        let tiles = measuredTiles(of: photos([(3, 2), (3, 2), (3, 2), (2, 3), (1, 1)]))
+        // If this is empty the card reported nothing — which is what deleting `mediaTapTarget`'s
+        // `onGeometryChange` does, and what every assertion below then has nothing to stand on.
+        #expect(tiles.count == 5, "the card measured \(tiles.count) tiles, not five")
+        #expect(Set(tiles.map(\.uid)).count == 5, "two tiles reported the same attachment")
+        for tile in tiles {
+            #expect(tile.frame.width > 1, "\(tile.uid) was measured at \(tile.frame)")
+            #expect(tile.frame.height > 1, "\(tile.uid) was measured at \(tile.frame)")
+        }
+    }
+
+    /// The measured geometry IS justified rows: several rows, each of them wider than one tile,
+    /// and every tile in a row standing at that row's height. This is what makes the arrangement
+    /// a fact about the running card rather than about the solver alone.
+    @Test("the measured tiles really are justified rows, not a strip")
+    func theMeasuredLayoutIsJustified() {
+        let tiles = measuredTiles(of: photos([(3, 2), (3, 2), (3, 2), (2, 3), (1, 1)]))
+        #expect(tiles.count == 5, "the card measured \(tiles.count) tiles, not five")
+        let rows = Dictionary(grouping: tiles) { ($0.frame.minY / 4).rounded() }
+        #expect(rows.count >= 2, "every photo landed on one line — that is the old strip")
+        for (_, row) in rows where row.count > 1 {
+            let heights = row.map(\.frame.height)
+            #expect(
+                (heights.max() ?? 0) - (heights.min() ?? 0) < 1.5,
+                "tiles sharing a row came out at different heights: \(heights)"
+            )
+            // Photos in one row do not overlap, which is what makes "the first frame containing
+            // the point" a sound rule.
+            let ordered = row.sorted { $0.frame.minX < $1.frame.minX }
+            for (left, right) in zip(ordered, ordered.dropFirst()) {
+                #expect(left.frame.maxX <= right.frame.minX + 0.5, "two tiles overlap")
+            }
+        }
+        // A portrait photo is narrower than a landscape one standing beside it.
+        let byUid = Dictionary(uniqueKeysWithValues: tiles.map { ($0.uid, $0.frame) })
+        if let landscape = byUid["a1"], let portrait = byUid["a4"] {
+            #expect(
+                portrait.width / portrait.height < landscape.width / landscape.height,
+                "the tiles were cropped to one shape instead of keeping their own"
+            )
+        }
+    }
+
+    @Test("a tap on a measured tile opens that picture")
     func tileOpensThePicture() {
-        let tiles = strip()
+        let tiles = measuredTiles(of: photos([(3, 2), (3, 2), (3, 2), (2, 3), (1, 1)]))
+        #expect(!tiles.isEmpty, "no measured tiles: the card reported nothing to route over")
         for tile in tiles {
             let centre = CGPoint(x: tile.frame.midX, y: tile.frame.midY)
-            let destination = MemoCardTap.destination(at: centre, tiles: tiles)
-            #expect(destination == .attachment(uid: tile.uid))
+            #expect(MemoCardTap.destination(at: centre, tiles: tiles) == .attachment(uid: tile.uid))
+        }
+    }
+
+    /// A tap on the eighth photo of a memo has to reach the eighth photo. The strip could not be
+    /// asked this question — it only ever drew three.
+    @Test("the photo a tap opens is the photo under the finger, at any count")
+    func everyPhotoIsItsOwnTarget() {
+        let tiles = measuredTiles(of: photos(Array(repeating: (3, 2), count: 9)))
+        #expect(tiles.count == 9, "the card measured \(tiles.count) of nine photos")
+        for tile in tiles {
+            let inside = CGPoint(x: tile.frame.minX + 2, y: tile.frame.maxY - 2)
+            #expect(MemoCardTap.destination(at: inside, tiles: tiles) == .attachment(uid: tile.uid))
         }
     }
 
     @Test("a tap anywhere else on the card still opens the memo")
     func theRestOpensTheMemo() {
-        let tiles = strip()
+        let tiles = measuredTiles(of: photos([(3, 2), (3, 2), (3, 2), (2, 3), (1, 1)]))
+        let ordered = tiles.sorted {
+            ($0.frame.minY, $0.frame.minX) < ($1.frame.minY, $1.frame.minX)
+        }
+        // A `guard` rather than an index: with no measured tiles this must FAIL, not crash the
+        // whole bundle and take every other suite in the process with it.
+        guard let first = ordered.first?.frame else {
+            #expect(Bool(false), "the card reported no tiles to route around")
+            return
+        }
+        let lowest = tiles.map(\.frame.maxY).max() ?? 0
         let elsewhere = [
-            CGPoint(x: 60, y: 24),  // the name and the time
-            CGPoint(x: 200, y: 80),  // the body text
-            CGPoint(x: 40, y: 300),  // the tag row, below the photos
-            CGPoint(x: tiles[0].frame.maxX + 4, y: tiles[0].frame.midY),  // the gap between tiles
-            CGPoint(x: 4, y: tiles[0].frame.midY),  // the card's inset, beside the first tile
+            CGPoint(x: 60, y: 4),  // the name and the time, above everything
+            CGPoint(x: 200, y: max(0, first.minY - 6)),  // the body text
+            CGPoint(x: 40, y: lowest + 20),  // the tag row, below the last row of photos
+            CGPoint(x: 4, y: first.midY),  // the card's inset, beside the first tile
         ]
         for point in elsewhere {
-            #expect(MemoCardTap.destination(at: point, tiles: tiles) == .memo)
+            #expect(
+                MemoCardTap.destination(at: point, tiles: tiles) == .memo,
+                "\(point) did not open the memo"
+            )
         }
     }
 
@@ -504,6 +589,87 @@ struct MemoCardTapTests {
     @Test("a card with no measured tiles is one target, as it always was")
     func unmeasuredCardOpensTheMemo() {
         #expect(MemoCardTap.destination(at: CGPoint(x: 100, y: 140), tiles: []) == .memo)
+    }
+
+    // MARK: - what a tap on a VIDEO means
+
+    /// Tapping a video used to open the viewer, which showed a still of the video with a play
+    /// button on it: the picture of the video, and a second tap needed before anything moved.
+    /// A tap on a video means play it.
+    @Test("a video tile plays and a photo tile opens the viewer — over the card's own geometry")
+    func videoPlaysAndPhotoOpens() {
+        var attachments = photos([(3, 2), (16, 9), (3, 2)])
+        attachments[1].mime = "video/quicktime"
+        attachments[1].webURL = URL(string: "https://memos.example.invalid/w.mp4")
+        let tiles = measuredTiles(of: attachments)
+        #expect(tiles.count == 3)
+
+        func tapped(_ tile: MemoCardTap.Tile) -> MemoCardTap.Destination {
+            MemoCardTap.destination(
+                at: CGPoint(x: tile.frame.midX, y: tile.frame.midY), tiles: tiles
+            )
+        }
+        for tile in tiles {
+            if tile.uid == "a2" {
+                #expect(tapped(tile) == .playback(uid: "a2"), "a video tile opened the pager")
+            } else {
+                #expect(
+                    tapped(tile) == .attachment(uid: tile.uid),
+                    "a photo tile started playing something"
+                )
+            }
+        }
+        // And the two are genuinely different answers, not two spellings of one.
+        #expect(MemoCardTap.Destination.playback(uid: "a2") != .attachment(uid: "a2"))
+    }
+
+    /// Which attachments that routing applies to, case by case. A video with nothing streamable
+    /// has nothing to play, so it falls back to the viewer, where its poster is at least something.
+    @Test("only a video with a streamable rendition plays on tap")
+    func playsIsAboutTheStream() {
+        let playable = MemoAttachment(
+            uid: "v1",
+            mime: "video/quicktime",
+            status: .ready,
+            webURL: URL(string: "https://memos.example.invalid/w.mp4"),
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+        let unstreamable = MemoAttachment(
+            uid: "v2",
+            mime: "video/quicktime",
+            status: .ready,
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+        let photo = MemoAttachment(
+            uid: "a1",
+            mime: "image/jpeg",
+            status: .ready,
+            thumbnailURL: URL(string: "https://memos.example.invalid/t")
+        )
+        #expect(MemoCardTap.plays(playable))
+        #expect(!MemoCardTap.plays(unstreamable))
+        #expect(!MemoCardTap.plays(photo))
+    }
+
+    /// The other half of the rule, and the half that must NOT change: inside the viewer a video
+    /// page reached by swiping keeps its poster and its play button. Autoplaying something
+    /// somebody swiped past is the surprising thing there, and the page still carries both the
+    /// still it shows and the stream it waits to be asked for.
+    @Test("a video page inside the viewer still waits to be asked")
+    func inViewerVideoStillWaits() {
+        let video = MemoAttachment(
+            uid: "v1",
+            mime: "video/quicktime",
+            status: .ready,
+            thumbnailURL: URL(string: "https://memos.example.invalid/t"),
+            webURL: URL(string: "https://memos.example.invalid/w.mp4"),
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+        let pages = MediaViewerPresentation.pages(for: [video])
+        #expect(pages.count == 1)
+        #expect(pages[0].kind == .video)
+        #expect(pages[0].stillURL != nil, "the page lost the poster it shows until it is tapped")
+        #expect(pages[0].playbackURL != nil)
     }
 }
 

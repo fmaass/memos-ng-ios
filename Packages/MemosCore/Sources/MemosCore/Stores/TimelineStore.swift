@@ -247,6 +247,46 @@ public final class TimelineStore {
         }
     }
 
+    /// Re-reads ONE memo from the server and applies it to the loaded list.
+    ///
+    /// This is the read half of the tier-ready refresh: a memo posted a moment ago carries
+    /// attachments the media worker has not derived yet, and nothing on the client can produce
+    /// those tiers — only asking again can. It goes through the same `apply` an edit does, so a
+    /// re-read lands in the card that is already on screen instead of appearing as a new row.
+    ///
+    /// SEAM (phase 5c): this whole polling arrangement is the INTERIM. `GET /api/events` (SSE)
+    /// already pushes media-ready events to the SPA; when the app subscribes to it, the poll in
+    /// `TierReadinessPoll` goes and this method becomes the handler for one event.
+    ///
+    /// A failure is deliberately NOT reported into `lastError`: this runs in the background,
+    /// behind a screen nobody asked to refresh, and a blip on a poll must not paint an error
+    /// banner over a timeline that is working. A 401 is different — it ends the session wherever
+    /// it happens — so that one is still handed on.
+    @discardableResult
+    public func refreshMemo(
+        uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        do {
+            let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
+            switch response {
+            case .ok(let ok):
+                apply(Memo(try ok.body.json, baseURL: baseURL))
+                return true
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                throw APIError.fromStatus(statusCode)
+            }
+        } catch {
+            let apiError =
+                (error as? APIError) ?? .unexpected(description: error.localizedDescription)
+            if apiError == .unauthorized { await onUnauthorized() }
+            return false
+        }
+    }
+
     /// Ticks or unticks the Nth rendered checkbox of a memo.
     ///
     /// This one IS optimistic, and it is the only one: a checkbox that waits for a round trip

@@ -227,18 +227,32 @@ struct AttachmentSlotTests {
         #expect(unmeasured.measuredAspectRatio == nil)
     }
 
-    /// The browse surface is deliberately the other way round: tiles crop so a row lines up.
-    @Test("the timeline still crops, because a row that does not line up is not a row")
-    func timelineTilesStillFill() {
+    /// The two-up is the ONE timeline arrangement that still crops: two photos at two different
+    /// ratios beside each other read as a mistake, so they share a square. A lone photo and a
+    /// photo in a justified row are shown whole, at the shape the server measured — the SPA's
+    /// rule, and the reason the strip of square crops is gone.
+    @Test("only the two-up crops; a lone photo and a justified tile keep their own shape")
+    func timelineSlotsPerArrangement() {
         #expect(MemoPresentation.gridSlot.contentMode == .fill)
         #expect(MemoPresentation.gridSlot.aspectRatio == 1)
-        let solo = MemoPresentation.timelineSlot(for: attachment(width: 3000, height: 4000))
-        #expect(solo.contentMode == .fill)
+
+        let solo = MemoPresentation.soloSlot(for: attachment(width: 3000, height: 4000))
+        #expect(solo.contentMode == .fit, "a lone photo is still being cropped on the timeline")
         #expect(abs(solo.aspectRatio - 0.75) < 0.0001)
-        // An unmeasured tile is square there, which is what a grid wants — not 4:3.
+
+        // Nothing to take the shape of: the web app's 4:3 fallback, cropped into. Guessing
+        // "square" would be a shape the client invented.
+        let unmeasured = MemoPresentation.soloSlot(for: attachment(width: nil, height: nil))
+        #expect(unmeasured.contentMode == .fill)
+        #expect(abs(unmeasured.aspectRatio - 4.0 / 3.0) < 0.0001)
+
+        // A justified tile's box IS its own ratio — the row solver allotted it that box.
+        let justified = MemoPresentation.justifiedSlot(for: attachment(width: 1600, height: 900))
+        #expect(abs(justified.aspectRatio - 16.0 / 9.0) < 0.0001)
         #expect(
-            MemoPresentation.timelineSlot(for: attachment(width: nil, height: nil))
-                .aspectRatio == 1)
+            MemoPresentation.justifiedSlot(for: attachment(width: nil, height: nil))
+                .aspectRatio == 1
+        )
     }
 
     @Test("a measurement the server did not make is reported as missing, not as a square")

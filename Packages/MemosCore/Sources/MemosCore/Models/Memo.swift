@@ -15,6 +15,24 @@ public enum AttachmentStatus: String, Sendable, Equatable, Codable {
     case failed
 }
 
+/// What a tile should SAY about an attachment, as three states rather than two.
+///
+/// The server produces the derived tiers after the memo exists, so a memo posted a moment ago
+/// carries attachments that are real, intact and simply not rendered yet. The app used to know
+/// only "there is a picture" and "there is no picture", so those attachments got the same warning
+/// triangle a genuinely broken upload gets — the first real post showed a card of "!" marks.
+///
+/// Waiting and failed are different facts about the world and they are projected apart here, once,
+/// so the view and the refresh that ends the waiting cannot disagree about which is which.
+public enum AttachmentReadiness: String, Sendable, Equatable {
+    /// The tiers exist; the tile can fetch a picture.
+    case ready
+    /// The server has not finished with it. Nothing is wrong.
+    case waiting
+    /// The server gave up on this file. Nothing more is coming.
+    case failed
+}
+
 /// A media file hanging off a memo, with the derived tiers the server already produced.
 public struct MemoAttachment: Sendable, Equatable, Identifiable {
     public var uid: String
@@ -71,6 +89,17 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
 
     /// Aspect ratio for layout; a missing dimension means "assume a square" rather than "crash".
     public var aspectRatio: Double { measuredAspectRatio ?? 1 }
+
+    /// The three-way projection every surface reads. `uploading` is grouped with the server-side
+    /// stages deliberately: from a reader's point of view a file still on its way and a file the
+    /// worker has not reached yet are the same thing — something is coming, nothing is broken.
+    public var readiness: AttachmentReadiness {
+        switch status {
+        case .ready: .ready
+        case .failed: .failed
+        case .uploading, .pending, .processing: .waiting
+        }
+    }
 }
 
 public struct Memo: Sendable, Equatable, Identifiable {
@@ -114,6 +143,10 @@ public struct Memo: Sendable, Equatable, Identifiable {
 
     public var id: String { uid }
     public var isArchived: Bool { archivedAt != nil }
+
+    /// Whether anything on this memo is still being derived — the condition the tier-ready refresh
+    /// runs under, and the condition it stops on.
+    public var isAwaitingTiers: Bool { attachments.contains { $0.readiness == .waiting } }
 }
 
 // MARK: - mapping from the generated types

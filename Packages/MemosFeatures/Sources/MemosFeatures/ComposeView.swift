@@ -46,6 +46,32 @@ public struct ComposeSubmission: Sendable, Equatable {
 ///
 /// Photos and videos are attached from the LIBRARY, not captured in the app: something shot with
 /// the system camera moments ago is already there, and an in-app stills camera would re-encode it.
+/// The destructive action an edit sheet offers, and the question it asks first.
+///
+/// It is handed IN rather than owned for the same reason the save is: the sheet has no store and no
+/// client, and one that reached for them would be untestable for exactly that reason. The stage
+/// belongs to `MemoEditFlow`; this carries only what the sheet needs to draw — whether the question
+/// is up — and where to send the answer.
+///
+/// Mine-gating is inherent rather than re-checked here: the only thing that hands one of these over
+/// is the memo's own screen, which opens the sheet solely for `MemoDetailPresentation.editMode`,
+/// and that is nil for a memo that is not mine.
+public struct ComposeDelete {
+    public var isAsking: Bool
+    /// `@MainActor` spelled out: the sink is a method on the screen that presented the sheet, and a
+    /// method reference cannot be converted to a non-isolated function type without losing the
+    /// isolation it actually has.
+    public var send: @MainActor (MemoEditFlow.DeleteEvent) -> Void
+
+    public init(
+        isAsking: Bool,
+        send: @escaping @MainActor (MemoEditFlow.DeleteEvent) -> Void
+    ) {
+        self.isAsking = isAsking
+        self.send = send
+    }
+}
+
 public struct ComposeView: View {
     public enum Mode: Equatable {
         case create
@@ -56,6 +82,9 @@ public struct ComposeView: View {
 
     let mode: Mode
     let submit: (ComposeSubmission) async -> Bool
+    /// The destructive action, on an edit that has one. `nil` everywhere else — a new memo has
+    /// nothing to delete, and neither has a memo that is not mine (see `ComposeDelete`).
+    let delete: ComposeDelete?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -78,8 +107,13 @@ public struct ComposeView: View {
     @State private var detent: PresentationDetent = .medium
     @FocusState private var editorFocused: Bool
 
-    public init(mode: Mode, submit: @escaping (ComposeSubmission) async -> Bool) {
+    public init(
+        mode: Mode,
+        delete: ComposeDelete? = nil,
+        submit: @escaping (ComposeSubmission) async -> Bool
+    ) {
         self.mode = mode
+        self.delete = delete
         self.submit = submit
         _content = State(
             initialValue: {
@@ -202,6 +236,9 @@ public struct ComposeView: View {
                 metaRow
             } else {
                 MemoDateRow(date: $date, clearable: false)
+                if let delete {
+                    deleteRow(delete)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -239,6 +276,46 @@ public struct ComposeView: View {
             pills(.bare)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The one destructive thing this sheet can do, and the question it asks first.
+    ///
+    /// An ALERT rather than a confirmation dialog, for the reason the sign-out flow discovered the
+    /// hard way: the dialog rendered as a glass card that dimmed nothing and put its Cancel button
+    /// neither on screen nor in the accessibility tree, so the only visible answer to a
+    /// destructive question was "yes". An alert dims, shows both answers, and hands both to
+    /// VoiceOver.
+    ///
+    /// The alert lives HERE, inside the sheet, rather than on the screen that presented it: an
+    /// alert attached to a view with a sheet over it is the classic way to make a presentation
+    /// silently never appear.
+    private func deleteRow(_ delete: ComposeDelete) -> some View {
+        Button(role: .destructive) {
+            delete.send(.tapped)
+        } label: {
+            Label("Delete memo", systemImage: "trash")
+                .font(.footnote.weight(.medium))
+        }
+        .buttonStyle(.borderless)
+        // The destructive role reddens the WORDS; the glyph beside them is drawn in the inherited
+        // tint, which is this app's green — so the one row that should read as dangerous had a
+        // friendly icon on it.
+        .tint(.red)
+        .alert(
+            "Delete this memo?",
+            isPresented: .init(
+                get: { delete.isAsking },
+                set: { if !$0 { delete.send(.cancelled) } }
+            )
+        ) {
+            Button("Delete", role: .destructive) { delete.send(.confirmed) }
+            Button("Cancel", role: .cancel) { delete.send(.cancelled) }
+        } message: {
+            Text(
+                "It is removed from the server, with anything attached to it."
+                    + " This cannot be undone."
+            )
+        }
     }
 
     private func pills(_ verbosity: ComposeMetaRow.Verbosity) -> some View {

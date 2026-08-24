@@ -155,6 +155,16 @@ enum PixelGrid {
     }
 }
 
+/// One value written by a view's own callback and read by the assertion afterwards.
+///
+/// No lock: everything in this bundle is on the main actor, which is also where SwiftUI calls back.
+@MainActor
+final class Box<Value> {
+    var value: Value
+
+    init(_ value: Value) { self.value = value }
+}
+
 /// A memo built for a test, with only the fields the assertion cares about spelled out.
 @MainActor
 enum MemoFixture {

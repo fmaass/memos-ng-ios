@@ -21,11 +21,21 @@ struct MemoCard: View {
     let mediaZoom: Namespace.ID?
     let openMemo: () -> Void
     let openAttachment: (MemoAttachment) -> Void
+    /// A video tapped directly. It plays; it does not open the pager on its own poster.
+    let openPlayback: (MemoAttachment) -> Void
+    /// Publishes the tiles the card has MEASURED, as the router sees them.
+    ///
+    /// `nil` everywhere in the app — nothing in a running card needs them. It exists because the
+    /// routing rule is only worth anything over the frames this view really reports: a test that
+    /// computes tile rectangles for itself keeps passing after the reporting is deleted, which is
+    /// exactly the hole this closes (`MemoCardTapTests`).
+    let reportTiles: (([MemoCardTap.Tile]) -> Void)?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
-    @ScaledMetric(relativeTo: .body) private var stripHeight = DesignTokens.Metric.photoStrip
+    @ScaledMetric(relativeTo: .body) private var pairHeight = DesignTokens.Metric.photoPair
     @ScaledMetric(relativeTo: .body) private var soloHeight = DesignTokens.Metric.photoSolo
+    @ScaledMetric(relativeTo: .body) private var rowHeight = DesignTokens.Metric.photoRow
     /// Where each drawn tile ended up, in the card's own coordinate space. Kept per card rather
     /// than globally so scrolling the timeline does not rewrite it on every frame.
     @State private var tileFrames: [String: CGRect] = [:]
@@ -38,12 +48,16 @@ struct MemoCard: View {
         memo: Memo,
         mediaZoom: Namespace.ID? = nil,
         openMemo: @escaping () -> Void = {},
-        openAttachment: @escaping (MemoAttachment) -> Void = { _ in }
+        openAttachment: @escaping (MemoAttachment) -> Void = { _ in },
+        openPlayback: @escaping (MemoAttachment) -> Void = { _ in },
+        reportTiles: (([MemoCardTap.Tile]) -> Void)? = nil
     ) {
         self.memo = memo
         self.mediaZoom = mediaZoom
         self.openMemo = openMemo
         self.openAttachment = openAttachment
+        self.openPlayback = openPlayback
+        self.reportTiles = reportTiles
     }
 
     var body: some View {
@@ -70,13 +84,24 @@ struct MemoCard: View {
         // Declared on the wrapper OUTSIDE the gesture and the tiles, so both resolve the same
         // space: a named space is looked up in a view's ancestors.
         .coordinateSpace(.named(Self.tapSpace))
+        // Published from the same `tileFrames` the router reads, so an observer cannot see a set
+        // of tiles the router does not have.
+        .onChange(of: tileFrames) { _, _ in reportTiles?(tiles) }
         // A gesture carries no meaning to VoiceOver, so the card says what it is and what it does.
         // The combined element is what a single card-wide button used to produce.
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(.default, openMemo)
         .accessibilityActions {
-            let openable = memo.attachments.first { MediaViewerPresentation.isViewable($0) }
+            // A gesture-routed card has no targets a screen reader can find, so the two things a
+            // tap can do are offered by name. The video one is separate because it does something
+            // different: it plays, where the photo one opens a viewer.
+            if let playable = memo.attachments.first(where: { MemoCardTap.plays($0) }) {
+                Button("Play video") { openPlayback(playable) }
+            }
+            let openable = memo.attachments.first {
+                MediaViewerPresentation.isViewable($0) && !MemoCardTap.plays($0)
+            }
             if let openable {
                 Button("Open photo") { openAttachment(openable) }
             }
@@ -85,12 +110,18 @@ struct MemoCard: View {
 
     /// The drawn tiles, in card order, as the router sees them. A tile that has not reported its
     /// frame yet is simply not a target — the memo is, which is what the whole card did before.
+    ///
+    /// Every attachment is drawn now (justified rows hide nothing behind a count), so the router
+    /// sees every one of them, wherever the solver put it: the frames come from the tiles
+    /// themselves, so a change of arrangement needs no change here.
     private var tiles: [MemoCardTap.Tile] {
-        let layout = MemoCardPresentation.photoLayout(for: memo.attachments.count)
-        let shown = MemoCardPresentation.tileCount(for: layout)
-        return memo.attachments.prefix(shown).compactMap { attachment in
+        memo.attachments.compactMap { attachment in
             tileFrames[attachment.uid].map {
-                MemoCardTap.Tile(uid: attachment.uid, frame: $0)
+                MemoCardTap.Tile(
+                    uid: attachment.uid,
+                    frame: $0,
+                    plays: MemoCardTap.plays(attachment)
+                )
             }
         }
     }
@@ -100,12 +131,22 @@ struct MemoCard: View {
         case .memo:
             openMemo()
         case .attachment(let uid):
-            guard let attachment = memo.attachments.first(where: { $0.uid == uid }) else {
+            guard let attachment = attachment(uid) else {
                 openMemo()
                 return
             }
             openAttachment(attachment)
+        case .playback(let uid):
+            guard let attachment = attachment(uid) else {
+                openMemo()
+                return
+            }
+            openPlayback(attachment)
         }
+    }
+
+    private func attachment(_ uid: String) -> MemoAttachment? {
+        memo.attachments.first { $0.uid == uid }
     }
 
     /// At an accessibility text size a row of avatar, name and pill cannot share a line without
@@ -160,16 +201,17 @@ struct MemoCard: View {
 
     @ViewBuilder
     private var photos: some View {
-        let layout = MemoCardPresentation.photoLayout(for: memo.attachments.count)
-        switch layout {
+        switch MemoCardPresentation.photoLayout(for: memo.attachments.count) {
         case .none:
             EmptyView()
         case .solo:
             AttachmentThumbnail(
                 attachment: memo.attachments[0],
                 tier: .mobile,
-                slot: MemoPresentation.timelineSlot(for: memo.attachments[0])
+                slot: MemoPresentation.soloSlot(for: memo.attachments[0])
             )
+            // A CAP, not a height: a photo shorter than this stands at its own size, and a tall
+            // one narrows to fit rather than being cropped to it.
             .frame(maxHeight: soloHeight)
             .mediaTapTarget(
                 memo.attachments[0],
@@ -178,24 +220,33 @@ struct MemoCard: View {
                 zoom: mediaZoom
             )
             .padding(.horizontal, DesignTokens.Space.roomy)
-        case .pair, .strip:
+        case .pair:
             HStack(spacing: DesignTokens.Space.snug) {
-                let shown = MemoCardPresentation.tileCount(for: layout)
-                ForEach(Array(memo.attachments.prefix(shown).enumerated()), id: \.element.uid) {
-                    index, attachment in
+                ForEach(memo.attachments) { attachment in
+                    AttachmentThumbnail(attachment: attachment, slot: MemoPresentation.gridSlot)
+                        .mediaTapTarget(
+                            attachment,
+                            in: $tileFrames,
+                            space: Self.tapSpace,
+                            zoom: mediaZoom
+                        )
+                }
+            }
+            .frame(maxHeight: pairHeight)
+            .padding(.horizontal, DesignTokens.Space.roomy)
+        case .justified:
+            // Every photo, each at its own ratio, in rows that fill the card exactly. No "+N", no
+            // horizontal scroller: what the memo holds is what the card shows.
+            JustifiedRowsLayout(
+                ratios: JustifiedGallery.ratios(of: memo.attachments),
+                targetHeight: rowHeight,
+                gap: DesignTokens.Space.tight
+            ) {
+                ForEach(memo.attachments) { attachment in
                     AttachmentThumbnail(
                         attachment: attachment,
-                        slot: MemoPresentation.gridSlot
+                        slot: MemoPresentation.justifiedSlot(for: attachment)
                     )
-                    .overlay {
-                        if case .strip(let overflow) = layout, overflow > 0,
-                            index == shown - 1
-                        {
-                            overflowBadge(overflow)
-                        }
-                    }
-                    // The badge tile is a target like any other: it opens the viewer at the
-                    // third picture, and the ones it counts are a swipe away from there.
                     .mediaTapTarget(
                         attachment,
                         in: $tileFrames,
@@ -204,21 +255,8 @@ struct MemoCard: View {
                     )
                 }
             }
-            .frame(maxHeight: stripHeight)
             .padding(.horizontal, DesignTokens.Space.roomy)
         }
-    }
-
-    private func overflowBadge(_ overflow: Int) -> some View {
-        ZStack {
-            Rectangle().fill(.black.opacity(0.45))
-            Text("+\(overflow)")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-                .minimumScaleFactor(0.5)
-        }
-        .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
-        .accessibilityLabel("\(overflow) more")
     }
 
     private var tags: some View {

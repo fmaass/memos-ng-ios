@@ -71,13 +71,31 @@ public enum MemoPresentation {
         )
     }
 
-    /// A memo with one photo on the timeline: the picture's own shape, cropped to fill it.
-    public static func timelineSlot(for attachment: MemoAttachment) -> AttachmentSlot {
+    /// A memo with ONE photo on the timeline: the picture's own shape, whole.
+    ///
+    /// A lone photo reads as a photo rather than as a tile, so nothing is cut off it — the card
+    /// takes the shape the server measured and the card's own height cap is what stops a very tall
+    /// one from taking the whole screen (it narrows instead of losing its top and bottom).
+    ///
+    /// An UNMEASURED one is the exception, and the same exception the web app makes: there is no
+    /// shape to take, so it goes in a 4:3 box and crops into it. Guessing "square" for a photo
+    /// nobody measured would be a shape invented by the client.
+    public static func soloSlot(for attachment: MemoAttachment) -> AttachmentSlot {
+        guard let ratio = attachment.measuredAspectRatio else {
+            return AttachmentSlot(aspectRatio: fallbackAspectRatio, contentMode: .fill)
+        }
+        return AttachmentSlot(aspectRatio: ratio, contentMode: .fit)
+    }
+
+    /// A photo in a justified row: its own proportions, because that is what the row solver
+    /// allotted it. `fill` rather than `fit` only so a rounded fraction of a point cannot leave a
+    /// hairline of blur down one edge — the box IS the picture's shape, so nothing is cropped.
+    public static func justifiedSlot(for attachment: MemoAttachment) -> AttachmentSlot {
         AttachmentSlot(aspectRatio: attachment.aspectRatio, contentMode: .fill)
     }
 
     /// A tile in a row of tiles. Square and cropped, because a row that does not line up is not
-    /// a row.
+    /// a row. This is the two-up, which is the one arrangement that still crops.
     public static let gridSlot = AttachmentSlot(aspectRatio: 1, contentMode: .fill)
 
     static let fallbackAspectRatio = 4.0 / 3.0
