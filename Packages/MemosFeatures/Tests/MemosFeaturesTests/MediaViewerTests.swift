@@ -764,8 +764,14 @@ struct MediaViewerLoadingTests {
         let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
         let url = try #require(page.stillURL)
 
-        let cache = URLCache.shared
-        cache.memoryCapacity = max(cache.memoryCapacity, 4 * 1024 * 1024)
+        // A cache of this test's OWN, handed to the page, and memory-only so nothing outlives the
+        // run. Seeding the default instead — a process-wide singleton — made the result depend on
+        // which cache the composition root won at launch, on whatever else in the bundle was
+        // touching that singleton in parallel, and on whether `AsyncImage`'s load raced the task.
+        // None of those can reach a cache nobody else holds a reference to, so a failure here now
+        // means the page did not evict, which is the only thing this test is for. What keeps the
+        // page's DEFAULT honest is the test below.
+        let cache = URLCache(memoryCapacity: 4 * 1024 * 1024, diskCapacity: 0, directory: nil)
         let request = URLRequest(url: url)
         let response = try #require(
             HTTPURLResponse(
@@ -784,7 +790,9 @@ struct MediaViewerLoadingTests {
 
         let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
         window.rootViewController = UIHostingController(
-            rootView: MediaViewerPage(page: page, onZoomChange: { _ in }, play: { _ in })
+            rootView: MediaViewerPage(
+                page: page, onZoomChange: { _ in }, play: { _ in }, cache: cache
+            )
         )
         window.makeKeyAndVisible()
         window.layoutIfNeeded()
@@ -794,8 +802,30 @@ struct MediaViewerLoadingTests {
             try await Task.sleep(for: .milliseconds(50))
             dropped = cache.cachedResponse(for: request) == nil
         }
-        cache.removeCachedResponse(for: request)
         window.isHidden = true
         #expect(dropped, "the page never dropped the entry whose signature had lapsed")
+    }
+
+    /// What the test above deliberately steps around: the cache the page reaches for when nobody
+    /// hands it one, and whether evicting from it means anything.
+    ///
+    /// Asserted by IDENTITY rather than by storing and looking. The media session's cache is
+    /// disk-backed, and `storeCachedResponse` on a disk-backed `URLCache` lands asynchronously —
+    /// a seed-then-read test of it is a timing test wearing a correctness test's clothes, which
+    /// is the thing this whole rework is removing. Identity has no timing.
+    @Test("the page's default cache is the one the media session fetches through")
+    func evictionDefaultsToTheMediaSessionCache() throws {
+        var attachment = MediaViewerPageTests.image("evict-default")
+        attachment.previewURL = MediaViewerPageTests.url("evict-default", "mobile")
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+
+        // The default the memberwise initialiser applies — production passes no cache at all.
+        let unconfigured = MediaViewerPage(page: page, onZoomChange: { _ in }, play: { _ in })
+        #expect(unconfigured.cache === MediaSession.shared.cache)
+
+        // And the half that makes evicting from it worth doing: the session the images are
+        // actually fetched through holds that very object. Evicting out of any other cache is a
+        // no-op that reads exactly like an eviction.
+        #expect(MediaSession.shared.session.configuration.urlCache === MediaSession.shared.cache)
     }
 }

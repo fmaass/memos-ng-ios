@@ -1,148 +1,181 @@
 import Foundation
 
-/// Where the device credential lives, and how it got there from where it used to live.
+/// Where the device credential lives, which namespaces it is still being collected from, and how
+/// all three are named on a build that carries no team id.
 ///
-/// The credential moved into the app group's keychain namespace when the entitlements arrived, so
-/// that the app and its extensions can read one token instead of each holding their own. A device
-/// that was signed in BEFORE that move still has its token in the default namespace, and a person
-/// who is already signed in must not be signed out by an app update — hence the migrating store
-/// below rather than a straight switch.
+/// There have been three homes, and a device can be carrying its token in any of them:
+///
+/// 1. `<team>.live.discomarder.memosng` — the application-identifier group, where a sign-in wrote
+///    before any entitlement existed.
+/// 2. `group.live.discomarder.memosng` — the app group, taken as a keychain group so "the app and
+///    its extensions read one token". That was the mistake this round closes: on iOS an app group
+///    identifier IS a keychain access group, so the share extension — which needs the group's
+///    CONTAINER for the outbox files and the identity JSON — could read the token as well.
+/// 3. `$(AppIdentifierPrefix)live.discomarder.memosng.credentials` — a group named in
+///    `keychain-access-groups` on the APP target and nowhere else. The extension's entitlements
+///    do not contain it, so the extension cannot name it and cannot reach it.
+///
+/// Nobody is signed out to get from one to the next: whichever namespace still holds the token,
+/// the first read moves it home (see `CredentialVault`).
+///
+/// **What only a signed device build can prove.** The simulator does not enforce keychain access
+/// groups, so no test that runs in it can show that the share extension is refused. What runs
+/// here is the arithmetic — that the token's home is never the app group, that the three names
+/// are derived correctly from what the probe reports, and that the entitlement files say what
+/// they must (the gate greps the generated pair). The isolation itself is a device ceremony:
+/// install a signed build, sign in, and have the share extension attempt a read of
+/// `service = live.discomarder.memosng` in the app group and in the credentials group. The first
+/// must find nothing; the second must fail with `errSecMissingEntitlement`.
 public enum DeviceCredentials {
-    /// The keychain service both namespaces use. Unchanged by the move: only the access group is
-    /// new, and changing both at once would make the old items unfindable.
+    /// The keychain service every namespace uses. Unchanged by both moves: only the access group
+    /// changes, and changing both at once would make the older items unfindable.
     public static let service = "live.discomarder.memosng"
 
-    /// The app group, which doubles as the keychain access group. An app group identifier is used
-    /// verbatim — unlike a bare access group, it takes no team-id prefix, which is what lets this
-    /// repository carry the entitlement without carrying a team id.
-    public static let accessGroup = "group.live.discomarder.memosng"
+    /// The app's bundle identifier, which is also the tail of its application-identifier access
+    /// group — the first home, above.
+    public static let bundleIdentifier = "live.discomarder.memosng"
 
-    /// The store the app signs in through: the shared namespace, with the pre-entitlement one
-    /// behind it for as long as a device might still be carrying a token there.
+    /// The app group. It is a keychain access group too, which is why the token is not in it.
+    public static let appGroup = "group.live.discomarder.memosng"
+
+    /// The tail of the app-only group the token lives in now. The team id enters at build time,
+    /// through `$(AppIdentifierPrefix)` in the entitlement, and never at rest in this repository.
+    public static let credentialsGroupTail = "live.discomarder.memosng.credentials"
+
+    /// The ONE vault in the process.
     ///
-    /// The legacy namespace is addressed by NAME (`KeychainAccessGroup.appDefault`), never by
-    /// omission. When that name cannot be resolved — or turns out to be the shared group, so there
-    /// is no second namespace at all — the shared store is the whole story and there is nothing to
-    /// migrate. An unnameable namespace is left alone; it is never addressed with a query that
-    /// names no group, because such a query reaches into every group the app can see.
-    public static func keychain() -> any CredentialStore {
-        let shared = Keychain(service: service, accessGroup: accessGroup)
-        guard let appDefault = KeychainAccessGroup.appDefault, appDefault != accessGroup else {
-            return shared
-        }
-        return MigratingCredentialStore(
-            primary: shared,
-            legacy: Keychain(service: service, accessGroup: appDefault)
+    /// Serialization is a property of the object: two vaults over the same keychain would
+    /// serialize nothing, and the session's wipe and the outbox's read have to be two calls on
+    /// the same one. Everything that stores a credential in this app comes through here.
+    public static let shared: any CredentialStore = CredentialVault(resolving: { namespaces() })
+
+    public static func keychain() -> any CredentialStore { shared }
+
+    /// The three namespaces, as stores.
+    static func namespaces() -> CredentialNamespaces? {
+        guard let plan = plan() else { return nil }
+        return CredentialNamespaces(
+            primary: CredentialNamespace(
+                Keychain(service: service, accessGroup: plan.primary.accessGroup),
+                reach: plan.primary.reach
+            ),
+            legacies: plan.legacies.map {
+                CredentialNamespace(
+                    Keychain(service: service, accessGroup: $0.accessGroup), reach: $0.reach)
+            },
+            // A home that is not the entitlement's own group reads and clears, and refuses to
+            // take a new credential. The alternative — storing it somewhere weaker without
+            // saying so — is a security policy changing itself quietly.
+            homeIsDedicated: plan.dedicatedGroupInEffect
         )
+    }
+
+    /// The plan for THIS build, or nil while the probe will not resolve.
+    static func plan() -> KeychainNamespacePlan? {
+        KeychainAccessGroup.appDefault.flatMap(plan(default:))
+    }
+
+    /// Which of the three namespaces is the token's home, worked out from the one thing this app
+    /// can observe about its own entitlements: the group an unqualified add lands in.
+    ///
+    /// Probing rather than assembling is what lets a repository with no team id name a
+    /// team-prefixed group at all. It also makes the entitlement's presence EVIDENCE rather than
+    /// an assumption: the dedicated group is the default access group exactly when
+    /// `keychain-access-groups` is in effect and names it first, so a probe that reports it has
+    /// proved the entitlement reached the running build.
+    ///
+    /// - Parameter probed: what `KeychainAccessGroup.appDefault` reported.
+    /// - Returns: nil when nothing usable can be named — including the one answer that must never
+    ///   be used, the app group itself.
+    static func plan(default probed: String) -> KeychainNamespacePlan? {
+        guard !probed.isEmpty, probed != appGroup else { return nil }
+        let shared = KeychainNamespacePlan.Namespace(
+            accessGroup: appGroup, reach: .sharedWithExtensions)
+
+        if let prefix = prefix(of: probed, endingWith: credentialsGroupTail) {
+            // The dedicated group IS the default, so the entitlement is in effect on this build.
+            return KeychainNamespacePlan(
+                primary: KeychainNamespacePlan.Namespace(accessGroup: probed, reach: .appOnly),
+                legacies: [
+                    shared,
+                    KeychainNamespacePlan.Namespace(
+                        accessGroup: prefix + bundleIdentifier, reach: .appOnly),
+                ],
+                dedicatedGroupInEffect: true
+            )
+        }
+
+        if let prefix = prefix(of: probed, endingWith: bundleIdentifier) {
+            // No dedicated group in effect — an older build, or a simulator that does not apply
+            // the entitlement. The application-identifier group is the home instead: it is app-only
+            // too (the extension's application identifier is a different one), so the token is
+            // still out of the extension's reach. The dedicated group goes in the legacies, which
+            // is how a device that HAS migrated finds its token again on a build that has not.
+            return KeychainNamespacePlan(
+                primary: KeychainNamespacePlan.Namespace(accessGroup: probed, reach: .appOnly),
+                legacies: [
+                    shared,
+                    KeychainNamespacePlan.Namespace(
+                        accessGroup: prefix + credentialsGroupTail, reach: .appOnly),
+                ],
+                dedicatedGroupInEffect: false
+            )
+        }
+
+        // Some other group is the default. It is one this build is entitled to and it is not the
+        // app group, so the token may live there — but no other name can be derived from it, so
+        // none is claimed.
+        return KeychainNamespacePlan(
+            primary: KeychainNamespacePlan.Namespace(accessGroup: probed, reach: .appOnly),
+            legacies: [shared],
+            dedicatedGroupInEffect: false
+        )
+    }
+
+    /// The part before a trailing `.<tail>`: `"TEAM."` for a device build, `""` when the whole
+    /// string IS the tail — which is what a build with no team prefix reports — and nil when it
+    /// does not end there at all.
+    static func prefix(of group: String, endingWith tail: String) -> String? {
+        if group == tail { return "" }
+        guard group.hasSuffix("." + tail) else { return nil }
+        return String(group.dropLast(tail.count))
     }
 }
 
-/// Two credential namespaces, read newest-first, with whatever is found in the old one moved into
-/// the new one on the way past.
+/// Which access group holds the credential, and which ones are still being emptied into it.
 ///
-/// The migration happens on READ rather than at launch on purpose: a launch-time sweep would have
-/// to run before anything else could touch the keychain, and it would run on every launch forever.
-/// This one costs a second lookup exactly until the first read finds nothing left to move.
-///
-/// Three rules hold it together, and all three exist because of one shipped defect: the token was
-/// written to the shared namespace and instantly deleted again by the very call meant to clear the
-/// OLD one, leaving the device with no stored credential at all. The session did not notice —
-/// it keeps its client in memory — but the outbox reads the keychain on every drain, so from that
-/// moment it refused every capture and never even sent its reachability probe.
-///
-/// 1. The two namespaces are DISJOINT by construction. Both are `Keychain` instances with a named
-///    access group, so no operation on one can match an item in the other. That is what makes the
-///    rest of this safe rather than merely lucky.
-/// 2. Because they are disjoint, the ordering is the SAFE one: write the new value, prove it reads
-///    back, and only then clear the old namespace. A crash in between leaves BOTH copies — which
-///    the next read tidies up — and never neither, so there is no window in which the device is
-///    signed in with nothing stored.
-/// 3. The migration FILLS the shared namespace, it never overwrites it. `add` refuses a duplicate
-///    in one call, so a sign-in racing a migration cannot have its fresh token replaced by the
-///    stale one the migration is carrying.
-public struct MigratingCredentialStore: CredentialStore {
-    private let primary: any CredentialStore
-    private let legacy: any CredentialStore
+/// A value of this type is only ever constructed with a primary no extension can reach and
+/// legacies that are all different from it — the initializer refuses anything else, so a plan
+/// that would put the token where the share extension can read it has no representation.
+struct KeychainNamespacePlan: Equatable, Sendable {
+    struct Namespace: Equatable, Sendable {
+        let accessGroup: String
+        let reach: CredentialReach
 
-    public init(primary: any CredentialStore, legacy: any CredentialStore) {
+        init(accessGroup: String, reach: CredentialReach) {
+            self.accessGroup = accessGroup
+            self.reach = reach
+        }
+    }
+
+    let primary: Namespace
+    let legacies: [Namespace]
+    /// True when the probe PROVED the dedicated app-only group is in effect on this build. False
+    /// is not a fallback to a weaker home for WRITES — see `CredentialNamespaces.homeIsDedicated`
+    /// — it is a device that can still read and still sign out, and cannot sign in.
+    let dedicatedGroupInEffect: Bool
+
+    init?(primary: Namespace, legacies: [Namespace], dedicatedGroupInEffect: Bool) {
+        guard primary.reach == .appOnly, !primary.accessGroup.isEmpty else { return nil }
+        guard !legacies.contains(where: { $0.accessGroup.isEmpty }) else { return nil }
+        // Disjoint by name, which is what makes "a delete in one cannot reach the other" true of
+        // the plan and not only of each query.
+        guard !legacies.contains(where: { $0.accessGroup == primary.accessGroup }) else {
+            return nil
+        }
+        guard Set(legacies.map(\.accessGroup)).count == legacies.count else { return nil }
         self.primary = primary
-        self.legacy = legacy
-    }
-
-    /// A new credential goes to the shared namespace, and the old copy is dropped once the new one
-    /// has PROVED it is there.
-    ///
-    /// The read-back is not defensiveness. `SecItemAdd` answers `errSecSuccess` for an item that
-    /// the very next `SecItemCopyMatching` cannot find when the access group it names is not one
-    /// the build is entitled to — so a store that believed the status code would report a
-    /// credential as saved while the keychain held nothing readable.
-    public func set(_ value: String, for account: String) throws {
-        if (try? Self.write(value, for: account, to: primary)) != nil {
-            // Scoped to the legacy group, so it cannot reach what was just written.
-            try? legacy.remove(account)
-            return
-        }
-        // The shared namespace would not hold it. The app's own namespace is the fallback rather
-        // than the failure: a credential only this app can read is worth strictly more than none,
-        // and it is where a device signed in before the entitlements existed keeps its token
-        // anyway. If neither namespace holds it, THAT is worth throwing — the sign-in says so.
-        try? primary.remove(account)
-        try Self.write(value, for: account, to: legacy)
-    }
-
-    /// Adding is offered on the shared namespace alone. A migration is the only caller, and it has
-    /// no business filling the namespace it is migrating out of.
-    public func add(_ value: String, for account: String) throws -> Bool {
-        try primary.add(value, for: account)
-    }
-
-    public func string(for account: String) throws -> String? {
-        if let value = try primary.string(for: account) {
-            // The leftover a crash between `set`'s write and its delete leaves behind. Dropping it
-            // HERE rather than insisting on it at write time is what lets the write happen first:
-            // the cost of the crash is a stale copy that the next read removes, not a device with
-            // no credential and a forced sign-in.
-            try? legacy.remove(account)
-            return value
-        }
-        guard let migrated = try legacy.string(for: account) else { return nil }
-        // Between the read above and this line another thread may have signed in, and the value in
-        // hand is by definition the older of the two. `add` settles that in ONE keychain call: it
-        // fills an empty namespace and refuses a full one.
-        let filled = (try? primary.add(migrated, for: account)) ?? false
-        if filled, (try? primary.string(for: account)) == migrated {
-            try? legacy.remove(account)
-            return migrated
-        }
-        // Either something newer got there first — in which case the newer value wins and the
-        // stale copy goes — or the shared namespace would not hold it, in which case the only copy
-        // stays exactly where it is.
-        if let newer = (try? primary.string(for: account)) ?? nil {
-            try? legacy.remove(account)
-            return newer
-        }
-        return migrated
-    }
-
-    /// Writes and reads back. A namespace that accepts a value and then cannot return it has not
-    /// stored it, whatever it said at the time.
-    private static func write(
-        _ value: String,
-        for account: String,
-        to store: any CredentialStore
-    ) throws {
-        try store.set(value, for: account)
-        guard try store.string(for: account) == value else {
-            throw CredentialStoreError.notReadableBack(account: account)
-        }
-    }
-
-    /// Sign-out clears BOTH namespaces, whatever happens in either: the whole point of a wipe is
-    /// that nothing is left, so a failure in one half must not skip the other.
-    public func remove(_ account: String) throws {
-        var failure: (any Error)?
-        do { try primary.remove(account) } catch { failure = error }
-        do { try legacy.remove(account) } catch { failure = failure ?? error }
-        if let failure { throw failure }
+        self.legacies = legacies
+        self.dedicatedGroupInEffect = dedicatedGroupInEffect
     }
 }

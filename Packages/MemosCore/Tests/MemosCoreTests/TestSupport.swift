@@ -1,7 +1,7 @@
 import Foundation
 import HTTPTypes
 import MemosAPI
-import MemosCore
+@testable import MemosCore
 import OpenAPIRuntime
 
 /// Substitutes the network, not the client.
@@ -198,7 +198,11 @@ struct StubPresenter: NativeLoginPresenter {
 }
 
 /// A credential store that behaves like the Keychain without needing one.
-final class InMemoryCredentials: CredentialStore, @unchecked Sendable {
+///
+/// It conforms to BOTH seams: `KeychainNamespaceStore`, so it can be one namespace inside a
+/// vault, and `CredentialStore`, so it can be the whole of what a session is given. A synchronous
+/// method satisfies an asynchronous requirement, so there is one implementation, not two.
+final class InMemoryCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [String: String] = [:]
 
@@ -229,7 +233,7 @@ final class InMemoryCredentials: CredentialStore, @unchecked Sendable {
 
 /// A store that accepts nothing — how the app-group namespace behaves on a build whose
 /// entitlement is missing, which is the case the migration has to survive without losing a token.
-final class RefusingCredentials: CredentialStore, @unchecked Sendable {
+final class RefusingCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
     struct Refused: Error {}
 
     private let lock = NSLock()
@@ -263,8 +267,10 @@ final class Counter: @unchecked Sendable {
 /// property it lacked when the token was written to one namespace and deleted by a query that
 /// named none.
 final class KeychainNamespaces: @unchecked Sendable {
-    /// The two groups a device actually has: the app group the extensions share, and the
-    /// `<team id>.<bundle id>` one a pre-entitlement sign-in wrote to.
+    /// The three groups a device actually has: the app-only one the token lives in now, the app
+    /// group the extensions share, and the `<team id>.<bundle id>` one a pre-entitlement sign-in
+    /// wrote to.
+    static let credentials = "ABCDE12345.live.discomarder.memosng.credentials"
     static let shared = "group.live.discomarder.memosng"
     static let appDefault = "ABCDE12345.live.discomarder.memosng"
 
@@ -276,7 +282,9 @@ final class KeychainNamespaces: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [Key: String] = [:]
 
-    func grouped(_ group: String) -> any CredentialStore { Namespace(table: self, group: group) }
+    func grouped(_ group: String) -> any KeychainNamespaceStore {
+        Namespace(table: self, group: group)
+    }
 
     func value(_ group: String, _ account: String) -> String? {
         lock.withLock { items[Key(group: group, account: account)] }
@@ -307,7 +315,7 @@ final class KeychainNamespaces: @unchecked Sendable {
         lock.withLock { items[Key(group: group, account: account)] = nil }
     }
 
-    private struct Namespace: CredentialStore {
+    private struct Namespace: KeychainNamespaceStore {
         let table: KeychainNamespaces
         let group: String
 
@@ -332,7 +340,7 @@ final class KeychainNamespaces: @unchecked Sendable {
 /// A namespace that accepts every write and then has nothing — `SecItemAdd` answering
 /// `errSecSuccess` for an item the next `SecItemCopyMatching` cannot find. It is the only failure
 /// here that a status code does not report, which is why the store has to read back.
-final class ForgetfulCredentials: CredentialStore, @unchecked Sendable {
+final class ForgetfulCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var writes = 0
 
@@ -352,15 +360,15 @@ final class ForgetfulCredentials: CredentialStore, @unchecked Sendable {
 /// The migration reads the old namespace and then acts on what it read, and the interesting
 /// question is what happens when a sign-in lands in that gap. This holds the gap open: the reader
 /// signals `entered` with the stale value already in hand and blocks on `proceed`.
-final class GatedCredentialStore: CredentialStore, @unchecked Sendable {
+final class GatedCredentialStore: KeychainNamespaceStore, @unchecked Sendable {
     let entered = DispatchSemaphore(value: 0)
     let proceed = DispatchSemaphore(value: 0)
 
-    private let wrapped: any CredentialStore
+    private let wrapped: any KeychainNamespaceStore
     private let lock = NSLock()
     private var armed = true
 
-    init(wrapping wrapped: any CredentialStore) { self.wrapped = wrapped }
+    init(wrapping wrapped: any KeychainNamespaceStore) { self.wrapped = wrapped }
 
     func string(for account: String) throws -> String? {
         let value = try wrapped.string(for: account)
@@ -375,6 +383,123 @@ final class GatedCredentialStore: CredentialStore, @unchecked Sendable {
     func add(_ value: String, for account: String) throws -> Bool {
         try wrapped.add(value, for: account)
     }
+    func remove(_ account: String) throws { try wrapped.remove(account) }
+
+    private func takeGate() -> Bool {
+        lock.withLock {
+            guard armed else { return false }
+            armed = false
+            return true
+        }
+    }
+}
+
+/// A namespace that holds what it was given and refuses every write — a build whose entitlement
+/// for this group is missing, which is readable and unwritable. It is here to prove that a writer
+/// whose own write failed deletes NOTHING: the delete works, so a wrongful one would show.
+final class ReadOnlyCredentials: KeychainNamespaceStore, @unchecked Sendable {
+    struct Refused: Error {}
+
+    private let lock = NSLock()
+    private var storage: [String: String]
+
+    init(holding storage: [String: String]) { self.storage = storage }
+
+    func set(_ value: String, for account: String) throws { throw Refused() }
+    func add(_ value: String, for account: String) throws -> Bool { throw Refused() }
+    func string(for account: String) throws -> String? { lock.withLock { storage[account] } }
+    func remove(_ account: String) throws {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
+    }
+
+    func snapshot() -> [String: String] { lock.withLock { storage } }
+}
+
+/// A namespace whose reads FAIL: an item that is there and will not come back — bytes that are
+/// not UTF-8, an item of the wrong class, a status the keychain would not explain. Absence and
+/// corruption are different answers, and this is the second one. It counts its deletions, because
+/// the thing being asserted is usually that there were none.
+final class UnreadableCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
+    struct Unreadable: Error {}
+
+    private let lock = NSLock()
+    private var removals = 0
+
+    func set(_ value: String, for account: String) throws {}
+    func add(_ value: String, for account: String) throws -> Bool { true }
+    func string(for account: String) throws -> String? { throw Unreadable() }
+    func remove(_ account: String) throws { lock.withLock { removals += 1 } }
+
+    var removalCount: Int { lock.withLock { removals } }
+}
+
+/// A store that keeps what it is given and will not let go of it — the sign-out that cannot clear
+/// the device.
+final class UnwipeableCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
+    struct Stuck: Error {}
+
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+
+    func set(_ value: String, for account: String) throws {
+        lock.withLock { storage[account] = value }
+    }
+    func add(_ value: String, for account: String) throws -> Bool {
+        lock.withLock {
+            guard storage[account] == nil else { return false }
+            storage[account] = value
+            return true
+        }
+    }
+    func string(for account: String) throws -> String? { lock.withLock { storage[account] } }
+    func remove(_ account: String) throws { throw Stuck() }
+
+    func snapshot() -> [String: String] { lock.withLock { storage } }
+}
+
+/// A namespace this build has lost the right to look in — `errSecMissingEntitlement`, which is
+/// what a keychain group missing from the signed entitlements answers. It is the one status that
+/// must never be read as "nothing here": the token may be sitting in exactly this namespace.
+final class NotEntitledCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var removals = 0
+
+    func set(_ value: String, for account: String) throws { throw Keychain.Failure.notEntitled }
+    func add(_ value: String, for account: String) throws -> Bool {
+        throw Keychain.Failure.notEntitled
+    }
+    func string(for account: String) throws -> String? { throw Keychain.Failure.notEntitled }
+    func remove(_ account: String) throws { lock.withLock { removals += 1 } }
+
+    var removalCount: Int { lock.withLock { removals } }
+}
+
+/// Stops a namespace's FIRST write halfway, so another operation can be let at it.
+///
+/// The interesting question about a sign-in is what a sign-out arriving mid-way would leave
+/// behind, and the only way to ask it is to hold the sign-in open between its two halves.
+final class GatedWriteCredentials: KeychainNamespaceStore, @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let proceed = DispatchSemaphore(value: 0)
+
+    private let wrapped: any KeychainNamespaceStore
+    private let lock = NSLock()
+    private var armed = true
+
+    init(wrapping wrapped: any KeychainNamespaceStore) { self.wrapped = wrapped }
+
+    func set(_ value: String, for account: String) throws {
+        try wrapped.set(value, for: account)
+        if takeGate() {
+            entered.signal()
+            proceed.wait()
+        }
+    }
+
+    func add(_ value: String, for account: String) throws -> Bool {
+        try wrapped.add(value, for: account)
+    }
+    func string(for account: String) throws -> String? { try wrapped.string(for: account) }
     func remove(_ account: String) throws { try wrapped.remove(account) }
 
     private func takeGate() -> Bool {

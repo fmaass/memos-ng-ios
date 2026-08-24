@@ -330,6 +330,53 @@ PY
 
 s_format() { swift format lint --strict --recursive . ; }
 
+s_entitlements() {
+  # The privilege boundary this app rests on is not in the Swift: it is two generated plists. The
+  # device token lives in a keychain access group the APP declares and the share extension does
+  # not, and an app group identifier is itself a keychain access group — so an extension that
+  # gained a keychain-access-groups entry, or a token left in the app group, would be readable by
+  # the share sheet with nothing in the code to show for it. Checked on the GENERATED files rather
+  # than on project.yml: the artefact is what ships.
+  local rc=0 app="MemosNG.entitlements" ext="MemosShare.entitlements" f
+  for f in "$app" "$ext"; do
+    [ -f "$f" ] || { echo "ENTITLEMENT FAIL: $f was not generated"; return 1; }
+    echo "--- $f"
+    plutil -p "$f"
+  done
+  # Read by INDEX, because the order is the security property: the first entry of
+  # keychain-access-groups is the default access group, and the app writes the token to whichever
+  # group that is. A list whose first entry drifted to the app group would put every new token
+  # where the share extension can read it.
+  local first second
+  first="$(plutil -extract keychain-access-groups.0 raw -o - "$app" 2>/dev/null)"
+  second="$(plutil -extract keychain-access-groups.1 raw -o - "$app" 2>/dev/null)"
+  if [ "$first" = '$(AppIdentifierPrefix)live.discomarder.memosng.credentials' ]; then
+    echo "ENTITLEMENT ok: the credential group is FIRST, so it is the default access group"
+  else
+    echo "ENTITLEMENT FAIL: the first keychain access group is '$first'"; rc=1
+  fi
+  if [ "$second" = 'group.live.discomarder.memosng' ]; then
+    echo "ENTITLEMENT ok: the app group is named as a migration source, after it"
+  else
+    echo "ENTITLEMENT FAIL: the second keychain access group is '$second'"; rc=1
+  fi
+  if grep -q 'keychain-access-groups' "$ext"; then
+    echo "ENTITLEMENT FAIL: $ext declares a keychain access group; the token would be readable"
+    rc=1
+  else
+    echo "ENTITLEMENT ok: the share extension declares no keychain access group"
+  fi
+  # A grep that finds nothing proves nothing on its own: both targets DO carry the app group, so
+  # this is the control that says the two greps above were run against real files.
+  if grep -q 'group.live.discomarder.memosng' "$app" \
+    && grep -q 'group.live.discomarder.memosng' "$ext"; then
+    echo "ENTITLEMENT ok (positive control): both targets declare the app group"
+  else
+    echo "ENTITLEMENT FAIL: positive control missing — the app group is not in both files"; rc=1
+  fi
+  return $rc
+}
+
 s_xcodebuild() {
   xcodebuild test \
     -scheme MemosNG \
@@ -515,6 +562,29 @@ s_deps() {
   else
     echo "DEPRULE FAIL: positive control missing — MemosFeatures does not reference MemosCore"; rc=1
   fi
+  # Every raw Security call lives in ONE file. A delete whose query names no access group matches
+  # items in every group the app can reach, which is how the device credential deleted itself;
+  # confining those calls to Keychain.swift, where the access group is not optional, is what makes
+  # "every query names its group" checkable instead of habitual. Sources only — a test may plant a
+  # corrupt item to prove the wrapper raises on it. Like the dependency rule this is a LITERAL
+  # text grep, so no other source file may carry the string at all, comments included: prose
+  # elsewhere names the statuses in words.
+  echo "--- keychain rule (raw SecItem calls live in Keychain.swift) ---"
+  local strays
+  strays="$(grep -rl 'SecItem' --include='*.swift' Packages/*/Sources Sources \
+    | grep -v '^Packages/MemosCore/Sources/MemosCore/Security/Keychain.swift$')"
+  if [ -n "$strays" ]; then
+    echo "KEYCHAIN FAIL: the Security call prefix appears outside Keychain.swift:"
+    echo "$strays"
+    rc=1
+  else
+    echo "KEYCHAIN ok: no raw SecItem call outside Keychain.swift"
+  fi
+  if grep -q 'SecItemDelete' Packages/MemosCore/Sources/MemosCore/Security/Keychain.swift; then
+    echo "KEYCHAIN ok (positive control): Keychain.swift is where SecItemDelete lives"
+  else
+    echo "KEYCHAIN FAIL: positive control missing — Keychain.swift has no SecItemDelete"; rc=1
+  fi
   return $rc
 }
 
@@ -558,6 +628,7 @@ PY
 }
 
 step xcodegen   s_xcodegen
+step entitlements s_entitlements
 step swiftformat s_format
 step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck

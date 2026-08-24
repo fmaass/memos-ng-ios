@@ -77,6 +77,9 @@ public final class SessionStore {
     /// identity that can still queue captures — outlives the call that failed to remove it, and
     /// the next `restore()` is where it is tried again.
     private var licenceRevocationFailed = false
+    /// A credential that would not delete. Like the licence above it outlives the call that
+    /// failed to remove it, and it is what the sign-out screens say instead of nothing.
+    private var credentialWipeFailed = false
     /// Which session this is. Bumped wherever the account licence is published or revoked — the
     /// same two moments, and the only two, at which "who this device is signed in as" changes.
     ///
@@ -163,7 +166,7 @@ public final class SessionStore {
                 makeClient(configuration) { nil }, code: code, verifier: verifier
             )
             let token = exchanged.token
-            let persistence = persist(token: token, configuration: configuration)
+            let persistence = await persist(token: token, configuration: configuration)
             guard persistence != .licenceNotRevoked else {
                 abandonSignIn(restoring: previousState)
                 return false
@@ -203,7 +206,7 @@ public final class SessionStore {
         let client = makeClient(configuration) { trimmed }
         do {
             let user = try await Self.whoami(client)
-            switch persist(token: trimmed, configuration: configuration) {
+            switch await persist(token: trimmed, configuration: configuration) {
             case .licenceNotRevoked:
                 abandonSignIn(restoring: previousState)
                 return
@@ -232,15 +235,30 @@ public final class SessionStore {
     /// a licence naming another server is revoked before anything is validated, and a credential
     /// with no licence gets one again the moment the server says whose it is.
     public func restore() async {
-        guard let storedToken = (try? credentials.string(for: Self.tokenAccount)) ?? nil,
-            let storedAddress = (try? credentials.string(for: Self.serverAccount)) ?? nil,
-            let configuration = ServerConfiguration(serverAddress: storedAddress)
+        let stored: StoredCredential?
+        do {
+            stored = try await storedCredential()
+        } catch {
+            // Storage answered, and what it answered with could not be read: a status, an item of
+            // the wrong type, bytes that are not a token. That is not evidence that nobody is
+            // signed in, so nothing here deletes anything and nothing announces a sign-out — it
+            // is said out loud instead, the same way a credential that would not save is.
+            let detail = String(describing: error)
+            MemosLog.session.error(
+                "the stored device credential would not read: \(detail, privacy: .public)"
+            )
+            lastError = Self.storageUnreadable
+            return
+        }
+        guard let stored,
+            let configuration = ServerConfiguration(serverAddress: stored.address)
         else {
             // No credential: whatever licence is lying about belongs to nobody. This is also the
             // retry for a revocation that failed during sign-out.
             clearAccountLicence()
             return
         }
+        let storedToken = stored.token
         // A licence naming a different server than the stored credential is what an interrupted
         // account switch leaves behind. Deny first; `adopt` republishes once whoami says who this
         // is. The subject cannot be checked here — that is precisely what the server is for.
@@ -255,7 +273,7 @@ public final class SessionStore {
             let user = try await Self.whoami(client)
             adopt(client: client, configuration: configuration, user: user)
         } catch let error as APIError where error == .unauthorized {
-            wipeCredential()
+            await wipeCredential()
             lastError = error.errorDescription
         } catch {
             // The token was neither confirmed nor rejected. Park, keep, retry — see `unreachable`.
@@ -277,8 +295,8 @@ public final class SessionStore {
     @discardableResult
     public func signOut() async -> SignOutOutcome {
         guard let client else {
-            wipeCredential()
-            lastError = licenceComplaint
+            await wipeCredential()
+            lastError = signOutComplaint
             return .revoked
         }
         do {
@@ -286,8 +304,8 @@ public final class SessionStore {
             switch response {
             case .noContent:
                 MemosLog.session.info("POST /api/auth/native/logout -> 204")
-                wipeCredential()
-                lastError = licenceComplaint
+                await wipeCredential()
+                lastError = signOutComplaint
                 return .revoked
             case .undocumented(let statusCode, _):
                 guard statusCode == 401 else {
@@ -296,8 +314,8 @@ public final class SessionStore {
                     return .revokeFailed(error)
                 }
                 MemosLog.session.info("POST /api/auth/native/logout -> 401, token already gone")
-                wipeCredential()
-                lastError = licenceComplaint
+                await wipeCredential()
+                lastError = signOutComplaint
                 return .alreadyRevoked
             }
         } catch {
@@ -312,9 +330,9 @@ public final class SessionStore {
     ///
     /// It exists so that "I could not reach the server, sign me out anyway" is a choice made in
     /// the open, on a screen that also says what it means, rather than the silent default.
-    public func signOutWithoutRevoking() {
-        wipeCredential()
-        lastError = licenceComplaint
+    public func signOutWithoutRevoking() async {
+        await wipeCredential()
+        lastError = signOutComplaint
     }
 
     /// The 401 rule, in one place: any feature that sees `.unauthorized` calls this.
@@ -323,7 +341,10 @@ public final class SessionStore {
     /// nothing to revoke and nothing to keep — this is not the failed-revoke case.
     public func handle(_ error: APIError) async {
         guard error == .unauthorized else { return }
-        wipeCredential()
+        await wipeCredential()
+        // The 401 keeps the headline: a dead token is what the person needs to hear. A wipe that
+        // also failed is on the log and in `credentialWipeFailed`, and the next sign-out or
+        // restore says so.
         lastError = error.errorDescription
     }
 
@@ -366,7 +387,7 @@ public final class SessionStore {
     /// The device credential could not be written where it survives the process. Sign-in still
     /// succeeds — the token works from memory and a proper sign-out can still revoke it — but
     /// silence here is how a live server credential gets orphaned by a force-quit.
-    static let storageWarning =
+    public static let storageWarning =
         "Signed in, but the credential could not be saved on this device. "
         + "It will not survive quitting the app - sign out properly before you do."
 
@@ -396,19 +417,43 @@ public final class SessionStore {
     /// far smaller harm than a capture posted into the wrong account.
     private func persist(
         token: String, configuration: ServerConfiguration
-    ) -> CredentialPersistence {
+    ) async -> CredentialPersistence {
         guard clearAccountLicence() else { return .licenceNotRevoked }
         do {
-            try credentials.set(token, for: Self.tokenAccount)
-            try credentials.set(configuration.baseURL.absoluteString, for: Self.serverAccount)
+            // ONE call. Two awaits are two critical sections with a gap between them, and this
+            // method's own callers run in that gap: a 401 handled or a sign-out tapped between
+            // the token landing and the address landing would wipe the token and leave the
+            // address — a state nothing else produces and nothing repairs.
+            try await credentials.setAll([
+                Self.tokenAccount: token,
+                Self.serverAccount: configuration.baseURL.absoluteString,
+            ])
             return .stored
         } catch {
+            let detail = String(describing: error)
+            MemosLog.session.error(
+                "the device credential could not be stored: \(detail, privacy: .public)"
+            )
             return .storedNowhere
         }
     }
 
+    /// The pair a restore needs, read through one seam so a failure to READ is distinguishable
+    /// from nothing being stored.
+    private struct StoredCredential {
+        var token: String
+        var address: String
+    }
+
+    private func storedCredential() async throws -> StoredCredential? {
+        guard let token = try await credentials.string(for: Self.tokenAccount),
+            let address = try await credentials.string(for: Self.serverAccount)
+        else { return nil }
+        return StoredCredential(token: token, address: address)
+    }
+
     /// What a sign-in says when it refused to touch anything.
-    static let licenceBlockedSignIn =
+    public static let licenceBlockedSignIn =
         "The account already on this device could not be cleared, so nothing was changed. "
         + "Try signing in again."
 
@@ -425,10 +470,24 @@ public final class SessionStore {
     /// leaves a credential nobody is signed in with, which denies the extension. Credential then
     /// licence: a crash leaves a revoked identity that can still queue captures, and the person
     /// who signed out has no way of knowing.
-    private func wipeCredential() {
+    private func wipeCredential() async {
         clearAccountLicence()
-        try? credentials.remove(Self.tokenAccount)
-        try? credentials.remove(Self.serverAccount)
+        // Both halves, whatever either does: a wipe that stopped at the first failure would
+        // leave the server address next to a token it could not delete. A failure is REMEMBERED
+        // rather than dropped — a device that believes it is signed out while a credential is
+        // still on it is the one thing a sign-out must never do quietly.
+        credentialWipeFailed = false
+        do {
+            // ONE call, the mirror of the sign-in's: a sign-in that landed between two deletions
+            // would have half of itself deleted behind it.
+            try await credentials.removeAll([Self.tokenAccount, Self.serverAccount])
+        } catch {
+            credentialWipeFailed = true
+            let detail = String(describing: error)
+            MemosLog.session.error(
+                "the stored credential would not delete: \(detail, privacy: .public)"
+            )
+        }
         client = nil
         configuration = nil
         // The account's default belongs to the account. Carrying it into the next sign-in would
@@ -459,14 +518,27 @@ public final class SessionStore {
     /// Sign-out still happens: keeping a live token because a file would not delete is the worse
     /// failure. But it is said out loud rather than swallowed, because until the next launch
     /// reconciles it, a share made from the sheet would still be stamped with this account.
-    static let licenceWarning =
+    public static let licenceWarning =
         "Signed out, but the share extension's copy of this account could not be removed. "
         + "Open the app again to finish clearing it."
 
-    /// `nil` unless the licence outlived the credential — the value the sign-out paths put in
-    /// `lastError` in place of the "nothing went wrong" they used to assume.
-    private var licenceComplaint: String? {
-        licenceRevocationFailed ? Self.licenceWarning : nil
+    /// What a sign-out has to say when a credential could not be removed from the device.
+    public static let credentialWipeWarning =
+        "Signed out, but the stored credential could not be removed from this device. "
+        + "Nothing uses it now - signing in again replaces it."
+
+    /// What a launch says when there IS something stored and it will not read. Deliberately not a
+    /// sign-out: nothing was deleted, and the credential may well read on the next launch.
+    public static let storageUnreadable =
+        "There is a saved sign-in on this device that could not be read. "
+        + "Sign in again to replace it."
+
+    /// `nil` unless something outlived the sign-out — the value the sign-out paths put in
+    /// `lastError` in place of the "nothing went wrong" they used to assume. The credential is
+    /// named first: a token still on the device outranks a stale licence beside the queue.
+    private var signOutComplaint: String? {
+        if credentialWipeFailed { return Self.credentialWipeWarning }
+        return licenceRevocationFailed ? Self.licenceWarning : nil
     }
 
     static func code(from callbackURL: URL) throws -> String {
