@@ -61,10 +61,14 @@ public enum TimelineGrouping {
         }
         let sameYear =
             calendar.component(.year, from: day) == calendar.component(.year, from: now)
-        let style =
+        var style =
             sameYear
             ? Date.FormatStyle().weekday(.wide).day().month(.wide)
             : Date.FormatStyle().day().month(.wide).year()
-        return day.formatted(style.calendar(calendar).timeZone(calendar.timeZone))
+        // The header is written in the same calendar the day was cut on — a date formatted in the
+        // system's zone under a section grouped in another one is the same bug twice.
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        return day.formatted(calendar.locale.map { style.locale($0) } ?? style)
     }
 }

@@ -68,7 +68,7 @@ struct DesignTokensTests {
     /// green icon. That state fails the first assertion here.
     @Test("a markdown link resolves to the accent, not to the system default")
     func markdownLinksArePaintedInTheAccent() throws {
-        let attributes = MemoMarkdownTheme.linkAttributes(bodyPointSize: 17)
+        let attributes = MemoMarkdownTheme.linkAttributes()
         let colour = try #require(
             attributes.foregroundColor,
             "the memo theme leaves link colour to the system"

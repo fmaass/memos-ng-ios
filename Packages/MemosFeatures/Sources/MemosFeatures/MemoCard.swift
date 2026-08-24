@@ -227,7 +227,8 @@ struct PendingCard: View {
         .overlay {
             RoundedRectangle(cornerRadius: DesignTokens.Radius.card)
                 .strokeBorder(
-                    row.needsAttention ? AnyShapeStyle(.orange.opacity(0.5))
+                    row.needsAttention
+                        ? AnyShapeStyle(.orange.opacity(0.5))
                         : AnyShapeStyle(DesignTokens.accent.opacity(0.25)),
                     style: StrokeStyle(lineWidth: 1, dash: row.needsAttention ? [] : [4, 3])
                 )

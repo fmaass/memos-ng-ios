@@ -73,22 +73,62 @@ struct DynamicTypeFittingTests {
         #expect(abs(laidOut.width - Self.cardWidth) < 1)
     }
 
-    /// The one that kills the pinned font size. MarkdownUI resolves every run through a POINT
-    /// size, so a body that ignored Dynamic Type would measure the same at both ends of the scale.
-    @Test("a memo body grows with the reader's text size")
-    func memoBodyHonoursDynamicType() {
-        let body = String(
-            repeating: "A sentence about the garden, long enough to wrap more than once. ",
-            count: 2
+    /// The three ways a memo body can be wrong about text size, in one measurement.
+    ///
+    /// MarkdownUI resolves every run through a POINT size rather than a Dynamic Type role, which
+    /// leaves three failure modes: naming a size that is not the platform's body size (the old
+    /// `FontSize(16)`), naming one that never moves (a truly pinned body), and naming one that has
+    /// ALREADY been scaled — which scales it twice and produced a 161pt line while this phase was
+    /// being written. The floor catches the second, the ceiling catches the third, and matching
+    /// `.font(.body)` at the default size catches the first.
+    @Test("a memo body is the platform's body text, and grows like it")
+    func memoBodyTracksTheBodyRole() {
+        let width: CGFloat = 320
+        let sample = "Hello"
+        let memoDefault = LayoutProbe.size(
+            MemoMarkdownView(content: sample), width: width, typeSize: .large
+        ).height
+        let memoLargest = LayoutProbe.size(
+            MemoMarkdownView(content: sample), width: width, typeSize: .accessibility5
+        ).height
+        let bodyDefault = LayoutProbe.size(
+            Text(sample).font(.body), width: width, typeSize: .large
+        ).height
+        let bodyLargest = LayoutProbe.size(
+            Text(sample).font(.body), width: width, typeSize: .accessibility5
+        ).height
+
+        // At the default size a memo line IS a body line — not a point smaller.
+        #expect(
+            abs(memoDefault - bodyDefault) < 0.5,
+            "memo line is \(memoDefault)pt against a body line of \(bodyDefault)pt"
         )
-        let view = MemoMarkdownView(content: body)
-        let small = LayoutProbe.size(view, width: Self.cardWidth, typeSize: .xSmall).height
-        let normal = LayoutProbe.size(view, width: Self.cardWidth, typeSize: .large).height
-        let largest = LayoutProbe.size(view, width: Self.cardWidth, typeSize: .accessibility5)
-            .height
-        #expect(small > 0)
-        #expect(normal > small)
-        #expect(largest > normal * 2, "body is \(largest)pt at AX5 against \(normal)pt at default")
+
+        let memoGrowth = memoLargest / memoDefault
+        let bodyGrowth = bodyLargest / bodyDefault
+        #expect(bodyGrowth > 2.5)
+        // It moves with the reader — a pinned body measures the same at both ends.
+        #expect(
+            memoGrowth > 2.5,
+            "memo grew \(memoGrowth)x where the platform's body grew \(bodyGrowth)x"
+        )
+        // And it moves ONCE. A size that was scaled before it was handed over grows by the
+        // square of that factor.
+        #expect(
+            memoGrowth < bodyGrowth * 1.25,
+            "memo grew \(memoGrowth)x where the platform's body grew \(bodyGrowth)x"
+        )
+    }
+
+    /// The base size is not a taste: it is whatever the platform says `.body` is. Asserting it
+    /// against UIKit rather than against the literal is what makes `16` a failure.
+    @Test("the body size the theme names is the platform's own body size")
+    func themeBodySizeIsThePlatformBodySize() {
+        let platform = UIFont.preferredFont(
+            forTextStyle: .body,
+            compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)
+        ).pointSize
+        #expect(MemoMarkdownTheme.baseBodyPointSize == platform)
     }
 
     @Test("a whole card grows with the reader's text size")

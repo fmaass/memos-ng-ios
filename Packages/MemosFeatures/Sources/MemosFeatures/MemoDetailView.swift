@@ -111,7 +111,8 @@ public struct MemoDetailView: View {
                     } icon: {
                         Image(systemName: task.checked ? "checkmark.circle.fill" : "circle")
                             .foregroundStyle(
-                                task.checked ? AnyShapeStyle(DesignTokens.accent)
+                                task.checked
+                                    ? AnyShapeStyle(DesignTokens.accent)
                                     : AnyShapeStyle(.secondary)
                             )
                             .symbolEffect(.bounce, value: task.checked)

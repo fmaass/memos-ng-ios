@@ -5,38 +5,40 @@ import SwiftUI
 ///
 /// It is a value for one reason: a `Theme`'s text styles can be run into an `AttributeContainer`
 /// with `_collectAttributes(in:)` — the same call MarkdownUI's own inline renderer makes when it
-/// paints a link — so what a link and a paragraph will actually look like is assertable without
-/// rendering anything. `MemoMarkdownThemeTests` uses that to hold links to the accent and the body
-/// to the reader's own text size.
+/// paints a link — so what a link will actually look like is assertable without rendering
+/// anything. `DesignTokensTests` uses that to hold links to the accent; before this phase nothing
+/// set the colour at all, which is why they came out system blue beside a green icon.
 ///
-/// The size has to be passed IN, and that is the whole Dynamic Type fix. MarkdownUI resolves every
-/// run through `FontProperties`, whose environment default is a fixed 17pt system font
-/// (`Environment+TextStyle.swift`), and turns it into `Font.system(size:)` — a point size, which
-/// does not grow with the reader's setting. Simply deleting the old `FontSize(16)` would have left
-/// the body pinned at 17 instead of 16. So the view resolves the `.body` ROLE to points with
-/// `@ScaledMetric` and hands the result here; at the largest accessibility size that is roughly
-/// 53pt, and every relative size in the theme moves with it.
+/// The body size is the PLATFORM'S body point size and nothing else. MarkdownUI resolves every run
+/// through `FontProperties`, whose size is a point value, so the theme has to name one — and the
+/// only honest number to name is the one `.body` resolves to at the default text size. The old
+/// `FontSize(16)` was a point short of the role and never said why.
+///
+/// Deliberately NOT scaled here. Measured on the simulator: a memo body at this size renders
+/// 20.33pt tall at the default text size and 57.33pt at `.accessibility5` — MarkdownUI's own
+/// output already tracks the reader's setting. Feeding it a size that had ALREADY been scaled
+/// through `@ScaledMetric` scaled it twice and produced a 161pt line. `DynamicTypeFittingTests`
+/// holds both ends of that: it must grow, and it must not grow more than the platform does.
 public enum MemoMarkdownTheme {
-    public static func memo(bodyPointSize: CGFloat) -> Theme {
-        Theme()
-            .text {
-                FontSize(bodyPointSize)
-            }
-            .link {
-                ForegroundColor(DesignTokens.accent)
-            }
-            .code {
-                FontFamilyVariant(.monospaced)
-                FontSize(.em(0.92))
-            }
-            .strong {
-                FontWeight(.semibold)
-            }
-    }
-
-    /// The point size the `.body` role resolves to at the default text size — the base a
-    /// `@ScaledMetric(relativeTo: .body)` scales up and down from.
+    /// The point size `.body` resolves to at the default text size. Asserted against
+    /// `UIFont.preferredFont(forTextStyle: .body)` rather than trusted as a literal.
     public static let baseBodyPointSize: CGFloat = 17
+
+    public static let memo: Theme =
+        Theme()
+        .text {
+            FontSize(baseBodyPointSize)
+        }
+        .link {
+            ForegroundColor(DesignTokens.accent)
+        }
+        .code {
+            FontFamilyVariant(.monospaced)
+            FontSize(.em(0.92))
+        }
+        .strong {
+            FontWeight(.semibold)
+        }
 }
 
 extension MemoMarkdownTheme {
@@ -44,11 +46,10 @@ extension MemoMarkdownTheme {
     /// its inline renderer makes: `AttributedStringInlineRenderer` merges `theme.link` into the
     /// run for a `.link` inline. Exposed as a plain `AttributeContainer` so what a link looks like
     /// can be asserted without a renderer, a screenshot or an import of MarkdownUI in the test.
-    public static func linkAttributes(bodyPointSize: CGFloat) -> AttributeContainer {
+    public static func linkAttributes() -> AttributeContainer {
         var attributes = AttributeContainer()
-        let theme = memo(bodyPointSize: bodyPointSize)
-        theme.text._collectAttributes(in: &attributes)
-        theme.link._collectAttributes(in: &attributes)
+        memo.text._collectAttributes(in: &attributes)
+        memo.link._collectAttributes(in: &attributes)
         return attributes
     }
 }
