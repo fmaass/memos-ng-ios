@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest for the MemosNG app target.
+
+  Every entry below was audited against the code that ships in this bundle, not assumed:
+
+    NSPrivacyAccessedAPICategoryFileTimestamp — PickedMedia.imported() reads
+    `.contentModificationDateKey` off the copy it just made of a picked file
+    (Packages/MemosFeatures/Sources/MemosFeatures/PickedMedia.swift). The copy lives in this
+    app's own temporary directory, which is why the reason is C617.1 (timestamps of files inside
+    the app container) and NOT DDA9.1: the timestamp is sent to the server as an upload's
+    `last_modified`, and DDA9.1 forbids sending the value off-device.
+
+  Audited and deliberately NOT declared:
+    - UserDefaults: this app has none. There is no @AppStorage, no UserDefaults and no
+      SceneStorage anywhere in the app or its packages; session state lives in the keychain and
+      the outbox in the app group's SQLite store.
+    - Disk space: nothing reads a volume-capacity resource key. OutboxRepository reads
+      `.fileSizeKey`, which is a file attribute and not in the disk-space category.
+    - System boot time: nothing calls `systemUptime` or `mach_absolute_time`.
+    - Active keyboards: nothing calls `activeInputModes`.
+
+  Nothing is collected: memo text and media go to the household memos-ng server the person
+  running this app operates, and to nowhere else. There is no analytics SDK, no crash reporter
+  and no advertising identifier, so NSPrivacyTracking is false and there are no tracking domains.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

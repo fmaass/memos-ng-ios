@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest for the MemosShare app extension.
+
+  An .appex is its own bundle and Apple reads its manifest separately from the host app's, so
+  this file declares what THIS process does, which is a strict subset of the app:
+
+    NSPrivacyAccessedAPICategoryFileTimestamp — SharedFile.imported() reads
+    `.contentModificationDateKey` off the copy it just made of a shared file
+    (Packages/MemosShareKit/Sources/MemosShareKit/SharedItem.swift). The copy is staged in this
+    extension's own temporary directory, so the reason is C617.1; the timestamp reaches the
+    server as an upload's `last_modified`, which rules out DDA9.1.
+
+  Audited and deliberately NOT declared: the extension links only MemosShareKit and MemosOutbox,
+  neither of which touches UserDefaults, volume capacity, system uptime or active input modes.
+  The extension carries no client, no session and no credential.
+
+  Nothing is collected and nothing is tracked: the extension writes a capture into the app
+  group's outbox and returns.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

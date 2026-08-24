@@ -5,7 +5,9 @@ project I build new iOS apps from. It talks to a memos-ng server over its REST A
 access token stored in the Keychain.
 
 Status: foundation. Sign in, read the timeline, read a memo. Writing, sharing and notifications
-come later. The architecture and its reasoning are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+come later. The architecture and its reasoning are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
+the click-path for getting a build to my own devices over TestFlight is in
+[`docs/TESTFLIGHT.md`](docs/TESTFLIGHT.md).
 
 ## Building
 

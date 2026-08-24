@@ -66,6 +66,11 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Sources/MemosNG
+      # Apple reads the privacy manifest from the bundle ROOT, under exactly this name, so each
+      # target needs its own directory holding a file called PrivacyInfo.xcprivacy — a resource
+      # build phase copies it flat, and it cannot be renamed on the way in.
+      - path: Support/MemosNG/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: MemosFeatures
       - package: MemosCore
@@ -99,6 +104,12 @@ targets:
           - live.discomarder.memosng.outbox-refresh
         UIBackgroundModes:
           - fetch
+        # The export-compliance answer, given once here so App Store Connect stops asking it on
+        # every upload. It is a real boolean, which is why it lives in this block and not in an
+        # INFOPLIST_KEY_ setting: build settings are strings, and this key is read as a Boolean.
+        # NO is the truthful answer — the app's only cryptography is HTTPS through the system's
+        # own TLS and the keychain, both exempt.
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng
@@ -111,12 +122,22 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: memosng
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        INFOPLIST_KEY_UIRequiresFullScreen: YES
         # The app declared no version at all until it had an extension. It has to now: an
         # extension's CFBundleVersion must match its containing app's, and these two settings are
         # where GENERATE_INFOPLIST_FILE reads both version keys from. Move them together with the
         # matching pair on MemosShare, never one alone.
-        MARKETING_VERSION: "1.0"
+        #
+        # 0.1.0 because that is what this is: the first build handed to the household over
+        # TestFlight, not a 1.0. The build number stays 1 in the repo and is not bumped by hand —
+        # Xcode Cloud assigns every build its own auto-incrementing number starting at 1
+        # (developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds),
+        # exposes it to custom build scripts as CI_BUILD_NUMBER ("The number of the current build,
+        # for example, 42" — the environment variable reference), and that number is what the
+        # TestFlight build is filed under. See docs/TESTFLIGHT.md for what is verified from Apple's
+        # documentation and what is not: if a TestFlight upload is ever rejected for a duplicate
+        # build number, the fix is a ci_scripts/ci_pre_xcodebuild.sh that stamps
+        # CURRENT_PROJECT_VERSION from $CI_BUILD_NUMBER, not a hand edit here.
+        MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
         # classifies API calls as Local Network access; without this declaration iOS 18+ denies
@@ -135,6 +156,10 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Sources/MemosShare
+      # An .appex is its own bundle with its own privacy manifest — the host app's does not
+      # cover it. Same flat copy, same mandatory filename, so it needs its own directory.
+      - path: Support/MemosShare/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: MemosShareKit
       - package: MemosOutbox
@@ -160,6 +185,10 @@ targets:
               NSExtensionActivationSupportsMovieWithMaxCount: 10
               NSExtensionActivationSupportsWebURLWithMaxCount: 1
               NSExtensionActivationSupportsText: true
+        # Declared in the embedded bundle too, for the same reason the version keys are: the
+        # export-compliance check reads the bundles it is given, and an extension that answers
+        # differently from its host is a question waiting to be asked. Boolean, so it lives here.
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng.share
@@ -172,7 +201,7 @@ targets:
         # without a bundle version cannot be installed at all — "bundleVersion must be set in
         # placeholder attributes for an app extension placeholder", which is a failure to
         # INSTALL the host app, not a warning about the extension.
-        MARKETING_VERSION: "1.0"
+        MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
 
   MemosAPITests:
