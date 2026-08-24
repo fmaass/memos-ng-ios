@@ -31,7 +31,18 @@ public struct TimelineView: View {
                     .accessibilityLabel("New memo")
                 }
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Sign out") { Task { await signOut() } }
+                    // Signing out is a rare, deliberate act on a personal device — it lives
+                    // behind the overflow, not beside the compose button someone taps daily.
+                    Menu {
+                        Button(role: .destructive) {
+                            Task { await signOut() }
+                        } label: {
+                            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("More")
                 }
             }
         }
