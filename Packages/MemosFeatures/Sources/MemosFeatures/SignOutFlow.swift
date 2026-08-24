@@ -9,7 +9,7 @@ import MemosCore
 ///
 /// So the tap that opens the conversation and the tap that ends the session are different events,
 /// and only one of them reaches the server. `menuTapped` can be delivered any number of times and
-/// never revokes anything; nothing is sent until `confirmed` arrives from a dialog that is not
+/// never revokes anything; nothing is sent until `confirmed` arrives from an alert that is not
 /// under the anchor. `SignOutFlowTests` asserts exactly that, which is the part a screenshot of a
 /// menu could never show.
 ///
@@ -34,7 +34,7 @@ public enum SignOutFlow {
     public enum Event: Equatable, Sendable {
         /// The destructive row in the overflow menu was tapped. Deliberately harmless.
         case menuTapped
-        /// The question was answered yes — in the dialog, or "Try again" after a failed revoke.
+        /// The question was answered yes — in the alert, or "Try again" after a failed revoke.
         case confirmed
         /// The question was dismissed, whether by Cancel or by the sheet going away.
         case cancelled

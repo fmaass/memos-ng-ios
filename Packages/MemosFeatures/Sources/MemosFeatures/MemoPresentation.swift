@@ -7,6 +7,28 @@ public enum MediaTier: String, Sendable, Equatable {
     case mobile
 }
 
+/// How much of a picture a slot shows, and in what proportions.
+///
+/// The two surfaces want opposite things and both are right. A timeline is a browse surface: the
+/// tiles line up, so they crop. A detail view is the picture itself: nothing may be cut off, so
+/// the slot takes the picture's own proportions and the whole frame is shown inside it.
+public enum TileContentMode: Equatable, Sendable {
+    /// Fill the slot and crop whatever overflows.
+    case fill
+    /// Show the whole picture inside the slot.
+    case fit
+}
+
+public struct AttachmentSlot: Equatable, Sendable {
+    public var aspectRatio: Double
+    public var contentMode: TileContentMode
+
+    public init(aspectRatio: Double, contentMode: TileContentMode) {
+        self.aspectRatio = aspectRatio
+        self.contentMode = contentMode
+    }
+}
+
 /// Decisions a view needs, kept out of the view.
 ///
 /// A SwiftUI body is the worst place to unit-test anything, so everything here is a pure function
@@ -18,6 +40,33 @@ public enum MemoPresentation {
     public static func tier(forPointWidth width: Double, scale: Double = 2) -> MediaTier {
         width * scale <= 320 ? .thumb : .mobile
     }
+
+    /// The detail view: the whole picture, at the proportions the server measured.
+    ///
+    /// The ratio comes from the metadata rather than from the decoded image so the container is
+    /// the right shape BEFORE anything loads — which is what stops the page jumping as photos
+    /// arrive, and what gives the blurhash underneath the identical frame.
+    ///
+    /// Without measurements there is nothing to derive, and a ratio of zero would be a
+    /// zero-height container that renders as nothing at all. 4:3 is the fallback: the commonest
+    /// photographic shape, and wrong in a way that letterboxes rather than crops.
+    public static func detailSlot(for attachment: MemoAttachment) -> AttachmentSlot {
+        AttachmentSlot(
+            aspectRatio: attachment.measuredAspectRatio ?? fallbackAspectRatio,
+            contentMode: .fit
+        )
+    }
+
+    /// A memo with one photo on the timeline: the picture's own shape, cropped to fill it.
+    public static func timelineSlot(for attachment: MemoAttachment) -> AttachmentSlot {
+        AttachmentSlot(aspectRatio: attachment.aspectRatio, contentMode: .fill)
+    }
+
+    /// A tile in a row of tiles. Square and cropped, because a row that does not line up is not
+    /// a row.
+    public static let gridSlot = AttachmentSlot(aspectRatio: 1, contentMode: .fill)
+
+    static let fallbackAspectRatio = 4.0 / 3.0
 
     public static func url(for attachment: MemoAttachment, tier: MediaTier) -> URL? {
         // A video has no image tiers — its still is the poster (the same hero frame the mail

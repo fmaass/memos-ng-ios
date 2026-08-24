@@ -33,27 +33,33 @@ public enum ThumbnailPhase: Equatable, Sendable {
 struct AttachmentThumbnail: View {
     let attachment: MemoAttachment
     var tier: MediaTier = .thumb
-    /// The shape of the SLOT. `nil` keeps the photo's own proportions — right for a memo with one
-    /// photo, where the picture decides the shape of the card. A value crops to a fixed slot,
-    /// which is what a row of tiles needs to line up at all.
-    var aspectRatio: Double?
+    /// The shape of the slot and how much of the picture goes in it. The container takes this
+    /// shape immediately, from the server's own measurements, so the layout does not jump when
+    /// the image lands — and the blurhash underneath gets that identical frame.
+    var slot: AttachmentSlot
 
     private var url: URL? { MemoPresentation.url(for: attachment, tier: tier) }
 
     var body: some View {
         Color.clear
-            .aspectRatio(aspectRatio ?? attachment.aspectRatio, contentMode: .fit)
+            .aspectRatio(slot.aspectRatio, contentMode: .fit)
             .overlay {
                 if let url {
                     AsyncImage(url: url) { phase in
                         ThumbnailContent(
                             attachment: attachment,
                             phase: .of(phase),
-                            image: phase.image
+                            image: phase.image,
+                            contentMode: slot.contentMode
                         )
                     }
                 } else {
-                    ThumbnailContent(attachment: attachment, phase: .failed, image: nil)
+                    ThumbnailContent(
+                        attachment: attachment,
+                        phase: .failed,
+                        image: nil,
+                        contentMode: slot.contentMode
+                    )
                 }
             }
             .task(id: url) {
@@ -63,18 +69,49 @@ struct AttachmentThumbnail: View {
     }
 }
 
+/// A layer pinned to the slot it was given, however it draws inside it.
+///
+/// `scaledToFill` reports the oversized dimensions it drew, not the space it was offered: a 4:3
+/// image asked to fill a 120x160 slot answers 213x160. Two such layers in one `ZStack` therefore
+/// grow the stack to the larger of them and centre each inside it — so a blurhash (always 4:3
+/// from a 32x24 decode) and a photo of some other shape ended up centred in different boxes, and
+/// the blur sat visibly beside the picture it was supposed to be under.
+///
+/// `Color.clear` accepts whatever it is offered and reports exactly that, so putting the filled
+/// content in its overlay keeps the reported size equal to the slot. Every layer of a tile goes
+/// through here, which is what pins them all to one frame.
+struct AspectPinnedLayer<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        Color.clear
+            .overlay { content }
+            .clipped()
+    }
+}
+
 /// The tile itself, with the load phase handed IN rather than fetched — so what a stalled load
 /// looks like can be rendered and asserted without a network.
 struct ThumbnailContent: View {
     let attachment: MemoAttachment
     let phase: ThumbnailPhase
     let image: Image?
+    /// `fill` crops to the slot, `fit` shows the whole picture inside it. The BACKDROP always
+    /// fills whichever way this goes: when a fitted picture does not reach the edges, the blur is
+    /// what should be behind it, not a grey bar.
+    var contentMode: TileContentMode = .fill
 
     var body: some View {
         ZStack {
             BlurHashBackdrop(blurhash: attachment.blurhash)
             if phase == .loaded, let image {
-                image.resizable().scaledToFill()
+                AspectPinnedLayer {
+                    if contentMode == .fit {
+                        image.resizable().scaledToFit()
+                    } else {
+                        image.resizable().scaledToFill()
+                    }
+                }
             }
             if phase == .failed {
                 Image(systemName: "exclamationmark.triangle.fill")

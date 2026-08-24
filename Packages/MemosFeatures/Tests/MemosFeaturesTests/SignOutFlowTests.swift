@@ -123,11 +123,11 @@ struct SignOutConfirmationTests {
         #expect(SignOutFlow.next(.idle, on: .cancelled) == .idle)
     }
 
-    /// The dialog sets its binding to false the moment the destructive button is tapped, so the
+    /// The alert sets its binding to false the moment the destructive button is tapped, so the
     /// dismissal arrives AFTER the confirmation. If that dismissal reset the machine, the screen
     /// would go back to idle while the revoke was still in flight and the outcome would land
     /// nowhere.
-    @Test("the sheet going away does not abort a revoke already sent")
+    @Test("the alert going away does not abort a revoke already sent")
     func dismissalCannotAbortAnInFlightRevoke() {
         let revoking = SignOutFlow.next(.asking, on: .confirmed)
         #expect(revoking == .revoking)

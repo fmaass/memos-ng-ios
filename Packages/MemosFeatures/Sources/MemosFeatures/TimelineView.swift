@@ -38,7 +38,7 @@ public struct TimelineView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("Memos")
+            .navigationTitle("memosng")
             .navigationDestination(for: MemoRoute.self) { route in
                 if let timeline, let memo = memo(route.uid, in: timeline) {
                     MemoDetailView(uid: route.uid, initial: memo, timeline: timeline)
@@ -72,6 +72,10 @@ public struct TimelineView: View {
                                     systemImage: "rectangle.portrait.and.arrow.right"
                                 )
                             }
+                            // The destructive role reddens the WORDS; the glyph beside them is
+                            // drawn in the inherited tint, which is the app's green — so the one
+                            // row that should read as dangerous had a friendly icon on it.
+                            .tint(.red)
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -89,16 +93,20 @@ public struct TimelineView: View {
                 }
             }
         }
-        // The question the menu tap asks. It is a dialog rather than a second menu row because a
-        // dialog is not drawn under the anchor: no repeat of the tap that opened the menu can
-        // land on it.
-        .confirmationDialog(
+        // The question the menu tap asks. It is not drawn under the anchor, so no repeat of the
+        // tap that opened the menu can land on it.
+        //
+        // An ALERT rather than a confirmation dialog: the dialog rendered as a glass card that
+        // dimmed nothing, left the timeline legible underneath, and — the part that matters —
+        // put its Cancel button neither on screen nor in the accessibility tree, so the only
+        // visible answer to "Sign out?" was "Sign out". An alert dims, shows both answers, and
+        // hands both to VoiceOver.
+        .alert(
             "Sign out?",
             isPresented: .init(
                 get: { signOutStage == .asking },
                 set: { if !$0 { advanceSignOut(.cancelled) } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             Button("Sign out", role: .destructive) { advanceSignOut(.confirmed) }
             Button("Cancel", role: .cancel) { advanceSignOut(.cancelled) }
@@ -129,6 +137,10 @@ public struct TimelineView: View {
                 })
             }
             await load()
+            // What "Default" resolves to is the account's setting, not something the app can
+            // guess. It is fetched here rather than during sign-in so a slow or missing
+            // /api/settings can never hold up getting someone into the app.
+            await session.loadSettings()
             // Adopt whatever the last run left in flight before anything new is scheduled.
             await outbox?.start()
         }

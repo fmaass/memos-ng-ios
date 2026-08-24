@@ -38,6 +38,10 @@ public struct ComposeView: View {
     let submit: (ComposeSubmission) async -> Bool
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    // The sheet inherits the session from the screen that presented it; the account's default
+    // visibility is the only thing it needs from there.
+    @Environment(SessionStore.self) private var session: SessionStore?
     @State private var content: String
     @State private var visibility: MemoVisibility?
     @State private var picked: [PhotosPickerItem] = []
@@ -144,7 +148,9 @@ public struct ComposeView: View {
             if !attachments.isEmpty {
                 PickedThumbnailRow(attachments: attachments)
             }
-            HStack(spacing: DesignTokens.Space.regular) {
+            // At an accessibility text size the picker's label and the visibility pill cannot
+            // share a line without one of them being squeezed, so they stop trying to.
+            AttachControls(stacked: dynamicTypeSize.isAccessibilitySize) {
                 PhotosPicker(
                     selection: $picked,
                     selectionBehavior: .ordered,
@@ -157,8 +163,11 @@ public struct ComposeView: View {
                 if isImporting {
                     ProgressView()
                 }
-                Spacer(minLength: DesignTokens.Space.snug)
-                VisibilityMenu(selection: $visibility)
+            } trailing: {
+                VisibilityMenu(
+                    selection: $visibility,
+                    accountDefault: session?.defaultVisibility
+                )
             }
             if failedImports > 0,
                 let summary = ComposeAttachments.summary(
@@ -225,19 +234,25 @@ public struct ComposeView: View {
 /// menu shows one choice at a time, at whatever width that choice needs.
 struct VisibilityMenu: View {
     @Binding var selection: MemoVisibility?
+    var accountDefault: MemoVisibility?
 
     var body: some View {
         Menu {
             Picker("Visibility", selection: $selection) {
-                Label("Server default", systemImage: "person.crop.circle")
-                    .tag(MemoVisibility?.none)
+                Label(
+                    VisibilityChoice.title(selection: nil, accountDefault: accountDefault),
+                    systemImage: VisibilityChoice.symbol(
+                        selection: nil, accountDefault: accountDefault
+                    )
+                )
+                .tag(MemoVisibility?.none)
                 ForEach(MemoVisibility.allCases, id: \.self) { option in
                     Label(option.label, systemImage: option.symbolName)
                         .tag(MemoVisibility?.some(option))
                 }
             }
         } label: {
-            VisibilityChoicePill(selection: selection)
+            VisibilityChoicePill(selection: selection, accountDefault: accountDefault)
         }
         .accessibilityLabel("Visibility")
     }
@@ -247,9 +262,20 @@ struct VisibilityMenu: View {
 /// measured directly (`DynamicTypeFittingTests`) rather than eyeballed in a screenshot.
 struct VisibilityChoicePill: View {
     let selection: MemoVisibility?
+    var accountDefault: MemoVisibility?
 
-    var title: String { selection?.label ?? "Default" }
-    var symbol: String { selection?.symbolName ?? "person.crop.circle" }
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var title: String {
+        VisibilityChoice.title(
+            selection: selection,
+            accountDefault: accountDefault,
+            compact: dynamicTypeSize.isAccessibilitySize
+        )
+    }
+    var symbol: String {
+        VisibilityChoice.symbol(selection: selection, accountDefault: accountDefault)
+    }
 
     var body: some View {
         Label {
@@ -265,5 +291,56 @@ struct VisibilityChoicePill: View {
         .padding(.vertical, DesignTokens.Space.snug)
         .background(DesignTokens.accent.opacity(0.14), in: .capsule)
         .foregroundStyle(DesignTokens.accent)
+    }
+}
+
+/// What the visibility control says it will do.
+///
+/// "Default" on its own is the one answer that tells nobody anything: the whole question is who
+/// will see this, and leaving the choice alone is only safe if you know what leaving it alone
+/// means. So the account's own setting is named alongside it — and when the app does not know
+/// that setting yet, it says "Default" rather than inventing one, because a wrong promise about
+/// who can read a memo is worse than a vague one.
+enum VisibilityChoice {
+    /// `compact` drops the framing and keeps the answer. At an accessibility text size
+    /// "Default (Protected)" wants 518pt of the 369 a compose sheet has, and a pill that refuses
+    /// to truncate would simply run off the screen — so at those sizes it says "Protected", which
+    /// is the part that was worth saying. The word it loses is the one the menu's checkmark
+    /// already carries.
+    static func title(
+        selection: MemoVisibility?,
+        accountDefault: MemoVisibility?,
+        compact: Bool = false
+    ) -> String {
+        if let selection { return selection.label }
+        guard let accountDefault else { return "Default" }
+        return compact ? accountDefault.label : "Default (\(accountDefault.label))"
+    }
+
+    static func symbol(selection: MemoVisibility?, accountDefault: MemoVisibility?) -> String {
+        selection?.symbolName ?? accountDefault?.symbolName ?? "person.crop.circle"
+    }
+}
+
+/// The compose sheet's controls: side by side while they fit, stacked when the text is large
+/// enough that they would otherwise fight over the width.
+struct AttachControls<Leading: View, Trailing: View>: View {
+    let stacked: Bool
+    @ViewBuilder let leading: Leading
+    @ViewBuilder let trailing: Trailing
+
+    var body: some View {
+        if stacked {
+            VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
+                HStack(spacing: DesignTokens.Space.regular) { leading }
+                trailing
+            }
+        } else {
+            HStack(spacing: DesignTokens.Space.regular) {
+                leading
+                Spacer(minLength: DesignTokens.Space.snug)
+                trailing
+            }
+        }
     }
 }

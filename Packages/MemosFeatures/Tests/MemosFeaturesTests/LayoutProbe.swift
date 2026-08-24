@@ -24,6 +24,13 @@ enum LayoutProbe {
         return host.sizeThatFits(in: CGSize(width: width, height: unbounded))
     }
 
+    /// The size a view reports for an explicit proposal, with the type size left alone. Used to
+    /// hold every layer of a tile to the slot it was offered.
+    static func size(_ view: some View, width: CGFloat, height: CGFloat) -> CGSize {
+        UIHostingController(rootView: view)
+            .sizeThatFits(in: CGSize(width: width, height: height))
+    }
+
     /// What the view WANTS, with nothing squeezing it — the width below which it must start
     /// truncating.
     static func idealWidth(_ view: some View, typeSize: DynamicTypeSize) -> CGFloat {
@@ -87,6 +94,64 @@ enum PixelProbe {
         guard drawn else { return nil }
         let offset = ((height / 2) * width + (width / 2)) * 4
         return (bytes[offset], bytes[offset + 1], bytes[offset + 2])
+    }
+}
+
+/// A flat image of a known colour, for asserting which layer of a tile ended up where.
+@MainActor
+enum SolidImage {
+    static func of(_ color: UIColor, side: CGFloat = 8) -> Image {
+        of(color, size: CGSize(width: side, height: side))
+    }
+
+    static func of(_ color: UIColor, size: CGSize) -> Image {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return Image(
+            uiImage: renderer.image { context in
+                color.setFill()
+                context.fill(CGRect(origin: .zero, size: size))
+            }
+        )
+    }
+}
+
+/// Every pixel of a rendered view, so a test can ask which layer covered what.
+@MainActor
+enum PixelGrid {
+    static func of(_ view: some View, size: CGSize) -> [[(r: UInt8, g: UInt8, b: UInt8)]]? {
+        let renderer = ImageRenderer(
+            content: view.frame(width: size.width, height: size.height)
+        )
+        renderer.scale = 1
+        guard let cgImage = renderer.cgImage, let space = CGColorSpace(name: CGColorSpace.sRGB)
+        else { return nil }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        bytes.withUnsafeMutableBytes { buffer in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 4,
+                    space: space,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                )
+            else { return }
+            context.draw(
+                cgImage,
+                in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+            )
+        }
+        return (0..<height).map { y in
+            (0..<width).map { x in
+                let offset = (y * width + x) * 4
+                return (bytes[offset], bytes[offset + 1], bytes[offset + 2])
+            }
+        }
     }
 }
 

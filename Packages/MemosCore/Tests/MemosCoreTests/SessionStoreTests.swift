@@ -7,6 +7,7 @@ import Testing
 // The transport is handed the contract's own operationId, not the generated Swift method name.
 private let whoamiOperation = "whoami_api_auth_user_get"
 private let nativeLogoutOperation = "native_logout_api_auth_native_logout_post"
+private let settingsOperation = "get_settings_api_settings_get"
 
 @MainActor
 @Suite("SessionStore")
@@ -655,5 +656,225 @@ extension AccountLicenceOrderTests {
         #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_b")
         #expect(account.published?.ownerSubject == "fabian")
         #expect(session.lastError == nil)
+    }
+}
+
+/// What "Default" means in the compose sheet is the ACCOUNT's setting, and until this the app
+/// never asked for it — the pill said "Default" and left the reader to guess whether that meant
+/// their memo would be private or public.
+@MainActor
+@Suite("The account's default visibility")
+struct SessionSettingsTests {
+    private func signedIn(
+        handler: @escaping StubTransport.Handler
+    ) async -> SessionStore {
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in Stub.client(token: token, handler: handler) }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        return session
+    }
+
+    @Test("the default is read from /api/settings and kept")
+    func settingsAreRead() async {
+        let asked = LockedValue<Bool>(false)
+        let session = await signedIn { _, _, operation in
+            if operation == settingsOperation {
+                asked.set(true)
+                return Stub.json(
+                    """
+                    {"default_visibility":"PROTECTED","theme":"dark","avatar":null}
+                    """
+                )
+            }
+            return Stub.json(Stub.user)
+        }
+        // Nothing is assumed before the server has answered.
+        #expect(session.defaultVisibility == nil)
+
+        await session.loadSettings()
+
+        #expect(asked.get())
+        #expect(session.defaultVisibility == .protected)
+    }
+
+    @Test("each visibility the server can name round-trips")
+    func everyVisibilityIsUnderstood() async {
+        for (wire, expected) in [
+            ("PRIVATE", MemoVisibility.private),
+            ("PROTECTED", .protected),
+            ("PUBLIC", .public),
+        ] {
+            let session = await signedIn { _, _, operation in
+                operation == settingsOperation
+                    ? Stub.json(
+                        "{\"default_visibility\":\"\(wire)\",\"theme\":\"d\",\"avatar\":null}"
+                    )
+                    : Stub.json(Stub.user)
+            }
+            await session.loadSettings()
+            #expect(session.defaultVisibility == expected)
+        }
+    }
+
+    /// The pill is allowed to say less. It is not allowed to say something wrong, and it is not
+    /// allowed to take the screen down with it: this call sits on the timeline's appearance path.
+    @Test("a server that will not answer leaves the default unnamed, not invented")
+    func aFailedFetchIsSurvivable() async {
+        let session = await signedIn { _, _, operation in
+            operation == settingsOperation ? Stub.empty(.internalServerError) : Stub.json(Stub.user)
+        }
+        await session.loadSettings()
+        #expect(session.defaultVisibility == nil)
+        // The session itself is untouched — a settings failure is not a sign-out.
+        #expect(session.state.user?.subject == "fabian")
+        #expect(session.lastError == nil)
+    }
+
+    /// A reply can outlive the question it answered.
+    ///
+    /// Dropping the client does not reliably cancel a request already on the wire, so the settings
+    /// call started for account A can resolve after somebody has signed in as B. Without the
+    /// generation check it assigns A's answer into B's session, and the compose sheet then tells B
+    /// their memos default to whatever A had chosen — a wrong promise about who can read something.
+    @Test("an answer that arrives after the account changed is discarded")
+    func aLateAnswerCannotCrossAccounts() async {
+        let entered = Gate()
+        let release = Gate()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    guard operation == settingsOperation else { return Stub.json(Stub.user) }
+                    entered.open()
+                    await release.wait()
+                    return Stub.json(
+                        """
+                        {"default_visibility":"PUBLIC","theme":"d","avatar":null}
+                        """
+                    )
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+
+        let inFlight = Task { await session.loadSettings() }
+        // Not "probably started": the stub says so before anything is allowed to change.
+        await entered.wait()
+
+        session.signOutWithoutRevoking()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_b")
+
+        release.open()
+        await inFlight.value
+
+        #expect(session.defaultVisibility == nil)
+        #expect(session.state.user?.subject == "fabian")
+    }
+
+    /// The control for the test above. The same slow call, with nobody signing in behind it, still
+    /// lands — so what that test proves is about the account changing, not about slowness.
+    @Test("an answer for the session that asked for it is still assigned")
+    func aSlowAnswerForTheSameSessionLands() async {
+        let entered = Gate()
+        let release = Gate()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    guard operation == settingsOperation else { return Stub.json(Stub.user) }
+                    entered.open()
+                    await release.wait()
+                    return Stub.json(
+                        """
+                        {"default_visibility":"PUBLIC","theme":"d","avatar":null}
+                        """
+                    )
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+
+        let inFlight = Task { await session.loadSettings() }
+        await entered.wait()
+        release.open()
+        await inFlight.value
+
+        #expect(session.defaultVisibility == .public)
+    }
+
+    /// A 401 here is not "the setting could not be read", it is the server saying this credential
+    /// is dead — which is the one error this codebase never treats as best-effort, wherever it
+    /// turns up. A token revoked between opening the timeline and reading the settings is still a
+    /// revoked token.
+    @Test("a 401 from the settings call ends the session like any other")
+    func anUnauthorisedSettingsCallEndsTheSession() async {
+        let credentials = InMemoryCredentials()
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    operation == settingsOperation
+                        ? Stub.empty(.unauthorized) : Stub.json(Stub.user)
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+        #expect(session.state.user != nil)
+
+        await session.loadSettings()
+
+        #expect(session.state.user == nil)
+        #expect(session.defaultVisibility == nil)
+        #expect(session.lastError != nil)
+        // The dead credential is gone from the device, not merely from memory.
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == nil)
+    }
+
+    /// One account's setting must never be shown to the next one.
+    @Test("signing out forgets the account's default")
+    func theDefaultDoesNotOutliveTheAccount() async {
+        let session = await signedIn { _, _, operation in
+            operation == settingsOperation
+                ? Stub.json("{\"default_visibility\":\"PUBLIC\",\"theme\":\"d\",\"avatar\":null}")
+                : Stub.json(Stub.user)
+        }
+        await session.loadSettings()
+        #expect(session.defaultVisibility == .public)
+
+        session.signOutWithoutRevoking()
+
+        #expect(session.defaultVisibility == nil)
+    }
+}
+
+/// A place a stubbed request can stop, so a test can say exactly when a call is in flight and
+/// exactly when it is allowed to finish. Without it "start a slow load, then switch accounts" is
+/// a race the test would sometimes win by accident.
+final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var isOpen = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let alreadyOpen: Bool = lock.withLock {
+                if isOpen { return true }
+                waiter = continuation
+                return false
+            }
+            if alreadyOpen { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let waiting: CheckedContinuation<Void, Never>? = lock.withLock {
+            isOpen = true
+            let held = waiter
+            waiter = nil
+            return held
+        }
+        waiting?.resume()
     }
 }

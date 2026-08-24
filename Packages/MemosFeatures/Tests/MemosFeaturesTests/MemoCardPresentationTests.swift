@@ -53,6 +53,67 @@ struct MemoCardPresentationTests {
         #expect(MemoCardPresentation.displayName(forOwner: "@example.invalid") == "Unknown")
     }
 
+    /// "Default" alone answers the question with the question. The whole point of the control is
+    /// who will see this, and a person can only safely leave it alone if they are told what
+    /// leaving it alone does.
+    @Test("the default choice names what it resolves to, once the account has said")
+    func defaultNamesItsResolution() {
+        #expect(
+            VisibilityChoice.title(selection: nil, accountDefault: .private)
+                == "Default (Private)"
+        )
+        #expect(
+            VisibilityChoice.title(selection: nil, accountDefault: .public) == "Default (Public)"
+        )
+        // An explicit choice speaks for itself and never mentions the default.
+        #expect(
+            VisibilityChoice.title(selection: .protected, accountDefault: .public) == "Protected"
+        )
+        #expect(
+            VisibilityChoice.symbol(selection: .protected, accountDefault: .public)
+                == MemoVisibility.protected.symbolName
+        )
+    }
+
+    /// A pill that refuses to truncate must still fit the sheet. At an accessibility text size
+    /// the framed form wants 518pt of the 369 a compose sheet has, so at those sizes it keeps the
+    /// answer and drops the framing — the word "Default" is what the menu's checkmark already
+    /// says, and the visibility is what nobody should have to guess.
+    @Test("at an accessibility text size the answer survives and the framing goes")
+    func compactKeepsTheAnswer() {
+        #expect(
+            VisibilityChoice.title(selection: nil, accountDefault: .protected, compact: true)
+                == "Protected"
+        )
+        #expect(
+            VisibilityChoice.title(selection: nil, accountDefault: .protected, compact: false)
+                == "Default (Protected)"
+        )
+        // Nothing to shorten when nothing is known, and an explicit choice is already short.
+        #expect(
+            VisibilityChoice.title(selection: nil, accountDefault: nil, compact: true)
+                == "Default")
+        #expect(
+            VisibilityChoice.title(selection: .public, accountDefault: .private, compact: true)
+                == "Public"
+        )
+    }
+
+    /// The one case where saying less is right: until the account has answered, the app does not
+    /// know what "Default" means, and naming a guess would be a promise about who can read a memo.
+    @Test("an unknown account default is not invented")
+    func unknownDefaultStaysVague() {
+        #expect(VisibilityChoice.title(selection: nil, accountDefault: nil) == "Default")
+        #expect(
+            VisibilityChoice.symbol(selection: nil, accountDefault: nil) == "person.crop.circle"
+        )
+        // And the glyph follows the resolution as soon as there is one.
+        #expect(
+            VisibilityChoice.symbol(selection: nil, accountDefault: .private)
+                == MemoVisibility.private.symbolName
+        )
+    }
+
     @Test("every visibility has a distinct word and a distinct glyph")
     func visibilityVocabulary() {
         let labels = MemoVisibility.allCases.map(\.label)

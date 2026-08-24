@@ -131,3 +131,83 @@ extension MemoPresentationTests {
         #expect(MemoPresentation.playbackURL(for: image) == nil)
     }
 }
+
+/// The detail view shows the picture; the timeline shows a tile of it. Which is which is a
+/// decision, so it is a value a test can read rather than a modifier buried in a view body.
+@Suite("Attachment slots")
+struct AttachmentSlotTests {
+    private func attachment(width: Int?, height: Int?) -> MemoAttachment {
+        MemoAttachment(
+            uid: "a1",
+            mime: "image/jpeg",
+            status: .ready,
+            width: width,
+            height: height,
+            thumbnailURL: URL(string: "https://memos.example.invalid/thumb"),
+            previewURL: URL(string: "https://memos.example.invalid/mobile")
+        )
+    }
+
+    @Test("the detail view shows the whole picture, at the proportions the server measured")
+    func detailFitsTheMeasuredShape() {
+        let portrait = MemoPresentation.detailSlot(for: attachment(width: 3000, height: 4000))
+        #expect(portrait.contentMode == .fit)
+        #expect(abs(portrait.aspectRatio - 0.75) < 0.0001)
+
+        let landscape = MemoPresentation.detailSlot(for: attachment(width: 4032, height: 3024))
+        #expect(landscape.contentMode == .fit)
+        #expect(abs(landscape.aspectRatio - 4.0 / 3.0) < 0.0001)
+
+        let panorama = MemoPresentation.detailSlot(for: attachment(width: 8000, height: 2000))
+        #expect(abs(panorama.aspectRatio - 4.0) < 0.0001)
+    }
+
+    /// Without measurements there is nothing to derive, and a ratio of zero is a container with
+    /// no height that renders as nothing at all. 4:3 is wrong in the direction that letterboxes.
+    @Test("an unmeasured attachment falls back to a shape rather than to nothing")
+    func detailFallsBackToFourThirds() {
+        for missing in [(nil, 400), (300, nil), (nil, nil), (0, 400), (300, 0)] {
+            let slot = MemoPresentation.detailSlot(
+                for: attachment(width: missing.0, height: missing.1)
+            )
+            #expect(slot.contentMode == .fit)
+            #expect(abs(slot.aspectRatio - 4.0 / 3.0) < 0.0001, "got \(slot.aspectRatio)")
+            #expect(slot.aspectRatio > 0)
+        }
+    }
+
+    /// A video is a picture on this screen too — its poster gets the same whole-frame treatment,
+    /// which is what keeps the play button in the middle of the image rather than of a crop.
+    @Test("a video's poster is fitted like any other picture")
+    func videosAreFittedToo() {
+        var video = attachment(width: 1920, height: 1080)
+        video.mime = "video/mp4"
+        video.posterURL = URL(string: "https://memos.example.invalid/poster")
+        let slot = MemoPresentation.detailSlot(for: video)
+        #expect(slot.contentMode == .fit)
+        #expect(abs(slot.aspectRatio - 16.0 / 9.0) < 0.0001)
+    }
+
+    /// The browse surface is deliberately the other way round: tiles crop so a row lines up.
+    @Test("the timeline still crops, because a row that does not line up is not a row")
+    func timelineTilesStillFill() {
+        #expect(MemoPresentation.gridSlot.contentMode == .fill)
+        #expect(MemoPresentation.gridSlot.aspectRatio == 1)
+        let solo = MemoPresentation.timelineSlot(for: attachment(width: 3000, height: 4000))
+        #expect(solo.contentMode == .fill)
+        #expect(abs(solo.aspectRatio - 0.75) < 0.0001)
+        // An unmeasured tile is square there, which is what a grid wants — not 4:3.
+        #expect(
+            MemoPresentation.timelineSlot(for: attachment(width: nil, height: nil))
+                .aspectRatio == 1)
+    }
+
+    @Test("a measurement the server did not make is reported as missing, not as a square")
+    func measuredRatioIsHonest() {
+        #expect(attachment(width: nil, height: nil).measuredAspectRatio == nil)
+        #expect(attachment(width: 0, height: 400).measuredAspectRatio == nil)
+        #expect(attachment(width: 4000, height: 3000).measuredAspectRatio != nil)
+        // The old accessor keeps its square fallback for the callers that want one.
+        #expect(attachment(width: nil, height: nil).aspectRatio == 1)
+    }
+}
