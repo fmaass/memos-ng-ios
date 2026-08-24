@@ -103,6 +103,16 @@ public final class TimelineStore {
                 memos.insert(memo, at: Self.insertionIndex(for: memo, in: memos))
                 lastError = nil
                 return true
+            // Declared since the strict linking contract: the server refuses to create a memo
+            // whose uploads it cannot link, rather than quietly dropping them. This path never
+            // asks for uploads — the outbox owns anything with files — so a 409 here is the
+            // server disagreeing with a request this store did not make.
+            case .conflict:
+                throw APIError.server(status: 409)
+            // A keyed create that lost a race and stored nothing. This path sends no key, so it
+            // cannot safely repeat itself either; it reports and lets the person decide.
+            case .serviceUnavailable:
+                throw APIError.server(status: 503)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):
@@ -235,6 +245,11 @@ public final class TimelineStore {
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
+            // The strict linking refusal is declared on the patch too. An edit changes text or
+            // visibility and never names an upload, so this is reported rather than recovered
+            // from — recovering would mean re-uploading files this call never sent.
+            case .conflict:
+                throw APIError.server(status: 409)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):
@@ -266,6 +281,11 @@ public final class TimelineStore {
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
+            // The strict linking refusal is declared on the patch too. An edit changes text or
+            // visibility and never names an upload, so this is reported rather than recovered
+            // from — recovering would mean re-uploading files this call never sent.
+            case .conflict:
+                throw APIError.server(status: 409)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):

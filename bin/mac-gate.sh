@@ -34,7 +34,7 @@ set -uo pipefail
 GATE_ROOT_REMOTE='$HOME/build/memos-ng-ios/gate'
 SIMULATOR="${MAC_GATE_SIMULATOR:-iPhone 17}"
 # Always enforced. MAC_GATE_TEST_BUNDLES may only ADD to this list.
-MANDATORY_TEST_BUNDLES="MemosAPITests MemosCoreTests MemosFeaturesTests"
+MANDATORY_TEST_BUNDLES="MemosAPITests MemosCoreTests MemosOutboxTests MemosFeaturesTests"
 TEST_BUNDLES="$MANDATORY_TEST_BUNDLES"
 for extra in ${MAC_GATE_TEST_BUNDLES:-}; do
   case " $TEST_BUNDLES " in
@@ -316,6 +316,13 @@ s_deps() {
     echo "DEPRULE FAIL: MemosCore depends on MemosFeatures"; rc=1
   else
     echo "DEPRULE ok: MemosCore/Package.swift has no MemosFeatures reference"
+  fi
+  # The outbox is the durability layer: it must stay buildable and readable on its own, which it
+  # only does while it names no other layer of this app at all.
+  if grep -n "MemosAPI\|MemosCore\|MemosFeatures" Packages/MemosOutbox/Package.swift; then
+    echo "DEPRULE FAIL: MemosOutbox names another layer"; rc=1
+  else
+    echo "DEPRULE ok: MemosOutbox/Package.swift names no other layer"
   fi
   if grep -n "MemosCore" Packages/MemosFeatures/Package.swift; then
     echo "DEPRULE ok (positive control): MemosFeatures/Package.swift references MemosCore"
