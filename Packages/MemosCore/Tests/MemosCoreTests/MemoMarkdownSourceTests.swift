@@ -44,4 +44,56 @@ struct MemoMarkdownSourceTests {
         let source = "a [bracket] and (parens)"
         #expect(MemoMarkdownSource.prepare(source) == source)
     }
+
+    /// Escaping the definition's own bracket is what markdown-it's refusal to register it looks
+    /// like: the line stops being a definition and stays on screen, and every reference that named
+    /// the label has nothing to resolve to, so it is literal text as well. What the renderer then
+    /// does with that is asserted in `ReferenceLinkTests`; this is the string it is handed.
+    @Test("neutralises the definition of a reference link the SPA would refuse")
+    func neutralisesUnsafeReferenceDefinitions() {
+        #expect(
+            MemoMarkdownSource.prepare("[click][evil]\n\n[evil]: javascript:alert(1)")
+                == "[click][evil]\n\n\\[evil]: javascript:alert(1)"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("[evil]:\njavascript:alert(1)")
+                == "\\[evil]:\njavascript:alert(1)"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("[x]: <data:text/html,hi>") == "\\[x]: <data:text/html,hi>"
+        )
+        #expect(MemoMarkdownSource.prepare("> [e]: file:///etc") == "> \\[e]: file:///etc")
+    }
+
+    @Test("leaves the definition of an allowed scheme alone")
+    func keepsSafeReferenceDefinitions() {
+        let source = "[site][home]\n\n[home]: https://example.com/a?b=1"
+        #expect(MemoMarkdownSource.prepare(source) == source)
+        let titled = "[home]: https://example.com/ \"Home\""
+        #expect(MemoMarkdownSource.prepare(titled) == titled)
+    }
+
+    /// A line inside a fence is code, and a backslash there would be visible.
+    @Test("leaves a definition-shaped line inside a code block alone")
+    func leavesFencedDefinitions() {
+        let fenced = "```\n[evil]: javascript:alert(1)\n```"
+        #expect(MemoMarkdownSource.prepare(fenced) == fenced)
+        let indented = "    [evil]: javascript:alert(1)"
+        #expect(MemoMarkdownSource.prepare(indented) == indented)
+    }
+
+    @Test("removes a reference image whole, and only when the label resolves")
+    func removesReferenceImages() {
+        #expect(
+            MemoMarkdownSource.prepare("![shot][pic]\n\n[pic]: https://e.com/a.png")
+                == "\n\n[pic]: https://e.com/a.png"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("![shot][]\n\n[shot]: https://e.com/a.png")
+                == "\n\n[shot]: https://e.com/a.png"
+        )
+        // Nothing defines `nope`, so both renderers show the characters as they are.
+        let unresolved = "![alt][nope] stays"
+        #expect(MemoMarkdownSource.prepare(unresolved) == unresolved)
+    }
 }

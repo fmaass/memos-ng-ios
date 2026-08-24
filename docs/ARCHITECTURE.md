@@ -80,9 +80,16 @@ stripped before rendering.
 It is enforced by a committed projection fixture asserted on both sides. memos-ng renders a corpus
 through the real SPA renderer and commits the block projection defined in
 `docs/markdown-parity.schema.md`; this repo vendors that file next to `openapi.json` from the same
-commit, and a Swift Testing suite renders each case's carried input and asserts the same
-projection. A renderer that flattens a list, loses a task's state or keeps a `javascript:` link
-tappable cannot pass.
+commit, and a Swift Testing suite renders each case's carried input **through the renderer the app
+ships** — `MemoMarkdownSource.prepare` into `MarkdownContent`, the parse `Markdown(_:)` performs —
+and asserts the same projection. A renderer that flattens a list, loses a task's state or keeps a
+`javascript:` link tappable cannot pass, and neither can a MarkdownUI release that changes what it
+parses.
+
+A link is held to the scheme rule in every spelling CommonMark gives it. markdown-it validates a
+link reference definition where it is defined and refuses to register an unsafe one; cmark-gfm
+does not, so `prepare` neutralises the definition instead, which leaves the same thing on screen
+as the SPA shows and leaves every reference that named the label as text.
 
 The block parse is load-bearing, not test-only scaffolding: it decides which source lines are
 checkboxes (`taskCheckboxLines`, `toggleTask`), what the detail screen lists as tasks, and which
@@ -149,7 +156,11 @@ Recorded here rather than quietly absorbed, for the review that turns v0 into v1
 5. **The test bundles are Xcode targets, not SwiftPM test targets.** An XcodeGen scheme's test
    action cannot reference a package's test targets. The bundle names and the requirement that
    `xcodebuild test` runs all three are unchanged.
-6. **Parity is asserted at the block-model layer, not by inspecting MarkdownUI's output.**
-   MarkdownUI renders a view, which cannot be projected. The model the suite pins is the same one
-   the app uses to decide task rows and link safety, and MarkdownUI renders the source that model
-   prepared — but a divergence inside MarkdownUI's own inline rendering would not be caught here.
+6. **Parity is asserted against the shipped renderer's own parse, plus rendered measurements.**
+   `MarkdownContent(_:).renderHTML()` is projected, because it comes from the same block model
+   `Markdown(_:)` renders; the theme is held by measuring rendered views (body size, soft breaks)
+   and by reading pixels back (a link is painted in the accent). Two things that parse cannot
+   answer are asserted elsewhere and named where they are: cmark's HTML renderer applies its own
+   safe mode, which blanks an unsafe `href` and omits raw HTML where the view keeps both — so the
+   raw-HTML case is held against the block model in MemosCoreTests, and link liveness is read out
+   of the rendered pixels.
