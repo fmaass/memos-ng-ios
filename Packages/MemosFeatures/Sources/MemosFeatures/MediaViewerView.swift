@@ -122,6 +122,17 @@ struct MediaViewerPage: View {
     let page: MediaPage
     let onZoomChange: (Bool) -> Void
     let play: (URL) -> Void
+    /// The cache the lapsed-signature eviction below names.
+    ///
+    /// Injectable for one reason, and it is a testing one: the default is a process-wide
+    /// singleton every other test in the bundle shares, so watching an eviction in it made the
+    /// assertion depend on three things that have nothing to do with the rule — which cache the
+    /// composition root won at launch, what else was touching the singleton in parallel, and
+    /// whether the image load raced the task. A page handed its own cache can be watched
+    /// directly. Production passes nothing and gets `MediaSession.shared.cache`, which is the
+    /// cache the image fetches actually go through; evicting out of any other one is a no-op
+    /// that reads like an eviction.
+    var cache: URLCache = MediaSession.shared.cache
 
     @State private var transform = MediaZoom.Transform.identity
     @GestureState private var magnification: CGFloat = 1
@@ -207,7 +218,7 @@ struct MediaViewerPage: View {
                 .task(id: url) {
                     // The signature can lapse while a cached copy is still on disk; re-serving it
                     // would hide the moment it stopped verifying (SignedMediaURL / LSN-0062).
-                    MediaCache.evictExpired(url)
+                    MediaCache.evictExpired(url, cache: cache)
                 }
             }
         }
