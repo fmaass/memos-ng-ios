@@ -221,3 +221,82 @@ final class Counter: @unchecked Sendable {
     func increment() { lock.withLock { value += 1 } }
     var count: Int { lock.withLock { value } }
 }
+
+/// The two keychain namespaces as the Security framework was OBSERVED to behave, which is the one
+/// thing a pair of independent dictionaries cannot express: there is ONE item table, an item
+/// carries the access group it was written under, and a `SecItemDelete` whose query names no
+/// access group matches the account in EVERY group — while a `SecItemCopyMatching` that names
+/// none sees only the ungrouped ones.
+///
+/// That asymmetry is not invented for the test. On a fresh sign-in the shipped app logged
+/// `SecItemAdd -> 0`, then `SecItemCopyMatching -> 0` for the same query, and then
+/// `SecItemCopyMatching -> -25300` a second later — with nothing in between but the ungrouped
+/// delete that was supposed to clear the OTHER namespace.
+final class KeychainNamespaces: @unchecked Sendable {
+    private struct Key: Hashable {
+        var group: String?
+        var account: String
+    }
+
+    private let lock = NSLock()
+    private var items: [Key: String] = [:]
+
+    /// The namespace addressed WITH an access group: it reads, writes and deletes only its own.
+    func grouped(_ group: String) -> any CredentialStore { Namespace(table: self, group: group) }
+
+    /// The namespace addressed with no access group, as `Keychain(accessGroup: nil)` is.
+    func ungrouped() -> any CredentialStore { Namespace(table: self, group: nil) }
+
+    var isEmpty: Bool { lock.withLock { items.isEmpty } }
+
+    fileprivate func write(_ value: String, group: String?, account: String) {
+        lock.withLock { items[Key(group: group, account: account)] = value }
+    }
+
+    fileprivate func read(group: String?, account: String) -> String? {
+        lock.withLock { items[Key(group: group, account: account)] }
+    }
+
+    /// A grouped delete takes its own item. An UNGROUPED one takes the account out of every group
+    /// there is — the behaviour the shipped defect ran into.
+    fileprivate func delete(group: String?, account: String) {
+        lock.withLock {
+            if let group {
+                items[Key(group: group, account: account)] = nil
+            } else {
+                for key in items.keys where key.account == account { items[key] = nil }
+            }
+        }
+    }
+
+    private struct Namespace: CredentialStore {
+        let table: KeychainNamespaces
+        let group: String?
+
+        func set(_ value: String, for account: String) throws {
+            table.write(value, group: group, account: account)
+        }
+
+        func string(for account: String) throws -> String? {
+            table.read(group: group, account: account)
+        }
+
+        func remove(_ account: String) throws {
+            table.delete(group: group, account: account)
+        }
+    }
+}
+
+/// A namespace that accepts every write and then has nothing — `SecItemAdd` answering
+/// `errSecSuccess` for an item the next `SecItemCopyMatching` cannot find. It is the only failure
+/// here that a status code does not report, which is why the store has to read back.
+final class ForgetfulCredentials: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var writes = 0
+
+    func set(_ value: String, for account: String) throws { lock.withLock { writes += 1 } }
+    func string(for account: String) throws -> String? { nil }
+    func remove(_ account: String) throws {}
+
+    var writeCount: Int { lock.withLock { writes } }
+}

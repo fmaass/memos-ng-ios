@@ -55,4 +55,25 @@ struct ComposeDateTests {
         #expect(compact.count < full.count)
         #expect(full != "Now")
     }
+
+    @Test("the pill says nothing at all until a date is chosen")
+    func pillIsGlyphOnlyUntilChosen() {
+        #expect(MemoDateChoice.pillTitle(for: nil) == nil)
+        // Not the word "Now": the calendar glyph already says it, and a row of three pills has
+        // room only for the answers that differ from the default.
+        #expect(MemoDateChoice.pillTitle(for: nil) != "Now")
+    }
+
+    @Test("a chosen date reaches the pill in its short form")
+    func pillCarriesTheShortDate() throws {
+        let locale = Locale(identifier: "en_GB")
+        let shown = try #require(MemoDateChoice.pillTitle(for: capture, locale: locale))
+        let day = String(Calendar.current.component(.day, from: capture))
+        let year = String(Calendar.current.component(.year, from: capture))
+        #expect(shown.contains(day))
+        // The year and the time stay in the picker and in what a screen reader hears; spelling
+        // them out on the pill costs the row its other two.
+        #expect(!shown.contains(year))
+        #expect(shown == MemoDateChoice.title(for: capture, compact: true, locale: locale))
+    }
 }

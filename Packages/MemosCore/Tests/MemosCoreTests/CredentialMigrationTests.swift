@@ -85,6 +85,65 @@ struct CredentialMigrationTests {
         #expect(legacy.isEmpty)
     }
 
+    // MARK: - the credential that deleted itself
+
+    @Test("a stored token is still there afterwards")
+    func setSurvivesClearingTheOtherNamespace() throws {
+        let keychain = KeychainNamespaces()
+        let store = MigratingCredentialStore(
+            primary: keychain.grouped(DeviceCredentials.accessGroup),
+            legacy: keychain.ungrouped()
+        )
+
+        try store.set("memos_pat_new", for: account)
+
+        // The assertion the shipped app failed, and the reason writing a memo did nothing at all:
+        // the token went into the shared namespace and the very next call — the one that clears
+        // the OLD namespace — deleted it again, because a keychain delete naming no access group
+        // matches every group. The session never noticed (its client holds the token in memory);
+        // the outbox reads the keychain on every drain, so it refused every capture from here on.
+        #expect(try store.string(for: account) == "memos_pat_new")
+    }
+
+    @Test("migrating a token out of the old namespace does not delete it on the way")
+    func migrationSurvivesTheUngroupedDelete() throws {
+        let keychain = KeychainNamespaces()
+        try keychain.ungrouped().set("memos_pat_old", for: account)
+        let store = MigratingCredentialStore(
+            primary: keychain.grouped(DeviceCredentials.accessGroup),
+            legacy: keychain.ungrouped()
+        )
+
+        #expect(try store.string(for: account) == "memos_pat_old")
+        // The read that migrates must leave the token readable, not consume it.
+        #expect(try store.string(for: account) == "memos_pat_old")
+    }
+
+    @Test("a write that cannot be read back is not a write")
+    func writeIsNotDoneUntilItReadsBack() {
+        let store = MigratingCredentialStore(
+            primary: ForgetfulCredentials(), legacy: ForgetfulCredentials()
+        )
+
+        // Both namespaces answer success and hold nothing. Nothing threw, so only looking finds
+        // it — and a sign-in that believed the status code told someone their credential was
+        // saved when the keychain was empty.
+        #expect(throws: CredentialStoreError.notReadableBack(account: account)) {
+            try store.set("memos_pat_new", for: account)
+        }
+    }
+
+    @Test("a shared namespace that forgets falls back to the app's own")
+    func fallsBackWhenTheSharedNamespaceForgets() throws {
+        let legacy = InMemoryCredentials()
+        let store = MigratingCredentialStore(primary: ForgetfulCredentials(), legacy: legacy)
+
+        try store.set("memos_pat_new", for: account)
+
+        #expect(legacy.snapshot()[account] == "memos_pat_new")
+        #expect(try store.string(for: account) == "memos_pat_new")
+    }
+
     @Test("the app group is named without a team id, so the repository carries no team id")
     func accessGroupIsAnAppGroup() {
         #expect(DeviceCredentials.accessGroup == "group.live.discomarder.memosng")

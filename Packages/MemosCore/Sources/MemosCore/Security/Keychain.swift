@@ -13,6 +13,14 @@ public protocol CredentialStore: Sendable {
     func remove(_ account: String) throws
 }
 
+/// A storage failure no status code reported.
+public enum CredentialStoreError: Error, Equatable {
+    /// The namespace accepted the write and then could not return the value. It is its own case
+    /// because it is not a keychain ERROR — every call answered success — and the only way to see
+    /// it is to look.
+    case notReadableBack(account: String)
+}
+
 /// The device credential's only home.
 ///
 /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` is the deliberate choice: the token must

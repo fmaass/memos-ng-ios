@@ -16,6 +16,7 @@ public struct MemoDetailView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var playing: VideoPlayback?
     @State private var viewing: MediaViewerSelection?
+    @State private var editing: ComposeView.Mode?
     @State private var feedback = MemoFeedbackTrigger()
     /// What the zoom transition matches the full-screen viewer to: the picture that was tapped.
     @Namespace private var mediaZoom
@@ -96,6 +97,44 @@ public struct MemoDetailView: View {
         }
         .navigationTitle(memo.pinned ? "Pinned memo" : "Memo")
         .navigationBarTitleDisplayMode(.inline)
+        // The only place editing is visible on the memo's own screen. Until this, changing a memo
+        // meant knowing to long-press its card back in the timeline — see MemoDetailPresentation.
+        .toolbar {
+            if let mode = MemoDetailPresentation.editMode(for: memo) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        editing = mode
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .accessibilityLabel("Edit memo")
+                }
+            }
+        }
+        .sheet(item: $editing) { mode in
+            ComposeView(mode: mode) { submission in
+                await save(mode, submission: submission)
+            }
+        }
+    }
+
+    /// The same edit the timeline submits, from the screen the memo is already open on.
+    private func save(_ mode: ComposeView.Mode, submission: ComposeSubmission) async -> Bool {
+        guard case .edit(let uid, _, let createdAt) = mode,
+            let client = session.api,
+            let baseURL = session.serverBaseURL
+        else { return false }
+        let saved = await timeline.edit(
+            uid: uid,
+            content: submission.content,
+            createdAt: MemoDetailPresentation.editedDate(
+                chosen: submission.createdAt, original: createdAt
+            ),
+            using: client,
+            baseURL: baseURL
+        )
+        feedback.fire(saved ? .posted : .postFailed)
+        return saved
     }
 
     @ViewBuilder

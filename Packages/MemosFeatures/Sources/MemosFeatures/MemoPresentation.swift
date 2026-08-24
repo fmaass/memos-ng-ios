@@ -112,3 +112,31 @@ public enum MemoPresentation {
         taskCheckboxItems(content)
     }
 }
+
+/// What the memo DETAIL screen offers on a memo, decided outside the view.
+///
+/// Editing used to live only in the timeline card's context menu — a long press on a card, with
+/// nothing on the memo's own screen to say it was possible. People opened a memo to change it and
+/// found no way to, which is not a discoverability nicety: it is the feature being missing for
+/// anyone who did not already know the gesture.
+public enum MemoDetailPresentation {
+    /// The compose mode the Edit affordance opens, or nil when this memo is not mine.
+    ///
+    /// Returning the MODE rather than a Bool is what keeps the gate and the payload together: a
+    /// view that asked "may I edit?" and then built the mode itself could answer yes and open the
+    /// wrong memo. It is nil-gated on `mine` for the same reason every other own-memo action is —
+    /// the server would refuse the write, and an affordance that leads to a 403 is worse than none.
+    public static func editMode(for memo: Memo) -> ComposeView.Mode? {
+        guard memo.mine else { return nil }
+        return .edit(uid: memo.uid, content: memo.content, createdAt: memo.createdAt)
+    }
+
+    /// The date an edit actually SENDS: only one the editor moved.
+    ///
+    /// An untouched date would be a rewrite of the memo's own value dressed up as an edit. It is a
+    /// function rather than a line inside a submit closure because there are now two screens that
+    /// submit an edit, and the rule has to be the same one on both.
+    public static func editedDate(chosen: Date?, original: Date) -> Date? {
+        chosen == original ? nil : chosen
+    }
+}
