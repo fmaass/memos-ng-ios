@@ -13,9 +13,11 @@ dependency check runs on the Mac build host through one script:
 
 It refuses (exit 2) if the tree has no HEAD or if its remote target resolves outside
 `~/build/memos-ng-ios/gate/`, mirrors the worktree with `rsync --delete`, and runs, fail-fast:
-`bin/generate.sh` → `swift format lint --strict --recursive .` → `xcodebuild test` (all three
-test bundles) → `swift build -warnings-as-errors` for MemosAPI and MemosCore → the dependency-rule
-greps → a per-bundle test-count check. It ends with one summary line of every step's exit code and
+`bin/generate.sh` (which also asserts the version keys in the generated project) →
+`swift format lint --strict --recursive .` → `xcodebuild test` (all five test bundles) → a
+read-back of the BUILT app and .appex (each one's `PrivacyInfo.xcprivacy`, its version keys and
+its export-compliance answer) → `swift build -warnings-as-errors` for MemosAPI and MemosCore →
+the dependency-rule greps → a per-bundle test-count check. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
 

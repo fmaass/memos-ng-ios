@@ -8,6 +8,10 @@
 # ordered checks, streams their output, copies the result bundle back, and returns the remote
 # exit code unmasked.
 #
+# The ordered checks are: generate the project, lint, test, rebuild the two lower layers with
+# warnings as errors, check the dependency rule, read the SHIPPING bundles back, and count the
+# tests that actually ran.
+#
 # Git is the only medium of exchange between the two machines. The gate directory is a mirror,
 # never a checkout: it is rsync'd with --delete, it is never opened in Xcode, and a developer's
 # own clone on the build host is never a target (the containment check below enforces that).
@@ -268,7 +272,60 @@ step() {
 
 s_xcodegen() {
   [ -f project.yml ] || { echo "no project.yml in $GATE_TARGET — nothing to generate"; return 3; }
-  bin/generate.sh --spec project.yml
+  bin/generate.sh --spec project.yml || return $?
+  # The version pair has to move on BOTH targets together — an extension whose CFBundleVersion
+  # differs from its host's cannot be installed, and a marketing version that differs between
+  # them is a TestFlight build that says two things at once. Checked on the generated project,
+  # here, because it costs nothing and the build that would surface it costs ten minutes.
+  echo "--- version keys in the generated project ---"
+  /usr/bin/python3 - <<'PY'
+import re, sys
+
+EXPECTED_MARKETING = "0.1.0"
+pbxproj = "MemosNG.xcodeproj/project.pbxproj"
+try:
+    text = open(pbxproj, encoding="utf-8").read()
+except OSError as error:
+    print("VERSION FAIL: cannot read %s: %s" % (pbxproj, error))
+    sys.exit(1)
+
+marketing = re.findall(r"MARKETING_VERSION = ([^;]+);", text)
+current = re.findall(r"CURRENT_PROJECT_VERSION = ([^;]+);", text)
+print("MARKETING_VERSION values: %s" % (", ".join(marketing) or "(none)"))
+print("CURRENT_PROJECT_VERSION values: %s" % (", ".join(current) or "(none)"))
+
+rc = 0
+# Two targets carry the pair, each with a Debug and a Release configuration.
+if len(marketing) < 4:
+    print("VERSION FAIL: expected at least 4 MARKETING_VERSION entries (app + extension, "
+          "Debug + Release), found %d" % len(marketing))
+    rc = 1
+elif set(marketing) != {EXPECTED_MARKETING}:
+    print("VERSION FAIL: MARKETING_VERSION is not %s everywhere" % EXPECTED_MARKETING)
+    rc = 1
+else:
+    print("ok: every MARKETING_VERSION is %s" % EXPECTED_MARKETING)
+
+if len(current) < 4:
+    print("VERSION FAIL: expected at least 4 CURRENT_PROJECT_VERSION entries, found %d" % len(current))
+    rc = 1
+elif len(set(current)) != 1:
+    print("VERSION FAIL: the two targets disagree on CURRENT_PROJECT_VERSION: %s" % set(current))
+    rc = 1
+else:
+    print("ok: every CURRENT_PROJECT_VERSION is %s" % current[0])
+
+# Positive control in the same read: a setting that must be there, so that a "not found" above
+# means absent rather than a regex reading the wrong file.
+if re.search(r"PRODUCT_BUNDLE_IDENTIFIER = live\.discomarder\.memosng;", text):
+    print("ok (positive control): the app's bundle identifier is in the generated project")
+else:
+    print("VERSION FAIL: positive control missing — the generated project has no "
+          "PRODUCT_BUNDLE_IDENTIFIER = live.discomarder.memosng")
+    rc = 1
+
+sys.exit(rc)
+PY
 }
 
 s_format() { swift format lint --strict --recursive . ; }
@@ -280,6 +337,127 @@ s_xcodebuild() {
     -derivedDataPath "$DERIVED" \
     -resultBundlePath "$XCRESULT" \
     -skipPackagePluginValidation
+}
+
+s_bundlecheck() {
+  # What ships is the BUNDLE, not the spec that produced it. XcodeGen can be given a resource and
+  # still not put it where Apple looks, an INFOPLIST_KEY_ can land as the string "NO" where a
+  # Boolean is read, and a deprecated key can survive a deletion in the wrong block — none of
+  # which a green build says anything about. So the built product is opened and read.
+  local app="$DERIVED/Build/Products/Debug-iphonesimulator/MemosNG.app"
+  local appex="$app/PlugIns/MemosShare.appex"
+  [ -d "$app" ] || { echo "BUNDLE FAIL: no built app at $app"; return 1; }
+  [ -d "$appex" ] || { echo "BUNDLE FAIL: no embedded extension at $appex"; return 1; }
+  /usr/bin/python3 - "$app" "$appex" <<'PY'
+import plistlib, os, sys
+
+app, appex = sys.argv[1], sys.argv[2]
+EXPECTED_SHORT_VERSION = "0.1.0"
+rc = 0
+
+def fail(msg):
+    global rc
+    print("BUNDLE FAIL: " + msg)
+    rc = 1
+
+def load(path):
+    with open(path, "rb") as handle:
+        return plistlib.load(handle)
+
+def check(label, bundle, bundle_id):
+    print("--- %s: %s" % (label, bundle))
+
+    info_path = os.path.join(bundle, "Info.plist")
+    if not os.path.isfile(info_path):
+        fail("%s has no Info.plist" % label)
+        return
+    try:
+        info = load(info_path)
+    except Exception as error:
+        fail("%s Info.plist does not parse: %s" % (label, error))
+        return
+
+    # Positive control, in the same read: a key that MUST be there. Without it, an "absent"
+    # verdict below would only prove the reader came back empty.
+    got_id = info.get("CFBundleIdentifier")
+    if got_id == bundle_id:
+        print("  ok (positive control): CFBundleIdentifier = %s" % got_id)
+    else:
+        fail("%s CFBundleIdentifier is %r, expected %r — the reader is not reading this bundle"
+             % (label, got_id, bundle_id))
+        return
+
+    short = info.get("CFBundleShortVersionString")
+    if short == EXPECTED_SHORT_VERSION:
+        print("  ok: CFBundleShortVersionString = %s" % short)
+    else:
+        fail("%s CFBundleShortVersionString is %r, expected %r"
+             % (label, short, EXPECTED_SHORT_VERSION))
+
+    build = info.get("CFBundleVersion")
+    if isinstance(build, str) and build.strip():
+        print("  ok: CFBundleVersion = %s" % build)
+    else:
+        fail("%s CFBundleVersion is %r — an extension without one cannot be installed" % (label, build))
+
+    export = info.get("ITSAppUsesNonExemptEncryption")
+    if export is False:
+        print("  ok: ITSAppUsesNonExemptEncryption = false (a real Boolean)")
+    else:
+        fail("%s ITSAppUsesNonExemptEncryption is %r, expected the Boolean false" % (label, export))
+
+    if "UIRequiresFullScreen" in info:
+        fail("%s still declares UIRequiresFullScreen, which iOS 26 deprecates" % label)
+    else:
+        print("  ok: UIRequiresFullScreen absent")
+
+    privacy_path = os.path.join(bundle, "PrivacyInfo.xcprivacy")
+    if not os.path.isfile(privacy_path):
+        fail("%s has no PrivacyInfo.xcprivacy at its bundle root" % label)
+        return
+    try:
+        privacy = load(privacy_path)
+    except Exception as error:
+        fail("%s PrivacyInfo.xcprivacy does not parse: %s" % (label, error))
+        return
+    print("  ok: PrivacyInfo.xcprivacy present at the bundle root")
+
+    if privacy.get("NSPrivacyTracking") is not False:
+        fail("%s NSPrivacyTracking is %r, expected false" % (label, privacy.get("NSPrivacyTracking")))
+    if privacy.get("NSPrivacyTrackingDomains") != []:
+        fail("%s NSPrivacyTrackingDomains is %r, expected empty"
+             % (label, privacy.get("NSPrivacyTrackingDomains")))
+    if privacy.get("NSPrivacyCollectedDataTypes") != []:
+        fail("%s NSPrivacyCollectedDataTypes is %r, expected empty"
+             % (label, privacy.get("NSPrivacyCollectedDataTypes")))
+
+    declared = {
+        entry.get("NSPrivacyAccessedAPIType"): entry.get("NSPrivacyAccessedAPITypeReasons")
+        for entry in privacy.get("NSPrivacyAccessedAPITypes", []) or []
+    }
+    reasons = declared.get("NSPrivacyAccessedAPICategoryFileTimestamp")
+    if reasons == ["C617.1"]:
+        print("  ok: file-timestamp category declared with reason C617.1")
+    else:
+        fail("%s declares file-timestamp reasons %r, expected ['C617.1']" % (label, reasons))
+    print("  declared API categories: %s" % (", ".join(sorted(declared)) or "(none)"))
+
+check("app", app, "live.discomarder.memosng")
+check("extension", appex, "live.discomarder.memosng.share")
+
+# An extension's CFBundleVersion must equal its host's or the host will not install.
+try:
+    host_build = load(os.path.join(app, "Info.plist")).get("CFBundleVersion")
+    ext_build = load(os.path.join(appex, "Info.plist")).get("CFBundleVersion")
+    if host_build == ext_build:
+        print("--- ok: app and extension share CFBundleVersion %s" % host_build)
+    else:
+        fail("app CFBundleVersion %r != extension %r" % (host_build, ext_build))
+except Exception as error:
+    fail("could not compare bundle versions: %s" % error)
+
+sys.exit(rc)
+PY
 }
 
 s_warnings() {
@@ -382,6 +560,7 @@ PY
 step xcodegen   s_xcodegen
 step swiftformat s_format
 step xcodebuild s_xcodebuild
+step bundle     s_bundlecheck
 step warnaserr  s_warnings
 step deps       s_deps
 step testcount  s_testcount
