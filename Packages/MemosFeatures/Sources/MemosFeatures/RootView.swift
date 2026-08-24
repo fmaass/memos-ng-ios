@@ -70,7 +70,7 @@ struct UnreachableView: View {
             isPresented: $confirmDiscard
         ) {
             Button("Discard and sign in again", role: .destructive) {
-                session.signOutWithoutRevoking()
+                Task { await session.signOutWithoutRevoking() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

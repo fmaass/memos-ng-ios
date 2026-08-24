@@ -148,8 +148,10 @@ public struct TimelineView: View {
         ) { decision in
             Button("Try again") { advanceSignOut(.confirmed) }
             Button(decision.discardTitle, role: .destructive) {
-                session.signOutWithoutRevoking()
-                signOutStage = .idle
+                Task {
+                    await session.signOutWithoutRevoking()
+                    signOutStage = .idle
+                }
             }
             Button("Cancel", role: .cancel) { advanceSignOut(.cancelled) }
         } message: { decision in

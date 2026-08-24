@@ -330,6 +330,41 @@ PY
 
 s_format() { swift format lint --strict --recursive . ; }
 
+s_entitlements() {
+  # The privilege boundary this app rests on is not in the Swift: it is two generated plists. The
+  # device token lives in a keychain access group the APP declares and the share extension does
+  # not, and an app group identifier is itself a keychain access group — so an extension that
+  # gained a keychain-access-groups entry, or a token left in the app group, would be readable by
+  # the share sheet with nothing in the code to show for it. Checked on the GENERATED files rather
+  # than on project.yml: the artefact is what ships.
+  local rc=0 app="MemosNG.entitlements" ext="MemosShare.entitlements" f
+  for f in "$app" "$ext"; do
+    [ -f "$f" ] || { echo "ENTITLEMENT FAIL: $f was not generated"; return 1; }
+    echo "--- $f"
+    plutil -p "$f"
+  done
+  if grep -qF '$(AppIdentifierPrefix)live.discomarder.memosng.credentials' "$app"; then
+    echo "ENTITLEMENT ok: the app declares the app-only credential keychain group"
+  else
+    echo "ENTITLEMENT FAIL: $app does not declare the credential keychain group"; rc=1
+  fi
+  if grep -q 'keychain-access-groups' "$ext"; then
+    echo "ENTITLEMENT FAIL: $ext declares a keychain access group; the token would be readable"
+    rc=1
+  else
+    echo "ENTITLEMENT ok: the share extension declares no keychain access group"
+  fi
+  # A grep that finds nothing proves nothing on its own: both targets DO carry the app group, so
+  # this is the control that says the two greps above were run against real files.
+  if grep -q 'group.live.discomarder.memosng' "$app" \
+    && grep -q 'group.live.discomarder.memosng' "$ext"; then
+    echo "ENTITLEMENT ok (positive control): both targets declare the app group"
+  else
+    echo "ENTITLEMENT FAIL: positive control missing — the app group is not in both files"; rc=1
+  fi
+  return $rc
+}
+
 s_xcodebuild() {
   xcodebuild test \
     -scheme MemosNG \
@@ -558,6 +593,7 @@ PY
 }
 
 step xcodegen   s_xcodegen
+step entitlements s_entitlements
 step swiftformat s_format
 step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck

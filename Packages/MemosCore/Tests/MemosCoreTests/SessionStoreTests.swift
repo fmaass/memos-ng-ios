@@ -16,6 +16,15 @@ struct SessionStoreTests {
         credentials: InMemoryCredentials,
         handler: @escaping StubTransport.Handler
     ) -> SessionStore {
+        store(anyCredentials: credentials, handler: handler)
+    }
+
+    /// The same session over a store that is not the in-memory one — a namespace that will not
+    /// read, or one that will not let go of what it holds.
+    private func store(
+        anyCredentials credentials: any CredentialStore,
+        handler: @escaping StubTransport.Handler
+    ) -> SessionStore {
         SessionStore(
             credentials: credentials,
             makeClient: { _, token in Stub.client(token: token, handler: handler) }
@@ -121,7 +130,7 @@ struct SessionStoreTests {
         #expect(!credentials.isEmpty, "a live token must stay tracked until its fate is settled")
 
         // The person can still decide otherwise, in the open.
-        session.signOutWithoutRevoking()
+        await session.signOutWithoutRevoking()
         #expect(session.state == .signedOut)
         #expect(credentials.isEmpty)
     }
@@ -184,6 +193,50 @@ struct SessionStoreTests {
 
         #expect(session.state == .signedOut)
         #expect(credentials.isEmpty)
+    }
+
+    /// A stored credential that will not READ is not an absent one. Storage said something, and
+    /// what it said could not be turned into a token — which is a complaint, not evidence that
+    /// nobody is signed in. Nothing is deleted on the strength of it: the token may be perfectly
+    /// good and unreachable only because the device has not been unlocked since it booted.
+    @Test("a credential that cannot be read is a storage complaint, not a silent sign-out")
+    func restoreSurfacesUnreadableStorage() async {
+        let credentials = UnreadableCredentials()
+        let calls = Counter()
+        let session = store(anyCredentials: credentials) { _, _, _ in
+            calls.increment()
+            return Stub.json(Stub.user)
+        }
+
+        await session.restore()
+
+        #expect(session.state == .signedOut)
+        #expect(session.lastError == SessionStore.storageUnreadable)
+        #expect(credentials.removalCount == 0, "a read that failed must not delete anything")
+        #expect(calls.count == 0, "and nothing was sent anywhere on the strength of it")
+    }
+
+    /// A sign-out that could not clear the device must not look like one that did. The token is
+    /// revoked server-side either way, so the sign-out stands — but the person is told, because
+    /// until the next launch reconciles it there is a credential on a device that says there is
+    /// not.
+    @Test("a sign-out that could not remove the credential says so")
+    func signOutReportsACredentialItCouldNotRemove() async {
+        let credentials = UnwipeableCredentials()
+        let session = store(anyCredentials: credentials) { _, _, operation in
+            operation == whoamiOperation ? Stub.json(Stub.user) : Stub.empty(.noContent)
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+
+        let outcome = await session.signOut()
+
+        #expect(outcome == .revoked)
+        #expect(session.state == .signedOut)
+        #expect(session.lastError == SessionStore.credentialWipeWarning)
+        #expect(
+            credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_good",
+            "the double is only interesting while it really is holding the token"
+        )
     }
 }
 
@@ -769,7 +822,7 @@ struct SessionSettingsTests {
         // Not "probably started": the stub says so before anything is allowed to change.
         await entered.wait()
 
-        session.signOutWithoutRevoking()
+        await session.signOutWithoutRevoking()
         await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_b")
 
         release.open()
@@ -849,7 +902,7 @@ struct SessionSettingsTests {
         await session.loadSettings()
         #expect(session.defaultVisibility == .public)
 
-        session.signOutWithoutRevoking()
+        await session.signOutWithoutRevoking()
 
         #expect(session.defaultVisibility == nil)
     }
