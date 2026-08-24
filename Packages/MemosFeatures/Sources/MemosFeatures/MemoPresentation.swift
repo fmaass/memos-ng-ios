@@ -20,10 +20,22 @@ public enum MemoPresentation {
     }
 
     public static func url(for attachment: MemoAttachment, tier: MediaTier) -> URL? {
-        switch tier {
-        case .thumb: attachment.thumbnailURL
-        case .mobile: attachment.previewURL
+        // A video has no image tiers — its still is the poster (the same hero frame the mail
+        // digests use). Asking a video for `thumb` is how the timeline got warning triangles.
+        if attachment.isVideo {
+            return attachment.posterURL ?? attachment.thumbnailURL
         }
+        switch tier {
+        case .thumb: return attachment.thumbnailURL
+        case .mobile: return attachment.previewURL
+        }
+    }
+
+    /// What actually plays on tap: the derived, streamable rendition — never the original
+    /// (ADR-0008: originals are the archive master, screens get the light copies).
+    public static func playbackURL(for attachment: MemoAttachment) -> URL? {
+        guard attachment.isVideo else { return nil }
+        return attachment.webURL
     }
 
     /// A memo with no rendered body is not blank on screen — the tags still describe it.

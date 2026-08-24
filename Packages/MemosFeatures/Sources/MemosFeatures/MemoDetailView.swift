@@ -13,6 +13,7 @@ public struct MemoDetailView: View {
     let timeline: TimelineStore
 
     @Environment(SessionStore.self) private var session
+    @State private var playing: VideoPlayback?
 
     public init(uid: String, initial: Memo, timeline: TimelineStore) {
         self.uid = uid
@@ -63,11 +64,23 @@ public struct MemoDetailView: View {
                 }
 
                 ForEach(memo.attachments) { attachment in
-                    AttachmentThumbnail(attachment: attachment, tier: .mobile)
+                    if let playbackURL = MemoPresentation.playbackURL(for: attachment) {
+                        Button {
+                            playing = VideoPlayback(url: playbackURL)
+                        } label: {
+                            AttachmentThumbnail(attachment: attachment, tier: .mobile)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        AttachmentThumbnail(attachment: attachment, tier: .mobile)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
+        }
+        .fullScreenCover(item: $playing) { playback in
+            VideoPlayerView(playback: playback)
         }
         .navigationTitle(memo.pinned ? "Pinned memo" : "Memo")
         .navigationBarTitleDisplayMode(.inline)

@@ -91,3 +91,43 @@ struct DebugCredentialsTests {
         )
     }
 }
+
+extension MemoPresentationTests {
+    private static func video(_ overrides: (inout MemoAttachment) -> Void = { _ in })
+        -> MemoAttachment
+    {
+        var attachment = MemoAttachment(
+            uid: "v1",
+            mime: "video/mp4",
+            status: .ready,
+            thumbnailURL: URL(string: "https://example.invalid/thumb"),
+            previewURL: URL(string: "https://example.invalid/mobile"),
+            webURL: URL(string: "https://example.invalid/web.mp4"),
+            posterURL: URL(string: "https://example.invalid/poster")
+        )
+        overrides(&attachment)
+        return attachment
+    }
+
+    @Test("a video's still is its poster, whatever tier a slot asked for")
+    func videoTilesUseThePoster() {
+        let video = Self.video()
+        #expect(MemoPresentation.url(for: video, tier: .thumb)?.lastPathComponent == "poster")
+        #expect(MemoPresentation.url(for: video, tier: .mobile)?.lastPathComponent == "poster")
+    }
+
+    @Test("a video without a poster falls back rather than showing a warning triangle")
+    func videoWithoutPosterFallsBack() {
+        let video = Self.video { $0.posterURL = nil }
+        #expect(MemoPresentation.url(for: video, tier: .thumb)?.lastPathComponent == "thumb")
+    }
+
+    @Test("playback streams the derived rendition and only exists for videos")
+    func playbackIsTheDerivedRendition() {
+        #expect(
+            MemoPresentation.playbackURL(for: Self.video())?.lastPathComponent == "web.mp4"
+        )
+        let image = Self.video { $0.mime = "image/jpeg" }
+        #expect(MemoPresentation.playbackURL(for: image) == nil)
+    }
+}
