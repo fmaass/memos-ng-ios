@@ -43,7 +43,14 @@
 #                        this — an override that could shrink the list would let a suite stop
 #                        being built without the gate noticing.
 #
+# Two gates for the SAME branch are a different matter: they share the gate directory, the work
+# directory, the DerivedData and the result bundle, so the second one's `rsync --delete` rewrites
+# the tree the first is building and the verdict belongs to neither. Those runs are serialised by
+# a lock on the branch's gate directory, taken before anything is copied. The loser does not
+# wait: it says who holds the lock and stops.
+#
 # Exit codes: 2 = refusal (unsafe or unusable inputs, nothing was copied or run);
+#             3 = another run of this branch holds the gate lock (nothing was copied or run);
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -112,6 +119,11 @@ branch_slug="$(printf '%s' "$branch" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-')"
 branch_slug="${branch_slug:0:40}"
 DEVICE_NAME="gate-${branch_slug}-$$"
 
+# Who this run is, for the gate lock below. The host is in it because the pid alone is only
+# meaningful to the machine that issued it, and the lock is read by whoever comes next.
+LOCK_DIR=""
+LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
 mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
 log="$artifacts/mac-gate.log"
@@ -139,10 +151,35 @@ remove_gate_device() {
     && say "simulator   : removed the leftover device $DEVICE_NAME from the build host"
   return 0
 }
-trap 'remove_gate_device' EXIT
-trap 'remove_gate_device; exit 130' INT
-trap 'remove_gate_device; exit 143' TERM
-trap 'remove_gate_device; exit 129' HUP
+# The lock goes back the same way the device does, and for the same reason: every exit path,
+# including the interrupted one. It is removed only while this run still owns it — a lock taken
+# over by a later run after this one was killed is that run's, not this one's to drop.
+release_gate_lock() {
+  [ -n "${LOCK_DIR:-}" ] || return 0
+  local dir="$LOCK_DIR"
+  # Cleared first: a signal arm and the EXIT trap both reach here.
+  LOCK_DIR=""
+  {
+    printf "lock='%s'\n" "$(esc "$dir")"
+    printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
+    cat <<'REL_EOF'
+[ -d "$lock" ] || exit 0
+if [ "$(cat "$lock/owner" 2>/dev/null)" = "$owner" ]; then rm -rf "$lock"; fi
+REL_EOF
+  } | timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' >/dev/null 2>&1
+  return 0
+}
+
+die_locked() {
+  printf 'mac-gate: REFUSED: %s\n' "$1" >&2
+  printf 'mac-gate: REFUSED: %s\n' "$1" >> "$log" 2>/dev/null
+  exit 3
+}
+
+trap 'remove_gate_device; release_gate_lock' EXIT
+trap 'remove_gate_device; release_gate_lock; exit 130' INT
+trap 'remove_gate_device; release_gate_lock; exit 143' TERM
+trap 'remove_gate_device; release_gate_lock; exit 129' HUP
 
 # --- (5) provenance ---------------------------------------------------------------------------
 {
@@ -170,6 +207,7 @@ trap 'remove_gate_device; exit 129' HUP
 preflight_out="$(
   {
     printf "branch='%s'\n" "$(esc "$branch")"
+    printf "lock_owner='%s'\n" "$(esc "$LOCK_OWNER")"
     cat <<'PRE_EOF'
 set -uo pipefail
 gate_root_raw="$HOME/build/memos-ng-ios/gate"
@@ -210,6 +248,17 @@ if [ -e "$target" ]; then
   fi
 fi
 mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
+# The lock is a directory, because mkdir is the one atomic "claim it or find it claimed" this
+# host has in every shell it runs: /bin/bash here is 3.2 and has no flock. It is taken now,
+# before a single byte is rsync'd, since the copy is what a concurrent same-branch run destroys.
+lock="$target.lock"
+if mkdir "$lock" 2>/dev/null; then
+  printf '%s\n' "$lock_owner" > "$lock/owner" 2>/dev/null
+  echo "LOCK ACQUIRED"
+else
+  echo "LOCK HELD $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
+fi
+echo "LOCKDIR $lock"
 echo "GATE_ROOT $gate_root"
 echo "TARGET $target"
 PRE_EOF
@@ -251,6 +300,56 @@ case "$target/" in
   */projects/*) die_refuse "target $target is inside a projects checkout" ;;
 esac
 say "gate target : $host:$target"
+
+# --- (2b) the gate lock -------------------------------------------------------------------------
+# The build host either handed this run the lock or named who holds it. A live holder is a
+# refusal, not a wait: two runs of one branch cannot be ordered by patience, and a gate that sits
+# silent for ten minutes reads as a hang. A holder that is gone is reaped once, out loud.
+lockdir="$(printf '%s\n' "$preflight_out" | sed -n 's/^LOCKDIR //p')"
+[ -n "$lockdir" ] || die_refuse "the build host did not return a gate lock path"
+[ "$(printf '%s\n' "$lockdir" | wc -l)" -eq 1 ] || die_refuse "more than one gate lock path returned"
+[ "$lockdir" = "$target.lock" ] \
+  || die_refuse "the build host returned the lock $lockdir, not the expected $target.lock"
+
+if printf '%s\n' "$preflight_out" | grep -q '^LOCK ACQUIRED$'; then
+  LOCK_DIR="$lockdir"
+  say "gate lock   : taken ($LOCK_OWNER)"
+else
+  holder="$(printf '%s\n' "$preflight_out" | sed -n 's/^LOCK HELD //p')"
+  holder_host="$(printf '%s\n' "$holder" | sed -n 's/.*host=\([^ ]*\).*/\1/p')"
+  holder_pid="$(printf '%s\n' "$holder" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+  # Only this machine's pids can be asked about; a lock from another machine is taken at its word.
+  holder_alive=yes
+  if [ -n "$holder_pid" ] && [ "$holder_host" = "$(hostname -s)" ] \
+     && ! kill -0 "$holder_pid" 2>/dev/null; then
+    holder_alive=no
+  fi
+  if [ "$holder_alive" = yes ]; then
+    die_locked "another run of $branch holds the gate lock on $host (${holder:-owner unknown}) — nothing was copied. Wait for it to finish, or clear it with: ssh $host rm -rf '$lockdir'"
+  fi
+  takeover_out="$(
+    {
+      printf "lock='%s'\n" "$(esc "$lockdir")"
+      printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
+      cat <<'TAKE_EOF'
+rm -rf "$lock" 2>/dev/null
+if mkdir "$lock" 2>/dev/null; then
+  printf '%s\n' "$owner" > "$lock/owner"
+  echo TAKEOVER_OK
+else
+  echo "TAKEOVER_LOST $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
+fi
+TAKE_EOF
+    } | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1
+  )"
+  case "$takeover_out" in
+    *TAKEOVER_OK*)
+      LOCK_DIR="$lockdir"
+      say "gate lock   : reaped a stale lock left by ${holder:-an unknown run} — pid $holder_pid is gone — and took it" ;;
+    *)
+      die_locked "the stale lock of $branch was claimed by another run first: $takeover_out" ;;
+  esac
+fi
 
 # --- step bookkeeping -------------------------------------------------------------------------
 declare -a STEP_NAMES=() STEP_RCS=()
