@@ -18,6 +18,7 @@ public struct RootView: View {
                 SignInView()
             }
         }
+        .tint(DesignTokens.accent)
         .task {
             guard session.state.user == nil else { return }
             // The stored credential always gets the first word — the debug shortcut must not
@@ -56,6 +57,7 @@ struct UnreachableView: View {
             )
             Button("Try again") { Task { await session.restore() } }
                 .buttonStyle(.borderedProminent)
+                .tint(DesignTokens.accent)
             Button("Sign in differently") { confirmDiscard = true }
                 .font(.footnote)
         }
