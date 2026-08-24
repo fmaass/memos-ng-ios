@@ -104,13 +104,43 @@ public final class MemoEditFlow {
     /// machine ENTERS it, so there is exactly one place a delete can begin.
     public static func deletes(_ stage: DeleteStage) -> Bool { stage == .deleting }
 
-    /// Feeds one event to the delete machine and applies what it means to the sheet.
+    /// Feeds one event to the delete machine, RUNS the request when that event is the one that
+    /// starts it, and applies the answer to the sheet.
+    ///
+    /// The request is passed IN, exactly as the save is, because the flow has no store and no
+    /// client — and because that is what makes "exactly one delete, of the memo the sheet is open
+    /// on, and only after a question was answered" a thing a test can hold rather than a sequence
+    /// of events a test has to trust.
+    ///
+    /// It fires on the TRANSITION into `deleting` and nowhere else: `previous` is read before the
+    /// machine moves, so no repeat of any tap, no re-render and no stray event can send a second
+    /// request. The uid comes from `editing`, so a delete cannot be aimed at a memo other than the
+    /// one on screen.
     ///
     /// A delete that WORKED closes the sheet and marks the memo gone. One that failed keeps the
     /// sheet open and says why through the same `lastError` a failed save uses — the memo is still
     /// there, and so is the screen it was being edited on.
-    public func advanceDelete(_ event: DeleteEvent) {
+    @discardableResult
+    public func advanceDelete(
+        _ event: DeleteEvent,
+        delete: @MainActor (String) async -> Bool
+    ) async -> Bool {
+        let previous = deleteStage
         deleteStage = Self.nextDelete(deleteStage, on: event)
+        settle(event)
+        guard Self.deletes(deleteStage), !Self.deletes(previous), let uid = editingUID else {
+            return false
+        }
+        let succeeded = await delete(uid)
+        let answer = DeleteEvent.returned(succeeded)
+        deleteStage = Self.nextDelete(deleteStage, on: answer)
+        settle(answer)
+        return succeeded
+    }
+
+    /// What an answer from the server means for the sheet. Separate from the machine because the
+    /// stage and the screen are two different questions.
+    private func settle(_ event: DeleteEvent) {
         guard case .returned(let succeeded) = event else { return }
         if succeeded {
             lastError = nil

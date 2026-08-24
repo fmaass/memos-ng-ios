@@ -23,6 +23,13 @@ struct MemoCard: View {
     let openAttachment: (MemoAttachment) -> Void
     /// A video tapped directly. It plays; it does not open the pager on its own poster.
     let openPlayback: (MemoAttachment) -> Void
+    /// Publishes the tiles the card has MEASURED, as the router sees them.
+    ///
+    /// `nil` everywhere in the app — nothing in a running card needs them. It exists because the
+    /// routing rule is only worth anything over the frames this view really reports: a test that
+    /// computes tile rectangles for itself keeps passing after the reporting is deleted, which is
+    /// exactly the hole this closes (`MemoCardTapTests`).
+    let reportTiles: (([MemoCardTap.Tile]) -> Void)?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
@@ -42,13 +49,15 @@ struct MemoCard: View {
         mediaZoom: Namespace.ID? = nil,
         openMemo: @escaping () -> Void = {},
         openAttachment: @escaping (MemoAttachment) -> Void = { _ in },
-        openPlayback: @escaping (MemoAttachment) -> Void = { _ in }
+        openPlayback: @escaping (MemoAttachment) -> Void = { _ in },
+        reportTiles: (([MemoCardTap.Tile]) -> Void)? = nil
     ) {
         self.memo = memo
         self.mediaZoom = mediaZoom
         self.openMemo = openMemo
         self.openAttachment = openAttachment
         self.openPlayback = openPlayback
+        self.reportTiles = reportTiles
     }
 
     var body: some View {
@@ -75,6 +84,9 @@ struct MemoCard: View {
         // Declared on the wrapper OUTSIDE the gesture and the tiles, so both resolve the same
         // space: a named space is looked up in a view's ancestors.
         .coordinateSpace(.named(Self.tapSpace))
+        // Published from the same `tileFrames` the router reads, so an observer cannot see a set
+        // of tiles the router does not have.
+        .onChange(of: tileFrames) { _, _ in reportTiles?(tiles) }
         // A gesture carries no meaning to VoiceOver, so the card says what it is and what it does.
         // The combined element is what a single card-wide button used to produce.
         .accessibilityElement(children: .combine)

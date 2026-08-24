@@ -45,8 +45,27 @@ nonisolated public enum JustifiedGallery {
     /// this, which is why the port needs no fallback of its own.
     public static let fallbackAspectRatio: Double = 1
 
+    /// No row is ever shorter than this.
+    ///
+    /// DIVERGENCE from the SPA (deliberate, and the only one): `justifyRows` subtracts the row's
+    /// gaps from the container width without a floor, so a card narrower than its own gap budget
+    /// produces a NEGATIVE available width and, from it, a negative row height and negative tile
+    /// widths — ratios [0.001, 0.001] at a width of 3 with a gap of 4 commit a row of height -500.
+    /// The browser quietly renders nothing for that; a layout that is handed those numbers places
+    /// subviews at negative sizes. Negative or zero geometry is simply not representable in this
+    /// solver's output, and the invariants are asserted rather than assumed.
+    public static let minimumRowHeight: Double = 1
+
+    /// One usable ratio. A ratio that is not a positive, finite number describes no shape at all,
+    /// so it falls back to a square exactly as an unmeasured attachment does — the alternative is
+    /// letting a NaN or a zero out of the solver and into a frame.
+    static func usable(_ ratio: Double) -> Double {
+        guard ratio.isFinite, ratio > 0 else { return fallbackAspectRatio }
+        return ratio
+    }
+
     public static func ratios(of attachments: [MemoAttachment]) -> [Double] {
-        attachments.map(\.aspectRatio)
+        attachments.map { usable($0.aspectRatio) }
     }
 
     /// Lay items out in justified rows.
@@ -59,7 +78,8 @@ nonisolated public enum JustifiedGallery {
     ///
     /// Faithful to `justifyRows` in the SPA: same commit condition, same available-width
     /// arithmetic, same trailing-row treatment, same "no items / no width / no target height means
-    /// no rows" guard.
+    /// no rows" guard. The ONE divergence is the clamp — see `minimumRowHeight` — because the
+    /// original can return negative geometry and this returns frames to a layout.
     public static func rows(
         ratios: [Double],
         containerWidth: Double,
@@ -67,22 +87,31 @@ nonisolated public enum JustifiedGallery {
         gap: Double
     ) -> [Row] {
         guard containerWidth > 0, targetHeight > 0, !ratios.isEmpty else { return [] }
+        let gap = max(0, gap)
+        let usableRatios = ratios.map(usable)
         var rows: [Row] = []
         var current: [Int] = []
         var ratioSum: Double = 0
-        for (index, ratio) in ratios.enumerated() {
+        for (index, ratio) in usableRatios.enumerated() {
             current.append(index)
             ratioSum += ratio
-            let available = containerWidth - gap * Double(current.count - 1)
-            let rowHeight = available / ratioSum
+            // Clamped BEFORE the height maths, not after: a row whose gaps alone are wider than
+            // the card has no width left to share out, and "less than none" is not a smaller
+            // share — it is a negative height and negative tiles (see `minimumRowHeight`).
+            let available = max(0, containerWidth - gap * Double(current.count - 1))
+            let rowHeight = max(minimumRowHeight, available / ratioSum)
             if rowHeight <= targetHeight {
-                rows.append(row(current, ratios: ratios, height: rowHeight))
+                rows.append(row(current, ratios: usableRatios, height: rowHeight))
                 current = []
                 ratioSum = 0
             }
         }
         if !current.isEmpty {
-            rows.append(row(current, ratios: ratios, height: targetHeight))
+            // The trailing row stands at the target, which the guard above has already established
+            // is positive — floored anyway so the invariant holds by construction, not by argument.
+            rows.append(
+                row(current, ratios: usableRatios, height: max(minimumRowHeight, targetHeight))
+            )
         }
         return rows
     }

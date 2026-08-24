@@ -196,6 +196,61 @@ struct TierReadinessPollTests {
         #expect(store.memos.first?.isAwaitingTiers == true)
     }
 
+    /// Both surfaces at once: the timeline row behind and the memo's own screen in front, each
+    /// running its own poll for the same memo.
+    ///
+    /// The decision recorded here is that they are INDEPENDENT and idempotent rather than
+    /// coordinated. Each round re-reads the store before it asks, so whichever poll lands the ready
+    /// copy ends the other one's next round without a request: the cost is bounded by the number of
+    /// surfaces, never unbounded, and both stop. The alternative — a shared registry keyed by uid —
+    /// buys one saved request in one situation and adds shared mutable state to two screens.
+    @Test("two surfaces polling one memo both stop, and cost a bounded number of requests")
+    func twoSurfacesPollingOneMemo() async {
+        let gets = Counter()
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Self.memo("pending")]))
+            case "get_memo_api_memos__uid__get":
+                gets.increment()
+                return Stub.json(Self.memo(gets.count >= 2 ? "ready" : "processing"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = await loaded(client)
+
+        // Two independent tasks rather than a task group: the group's child closures defeat the
+        // region-based isolation checker here, and two `Task`s are what the two views really are.
+        let row = Task { @MainActor in
+            await TierReadinessPoll.run(
+                uid: Self.uid, in: store, using: client, baseURL: Stub.baseURL
+            ) { _ in }
+        }
+        let detail = Task { @MainActor in
+            await TierReadinessPoll.run(
+                uid: Self.uid, in: store, using: client, baseURL: Stub.baseURL
+            ) { _ in }
+        }
+        await row.value
+        await detail.value
+
+        // Both returned — neither is still asking — and the memo is ready.
+        #expect(store.memos.first?.isAwaitingTiers == false)
+        #expect(gets.count >= 2, "the memo went ready without being re-read: \(gets.count)")
+        #expect(
+            gets.count <= 4,
+            "two surfaces cost \(gets.count) requests — they are not stopping each other"
+        )
+
+        // And a third surface arriving now costs nothing at all.
+        let before = gets.count
+        await TierReadinessPoll.run(
+            uid: Self.uid, in: store, using: client, baseURL: Stub.baseURL
+        ) { _ in }
+        #expect(gets.count == before, "a poll started on a ready memo asked anyway")
+    }
+
     // MARK: - the re-read itself
 
     /// The refreshed attachment data has to land in the card that is already on screen, through

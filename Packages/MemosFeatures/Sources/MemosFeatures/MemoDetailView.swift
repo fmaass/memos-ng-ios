@@ -133,11 +133,17 @@ public struct MemoDetailView: View {
                 mode: mode,
                 delete: ComposeDelete(
                     isAsking: edit.deleteStage == .asking,
-                    send: advanceDelete
+                    send: { event in
+                        Task { await edit.advanceDelete(event, delete: performDelete) }
+                    }
                 )
             ) { submission in
                 await edit.submit(submission, save: save)
             }
+        }
+        .task(id: memo.isAwaitingTiers) {
+            guard memo.isAwaitingTiers else { return }
+            await pollTiers()
         }
         .onChange(of: edit.memoDeleted) { _, gone in
             // The memo is gone from the server, so the screen it was open on goes with it. Landing
@@ -147,26 +153,31 @@ public struct MemoDetailView: View {
         }
     }
 
-    /// The single place a delete can start. The request is fired on the TRANSITION into
-    /// `deleting`, never on an event, so no repeat of any tap — and no re-render — can send a
-    /// second one. The machine itself is `MemoEditFlow.nextDelete`, which has no path from `idle`
-    /// to `deleting` at all: nothing is destroyed without a question having been asked and
-    /// answered.
-    private func advanceDelete(_ event: MemoEditFlow.DeleteEvent) {
-        let previous = edit.deleteStage
-        edit.advanceDelete(event)
-        guard MemoEditFlow.deletes(edit.deleteStage), !MemoEditFlow.deletes(previous) else {
-            return
-        }
-        Task {
-            guard let client = session?.api, let uid = edit.editingUID else {
-                advanceDelete(.returned(false))
-                return
-            }
-            let deleted = await timeline.delete(uid: uid, using: client)
-            feedback.fire(deleted ? .deleted : .postFailed)
-            advanceDelete(.returned(deleted))
-        }
+    /// The request itself. WHEN it runs — once, on the transition into `deleting`, for the memo
+    /// the sheet is open on — is `MemoEditFlow.advanceDelete`'s decision, so that rule lives
+    /// somewhere a test can drive rather than inside a view body.
+    private func performDelete(_ uid: String) async -> Bool {
+        guard let client = session?.api else { return false }
+        let deleted = await timeline.delete(uid: uid, using: client)
+        feedback.fire(deleted ? .deleted : .postFailed)
+        return deleted
+    }
+
+    /// Ends the WAITING treatment on this screen too.
+    ///
+    /// The timeline row polls its own memo, but a reader who opens a memo the moment they post it
+    /// is looking at THIS screen — and a `.task` belongs to the view that declared it, so the
+    /// row's poll is not something this screen may rely on. It runs its own, on the same schedule
+    /// and through the same store, and stops for the same reasons.
+    ///
+    /// Both surfaces polling one memo is harmless and self-limiting: every round re-reads the
+    /// store first, so whichever poll lands the ready copy ends the other one's next round without
+    /// a request (`TierReadinessPollTests.twoSurfacesPollingOneMemo`).
+    ///
+    /// SEAM (phase 5c): replaced by the `GET /api/events` subscription, like the timeline's.
+    private func pollTiers() async {
+        guard let client = session?.api, let baseURL = session?.serverBaseURL else { return }
+        await TierReadinessPoll.run(uid: uid, in: timeline, using: client, baseURL: baseURL)
     }
 
     /// The same edit the timeline submits, from the screen the memo is already open on.
