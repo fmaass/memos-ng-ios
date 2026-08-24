@@ -324,6 +324,32 @@ struct MediaEventClientTests {
 
         #expect(items.states.last == .stopped(.signedOut))
         #expect(await transport.connectCount == 0)
+        // Half of the distinction the other half is asserted against: an EMPTY store is an answer,
+        // and the answer is that nobody is signed in. Nothing about that improves by waiting.
+        #expect(await sleeper.waits.isEmpty, "absent is terminal — there is nothing to retry for")
+    }
+
+    @Test("a store that will not answer is a failed connection, not a sign-out")
+    @MainActor
+    func unreadableStorageIsNotASignOut() async {
+        // `UnreadableCredentials` throws where `InMemoryCredentials` returns nil, and that is the
+        // whole difference: the token may be sitting on the device, unreachable between a reboot
+        // and the first unlock. Signing the channel out on it would end the channel over a
+        // condition that clears itself the moment somebody unlocks the phone.
+        let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
+        let sleeper = RecordingSleeper(budget: 3)
+        let client = MediaEventClient.device(
+            credentials: UnreadableCredentials(),
+            identity: MediaIdentity(),
+            transport: transport,
+            sleeper: sleeper
+        )
+
+        let items = await client.collect()
+
+        #expect(!items.states.contains(.stopped(.signedOut)), "unreadable is not signed out")
+        #expect(await sleeper.waits == [1, 2, 4], "it backs off and keeps trying")
+        #expect(await transport.connectCount == 0, "and presents no credential it does not have")
     }
 }
 

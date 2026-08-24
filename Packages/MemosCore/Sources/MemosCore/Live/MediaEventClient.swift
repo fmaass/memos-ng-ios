@@ -32,6 +32,8 @@ extension MediaEventCredentials: CustomStringConvertible, CustomDebugStringConve
 /// again, so a client that retried would only be hammering a server that already answered.
 public enum MediaEventStopReason: Sendable, Equatable {
     /// There is no credential to present. Nobody is signed in, so there is nothing to stream.
+    /// ABSENT, and only absent: a store that could not ANSWER is a failed connection that retries,
+    /// because the credential it would not hand over may be sitting there the whole time.
     case signedOut
     /// The server refused the credential. The session ends on a 401 everywhere else in this app;
     /// reconnecting with the same dead token is the one thing that must not happen here.
@@ -130,7 +132,9 @@ public final class MediaEventClient: Sendable {
     /// The path the events route is mounted at (memos-ng `app/routers/assets.py:822-823`).
     public static let path = "api/events"
 
-    private let credentials: @Sendable () async -> MediaEventCredentials?
+    /// Read fresh per connection, and THROWING on purpose: `nil` means nobody is signed in, a
+    /// thrown error means storage would not answer, and only the first of those is terminal.
+    private let credentials: @Sendable () async throws -> MediaEventCredentials?
     private let generation: @Sendable () async -> Int
     private let backoff: SSEBackoff
     private let idleReconnectDelay: TimeInterval
@@ -138,7 +142,7 @@ public final class MediaEventClient: Sendable {
     private let sleeper: any SSESleeper
 
     public init(
-        credentials: @escaping @Sendable () async -> MediaEventCredentials?,
+        credentials: @escaping @Sendable () async throws -> MediaEventCredentials?,
         generation: @escaping @Sendable () async -> Int,
         backoff: SSEBackoff = SSEBackoff(),
         idleReconnectDelay: TimeInterval = 15,
@@ -154,7 +158,17 @@ public final class MediaEventClient: Sendable {
     }
 
     /// The channel the app composes: the device credential out of the keychain — the same two
-    /// items `DeviceOutboxCredentials` reads — and the media identity as the fence.
+    /// items `DeviceOutboxCredentials` reads, through the same vault — and the media identity as
+    /// the fence.
+    ///
+    /// The read is `try`, never `try?`. `CredentialStore.string(for:)` answers `nil` for an ABSENT
+    /// account and nothing else; every other answer it throws, precisely so a caller can tell
+    /// "there is no credential" from "there is one and it will not come back". Collapsing those
+    /// two with `try?` is the class the credential-hardening round removed from Security, and it
+    /// would land here as a device signing its own live channel out. So the throw travels OUT of
+    /// this closure and `connect` decides what it means. An address that will not parse is
+    /// neither case — it is stored and unusable — and is read as absent, the way
+    /// `DeviceOutboxCredentials` reads it too.
     @MainActor
     public static func device(
         credentials store: any CredentialStore = DeviceCredentials.keychain(),
@@ -166,9 +180,9 @@ public final class MediaEventClient: Sendable {
     ) -> MediaEventClient {
         MediaEventClient(
             credentials: {
-                guard let token = (try? store.string(for: SessionStore.tokenAccount)) ?? nil,
+                guard let token = try await store.string(for: SessionStore.tokenAccount),
                     !token.isEmpty,
-                    let address = (try? store.string(for: SessionStore.serverAccount)) ?? nil,
+                    let address = try await store.string(for: SessionStore.serverAccount),
                     let configuration = ServerConfiguration(serverAddress: address)
                 else { return nil }
                 return MediaEventCredentials(baseURL: configuration.baseURL, token: token)
@@ -264,7 +278,23 @@ public final class MediaEventClient: Sendable {
             )
         }
 
-        guard let credentials = await credentials() else { return result(.signedOut) }
+        // A store that will not answer is not an account that ended. The documented case is a
+        // background launch between a reboot and the first unlock, where an `AfterFirstUnlock`
+        // item is simply out of reach for a while (`KeychainAccessGroup.Probe.unavailable`) — the
+        // token is on the device the whole time. `.signedOut` is terminal, so reporting one here
+        // would kill the channel over a condition that fixes itself; a failed connect backs off
+        // and the channel is still there when the device unlocks.
+        let stored: MediaEventCredentials?
+        do {
+            stored = try await credentials()
+        } catch {
+            let detail = String(describing: error)
+            MemosLog.media.error(
+                "the media channel could not read the credential: \(detail, privacy: .public)"
+            )
+            return result(.failed(opened: false))
+        }
+        guard let credentials = stored else { return result(.signedOut) }
         var request = URLRequest(url: credentials.baseURL.appending(path: Self.path))
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
