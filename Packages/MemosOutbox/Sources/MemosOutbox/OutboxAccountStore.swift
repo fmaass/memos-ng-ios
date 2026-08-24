@@ -12,10 +12,17 @@ import Foundation
 /// is the safe answer: an extension that cannot bind a capture refuses to take it rather than
 /// queueing one that would be held for the wrong account later.
 public protocol OutboxAccountPublishing: Sendable {
+    /// What the licence currently says — read back rather than remembered, because the writer and
+    /// the reader are different processes and the only shared truth is the file.
+    func current() -> AccountBinding?
     /// Best effort by design: a binding that could not be written costs the share extension its
-    /// next capture, and must never cost the app a sign-in.
+    /// next capture, and must never cost the app a sign-in. Failing CLOSED is the whole point —
+    /// no licence means no enqueue.
     func publish(_ binding: AccountBinding)
-    func clear()
+    /// Throwing, unlike `publish`, and deliberately so: a licence that could not be revoked is a
+    /// revoked identity that can still queue captures. That must be visible to the caller and
+    /// retried, never swallowed.
+    func clear() throws
 }
 
 public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
@@ -49,8 +56,15 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
         try? data.write(to: url, options: .atomic)
     }
 
-    /// Signing out revokes the extension's licence to enqueue, in the same breath the token goes.
-    public func clear() {
-        try? FileManager.default.removeItem(at: url)
+    /// Signing out revokes the extension's licence to enqueue, before the token goes.
+    ///
+    /// Revoking a licence that is not there is success, not an error: the point of a revocation is
+    /// that nothing is left, whatever state it started from.
+    public func clear() throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            return
+        }
     }
 }

@@ -55,6 +55,21 @@ struct CompositionTests {
         )
     }
 
+    @Test("a share where NOTHING could be read still says so")
+    func speaksWhenEverythingFailed() {
+        // There are no items left to hang the message off, which is exactly when a silent sheet
+        // would refuse to post and never explain why.
+        #expect(
+            ShareComposition.summary(items: [], failed: 2)
+                == "2 of 2 could not be read. Share them again."
+        )
+        #expect(!ShareComposition.canPost(note: "", items: [], failed: 2, isBusy: false))
+        #expect(
+            !ShareComposition.canPost(note: "a note", items: [], failed: 2, isBusy: false),
+            "words of one's own do not make up for the photo that did not arrive"
+        )
+    }
+
     @Test("nothing is posted while the share is still being read")
     func refusesWhileBusy() {
         #expect(!ShareComposition.canPost(note: "a memo", items: [], failed: 0, isBusy: true))

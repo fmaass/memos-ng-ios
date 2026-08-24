@@ -8,6 +8,11 @@ public enum ShareOutcome: Sendable, Equatable {
     case enqueued(UUID)
     /// Nobody is signed in as far as anything outside the app can tell, so nothing was written.
     case notSignedIn
+    /// The account changed between the sheet opening and Post — a sign-out and a sign-in, or a
+    /// switch to another account. Nothing was written: the person composed this capture for the
+    /// account they were looking at, and posting it into a different one is not a smaller mistake
+    /// than losing it.
+    case accountChanged
     /// No files and no words: there is no memo here to keep.
     case nothingToPost
 }
@@ -19,19 +24,24 @@ public enum ShareOutcome: Sendable, Equatable {
 /// the same chunks and lose its host mid-transfer. So this writes to the queue the app drains, and
 /// the app's next launch or background refresh moves the bytes.
 public enum ShareIngest {
-    /// - Parameter binding: the account the app last published. Nil means nobody is signed in —
-    ///   and then NOTHING is written, rather than a capture being stamped with a guess: a job
-    ///   bound to the wrong account is one the engine holds forever, which looks exactly like a
-    ///   memo that was lost.
+    /// - Parameter binding: the licence as it reads NOW, at the moment of use — not as it read
+    ///   when the sheet opened. Nil means nobody is signed in, and then NOTHING is written rather
+    ///   than a capture being stamped with a guess: a job bound to the wrong account is one the
+    ///   engine holds forever, which looks exactly like a memo that was lost.
+    /// - Parameter expecting: the licence the sheet was opened with. A share sheet can sit on
+    ///   screen for as long as someone leaves it there, and a sign-out or an account switch in the
+    ///   app underneath it must not be posted through.
     public static func commit(
         items: [SharedItem],
         note: String,
         visibility: ShareVisibility?,
         binding: AccountBinding?,
+        expecting: AccountBinding?,
         capturedAt: Date = Date(),
         into repository: OutboxRepository
     ) async throws -> ShareOutcome {
         guard let binding else { return .notSignedIn }
+        if let expecting, expecting != binding { return .accountChanged }
         let content = ShareComposition.content(note: note, items: items)
         let sources = items.compactMap(\.file).map(\.stagedSource)
         guard !content.isEmpty || !sources.isEmpty else { return .nothingToPost }

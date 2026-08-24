@@ -44,14 +44,20 @@ struct ShareRootView: View {
                         Text("Reading what you shared…")
                     }
                 } else if account == nil {
-                    Text("Sign in to memos in the app first, then share again.")
-                        .foregroundStyle(.secondary)
+                    Text(Self.signInFirst).foregroundStyle(.secondary)
+                }
+                // Outside the item list on purpose: when NOTHING could be copied there are no
+                // items to hang this off, and a sheet that says nothing while refusing to post is
+                // a dead end.
+                if !isReading, let summary = ShareComposition.summary(items: items, failed: failed)
+                {
+                    Text(summary).foregroundStyle(failed > 0 ? .orange : .secondary)
                 }
                 if let problem {
                     Text(problem).foregroundStyle(.orange)
                 }
                 if !items.isEmpty {
-                    Section {
+                    Section("Shared") {
                         ForEach(Array(items.enumerated()), id: \.offset) { entry in
                             Label(
                                 Self.title(for: entry.element),
@@ -59,8 +65,6 @@ struct ShareRootView: View {
                             )
                             .lineLimit(1)
                         }
-                    } header: {
-                        Text(ShareComposition.summary(items: items, failed: failed) ?? "Shared")
                     }
                 }
                 Section("Note") {
@@ -113,13 +117,19 @@ struct ShareRootView: View {
         }
         isPosting = true
         defer { isPosting = false }
+        // Read AT THE MOMENT OF USE, never trusted from when the sheet opened: this sheet can sit
+        // on screen for hours, and a sign-out or an account switch in the app underneath it must
+        // not be posted through. The value read here is the one the job is stamped with, and the
+        // one the sheet was opened with is what it is checked against.
+        let licence = OutboxAccountStore.live()?.current()
         do {
             let repository = try OutboxRepository(root: root)
             let outcome = try await ShareIngest.commit(
                 items: items,
                 note: note,
                 visibility: visibility,
-                binding: account,
+                binding: licence,
+                expecting: account,
                 into: repository
             )
             switch outcome {
@@ -127,7 +137,11 @@ struct ShareRootView: View {
                 discardStaging()
                 finish()
             case .notSignedIn:
-                problem = "Sign in to memos in the app first, then share again."
+                account = nil
+                problem = Self.signInFirst
+            case .accountChanged:
+                account = licence
+                problem = "The account signed in to memos changed. Check this and post again."
             case .nothingToPost:
                 problem = "There is nothing here to keep."
             }
@@ -141,6 +155,8 @@ struct ShareRootView: View {
     private func discardStaging() {
         try? FileManager.default.removeItem(at: staging)
     }
+
+    static let signInFirst = "Sign in to memos in the app first, then share again."
 
     private static func title(for item: SharedItem) -> String {
         switch item {

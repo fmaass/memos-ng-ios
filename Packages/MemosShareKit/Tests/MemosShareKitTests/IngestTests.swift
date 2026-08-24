@@ -30,6 +30,7 @@ struct IngestTests {
                 note: "on the beach",
                 visibility: nil,
                 binding: Fixture.binding(),
+                expecting: Fixture.binding(),
                 capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
                 into: repository
             )
@@ -63,6 +64,7 @@ struct IngestTests {
                 note: "",
                 visibility: nil,
                 binding: Fixture.binding(),
+                expecting: Fixture.binding(),
                 into: repository
             )
 
@@ -85,6 +87,7 @@ struct IngestTests {
                 note: "",
                 visibility: .private,
                 binding: Fixture.binding(),
+                expecting: Fixture.binding(),
                 into: repository
             )
             guard case .enqueued(let id) = outcome else {
@@ -106,6 +109,7 @@ struct IngestTests {
                 note: "a memo nobody may own",
                 visibility: nil,
                 binding: nil,
+                expecting: nil,
                 into: repository
             )
 
@@ -122,11 +126,60 @@ struct IngestTests {
                 note: "  ",
                 visibility: nil,
                 binding: Fixture.binding(),
+                expecting: Fixture.binding(),
                 into: repository
             )
 
             #expect(outcome == .nothingToPost)
             #expect(await repository.loadJobs().isEmpty)
+        }
+    }
+
+    @Test("a sign-out between opening the sheet and Post refuses the capture")
+    func refusesWhenTheLicenceWentAway() async throws {
+        try await withOutbox { repository, root in
+            let staged = try Fixture.file(in: root, named: "IMG_0011.heic", bytes: 100)
+            let file = try SharedFile.imported(staged, into: root)
+
+            // The sheet was opened while signed in; by the time Post is tapped the licence is
+            // gone. The value that decides is the one read AT COMMIT, never the one read at load.
+            let outcome = try await ShareIngest.commit(
+                items: [.file(file)],
+                note: "shared before signing out",
+                visibility: nil,
+                binding: nil,
+                expecting: Fixture.binding(),
+                into: repository
+            )
+
+            #expect(outcome == .notSignedIn)
+            #expect(await repository.loadJobs().isEmpty)
+        }
+    }
+
+    @Test("an account switch between opening the sheet and Post refuses it too")
+    func refusesWhenTheAccountChanged() async throws {
+        try await withOutbox { repository, root in
+            let staged = try Fixture.file(in: root, named: "IMG_0012.heic", bytes: 100)
+            let file = try SharedFile.imported(staged, into: root)
+            let somebodyElse = AccountBinding(
+                serverBaseURL: Fixture.server, ownerSubject: "someone-else"
+            )
+
+            let outcome = try await ShareIngest.commit(
+                items: [.file(file)],
+                note: "composed for one account",
+                visibility: nil,
+                binding: somebodyElse,
+                expecting: Fixture.binding(),
+                into: repository
+            )
+
+            #expect(outcome == .accountChanged)
+            #expect(
+                await repository.loadJobs().isEmpty,
+                "posting into the account someone was NOT looking at is not a smaller mistake"
+            )
         }
     }
 
@@ -147,6 +200,7 @@ struct IngestTests {
                     note: "half a share",
                     visibility: nil,
                     binding: Fixture.binding(),
+                    expecting: Fixture.binding(),
                     into: repository
                 )
             }

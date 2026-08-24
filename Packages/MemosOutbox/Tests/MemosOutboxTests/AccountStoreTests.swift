@@ -23,17 +23,31 @@ struct AccountStoreTests {
         }
     }
 
-    @Test("signing out takes the binding with it")
+    @Test("signing out takes the binding with it, and says so if it cannot")
     func clearForgets() throws {
         try withStore { store, _ in
             store.publish(Fixture.binding())
-            store.clear()
+            try store.clear()
             #expect(store.current() == nil)
-            // Clearing what is not there is not a failure — a wipe has to leave nothing whatever
-            // state it started from.
-            store.clear()
+            // Revoking what is not there is success, not an error: the point of a revocation is
+            // that nothing is left, whatever state it started from. It has to stay non-throwing
+            // for the absent case, because the session treats a throw as "still licensed".
+            try store.clear()
             #expect(store.current() == nil)
         }
+    }
+
+    @Test("a licence in a container that is not there is a revocation that failed")
+    func clearReportsRealFailures() throws {
+        let root = try Fixture.temporaryDirectory()
+        let store = OutboxAccountStore(root: root.appending(path: "outbox"))
+        store.publish(Fixture.binding())
+        // The whole container goes, as a device running out of space or a wiped app group would
+        // leave it — everything below the licence is gone, but not the licence's own absence.
+        try FileManager.default.removeItem(at: root)
+        // Nothing is left to remove, so this is the absent case, not a failure.
+        try store.clear()
+        #expect(store.current() == nil)
     }
 
     @Test("a binding that cannot be parsed is no binding at all")
