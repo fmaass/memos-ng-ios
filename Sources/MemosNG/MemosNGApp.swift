@@ -12,9 +12,15 @@ struct MemosNGApp: App {
     @UIApplicationDelegateAdaptor(MemosNGAppDelegate.self) private var appDelegate
 
     init() {
-        // Derived media is served through signed URLs with an expiry, so the shared cache is
-        // bounded rather than left at whatever the system default happens to be.
-        URLCache.shared = MediaCache.makeURLCache()
+        // The SAME object the media session already holds, not a second cache — two URLCaches over
+        // one disk directory is a corruption waiting to happen. Images do not depend on this line
+        // any more: `MediaSession` attaches that cache to its own session explicitly, which is the
+        // only way to be sure a cache is reached. Installing it here extends it to whatever else
+        // in the process still uses the shared session, and only if the shared session had not
+        // already been made — which is exactly what the probe below reports.
+        URLCache.shared = MediaSession.shared.cache
+        let holds = MediaSession.sharedSessionHolds(MediaSession.shared.cache)
+        MemosLog.media.info("shared session holds the media cache: \(holds, privacy: .public)")
     }
 
     var body: some Scene {

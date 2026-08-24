@@ -9,4 +9,5 @@ import OSLog
 public enum MemosLog {
     public static let api = Logger(subsystem: "live.discomarder.memosng", category: "api")
     public static let session = Logger(subsystem: "live.discomarder.memosng", category: "session")
+    public static let media = Logger(subsystem: "live.discomarder.memosng", category: "media")
 }

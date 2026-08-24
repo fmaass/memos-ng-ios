@@ -1,35 +1,32 @@
 import MemosCore
 import SwiftUI
+import UIKit
 
-/// Which of the three things a tile can be showing. `AsyncImagePhase` is not `Equatable` and
-/// carries the loaded image with it; this is the part a test can name.
+/// Which of the three things a tile can be showing. Named separately from the loader so a stalled
+/// load can be rendered and asserted without a network.
 public enum ThumbnailPhase: Equatable, Sendable {
     case loading
     case loaded
     case failed
-
-    /// Anything that is not a delivered image or a reported failure is still loading — including
-    /// whatever cases a future SwiftUI adds, which must not turn into a warning triangle.
-    public static func of(_ phase: AsyncImagePhase) -> ThumbnailPhase {
-        switch phase {
-        case .success: .loaded
-        case .failure: .failed
-        default: .loading
-        }
-    }
 }
 
 /// One attachment in the timeline.
 ///
-/// `AsyncImage` loads through `URLSession.shared`, and therefore through the bounded
-/// `URLCache.shared` the app installs at launch. How long an entry lives is normally the server's
-/// `Cache-Control` decision; what the server cannot express is that the URL's own signature
-/// expires, so an entry whose signature has lapsed is evicted here before the image is requested
-/// (`MediaCache.evictExpired`).
+/// The photo comes from `MediaImageLoader`, which is the whole point of this view's shape. A
+/// `List` builds a fresh `AttachmentThumbnail` every time a row scrolls back, so the tile is asked
+/// for its picture again and again — and with `AsyncImage` each of those started at "no image" and
+/// flashed the blurhash before the photo reappeared, when it did not go back to the server for it.
+/// Here
+/// `MediaImageLoader.cached(for:)` is read in `body`, synchronously: a remounted row that has been
+/// seen before paints the decoded photo in the very frame it appears in, and never enters
+/// `.loading` at all.
 ///
-/// Underneath every tile, always, is the attachment's own BlurHash. That is what a tile shows
-/// while the photo is in flight: the picture's colours, in the picture's shape — not a spinner,
-/// and not a grey box that makes the whole timeline reflow when the image lands.
+/// A tile that has NOT been seen keeps the old sequence exactly: blurhash first, photo when it
+/// lands. Underneath every tile, always, is the attachment's own BlurHash — the picture's colours,
+/// in the picture's shape, not a spinner and not a grey box that reflows the timeline.
+///
+/// The signature is still enforced here: an entry whose signed URL has lapsed can only be stale,
+/// so it is dropped from the media cache before the fetch (`MediaCache.evictExpired`).
 struct AttachmentThumbnail: View {
     let attachment: MemoAttachment
     var tier: MediaTier = .thumb
@@ -38,34 +35,91 @@ struct AttachmentThumbnail: View {
     /// the image lands — and the blurhash underneath gets that identical frame.
     var slot: AttachmentSlot
 
+    /// What THIS view instance loaded, tagged with the key it was loaded for. The tag is not
+    /// bookkeeping: a tile whose attachment or tier changes under it would otherwise keep painting
+    /// the previous photo until the new one arrived, which is the one wrong picture a cache is
+    /// able to show.
+    @State private var loaded: (key: MediaImageKey, image: UIImage)?
+    /// The key whose load came back with nothing. Also tagged, for the same reason.
+    @State private var failedKey: MediaImageKey?
+
     private var url: URL? { MemoPresentation.url(for: attachment, tier: tier) }
+    private var key: MediaImageKey { MediaImageLoader.key(for: attachment, tier: tier) }
+
+    /// What a tile paints, given what this instance captured and what the loader still holds.
+    ///
+    /// The capture has to win, and not merely as an optimisation. `NSCache` may drop an entry at
+    /// any moment — a memory warning does not ask which rows are on screen — and a row that is
+    /// still mounted gets no second `.task`, because its `id` has not changed. Reading the cache
+    /// alone, such a row would fall back to its blurhash and stay there for as long as it lived.
+    ///
+    /// Pure and static so it can be asserted directly rather than through a hosted view.
+    static func painted(
+        captured: (key: MediaImageKey, image: UIImage)?,
+        for key: MediaImageKey,
+        cached: UIImage?
+    ) -> UIImage? {
+        if let captured, captured.key == key { return captured.image }
+        return cached
+    }
+
+    /// Read in `body`, and synchronous on both paths. The cache lookup is what makes a scroll-back
+    /// free; the capture is what keeps it painted afterwards.
+    private var image: Image? {
+        Self.painted(captured: loaded, for: key, cached: MediaImageLoader.cachedUIImage(for: key))
+            .map(Image.init(uiImage:))
+    }
+
+    private var phase: ThumbnailPhase {
+        if image != nil { return .loaded }
+        if url == nil || failedKey == key { return .failed }
+        return .loading
+    }
 
     var body: some View {
         Color.clear
             .aspectRatio(slot.aspectRatio, contentMode: .fit)
             .overlay {
-                if let url {
-                    AsyncImage(url: url) { phase in
-                        ThumbnailContent(
-                            attachment: attachment,
-                            phase: .of(phase),
-                            image: phase.image,
-                            contentMode: slot.contentMode
-                        )
-                    }
-                } else {
-                    ThumbnailContent(
-                        attachment: attachment,
-                        phase: .failed,
-                        image: nil,
-                        contentMode: slot.contentMode
-                    )
-                }
+                ThumbnailContent(
+                    attachment: attachment,
+                    phase: phase,
+                    image: image,
+                    contentMode: slot.contentMode
+                )
             }
-            .task(id: url) {
-                if let url { MediaCache.evictExpired(url) }
-            }
+            .task(id: url) { await load() }
             .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+    }
+
+    private func load() async {
+        guard let url else { return }
+        MediaCache.evictExpired(url)
+
+        // Captured before the await: the view can be handed a different attachment while the
+        // fetch is in flight, and the answer belongs to the key it was asked for.
+        let requested = key
+        // Already decoded — `body` has painted it in this very frame, and there is nothing to
+        // fetch. It is still taken INTO this view's own state: the frame is already right, and
+        // this is what keeps it right if the cache is emptied under a row that stays mounted.
+        if let hit = MediaImageLoader.cachedUIImage(for: requested) {
+            loaded = (requested, hit)
+            if failedKey == requested { failedKey = nil }
+            return
+        }
+
+        let generation = MediaImageLoader.store.generation
+        let image = await MediaImageLoader.uiImage(for: requested, url: url)
+        // The same fence the loader applies to its cache, applied to the screen: an answer about
+        // the account that was signed in when this started must not be painted for the one signed
+        // in now. Nothing is assigned at all — not even a failure, which would put a warning
+        // triangle on a tile whose memo is already being replaced.
+        guard generation == MediaImageLoader.store.generation else { return }
+        if let image {
+            loaded = (requested, image)
+            if failedKey == requested { failedKey = nil }
+        } else {
+            failedKey = requested
+        }
     }
 }
 
