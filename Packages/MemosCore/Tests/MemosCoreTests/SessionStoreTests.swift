@@ -7,6 +7,7 @@ import Testing
 // The transport is handed the contract's own operationId, not the generated Swift method name.
 private let whoamiOperation = "whoami_api_auth_user_get"
 private let nativeLogoutOperation = "native_logout_api_auth_native_logout_post"
+private let settingsOperation = "get_settings_api_settings_get"
 
 @MainActor
 @Suite("SessionStore")
@@ -655,5 +656,95 @@ extension AccountLicenceOrderTests {
         #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_b")
         #expect(account.published?.ownerSubject == "fabian")
         #expect(session.lastError == nil)
+    }
+}
+
+/// What "Default" means in the compose sheet is the ACCOUNT's setting, and until this the app
+/// never asked for it — the pill said "Default" and left the reader to guess whether that meant
+/// their memo would be private or public.
+@MainActor
+@Suite("The account's default visibility")
+struct SessionSettingsTests {
+    private func signedIn(
+        handler: @escaping StubTransport.Handler
+    ) async -> SessionStore {
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in Stub.client(token: token, handler: handler) }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        return session
+    }
+
+    @Test("the default is read from /api/settings and kept")
+    func settingsAreRead() async {
+        let asked = LockedValue<Bool>(false)
+        let session = await signedIn { _, _, operation in
+            if operation == settingsOperation {
+                asked.set(true)
+                return Stub.json(
+                    """
+                    {"default_visibility":"PROTECTED","theme":"dark","avatar":null}
+                    """
+                )
+            }
+            return Stub.json(Stub.user)
+        }
+        // Nothing is assumed before the server has answered.
+        #expect(session.defaultVisibility == nil)
+
+        await session.loadSettings()
+
+        #expect(asked.get())
+        #expect(session.defaultVisibility == .protected)
+    }
+
+    @Test("each visibility the server can name round-trips")
+    func everyVisibilityIsUnderstood() async {
+        for (wire, expected) in [
+            ("PRIVATE", MemoVisibility.private),
+            ("PROTECTED", .protected),
+            ("PUBLIC", .public),
+        ] {
+            let session = await signedIn { _, _, operation in
+                operation == settingsOperation
+                    ? Stub.json(
+                        "{\"default_visibility\":\"\(wire)\",\"theme\":\"d\",\"avatar\":null}"
+                    )
+                    : Stub.json(Stub.user)
+            }
+            await session.loadSettings()
+            #expect(session.defaultVisibility == expected)
+        }
+    }
+
+    /// The pill is allowed to say less. It is not allowed to say something wrong, and it is not
+    /// allowed to take the screen down with it: this call sits on the timeline's appearance path.
+    @Test("a server that will not answer leaves the default unnamed, not invented")
+    func aFailedFetchIsSurvivable() async {
+        let session = await signedIn { _, _, operation in
+            operation == settingsOperation ? Stub.empty(.internalServerError) : Stub.json(Stub.user)
+        }
+        await session.loadSettings()
+        #expect(session.defaultVisibility == nil)
+        // The session itself is untouched — a settings failure is not a sign-out.
+        #expect(session.state.user?.subject == "fabian")
+        #expect(session.lastError == nil)
+    }
+
+    /// One account's setting must never be shown to the next one.
+    @Test("signing out forgets the account's default")
+    func theDefaultDoesNotOutliveTheAccount() async {
+        let session = await signedIn { _, _, operation in
+            operation == settingsOperation
+                ? Stub.json("{\"default_visibility\":\"PUBLIC\",\"theme\":\"d\",\"avatar\":null}")
+                : Stub.json(Stub.user)
+        }
+        await session.loadSettings()
+        #expect(session.defaultVisibility == .public)
+
+        session.signOutWithoutRevoking()
+
+        #expect(session.defaultVisibility == nil)
     }
 }

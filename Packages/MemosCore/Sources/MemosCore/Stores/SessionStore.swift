@@ -53,6 +53,12 @@ public final class SessionStore {
     public private(set) var state: SessionState = .signedOut
     public private(set) var lastError: String?
     public private(set) var configuration: ServerConfiguration?
+    /// Who sees a memo when nobody says otherwise — the account's own setting, not a guess.
+    ///
+    /// `nil` means "not known yet, or the server would not say". A screen that has to name the
+    /// default says less rather than something invented: an app that tells someone their memo
+    /// will be Private when the account says Public is worse than one that stays vague.
+    public private(set) var defaultVisibility: MemoVisibility?
 
     private let credentials: any CredentialStore
     private let makeClient:
@@ -317,6 +323,8 @@ public final class SessionStore {
     private func adopt(client: any APIProtocol, configuration: ServerConfiguration, user: User) {
         self.configuration = configuration
         self.client = client
+        // Whatever the last account's default was, it is not this one's until it is fetched.
+        defaultVisibility = nil
         state = .signedIn(user)
         account?.publish(
             AccountBinding(serverBaseURL: configuration.baseURL, ownerSubject: user.subject)
@@ -400,6 +408,9 @@ public final class SessionStore {
         try? credentials.remove(Self.serverAccount)
         client = nil
         configuration = nil
+        // The account's default belongs to the account. Carrying it into the next sign-in would
+        // have the compose sheet promise someone else's setting.
+        defaultVisibility = nil
         state = .signedOut
     }
 
@@ -466,6 +477,29 @@ public final class SessionStore {
                 throw NativeLoginError.exchangeRejected(failure)
             }
             throw NativeLoginError.api(.fromStatus(statusCode))
+        }
+    }
+
+    /// Reads the account's settings. Best-effort by design: it is called from a screen that is
+    /// already usable without it, and a failure leaves `defaultVisibility` as it was rather than
+    /// interrupting anything.
+    public func loadSettings() async {
+        guard let client else { return }
+        do {
+            defaultVisibility = try await Self.settings(client)
+        } catch {
+            MemosLog.session.info("GET /api/settings did not answer; the default stays unnamed")
+        }
+    }
+
+    static func settings(_ client: any APIProtocol) async throws -> MemoVisibility {
+        let response = try await client.getSettingsApiSettingsGet(.init())
+        switch response {
+        case .ok(let ok):
+            MemosLog.session.info("GET /api/settings -> 200")
+            return MemoVisibility(try ok.body.json.defaultVisibility)
+        case .undocumented(let statusCode, _):
+            throw APIError.fromStatus(statusCode)
         }
     }
 

@@ -61,10 +61,13 @@ struct UnreachableView: View {
             Button("Sign in differently") { confirmDiscard = true }
                 .font(.footnote)
         }
-        .confirmationDialog(
+        // An alert, for the same reason the sign-out confirmation is one: a confirmation dialog
+        // renders here as a glass card that dims nothing and leaves its Cancel button out of both
+        // the screen and the accessibility tree — on a destructive question whose whole purpose is
+        // to be refusable. This is the only other one in the app; there are no more.
+        .alert(
             "Discard the saved sign-in?",
-            isPresented: $confirmDiscard,
-            titleVisibility: .visible
+            isPresented: $confirmDiscard
         ) {
             Button("Discard and sign in again", role: .destructive) {
                 session.signOutWithoutRevoking()

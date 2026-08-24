@@ -43,16 +43,27 @@ public struct MemoDetailView: View {
                     taskList
                 }
 
+                // The detail view is the picture. Each attachment takes the full content width
+                // at the proportions the server measured, and the WHOLE frame is shown — nothing
+                // is cropped here, whatever the timeline does with the same photo. Because the
+                // container takes that shape from the metadata rather than from the decoded
+                // image, it is the right size before the download finishes, so the page does not
+                // jump and the blurhash sits in exactly the frame the photo will occupy.
                 ForEach(memo.attachments) { attachment in
+                    let slot = MemoPresentation.detailSlot(for: attachment)
                     if let playbackURL = MemoPresentation.playbackURL(for: attachment) {
                         Button {
                             playing = VideoPlayback(url: playbackURL)
                         } label: {
-                            AttachmentThumbnail(attachment: attachment, tier: .mobile)
+                            AttachmentThumbnail(
+                                attachment: attachment,
+                                tier: .mobile,
+                                slot: slot
+                            )
                         }
                         .buttonStyle(.plain)
                     } else {
-                        AttachmentThumbnail(attachment: attachment, tier: .mobile)
+                        AttachmentThumbnail(attachment: attachment, tier: .mobile, slot: slot)
                     }
                 }
             }

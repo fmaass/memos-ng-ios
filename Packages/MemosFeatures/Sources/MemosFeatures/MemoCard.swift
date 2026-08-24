@@ -90,22 +90,29 @@ struct MemoCard: View {
         case .none:
             EmptyView()
         case .solo:
-            AttachmentThumbnail(attachment: memo.attachments[0], tier: .mobile)
-                .frame(maxHeight: soloHeight)
-                .padding(.horizontal, DesignTokens.Space.roomy)
+            AttachmentThumbnail(
+                attachment: memo.attachments[0],
+                tier: .mobile,
+                slot: MemoPresentation.timelineSlot(for: memo.attachments[0])
+            )
+            .frame(maxHeight: soloHeight)
+            .padding(.horizontal, DesignTokens.Space.roomy)
         case .pair, .strip:
             HStack(spacing: DesignTokens.Space.snug) {
                 let shown = MemoCardPresentation.tileCount(for: layout)
                 ForEach(Array(memo.attachments.prefix(shown).enumerated()), id: \.element.uid) {
                     index, attachment in
-                    AttachmentThumbnail(attachment: attachment, aspectRatio: 1)
-                        .overlay {
-                            if case .strip(let overflow) = layout, overflow > 0,
-                                index == shown - 1
-                            {
-                                overflowBadge(overflow)
-                            }
+                    AttachmentThumbnail(
+                        attachment: attachment,
+                        slot: MemoPresentation.gridSlot
+                    )
+                    .overlay {
+                        if case .strip(let overflow) = layout, overflow > 0,
+                            index == shown - 1
+                        {
+                            overflowBadge(overflow)
                         }
+                    }
                 }
             }
             .frame(maxHeight: stripHeight)

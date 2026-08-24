@@ -96,11 +96,16 @@ struct BlurHashBackdrop: View {
         ZStack {
             Rectangle().fill(.quaternary)
             if let image = decoded ?? BlurHashImage.cached(for: blurhash) {
-                image
-                    .resizable()
-                    .interpolation(.high)
-                    .antialiased(true)
-                    .scaledToFill()
+                // Through the same pinning layer the photo uses: a blurhash is decoded 4:3
+                // whatever shape the photo is, so without it the backdrop reported a different
+                // size from the picture and the two were centred in different boxes.
+                AspectPinnedLayer {
+                    image
+                        .resizable()
+                        .interpolation(.high)
+                        .antialiased(true)
+                        .scaledToFill()
+                }
             }
         }
         .task(id: blurhash) {

@@ -59,11 +59,18 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
 
     public var id: String { uid }
     public var isVideo: Bool { mime.hasPrefix("video/") }
-    /// Aspect ratio for layout; a missing dimension means "assume a square" rather than "crash".
-    public var aspectRatio: Double {
-        guard let width, let height, width > 0, height > 0 else { return 1 }
+    /// The proportions the SERVER measured, or `nil` when it did not say.
+    ///
+    /// A screen that reserves space for a picture before the picture arrives has to know the
+    /// difference between "this is square" and "nobody knows yet" — the two want different
+    /// fallbacks, and the caller is the only one that knows which.
+    public var measuredAspectRatio: Double? {
+        guard let width, let height, width > 0, height > 0 else { return nil }
         return Double(width) / Double(height)
     }
+
+    /// Aspect ratio for layout; a missing dimension means "assume a square" rather than "crash".
+    public var aspectRatio: Double { measuredAspectRatio ?? 1 }
 }
 
 public struct Memo: Sendable, Equatable, Identifiable {

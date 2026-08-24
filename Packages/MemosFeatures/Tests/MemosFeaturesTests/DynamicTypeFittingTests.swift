@@ -20,15 +20,23 @@ struct DynamicTypeFittingTests {
 
     @Test("the visibility control fits without truncating at the largest text size")
     func visibilityControlFitsAtAccessibility5() {
-        let choices: [MemoVisibility?] = [nil, .private, .protected, .public]
-        for choice in choices {
-            let pill = VisibilityChoicePill(selection: choice)
+        // `nil` with an account default is the WIDEST the pill ever gets — "Default (Protected)"
+        // — which is exactly the label the resolved-default fix introduced.
+        let choices: [(MemoVisibility?, MemoVisibility?)] = [
+            (nil, nil),
+            (nil, .protected),
+            (.private, nil),
+            (.protected, nil),
+            (.public, nil),
+        ]
+        for (choice, accountDefault) in choices {
+            let pill = VisibilityChoicePill(selection: choice, accountDefault: accountDefault)
             let atLargest = LayoutProbe.idealWidth(pill, typeSize: .accessibility5)
             let atDefault = LayoutProbe.idealWidth(pill, typeSize: .large)
             // It fits the space the sheet actually gives it — so it is never cut short.
             #expect(
                 atLargest <= Self.composeContentWidth,
-                "\(choice?.label ?? "Default") wants \(atLargest)pt of \(Self.composeContentWidth)"
+                "\(pill.title) wants \(atLargest)pt of \(Self.composeContentWidth)"
             )
             // And it fits because it is small enough, not because it was pinned: a control that
             // ignored the text size would measure the same at both.
