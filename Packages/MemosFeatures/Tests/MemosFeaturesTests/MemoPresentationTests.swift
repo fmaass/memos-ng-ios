@@ -178,14 +178,53 @@ struct AttachmentSlotTests {
 
     /// A video is a picture on this screen too — its poster gets the same whole-frame treatment,
     /// which is what keeps the play button in the middle of the image rather than of a crop.
-    @Test("a video's poster is fitted like any other picture")
+    ///
+    /// The cases are deliberately in DIFFERENT DIRECTIONS from the 4:3 fallback: portrait is
+    /// below it, landscape above it. A regression that forced every video to 4:3 would have to
+    /// fail both, and could not be hidden by a fixture that happens to sit near the fallback.
+    /// The real library is exactly these two shapes — 1080x1920 and 1920x1080 from an iPhone.
+    @Test("a video's poster is fitted at the shape it was shot in")
     func videosAreFittedToo() {
-        var video = attachment(width: 1920, height: 1080)
-        video.mime = "video/mp4"
-        video.posterURL = URL(string: "https://memos.example.invalid/poster")
-        let slot = MemoPresentation.detailSlot(for: video)
-        #expect(slot.contentMode == .fit)
-        #expect(abs(slot.aspectRatio - 16.0 / 9.0) < 0.0001)
+        var portrait = attachment(width: 1080, height: 1920)
+        portrait.mime = "video/quicktime"
+        portrait.posterURL = URL(string: "https://memos.example.invalid/poster")
+        let tall = MemoPresentation.detailSlot(for: portrait)
+        #expect(tall.contentMode == .fit)
+        #expect(abs(tall.aspectRatio - 0.5625) < 0.0001, "portrait video got \(tall.aspectRatio)")
+        #expect(tall.aspectRatio < 1, "a portrait video must not be laid out wider than tall")
+
+        var landscape = attachment(width: 1920, height: 1080)
+        landscape.mime = "video/quicktime"
+        landscape.posterURL = URL(string: "https://memos.example.invalid/poster")
+        let wide = MemoPresentation.detailSlot(for: landscape)
+        #expect(wide.contentMode == .fit)
+        #expect(
+            abs(wide.aspectRatio - 16.0 / 9.0) < 0.0001,
+            "landscape video got \(wide.aspectRatio)"
+        )
+
+        // Neither is the fallback, and they bracket it — so nothing can pass all three by
+        // accidentally returning one number.
+        #expect(tall.aspectRatio < 4.0 / 3.0)
+        #expect(wide.aspectRatio > 4.0 / 3.0)
+    }
+
+    /// The fallback is for an attachment nobody measured, and for nothing else. A video WITH
+    /// measurements must never reach it — that is the whole of this defect class.
+    @Test("a video falls back to 4:3 only when its metadata is genuinely absent")
+    func videosFallBackOnlyWhenUnmeasured() {
+        var unmeasured = attachment(width: nil, height: nil)
+        unmeasured.mime = "video/quicktime"
+        unmeasured.posterURL = URL(string: "https://memos.example.invalid/poster")
+        let slot = MemoPresentation.detailSlot(for: unmeasured)
+        #expect(abs(slot.aspectRatio - 4.0 / 3.0) < 0.0001)
+
+        // A measured video of the SAME shape as the fallback is still measured, not fallen back:
+        // 4:3 here is a fact about the video rather than a shrug.
+        var fourThree = attachment(width: 1440, height: 1080)
+        fourThree.mime = "video/quicktime"
+        #expect(fourThree.measuredAspectRatio != nil)
+        #expect(unmeasured.measuredAspectRatio == nil)
     }
 
     /// The browse surface is deliberately the other way round: tiles crop so a row lines up.

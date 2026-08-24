@@ -62,9 +62,8 @@ struct MemoCardPresentationTests {
             VisibilityChoice.title(selection: nil, accountDefault: .private)
                 == "Default (Private)"
         )
-        #expect(
-            VisibilityChoice.title(selection: nil, accountDefault: .public) == "Default (Public)"
-        )
+        // Public is the one resolution with no word at all — see publicIsCarriedByItsGlyph.
+        #expect(VisibilityChoice.title(selection: nil, accountDefault: .public) == nil)
         // An explicit choice speaks for itself and never mentions the default.
         #expect(
             VisibilityChoice.title(selection: .protected, accountDefault: .public) == "Protected"
@@ -93,9 +92,14 @@ struct MemoCardPresentationTests {
         #expect(
             VisibilityChoice.title(selection: nil, accountDefault: nil, compact: true)
                 == "Default")
+        // Public has no word to shorten in the first place.
         #expect(
             VisibilityChoice.title(selection: .public, accountDefault: .private, compact: true)
-                == "Public"
+                == nil
+        )
+        #expect(
+            VisibilityChoice.title(selection: .private, accountDefault: .public, compact: true)
+                == "Private"
         )
     }
 
@@ -112,6 +116,78 @@ struct MemoCardPresentationTests {
             VisibilityChoice.symbol(selection: nil, accountDefault: .private)
                 == MemoVisibility.private.symbolName
         )
+    }
+
+    /// Public is the household norm, so the pill stops saying it — the globe does. The word stays
+    /// everywhere the app SPEAKS: menus, and the accessibility label a screen reader reads.
+    @Test("only the exceptions get a word on the pill")
+    func publicIsCarriedByItsGlyph() {
+        #expect(MemoVisibility.public.pillLabel == nil)
+        #expect(MemoVisibility.private.pillLabel == "Private")
+        #expect(MemoVisibility.protected.pillLabel == "Protected")
+        // The full word is untouched — that is what the a11y label and the menu rows use.
+        #expect(MemoVisibility.public.label == "Public")
+        #expect(MemoVisibility.public.symbolName == "globe")
+    }
+
+    @Test("the compose pill drops the word for public however public was arrived at")
+    func composePillDropsPublicEitherWay() {
+        // Explicitly chosen, and inherited from the account: the same memo either way.
+        #expect(VisibilityChoice.title(selection: .public, accountDefault: nil) == nil)
+        #expect(VisibilityChoice.title(selection: nil, accountDefault: .public) == nil)
+        #expect(VisibilityChoice.title(selection: .public, accountDefault: .private) == nil)
+        #expect(VisibilityChoice.symbol(selection: nil, accountDefault: .public) == "globe")
+        // Everything that is NOT public still says what it is.
+        #expect(VisibilityChoice.title(selection: .private, accountDefault: .public) == "Private")
+        #expect(
+            VisibilityChoice.title(selection: nil, accountDefault: .protected)
+                == "Default (Protected)"
+        )
+        #expect(VisibilityChoice.title(selection: nil, accountDefault: nil) == "Default")
+    }
+
+    /// The word leaves the screen, not the app. An icon-only control that announced itself as
+    /// "Visibility" would have made the common case unreadable to a screen reader.
+    @Test("what a screen reader hears is never abbreviated")
+    func accessibilityAlwaysSpellsItOut() {
+        #expect(
+            VisibilityChoice.accessibilityLabel(selection: .public, accountDefault: nil)
+                == "Visibility: Public"
+        )
+        #expect(
+            VisibilityChoice.accessibilityLabel(selection: nil, accountDefault: .public)
+                == "Visibility: Public, the account default"
+        )
+        #expect(
+            VisibilityChoice.accessibilityLabel(selection: .private, accountDefault: .public)
+                == "Visibility: Private"
+        )
+        #expect(
+            VisibilityChoice.accessibilityLabel(selection: nil, accountDefault: nil)
+                == "Visibility: the account default"
+        )
+        // Every state names a visibility or says why it cannot — none is ever just "Visibility".
+        for selection in [nil, MemoVisibility.private, .protected, .public] {
+            for fallback in [nil, MemoVisibility.private, .protected, .public] {
+                let spoken = VisibilityChoice.accessibilityLabel(
+                    selection: selection, accountDefault: fallback
+                )
+                #expect(spoken != "Visibility")
+                #expect(spoken.hasPrefix("Visibility: "))
+            }
+        }
+    }
+
+    /// The default state of the date pill is the one everybody sees, and it has to read as a
+    /// control rather than as a caption.
+    @Test("the date pill says Now until a date is chosen")
+    func theDatePillDefaultsToNow() {
+        #expect(MemoDateChoice.title(for: nil) == "Now")
+        #expect(MemoDateChoice.title(for: nil, compact: true) == "Now")
+        let moment = Date(timeIntervalSince1970: 1_750_000_000)
+        let chosen = MemoDateChoice.title(for: moment, locale: Locale(identifier: "en_GB"))
+        #expect(chosen != "Now")
+        #expect(!chosen.isEmpty)
     }
 
     @Test("every visibility has a distinct word and a distinct glyph")

@@ -25,6 +25,7 @@ struct DynamicTypeFittingTests {
         let choices: [(MemoVisibility?, MemoVisibility?)] = [
             (nil, nil),
             (nil, .protected),
+            (nil, .public),
             (.private, nil),
             (.protected, nil),
             (.public, nil),
@@ -33,10 +34,11 @@ struct DynamicTypeFittingTests {
             let pill = VisibilityChoicePill(selection: choice, accountDefault: accountDefault)
             let atLargest = LayoutProbe.idealWidth(pill, typeSize: .accessibility5)
             let atDefault = LayoutProbe.idealWidth(pill, typeSize: .large)
+            let shown = pill.title ?? "(glyph only)"
             // It fits the space the sheet actually gives it — so it is never cut short.
             #expect(
                 atLargest <= Self.composeContentWidth,
-                "\(pill.title) wants \(atLargest)pt of \(Self.composeContentWidth)"
+                "\(shown) wants \(atLargest)pt of \(Self.composeContentWidth)"
             )
             // And it fits because it is small enough, not because it was pinned: a control that
             // ignored the text size would measure the same at both.
@@ -79,6 +81,37 @@ struct DynamicTypeFittingTests {
             #expect(atLargest <= Self.cardWidth)
             #expect(atLargest > atDefault)
         }
+    }
+
+    /// The date pill sits beside the visibility pill now, so it has to survive the same sizes.
+    /// Its default state — the one everyone sees — is the one that must never truncate.
+    @Test("the date pill fits without truncating at the largest text size")
+    func datePillFitsAtAccessibility5() {
+        for date in [nil, Date(timeIntervalSince1970: 1_750_000_000)] {
+            let pill = MemoDatePill(date: date)
+            let atLargest = LayoutProbe.idealWidth(pill, typeSize: .accessibility5)
+            let atDefault = LayoutProbe.idealWidth(pill, typeSize: .large)
+            #expect(
+                atLargest <= Self.composeContentWidth,
+                "the date pill wants \(atLargest)pt of \(Self.composeContentWidth)"
+            )
+            #expect(atLargest > atDefault)
+        }
+    }
+
+    /// Both meta pills on one line is the normal-size layout; at accessibility sizes they stack,
+    /// but the pair still may not want more width than the sheet has.
+    @Test("the date and visibility pills fit side by side")
+    func theMetaPillsFitTogether() {
+        let row = HStack(spacing: DesignTokens.Space.snug) {
+            MemoDatePill(date: nil)
+            VisibilityChoicePill(selection: nil, accountDefault: .protected)
+        }
+        let atDefault = LayoutProbe.idealWidth(row, typeSize: .large)
+        #expect(
+            atDefault <= Self.composeContentWidth,
+            "the meta row wants \(atDefault)pt of \(Self.composeContentWidth)"
+        )
     }
 
     /// The clipping assertion. A card with a fixed height, or a line limit on the body, measures
