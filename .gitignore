@@ -22,3 +22,4 @@ Secrets*.xcconfig
 signing.local.yml
 MemosNG.entitlements
 MemosShare.entitlements
+.env
