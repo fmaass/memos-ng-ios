@@ -76,6 +76,220 @@ public final class TimelineStore {
         if apiError == .unauthorized { await onUnauthorized() }
     }
 
+    // MARK: - writes
+
+    /// Creates a memo and puts it where the server would have.
+    ///
+    /// Tags are not a field: the server derives them from the hashtags in the content, so a
+    /// separate tag input here would be a second source of truth that the next edit silently
+    /// overrules.
+    ///
+    /// A `nil` visibility is left OUT of the request rather than guessed at, so the server applies
+    /// the account's own default — the app has no business deciding who can see a memo.
+    @discardableResult
+    public func create(
+        content: String,
+        visibility: MemoVisibility? = nil,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        do {
+            let response = try await client.createMemoApiMemosPost(
+                .init(body: .json(.init(content: content, visibility: visibility?.generated)))
+            )
+            switch response {
+            case .created(let created):
+                let memo = Memo(try created.body.json, baseURL: baseURL)
+                memos.insert(memo, at: Self.insertionIndex(for: memo, in: memos))
+                lastError = nil
+                return true
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                throw APIError.fromStatus(statusCode)
+            }
+        } catch {
+            await report(error)
+            return false
+        }
+    }
+
+    /// Replaces a memo's content with what the editor produced.
+    @discardableResult
+    public func edit(
+        uid: String,
+        content: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        await patch(uid: uid, .init(content: content), using: client, baseURL: baseURL)
+    }
+
+    /// Changes who can see a memo.
+    @discardableResult
+    public func setVisibility(
+        _ visibility: MemoVisibility,
+        uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        await patch(
+            uid: uid, .init(visibility: visibility.generated), using: client, baseURL: baseURL
+        )
+    }
+
+    /// Pins or unpins through the server's own routes rather than by patching the flag: pinning
+    /// is the server's decision to make (it also reorders), and a PATCH would only describe it.
+    @discardableResult
+    public func setPinned(
+        _ pinned: Bool,
+        uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        do {
+            // Each response is switched on rather than reached through the generated throwing
+            // accessors: those throw an untyped "unexpected status" error, and a 401 that does not
+            // arrive as `APIError.unauthorized` never reaches the rule that ends the session.
+            let json: Components.Schemas.MemoOut
+            if pinned {
+                switch try await client.pinMemoApiMemosUidPinPost(.init(path: .init(uid: uid))) {
+                case .ok(let ok): json = try ok.body.json
+                case .unprocessableContent: throw APIError.server(status: 422)
+                case .undocumented(let statusCode, _): throw APIError.fromStatus(statusCode)
+                }
+            } else {
+                switch try await client.unpinMemoApiMemosUidUnpinPost(
+                    .init(path: .init(uid: uid))
+                ) {
+                case .ok(let ok): json = try ok.body.json
+                case .unprocessableContent: throw APIError.server(status: 422)
+                case .undocumented(let statusCode, _): throw APIError.fromStatus(statusCode)
+                }
+            }
+            // Pinning is also a MOVE: the list is pinned-first, so the updated memo re-enters at
+            // the position its new flag earns. (Fine-grained recency ordering is the server's;
+            // the next refresh settles it.)
+            let updated = Memo(json, baseURL: baseURL)
+            if let position = memos.firstIndex(where: { $0.uid == updated.uid }) {
+                memos.remove(at: position)
+                memos.insert(updated, at: Self.insertionIndex(for: updated, in: memos))
+            }
+            lastError = nil
+            return true
+        } catch {
+            await report(error)
+            return false
+        }
+    }
+
+    /// Deletes a memo. The row goes when the server says it is gone, not before: a delete that
+    /// failed and left the row on screen is recoverable, one that vanished optimistically is not.
+    @discardableResult
+    public func delete(uid: String, using client: any APIProtocol) async -> Bool {
+        do {
+            let response = try await client.deleteMemoApiMemosUidDelete(
+                .init(path: .init(uid: uid))
+            )
+            switch response {
+            case .noContent:
+                memos.removeAll { $0.uid == uid }
+                lastError = nil
+                return true
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                throw APIError.fromStatus(statusCode)
+            }
+        } catch {
+            await report(error)
+            return false
+        }
+    }
+
+    /// Ticks or unticks the Nth rendered checkbox of a memo.
+    ///
+    /// This one IS optimistic, and it is the only one: a checkbox that waits for a round trip
+    /// before it moves feels broken, and the change is a single character that can be put back
+    /// exactly. The new content comes from the same pure `toggleTask` the SPA uses, so the app
+    /// and the web app cannot disagree about which line a tap meant.
+    @discardableResult
+    public func toggleTask(
+        at index: Int,
+        in uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
+        let original = memos[position]
+        let toggled = MemosCore.toggleTask(original.content, at: index)
+        guard toggled != original.content else { return false }
+
+        memos[position].content = toggled
+        do {
+            let response = try await client.patchMemoApiMemosUidPatch(
+                .init(path: .init(uid: uid), body: .json(.init(content: toggled)))
+            )
+            switch response {
+            case .ok(let ok):
+                apply(Memo(try ok.body.json, baseURL: baseURL))
+                lastError = nil
+                return true
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                throw APIError.fromStatus(statusCode)
+            }
+        } catch {
+            // Put the memo back as it was. It is found by uid rather than by the index captured
+            // above, because a refresh may have moved it while the request was in flight.
+            if let current = memos.firstIndex(where: { $0.uid == uid }) {
+                memos[current] = original
+            }
+            await report(error)
+            return false
+        }
+    }
+
+    private func patch(
+        uid: String,
+        _ body: Components.Schemas.MemoPatch,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        do {
+            let response = try await client.patchMemoApiMemosUidPatch(
+                .init(path: .init(uid: uid), body: .json(body))
+            )
+            switch response {
+            case .ok(let ok):
+                apply(Memo(try ok.body.json, baseURL: baseURL))
+                lastError = nil
+                return true
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                throw APIError.fromStatus(statusCode)
+            }
+        } catch {
+            await report(error)
+            return false
+        }
+    }
+
+    /// Replaces the loaded copy of a memo with the server's, if it is on screen at all.
+    private func apply(_ memo: Memo) {
+        guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
+        memos[position] = memo
+    }
+
+    /// Where a new memo belongs in a list the server sorts pinned-first, then newest-first. Pure,
+    /// so the placement is asserted rather than eyeballed against a running server.
+    static func insertionIndex(for memo: Memo, in memos: [Memo]) -> Int {
+        guard !memo.pinned else { return 0 }
+        return memos.firstIndex { !$0.pinned } ?? memos.count
+    }
+
     static func page(
         _ client: any APIProtocol,
         cursor: String?,

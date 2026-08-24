@@ -18,3 +18,4 @@ Secrets*.xcconfig
 .phase-ledger.md
 # per-machine signing (see signing.local.yml.example)
 signing.local.yml
+MemosNG.entitlements

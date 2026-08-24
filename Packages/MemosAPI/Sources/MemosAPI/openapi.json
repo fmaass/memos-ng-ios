@@ -497,14 +497,7 @@
       "type": "array"
      },
      "visibility": {
-      "anyOf": [
-       {
-        "$ref": "#/components/schemas/Visibility"
-       },
-       {
-        "type": "null"
-       }
-      ]
+      "$ref": "#/components/schemas/Visibility"
      }
     },
     "required": [
@@ -674,14 +667,7 @@
       ]
      },
      "visibility": {
-      "anyOf": [
-       {
-        "$ref": "#/components/schemas/Visibility"
-       },
-       {
-        "type": "null"
-       }
-      ]
+      "$ref": "#/components/schemas/Visibility"
      }
     },
     "title": "MemoPatch",
@@ -1231,14 +1217,8 @@
       ]
      },
      "default_visibility": {
-      "anyOf": [
-       {
-        "$ref": "#/components/schemas/Visibility"
-       },
-       {
-        "type": "null"
-       }
-      ]
+      "$ref": "#/components/schemas/Visibility",
+      "title": "Default Visibility"
      },
      "theme": {
       "title": "Theme",
@@ -2113,15 +2093,7 @@
       "name": "visibility",
       "required": false,
       "schema": {
-       "anyOf": [
-        {
-         "$ref": "#/components/schemas/Visibility"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Visibility"
+       "$ref": "#/components/schemas/Visibility"
       }
      },
      {
@@ -2378,15 +2350,7 @@
       "name": "visibility",
       "required": false,
       "schema": {
-       "anyOf": [
-        {
-         "$ref": "#/components/schemas/Visibility"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Visibility"
+       "$ref": "#/components/schemas/Visibility"
       }
      },
      {

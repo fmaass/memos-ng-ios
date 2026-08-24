@@ -1,7 +1,7 @@
 import Foundation
 import MemosAPI
 
-public enum MemoVisibility: String, Sendable, Equatable, Codable {
+public enum MemoVisibility: String, Sendable, Equatable, Codable, CaseIterable {
     case `private` = "PRIVATE"
     case protected = "PROTECTED"
     case `public` = "PUBLIC"
@@ -117,6 +117,19 @@ extension MemoVisibility {
         case ._private: self = .private
         case .protected: self = .protected
         case ._public: self = .public
+        }
+    }
+}
+
+extension MemoVisibility {
+    /// The write direction of the same mapping. It exists as its own function so the pair can be
+    /// asserted to round-trip: a request that says PUBLIC when the reader chose PROTECTED is the
+    /// one mistake in this file that would publish someone's memo.
+    var generated: Components.Schemas.Visibility {
+        switch self {
+        case .private: ._private
+        case .protected: .protected
+        case .public: ._public
         }
     }
 }

@@ -60,12 +60,54 @@ enum Stub {
         "role":"admin","auth_kind":"oidc"}
         """
 
-    static func memo(uid: String, content: String = "hello") -> String {
+    static func memo(
+        uid: String,
+        content: String = "hello",
+        pinned: Bool = false,
+        visibility: String = "PRIVATE"
+    ) -> String {
         """
-        {"uid":"\(uid)","owner":"fabian","mine":true,"content":"\(content)",\
-        "visibility":"PRIVATE","pinned":false,"created_at":"2026-08-23T09:00:00Z",\
+        {"uid":"\(uid)","owner":"fabian","mine":true,"content":"\(jsonEscaped(content))",\
+        "visibility":"\(visibility)","pinned":\(pinned),"created_at":"2026-08-23T09:00:00Z",\
         "updated_at":"2026-08-23T09:00:00.443000Z","archived_at":null,"tags":[],"attachments":[]}
         """
+    }
+
+    /// A memo's content is Markdown, so it carries newlines and quotes into these hand-built JSON
+    /// bodies; unescaped they produce a body the real decoder rejects and a test that fails for
+    /// the wrong reason.
+    static func jsonEscaped(_ text: String) -> String {
+        var out = ""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
+    /// What `POST /api/auth/native/exchange` answers on the one and only successful exchange.
+    static func exchange(token: String) -> String {
+        """
+        {"token":"\(token)","expires_at":"2027-08-23T09:00:00Z","user":\(user)}
+        """
+    }
+
+    /// A 400 from the exchange, with one of the server's four stable detail codes.
+    static func exchangeFailure(_ detail: String) -> (HTTPResponse, HTTPBody?) {
+        json(#"{"detail":"\#(detail)"}"#, status: .badRequest)
+    }
+
+    /// The JSON body a store actually sent, so a test asserts the request rather than trusting it.
+    static func body(_ body: HTTPBody?) async throws -> [String: Any] {
+        guard let body else { return [:] }
+        let data = try await Data(collecting: body, upTo: 64 * 1024)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
     static func memoList(_ uids: [String], nextCursor: String?) -> String {
@@ -74,6 +116,40 @@ enum Stub {
             {"items":[\(uids.map { memo(uid: $0) }.joined(separator: ","))],\
             "nextCursor":\(cursor),"totalCount":null}
             """
+    }
+}
+
+/// Stands in for the browser sheet: it hands back whatever callback URL a test wants, or fails
+/// the way a real authentication session fails, and records what it was asked to present.
+@MainActor
+struct StubPresenter: NativeLoginPresenter {
+    enum Behaviour {
+        case callback(String)
+        case failure(NativeLoginError)
+    }
+
+    let behaviour: Behaviour
+    let seenAuthorizeURL = LockedValue<URL?>(nil)
+    let seenHost = LockedValue<String?>(nil)
+    let seenPath = LockedValue<String?>(nil)
+    let calls = Counter()
+
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String
+    ) async throws -> URL {
+        calls.increment()
+        seenAuthorizeURL.set(authorizeURL)
+        seenHost.set(callbackHost)
+        seenPath.set(callbackPath)
+        switch behaviour {
+        case .callback(let raw):
+            guard let url = URL(string: raw) else { throw NativeLoginError.malformedCallback }
+            return url
+        case .failure(let error):
+            throw error
+        }
     }
 }
 
@@ -97,6 +173,24 @@ final class InMemoryCredentials: CredentialStore, @unchecked Sendable {
     var isEmpty: Bool { lock.withLock { storage.isEmpty } }
 
     func snapshot() -> [String: String] { lock.withLock { storage } }
+}
+
+/// A store that accepts nothing — how the app-group namespace behaves on a build whose
+/// entitlement is missing, which is the case the migration has to survive without losing a token.
+final class RefusingCredentials: CredentialStore, @unchecked Sendable {
+    struct Refused: Error {}
+
+    private let lock = NSLock()
+    private var reads = 0
+
+    func set(_ value: String, for account: String) throws { throw Refused() }
+    func string(for account: String) throws -> String? {
+        lock.withLock { reads += 1 }
+        return nil
+    }
+    func remove(_ account: String) throws {}
+
+    var readCount: Int { lock.withLock { reads } }
 }
 
 /// Counts calls from a `@Sendable` closure without tripping strict concurrency.
