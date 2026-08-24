@@ -19,6 +19,10 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../MemosAPI"),
+        // The queue of captures waiting for the server. It depends on nothing, and this layer
+        // depends on it only to implement the one protocol it asks for: where the server is, who
+        // is signed in, and the bearer token of the moment.
+        .package(path: "../MemosOutbox"),
         // Not a layering break: the generated request types ARE OpenAPIRuntime types, and the
         // default arguments Core inlines when it builds one (`Input.Headers.init(accept:)`) are
         // defined in that module, so Core has to link it or the symbols are simply missing.
@@ -29,6 +33,7 @@ let package = Package(
             name: "MemosCore",
             dependencies: [
                 .product(name: "MemosAPI", package: "MemosAPI"),
+                .product(name: "MemosOutbox", package: "MemosOutbox"),
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
@@ -38,6 +43,7 @@ let package = Package(
             dependencies: [
                 "MemosCore",
                 .product(name: "MemosAPI", package: "MemosAPI"),
+                .product(name: "MemosOutbox", package: "MemosOutbox"),
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]

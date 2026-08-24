@@ -58,8 +58,10 @@ public final class SessionStore {
         @Sendable (ServerConfiguration, @escaping @Sendable () async -> String?) -> any APIProtocol
     private var client: (any APIProtocol)?
 
-    public static let tokenAccount = "device-token"
-    public static let serverAccount = "server-url"
+    // Nonisolated: these name the two keychain items, and the outbox reads them from its own
+    // isolation. They are immutable strings, so there is nothing here for the main actor to guard.
+    public nonisolated static let tokenAccount = "device-token"
+    public nonisolated static let serverAccount = "server-url"
 
     public init(
         credentials: any CredentialStore = DeviceCredentials.keychain(),

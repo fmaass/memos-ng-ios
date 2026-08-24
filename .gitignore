@@ -1,5 +1,6 @@
 # generated project (XcodeGen)
 *.xcodeproj
+Support/Info.plist
 *.xcworkspace
 # build products
 .build/

@@ -39,6 +39,8 @@ packages:
     path: Packages/MemosCore
   MemosFeatures:
     path: Packages/MemosFeatures
+  MemosOutbox:
+    path: Packages/MemosOutbox
   # The test bundles substitute the transport and build requests by hand, so they reference these
   # two modules directly and Xcode has to be told to link them. Keep the versions in step with
   # Packages/MemosAPI/Package.swift — SwiftPM resolves one graph and will refuse a conflict.
@@ -63,6 +65,7 @@ targets:
     dependencies:
       - package: MemosFeatures
       - package: MemosCore
+      - package: MemosOutbox
       # Linked, not imported: composing a SessionStore inlines its default client factory, which
       # lives in MemosAPI, so the app has to link it even though it never says `import MemosAPI`.
       - package: MemosAPI
@@ -79,6 +82,16 @@ targets:
           - webcredentials:memos.discomarder.live?mode=developer
         com.apple.security.application-groups:
           - group.live.discomarder.memosng
+    # Two keys have no INFOPLIST_KEY_ build setting to express them, so they live in a generated
+    # plist that the INFOPLIST_KEY_ values below are merged into. The file is generated from THIS
+    # spec (and gitignored) — it is not a hand-maintained Info.plist coming back through the door.
+    info:
+      path: Support/Info.plist
+      properties:
+        BGTaskSchedulerPermittedIdentifiers:
+          - live.discomarder.memosng.outbox-refresh
+        UIBackgroundModes:
+          - fetch
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng
@@ -130,6 +143,7 @@ targets:
     dependencies:
       - package: MemosCore
       - package: MemosAPI
+      - package: MemosOutbox
       - package: swift-openapi-runtime
         product: OpenAPIRuntime
       - package: swift-http-types
@@ -140,6 +154,20 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng.coretests
 
+  MemosOutboxTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Packages/MemosOutbox/Tests/MemosOutboxTests
+    dependencies:
+      - package: MemosOutbox
+      - target: MemosNG
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng.outboxtests
+
   MemosFeaturesTests:
     type: bundle.unit-test
     platform: iOS
@@ -149,6 +177,7 @@ targets:
     dependencies:
       - package: MemosFeatures
       - package: MemosCore
+      - package: MemosOutbox
       - target: MemosNG
     settings:
       base:
@@ -163,6 +192,7 @@ schemes:
         MemosNG: all
         MemosAPITests: [test]
         MemosCoreTests: [test]
+        MemosOutboxTests: [test]
         MemosFeaturesTests: [test]
     run:
       config: Debug
@@ -172,4 +202,5 @@ schemes:
       targets:
         - MemosAPITests
         - MemosCoreTests
+        - MemosOutboxTests
         - MemosFeaturesTests
