@@ -224,7 +224,7 @@ public enum MemoMarkdownSource {
 
 extension MemoMarkdownSource {
     struct ReferenceScan {
-        /// The source with every unsafe definition line neutralised.
+        /// The source with every unsafe definition line neutralised, byte for byte otherwise.
         var source: String
         /// Labels that still resolve after that, normalised the way CommonMark matches them.
         var labels: Set<String>
@@ -233,54 +233,60 @@ extension MemoMarkdownSource {
     /// Escapes the opening bracket of every `[label]: destination` line whose destination would
     /// not survive the SPA's sanitiser, which is what markdown-it's refusal to register such a
     /// definition looks like from the outside: the line stops being a definition and stays on
-    /// screen as text, and every reference that named the label becomes literal text as well,
-    /// because neither parser resolves a label it has no definition for.
+    /// screen as text, and every reference that named the label becomes literal text as well.
     ///
-    /// Neutralising is applied to any line SHAPED like a definition outside a fenced code block,
-    /// not only to the ones a full parse would accept: escaping a `[` in a line that was ordinary
-    /// prose all along renders exactly as it did before (`\[` is a literal `[`), so the cost of
-    /// being too eager is nothing, while the cost of being too clever is a live `javascript:`
-    /// link in whichever position the line-position rules were not modelled faithfully.
+    /// Everything this needs to know about a line — where it ends, which containers it is inside,
+    /// how far its content is indented — is decided ONCE, by `sourceLines`, and every question
+    /// below is asked of that. Four review rounds found four spellings that a per-site reading of
+    /// the raw line got wrong (a tab after a list marker, a lone-CR line ending, indented code
+    /// inside a blockquote, a marker-only list item); they are not four patches but one layer,
+    /// because the class is "this scanner's idea of block structure differs from cmark's" and
+    /// only a shared layer can be held to the spec in one place.
     ///
-    /// Collecting the labels that DO resolve is the opposite bet, because a label wrongly thought
-    /// to be defined makes the image rule delete `![text]` a reader was meant to see. So a label
-    /// is registered only from a line that starts a block, which is the only place a definition
-    /// can be.
+    /// Being too eager costs nothing — escaping a `[` in a line that was prose all along renders
+    /// exactly as it did before, `\[` is a literal `[` — while being too clever costs a live
+    /// `javascript:` link. Registering a label is the opposite bet, because a label wrongly
+    /// thought to be defined deletes a `![text]` a reader was meant to see, so that happens only
+    /// where a definition can actually begin.
     static func neutralizeUnsafeReferenceDefinitions(_ source: String) -> ReferenceScan {
-        var lines = source.components(separatedBy: "\n")
+        var lines = sourceLines(source)
         var labels: Set<String> = []
-        var fence: (character: Character, length: Int)?
+        var fence: (character: Character, length: Int, depth: Int)?
         var atBlockStart = true
 
         for index in lines.indices {
             let line = lines[index]
-            // A memo written on a device that ends its lines with CRLF is the same memo, and
-            // cmark normalises the endings before it parses. So every line-shaped question here
-            // is asked of the line WITHOUT its carriage return — a `\r` left on a closing fence
-            // makes the fence never close, and everything below it stops being looked at. The
-            // escape is still inserted into the line as the author wrote it.
-            let body = withoutCarriageReturn(line)
-            let openedThisBlock = atBlockStart
+
             if let open = fence {
-                if let closing = fenceMarker(body), closing.character == open.character,
+                if line.depth < open.depth {
+                    // The container that held the fence has ended. A fence inside a blockquote
+                    // cannot swallow the rest of the document — and a scanner that lets it stops
+                    // looking at every definition below.
+                    fence = nil
+                    atBlockStart = true
+                } else if let closing = fenceMarker(line), closing.character == open.character,
                     closing.length >= open.length, closing.info.isEmpty
                 {
                     fence = nil
                     atBlockStart = true
+                    continue
+                } else {
+                    continue
                 }
-                continue
             }
-            if let opening = fenceMarker(body) {
-                fence = (opening.character, opening.length)
+            if let opening = fenceMarker(line) {
+                fence = (opening.character, opening.length, line.depth)
                 atBlockStart = false
                 continue
             }
-            guard let definition = definitionLine(body) else {
-                // A blank line is not the only thing that ends a block: an indented code block
-                // ends at the first line that is not indented, and a definition may sit on that
-                // line. Missing it leaves the label unregistered, and an unregistered label is a
-                // reference image this code will not drop.
-                atBlockStart = endsABlock(body) || (openedThisBlock && isIndentedCode(body))
+
+            let openedThisBlock = atBlockStart
+            guard let definition = definitionLine(line) else {
+                // A blank line ends a block, and so does a line that was nothing but container
+                // markers, and so does the last line of an indented code block — the first line
+                // that is not indented begins a block of its own, and a definition may sit there.
+                atBlockStart =
+                    endsABlock(line.content) || (openedThisBlock && line.isIndentedCode)
                 continue
             }
 
@@ -288,7 +294,7 @@ extension MemoMarkdownSource {
             if destination == nil, index + 1 < lines.count {
                 // CommonMark lets the destination sit on the line after the label. cmark-gfm
                 // registers that spelling; markdown-it validates it the same as any other.
-                destination = firstToken(of: withoutCarriageReturn(lines[index + 1]))
+                destination = firstToken(of: lines[index + 1].content)
             }
             guard let href = destination, !href.isEmpty else {
                 atBlockStart = false
@@ -298,55 +304,17 @@ extension MemoMarkdownSource {
             if MarkdownInline.isTappableScheme(href) {
                 if atBlockStart { labels.insert(normalizedLabel(definition.label)) }
             } else {
-                var characters = Array(line)
-                characters.insert("\\", at: definition.bracketOffset)
-                lines[index] = String(characters)
+                var characters = Array(line.raw)
+                characters.insert("\\", at: line.contentOffset + definition.bracketOffset)
+                lines[index].raw = String(characters)
             }
             // One definition may follow another; a definition never opens a paragraph.
             atBlockStart = definition.destination != nil
         }
-        return ReferenceScan(source: lines.joined(separator: "\n"), labels: labels)
-    }
-
-    private static func withoutCarriageReturn(_ line: String) -> String {
-        line.hasSuffix("\r") ? String(line.dropLast()) : line
-    }
-
-    /// Four columns of indent with something after them: an indented code block. No definition
-    /// can sit inside one, and the first line that is not indented ends it.
-    private static func isIndentedCode(_ line: String) -> Bool {
-        var columns = 0
-        for character in line {
-            if character == " " {
-                columns += 1
-                continue
-            }
-            if character == "\t" {
-                columns += 4
-                continue
-            }
-            return columns >= 4
-        }
-        return false
-    }
-
-    /// True when nothing on this line can be continued by the next one, so the next line begins a
-    /// block of its own. A definition cannot interrupt a paragraph, which is what this rules out.
-    private static func endsABlock(_ line: String) -> Bool {
-        let body = line.trimmingCharacters(in: .whitespaces)
-        if body.isEmpty { return true }
-        if body.hasPrefix("#") {
-            let hashes = body.prefix { $0 == "#" }
-            if hashes.count <= 6, body.dropFirst(hashes.count).first.map(\.isWhitespace) ?? true {
-                return true
-            }
-        }
-        if body.count >= 3, let first = body.first, "-*_".contains(first),
-            body.allSatisfy({ $0 == first })
-        {
-            return true
-        }
-        return false
+        return ReferenceScan(
+            source: lines.map { $0.raw + $0.ending }.joined(),
+            labels: labels
+        )
     }
 
     /// CommonMark matches reference labels case-insensitively and treats any run of whitespace
@@ -368,65 +336,137 @@ extension MemoMarkdownSource {
         return out.lowercased()
     }
 
-    private struct DefinitionLine {
-        var label: String
-        /// `nil` when the label was followed by nothing — the destination is on the next line.
-        var destination: String?
-        /// Where the `[` sits in the line, so the escape lands in front of it.
-        var bracketOffset: Int
+    // MARK: The one layer everything above reads
+
+    /// A source line as the scanner needs to see it.
+    ///
+    /// `raw` and `ending` put the document back together byte for byte; `content` is what is left
+    /// once the containers this line sits in have been peeled off, which is the only thing whose
+    /// indentation, fence-ness and definition-ness mean anything.
+    struct SourceLine {
+        /// The line as the author wrote it, its ending excluded.
+        var raw: String
+        /// The ending that followed it: `\n`, `\r\n`, `\r`, or nothing at the end of the source.
+        var ending: String
+        /// What is left after the blockquote and list markers, its own indentation included.
+        var content: String
+        /// Where `content` begins inside `raw`, counted in Characters.
+        var contentOffset: Int
+        /// How many containers were peeled off. A fence opened inside one cannot swallow lines
+        /// that sit outside it.
+        var depth: Int
+        /// Columns of indentation in front of the content, tabs advancing to 4-column tab stops.
+        var indentColumns: Int
+
+        /// Four columns of indent with something after them: an indented code block. No
+        /// definition can sit inside one, and the first line that is not indented ends it.
+        var isIndentedCode: Bool {
+            indentColumns >= 4 && !content.trimmingCharacters(in: .whitespaces).isEmpty
+        }
     }
 
-    private static func definitionLine(_ line: String) -> DefinitionLine? {
-        let chars = Array(line)
+    /// Splits the source the way CommonMark splits it — `\n`, `\r\n` and a lone `\r` are all line
+    /// endings — and peels the container markers off each line.
+    ///
+    /// A memo written on a device that ends its lines with `\r` alone is the same memo, and cmark
+    /// reads it as one. A scanner that only knows `\n` sees a single enormous line and looks at
+    /// none of it.
+    static func sourceLines(_ source: String) -> [SourceLine] {
+        // Scalars, not Characters. Swift reads `\r\n` as ONE extended grapheme cluster, so a
+        // Character-by-Character walk of a CRLF memo never matches `\n` or `\r` and hands the
+        // scanner a single enormous line — the very failure this layer exists to make impossible.
+        let scalars = Array(source.unicodeScalars)
+        var lines: [SourceLine] = []
+        var raw = String.UnicodeScalarView()
         var index = 0
-        var indent = 0
-        // Blockquote markers may precede the definition, and each level restarts the indent that
-        // would otherwise make the line an indented code block.
-        while index < chars.count {
-            if chars[index] == " " {
-                indent += 1
-                if indent > 3 { return nil }
+
+        while index < scalars.count {
+            let scalar = scalars[index]
+            guard scalar == "\n" || scalar == "\r" else {
+                raw.append(scalar)
                 index += 1
                 continue
             }
-            if chars[index] == "\t" { return nil }
+            var ending = String(scalar)
+            index += 1
+            if scalar == "\r", index < scalars.count, scalars[index] == "\n" {
+                ending.append("\n")
+                index += 1
+            }
+            lines.append(makeLine(raw: String(raw), ending: ending))
+            raw = String.UnicodeScalarView()
+        }
+        lines.append(makeLine(raw: String(raw), ending: ""))
+        return lines
+    }
+
+    /// Peels blockquote and list markers off, one after another, the way a document nests them.
+    /// Whitespace runs are measured in COLUMNS with four-column tab stops, because that is what
+    /// decides whether what follows is indented code or the content of the container.
+    private static func makeLine(raw: String, ending: String) -> SourceLine {
+        let chars = Array(raw)
+        var index = 0
+        var depth = 0
+        var indentStart = 0
+
+        while index < chars.count {
+            if chars[index] == " " || chars[index] == "\t" {
+                index += 1
+                continue
+            }
+            // Four columns of indentation is an indented code block, not room before a marker.
+            if columnWidth(chars, from: indentStart, to: index) >= 4 { break }
             if chars[index] == ">" {
                 index += 1
-                indent = 0
-                if index < chars.count, chars[index] == " " { index += 1 }
+                depth += 1
+                // The marker may be followed by one space, which belongs to the marker.
+                if index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+                indentStart = index
                 continue
             }
-            // A list marker opens a block a definition may sit in, and CommonMark registers a
-            // definition written inside a list item for the WHOLE document — so
-            // `- [evil]: javascript:…` is a definition, and a prefix scanner that knows `>` but
-            // not `-` is one bullet away from letting the scheme rule be bypassed.
             if let marker = listMarkerWidth(chars, at: index) {
                 index += marker
-                indent = 0
+                depth += 1
+                indentStart = index
                 continue
             }
             break
         }
-        let bracketOffset = index
-        guard let label = scanBracketed(chars, at: index) else { return nil }
-        guard !label.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        index = label.end
-        guard index < chars.count, chars[index] == ":" else { return nil }
-        index += 1
-        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
 
-        let rest = String(chars[index...])
-        return DefinitionLine(
-            label: label.text,
-            destination: destinationToken(rest),
-            bracketOffset: bracketOffset
+        var contentEnd = indentStart
+        while contentEnd < chars.count, chars[contentEnd] == " " || chars[contentEnd] == "\t" {
+            contentEnd += 1
+        }
+        return SourceLine(
+            raw: raw,
+            ending: ending,
+            content: String(chars[indentStart...]),
+            contentOffset: indentStart,
+            depth: depth,
+            indentColumns: columnWidth(chars, from: indentStart, to: contentEnd)
         )
     }
 
-    /// How wide the list marker starting here is, the space that must follow it included:
-    /// `- `, `* `, `+ `, `1. `, `12) `. `nil` when this is not one — `-[x]` opens no list item.
+    /// The width of a whitespace run in columns: a tab advances to the next four-column tab stop,
+    /// which is how CommonMark measures indentation and list-marker padding.
+    private static func columnWidth(_ chars: [Character], from start: Int, to end: Int) -> Int {
+        var columns = 0
+        var index = start
+        while index < end, index < chars.count {
+            if chars[index] == "\t" {
+                columns += 4 - (columns % 4)
+            } else {
+                columns += 1
+            }
+            index += 1
+        }
+        return columns
+    }
+
+    /// How wide the list marker starting here is, the one whitespace character that belongs to it
+    /// included: `- `, `*\t`, `+ `, `1. `, `12) `, or a marker alone at the end of its line — an
+    /// item whose content starts on the NEXT line is still an item. `nil` when this is not a
+    /// marker: `-[x]` opens no list.
     private static func listMarkerWidth(_ chars: [Character], at start: Int) -> Int? {
         var index = start
         if chars[index] == "-" || chars[index] == "+" || chars[index] == "*" {
@@ -441,8 +481,60 @@ extension MemoMarkdownSource {
             else { return nil }
             index += 1
         }
-        guard index < chars.count, chars[index] == " " else { return nil }
+        guard index < chars.count else { return index - start }
+        guard chars[index] == " " || chars[index] == "\t" else { return nil }
         return index + 1 - start
+    }
+
+    /// True when nothing on this line can be continued by the next one, so the next line begins a
+    /// block of its own. A definition cannot interrupt a paragraph, which is what this rules out.
+    private static func endsABlock(_ content: String) -> Bool {
+        let body = content.trimmingCharacters(in: .whitespaces)
+        if body.isEmpty { return true }
+        if body.hasPrefix("#") {
+            let hashes = body.prefix { $0 == "#" }
+            if hashes.count <= 6, body.dropFirst(hashes.count).first.map(\.isWhitespace) ?? true {
+                return true
+            }
+        }
+        if body.count >= 3, let first = body.first, "-*_".contains(first),
+            body.allSatisfy({ $0 == first })
+        {
+            return true
+        }
+        return false
+    }
+
+    private struct DefinitionLine {
+        var label: String
+        /// `nil` when the label was followed by nothing — the destination is on the next line.
+        var destination: String?
+        /// Where the `[` sits inside the line's CONTENT, so the escape lands in front of it.
+        var bracketOffset: Int
+    }
+
+    private static func definitionLine(_ line: SourceLine) -> DefinitionLine? {
+        // Inside an indented code block there are no definitions, only code.
+        guard line.indentColumns < 4 else { return nil }
+        let chars = Array(line.content)
+        var index = 0
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+
+        let bracketOffset = index
+        guard let label = scanBracketed(chars, at: index) else { return nil }
+        guard !label.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        index = label.end
+        guard index < chars.count, chars[index] == ":" else { return nil }
+        index += 1
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+
+        return DefinitionLine(
+            label: label.text,
+            destination: destinationToken(String(chars[index...])),
+            bracketOffset: bracketOffset
+        )
     }
 
     /// The destination as CommonMark reads it: either `<…>` or an unbroken run of characters.
@@ -456,20 +548,17 @@ extension MemoMarkdownSource {
         return trimmed.split(separator: " ", maxSplits: 1).first.map(String.init)
     }
 
-    private static func firstToken(of line: String) -> String? {
-        var body = line
-        while body.hasPrefix(">") || body.hasPrefix(" ") {
-            body.removeFirst()
-        }
-        return destinationToken(body)
+    private static func firstToken(of content: String) -> String? {
+        destinationToken(content)
     }
 
     private static func fenceMarker(
-        _ line: String
+        _ line: SourceLine
     ) -> (character: Character, length: Int, info: String)? {
-        let chars = Array(line)
+        guard line.indentColumns < 4 else { return nil }
+        let chars = Array(line.content)
         var index = 0
-        while index < chars.count, chars[index] == " ", index < 3 { index += 1 }
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
         guard index < chars.count, chars[index] == "`" || chars[index] == "~" else { return nil }
         let character = chars[index]
         var length = 0
