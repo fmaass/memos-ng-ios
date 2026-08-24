@@ -51,6 +51,8 @@
 #
 # Exit codes: 2 = refusal (unsafe or unusable inputs, nothing was copied or run);
 #             3 = another run of this branch holds the gate lock (nothing was copied or run);
+#             4 = the lock this run held was reaped while the run was starting, and the build host
+#                 half stopped before touching anything;
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -122,7 +124,12 @@ DEVICE_NAME="gate-${branch_slug}-$$"
 # Who this run is, for the gate lock below. The host is in it because the pid alone is only
 # meaningful to the machine that issued it, and the lock is read by whoever comes next.
 LOCK_DIR=""
-LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# A token, because a pid is not proof of identity to the far side: the remote half of this run has
+# to be able to ask "is the lock in that directory still MINE", and a reap replaces the directory
+# with one that carries somebody else's token.
+RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
+LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) token=$RUN_TOKEN"
 
 artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
 mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
@@ -463,9 +470,31 @@ say "--- step: remote ---"
   printf "GATE_SIMULATOR='%s'\n" "$(esc "$SIMULATOR")"
   printf "GATE_DEVICE_NAME='%s'\n" "$(esc "$DEVICE_NAME")"
   printf "GATE_DEVICE_TYPE='%s'\n" "$(esc "$DEVICE_TYPE")"
+  printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
   cat <<'REMOTE_EOF'
 set -uo pipefail
+
+# The first thing this shell does, before a directory is entered or a byte is removed: check that
+# the lock this run was given is still this run's. A controller can be killed between the copy and
+# this line, and the lock it left behind can be judged stale and reaped in that moment — in which
+# case another run now owns the tree, and the only correct move here is to stop having touched
+# nothing. What remains is the few milliseconds between ssh handing this script to bash and this
+# check: in that window this shell has mutated nothing, so a reap there costs the reaper nothing
+# and costs this run only the run itself.
+GATE_LOCK="$GATE_TARGET.lock"
+gate_lock_owner="$(cat "$GATE_LOCK/owner" 2>/dev/null)"
+case "$gate_lock_owner" in
+  *"token=$GATE_RUN_TOKEN"*) ;;
+  *)
+    echo "remote: the gate lock of this run was taken over while it was starting" \
+         "(the lock now reads: ${gate_lock_owner:-gone}) — stopping, nothing was touched"
+    exit 4 ;;
+esac
+# Only now, and only into a lock that answered with this run's token: the note that says a build
+# is running on this host, which is what tells the next run not to reap while it is.
+printf '%s\n' "$$" > "$GATE_LOCK/remote-pid" 2>/dev/null
+
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 # xcode-select still points at the Command Line Tools on this host, so the full Xcode is named
 # explicitly rather than assumed.
@@ -490,12 +519,6 @@ DERIVED="$GATE_WORK/DerivedData"
 # device of its own and gives it back. The trap is the giving back, and it has to hold on the
 # paths nobody plans for: a failing step, a refusal, the SIGHUP this shell gets when the ssh
 # connection goes away. An undeleted device is disk on a build host that has little to spare.
-# The lock this run holds was taken by the controlling shell before anything was copied. That
-# shell can be killed outright, and this script would carry on regardless — so it writes its own
-# pid in there, on THIS host, where the next run can actually ask whether it is still alive.
-GATE_LOCK="$GATE_TARGET.lock"
-[ -d "$GATE_LOCK" ] && printf '%s\n' "$$" > "$GATE_LOCK/remote-pid" 2>/dev/null
-
 GATE_DEVICE_UDID=""
 device_cleanup() {
   [ -n "$GATE_DEVICE_UDID" ] || return 0
