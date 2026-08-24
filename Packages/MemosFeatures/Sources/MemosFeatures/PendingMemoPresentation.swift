@@ -40,7 +40,10 @@ public enum PendingMemoPresentation {
                     snippet: snippet(job.content),
                     status: status(for: job),
                     attachmentCount: job.files.count,
-                    needsAttention: job.state == .held
+                    // A capture whose manifest could not be read has nothing to try again: the
+                    // row says what happened and what is being kept, and offers no button that
+                    // would do nothing.
+                    needsAttention: job.state == .held && job.holdReason != .unreadableManifest
                 )
             }
     }
@@ -51,6 +54,10 @@ public enum PendingMemoPresentation {
             switch job.holdReason {
             case .accountMismatch:
                 return "Captured under another account"
+            case .unreadableManifest:
+                return "This capture could not be read — its files are kept"
+            case .storageFailed:
+                return job.lastError ?? "This capture could not be saved on this device"
             case .serverRefused, .none:
                 return job.lastError ?? "Needs attention"
             }

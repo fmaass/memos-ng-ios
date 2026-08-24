@@ -59,7 +59,7 @@ struct RepositoryTests {
                     ]
                 )
             }
-            #expect(await repository.loadJobs().isEmpty)
+            #expect(try await repository.loadJobs().isEmpty)
             let media = root.appending(path: "outbox").appending(path: "media")
             let leftovers = try FileManager.default.contentsOfDirectory(
                 at: media, includingPropertiesForKeys: nil
@@ -151,15 +151,107 @@ struct RepositoryTests {
             #expect(FileManager.default.fileExists(atPath: media.path(percentEncoded: false)))
 
             await repository.delete(job)
-            #expect(await repository.loadJobs().isEmpty)
+            #expect(try await repository.loadJobs().isEmpty)
             #expect(!FileManager.default.fileExists(atPath: media.path(percentEncoded: false)))
 
             // An unreferenced media directory — what a crash mid-capture leaves — is swept.
             let orphan = root.appending(path: "outbox").appending(path: "media")
                 .appending(path: UUID().uuidString)
             try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
-            await repository.sweepOrphans()
+            try await repository.sweepOrphans()
             #expect(!FileManager.default.fileExists(atPath: orphan.path(percentEncoded: false)))
+        }
+    }
+
+    @Test("a manifest nobody can decode is set aside, not dropped, and its files are kept")
+    func quarantinesAnUndecodableManifest() async throws {
+        try await withRepository { repository, root in
+            let source = try Fixture.file(in: root, named: "one.heic", bytes: 4096)
+            let job = try await repository.enqueue(
+                content: "on the beach",
+                visibility: nil,
+                capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+                binding: Fixture.binding(),
+                sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+            )
+            let media = repository.mediaURL(job: job, file: job.files[0])
+            let mediaBefore = try Data(contentsOf: media)
+            let outbox = root.appending(path: "outbox")
+            let manifest = outbox.appending(path: "jobs/\(job.id.uuidString).json")
+            let corrupt = Data(#"{"id":"not a job"}"#.utf8)
+            try corrupt.write(to: manifest)
+
+            let jobs = try await repository.loadJobs()
+
+            #expect(jobs.count == 1, "a capture is never dropped for being unreadable")
+            #expect(jobs[0].id == job.id)
+            #expect(jobs[0].state == .held)
+            #expect(jobs[0].holdReason == .unreadableManifest)
+            #expect(jobs[0].lastError?.isEmpty == false, "and it says WHY it could not be read")
+
+            // Set aside, not deleted: the bytes are exactly the ones that were there.
+            #expect(!FileManager.default.fileExists(atPath: manifest.path(percentEncoded: false)))
+            let aside = outbox.appending(path: "quarantine/\(job.id.uuidString).json")
+            #expect(try Data(contentsOf: aside) == corrupt)
+            #expect(try Data(contentsOf: media) == mediaBefore)
+
+            // It keeps saying so: the entry is not a one-off of the load that moved it.
+            #expect(try await repository.loadJobs() == jobs)
+
+            // And the sweep goes on counting those originals as spoken for, exactly as it would
+            // for a job it could read. This is what "its files are kept" has to survive.
+            try await repository.sweepOrphans()
+            #expect(try Data(contentsOf: media) == mediaBefore)
+        }
+    }
+
+    @Test("what could not be read says which way it failed, whatever the file is called")
+    func saysWhichWayEachOneFailed() async throws {
+        try await withRepository { repository, root in
+            let jobs = root.appending(path: "outbox").appending(path: "jobs")
+            try Data("not json at all".utf8).write(to: jobs.appending(path: "notes.json"))
+            let id = UUID()
+            try Data(#"{"id":"\#(id.uuidString)"}"#.utf8)
+                .write(to: jobs.appending(path: "\(id.uuidString).json"))
+
+            let loaded = try await repository.loadJobs()
+
+            #expect(loaded.count == 2, "a file nobody can place is still a file nobody may drop")
+            #expect(loaded.allSatisfy { $0.holdReason == .unreadableManifest })
+            #expect(loaded.contains { $0.id == id }, "the one that IS named after a job keeps it")
+            #expect(
+                Set(loaded.compactMap(\.lastError)).count == 2,
+                "one sentence per way of failing, not a shrug that fits both"
+            )
+
+            // The row a person is looking at does not change identity under them on a refresh.
+            let again = try await repository.loadJobs()
+            #expect(Set(again.map(\.id)) == Set(loaded.map(\.id)))
+        }
+    }
+
+    @Test("a jobs directory that cannot be listed is an error, never an empty queue")
+    func anUnlistableQueueIsAnError() async throws {
+        try await withRepository { repository, root in
+            let source = try Fixture.file(in: root, named: "one.heic", bytes: 512)
+            let job = try await repository.enqueue(
+                content: "",
+                visibility: nil,
+                capturedAt: Date(),
+                binding: Fixture.binding(),
+                sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+            )
+            let media = repository.mediaURL(job: job, file: job.files[0])
+            let restore = try Fixture.permissions(
+                0, on: root.appending(path: "outbox").appending(path: "jobs")
+            )
+            defer { restore() }
+
+            await #expect(throws: (any Error).self) { try await repository.loadJobs() }
+            // And nothing is swept on the strength of a list nobody could produce: an empty one
+            // would take every capture's originals with it.
+            await #expect(throws: (any Error).self) { try await repository.sweepOrphans() }
+            #expect(FileManager.default.fileExists(atPath: media.path(percentEncoded: false)))
         }
     }
 

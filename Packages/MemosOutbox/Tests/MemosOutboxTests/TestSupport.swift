@@ -143,6 +143,56 @@ final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
     var idempotencyKeys: [UUID] { lock.withLock { attempts } }
 }
 
+/// The real queue on disk, with a set number of its writes refused.
+///
+/// Reading, slicing and sweeping all go straight through to the repository the app itself uses —
+/// only `save` is intercepted, because "the disk would not take this write" is the one state a test
+/// cannot otherwise reach, and what the drain does next is the whole point. Refusing a COUNT rather
+/// than a kind is what separates the two cases that matter: one manifest that cannot be written
+/// while the rest of the queue can, and a container that takes nothing at all.
+actor FaultyPersistence: OutboxPersisting {
+    struct Refused: Error {}
+
+    private let inner: OutboxRepository
+    /// How many writes still get refused; `Int.max` is a disk that never comes back.
+    private var refusals: Int
+    private(set) var refusedSaves = 0
+
+    init(_ inner: OutboxRepository, refusals: Int) {
+        self.inner = inner
+        self.refusals = refusals
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func save(_ job: UploadJob) async throws {
+        guard refusals == 0 else {
+            refusals -= 1
+            refusedSaves += 1
+            throw Refused()
+        }
+        try await inner.save(job)
+    }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
 /// A clock a test can move, for the parts of the drain that only happen later.
 final class MutableClock: @unchecked Sendable {
     private let lock = NSLock()
@@ -192,6 +242,17 @@ enum Fixture {
 
     static func binding(server: URL = Fixture.server, owner: String = "fabian") -> AccountBinding {
         AccountBinding(serverBaseURL: server, ownerSubject: owner)
+    }
+
+    /// Takes a directory's permissions away and hands back the undo, so a test can put them back
+    /// however it leaves — a directory nobody may write is the honest shape of a full disk, and one
+    /// left that way cannot be cleaned up.
+    static func permissions(_ mode: Int, on directory: URL) throws -> @Sendable () -> Void {
+        let path = directory.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
+        return {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+        }
     }
 
     /// A temporary directory that the caller removes.

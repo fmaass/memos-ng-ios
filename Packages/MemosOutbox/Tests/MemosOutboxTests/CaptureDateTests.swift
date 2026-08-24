@@ -40,7 +40,8 @@ struct CaptureDateTests {
 
         // Read back through a SECOND repository over the same directory: what a relaunch sees.
         let reopened = try OutboxRepository(root: root.appending(path: "outbox"))
-        let job = try #require(await reopened.loadJobs().first)
+        let reloaded = try await reopened.loadJobs()
+        let job = try #require(reloaded.first)
         #expect(job.capturedAt == backdated)
 
         let request = try OutboxRequests.createMemo(
@@ -69,7 +70,8 @@ struct CaptureDateTests {
         #expect(queued)
         let after = Date()
 
-        let job = try #require(await repository.loadJobs().first)
+        let jobs = try await repository.loadJobs()
+        let job = try #require(jobs.first)
         // The manifest stores ISO-8601 to the SECOND, so a stamp taken between these two instants
         // reads back rounded DOWN — the window is widened by exactly that second rather than the
         // assertion being softened to "some time this century".

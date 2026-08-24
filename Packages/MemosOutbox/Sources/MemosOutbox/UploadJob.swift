@@ -40,6 +40,15 @@ public enum HoldReason: String, Codable, Sendable, Equatable {
     case accountMismatch
     /// The server refused in a way that repeating cannot fix.
     case serverRefused
+    /// The capture's manifest on disk could not be read. Its originals and the manifest itself are
+    /// both KEPT — the manifest set aside rather than deleted — and this is what the outbox says
+    /// about it, because a capture that disappears without a word is the one failure this package
+    /// exists to prevent.
+    case unreadableManifest
+    /// A change to this capture could not be written to disk, so as far as anything is concerned
+    /// the change did not happen. The capture stops here rather than being carried on from a state
+    /// only memory believes in.
+    case storageFailed
 }
 
 /// One captured file, and how much of it the SERVER says it has.

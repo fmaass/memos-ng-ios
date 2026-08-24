@@ -72,6 +72,31 @@ struct PendingMemoPresentationTests {
         )
     }
 
+    @Test("a capture the queue could not read says so, and offers nothing that would do nothing")
+    func theUnreadableCaptureHasItsOwnSentence() {
+        let defective = job(
+            content: "", state: .held, holdReason: .unreadableManifest,
+            lastError: "dataCorrupted(...)"
+        )
+        #expect(
+            PendingMemoPresentation.status(for: defective)
+                == "This capture could not be read — its files are kept"
+        )
+        // "Try again" would clear a hold that is not the queue's to clear, so the row does not
+        // offer it — what it promises instead is that nothing was thrown away.
+        #expect(!PendingMemoPresentation.rows(for: [defective])[0].needsAttention)
+
+        let unwritable = job(
+            state: .held, holdReason: .storageFailed,
+            lastError: "This capture could not be saved on this device: no space left"
+        )
+        #expect(
+            PendingMemoPresentation.status(for: unwritable)
+                == "This capture could not be saved on this device: no space left"
+        )
+        #expect(PendingMemoPresentation.rows(for: [unwritable])[0].needsAttention)
+    }
+
     @Test("a text-only capture is not stuck at 0 %")
     func textOnlyProgress() {
         #expect(PendingMemoPresentation.status(for: job(state: .uploading)) == "Uploading 100%")
