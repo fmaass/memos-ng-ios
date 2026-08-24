@@ -60,20 +60,26 @@ public enum MediaEventConnectionState: Sendable, Equatable {
 /// `MediaIdentity` rotates on the main actor — so a consumer that asks there is asking a clock
 /// that cannot move underneath it.
 public struct MediaEventEnvelope: Sendable, Equatable {
-    public let event: MediaEvent
-    /// The generation the channel was fenced to when this event arrived.
+    /// Deliberately not `public`, and the whole reason this is a type rather than a tuple: outside
+    /// this module there is no unfenced way to reach the event at all. A rule a consumer has to
+    /// remember is a rule a consumer eventually forgets, and forgetting it here is precisely the
+    /// bug the stamp exists to prevent.
+    let event: MediaEvent
+    /// The generation the channel was fenced to when this event arrived. Readable everywhere: it
+    /// is a counter, it names no account and carries nothing of the event.
     public let generation: Int
 
-    public init(event: MediaEvent, generation: Int) {
+    init(event: MediaEvent, generation: Int) {
         self.event = event
         self.generation = generation
     }
 
-    /// The event to apply, or `nil` if the device has become another account since it arrived.
+    /// The event to apply, or `nil` if the device has become another account since it arrived —
+    /// and, by construction, the only way an event leaves an envelope across the module boundary.
     ///
-    /// THE CONSUMER CONTRACT: apply only what this returns, never `envelope.event` directly. An
-    /// attachment uid means nothing across accounts, so an event applied past a rotation patches
-    /// the new account's timeline with the previous account's photo.
+    /// An attachment uid means nothing across accounts, so an event applied past a rotation
+    /// patches the new account's timeline with the previous account's photo. Reading the clock
+    /// HERE, on the actor that owns it, is what makes the answer still true when it is used.
     @MainActor
     public func eventIfCurrent(for identity: MediaIdentity = .shared) -> MediaEvent? {
         generation == identity.generation ? event : nil
@@ -117,8 +123,9 @@ public enum MediaEventStreamItem: Sendable, Equatable {
 /// and they cannot do more than that: this client is `Sendable` and runs off the main actor, while
 /// rotation is serialized ON it, and an event yielded here is consumed by the app later still. So
 /// every event is delivered STAMPED, as a `MediaEventEnvelope`, and the deciding check belongs to
-/// the consumer: apply only what `MediaEventEnvelope.eventIfCurrent(for:)` returns — never
-/// `envelope.event` — which reads the live clock on the actor that owns it.
+/// the consumer: `MediaEventEnvelope.eventIfCurrent(for:)`, which reads the live clock on the
+/// actor that owns it. The envelope's raw event is `internal` BY DESIGN, so that check is not a
+/// convention a consumer is asked to keep — outside this module there is no other way in.
 public final class MediaEventClient: Sendable {
     /// The path the events route is mounted at (memos-ng `app/routers/assets.py:822-823`).
     public static let path = "api/events"

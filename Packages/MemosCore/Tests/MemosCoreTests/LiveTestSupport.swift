@@ -1,5 +1,5 @@
 import Foundation
-import MemosCore
+@testable import MemosCore
 
 /// The bytes the running server actually writes.
 ///
