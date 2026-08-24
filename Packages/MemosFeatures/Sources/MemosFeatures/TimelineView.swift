@@ -22,7 +22,7 @@ public struct TimelineView: View {
     @Environment(Outbox.self) private var outbox: Outbox?
     @State private var timeline: TimelineStore?
     @State private var composing: ComposeView.Mode?
-    @State private var signOutDecision: SignOutFlow.Decision?
+    @State private var signOutStage = SignOutFlow.Stage.idle
     @State private var path: [MemoRoute] = []
     @State private var feedback = MemoFeedbackTrigger()
 
@@ -57,11 +57,21 @@ public struct TimelineView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     // Signing out is a rare, deliberate act on a personal device — it lives
                     // behind the overflow, not beside the compose button someone taps daily.
+                    //
+                    // The heading is not decoration. A menu opens with its first ROW under the
+                    // anchor that opened it, and when that row was the destructive one a second
+                    // tap on the ellipsis revoked a live credential. The heading takes that
+                    // position, and the tap itself only ever asks (see SignOutFlow).
                     Menu {
-                        Button(role: .destructive) {
-                            Task { await signOut() }
-                        } label: {
-                            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                        Section(SignOutFlow.accountHeading(name: session.state.user?.name)) {
+                            Button(role: .destructive) {
+                                advanceSignOut(.menuTapped)
+                            } label: {
+                                Label(
+                                    "Sign out",
+                                    systemImage: "rectangle.portrait.and.arrow.right"
+                                )
+                            }
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -79,19 +89,36 @@ public struct TimelineView: View {
                 }
             }
         }
+        // The question the menu tap asks. It is a dialog rather than a second menu row because a
+        // dialog is not drawn under the anchor: no repeat of the tap that opened the menu can
+        // land on it.
+        .confirmationDialog(
+            "Sign out?",
+            isPresented: .init(
+                get: { signOutStage == .asking },
+                set: { if !$0 { advanceSignOut(.cancelled) } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Sign out", role: .destructive) { advanceSignOut(.confirmed) }
+            Button("Cancel", role: .cancel) { advanceSignOut(.cancelled) }
+        } message: {
+            Text("This device's access is revoked. Anything still queued stays on the phone.")
+        }
         .alert(
             "Could not sign out",
             isPresented: .init(
-                get: { signOutDecision != nil },
-                set: { if !$0 { signOutDecision = nil } }
+                get: { signOutExplanation != nil },
+                set: { if !$0 { advanceSignOut(.cancelled) } }
             ),
-            presenting: signOutDecision
+            presenting: signOutExplanation
         ) { decision in
-            Button("Try again") { Task { await signOut() } }
+            Button("Try again") { advanceSignOut(.confirmed) }
             Button(decision.discardTitle, role: .destructive) {
                 session.signOutWithoutRevoking()
+                signOutStage = .idle
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { advanceSignOut(.cancelled) }
         } message: { decision in
             Text(decision.message)
         }
@@ -291,8 +318,21 @@ public struct TimelineView: View {
         return posted
     }
 
-    private func signOut() async {
-        signOutDecision = SignOutFlow.decision(for: await session.signOut())
+    private var signOutExplanation: SignOutFlow.Decision? {
+        guard case .explaining(let decision) = signOutStage else { return nil }
+        return decision
+    }
+
+    /// The single place a sign-out can start. The revoke is fired on the TRANSITION into
+    /// `revoking`, never on an event, so no repeat of any tap can send a second one.
+    private func advanceSignOut(_ event: SignOutFlow.Event) {
+        let previous = signOutStage
+        signOutStage = SignOutFlow.next(previous, on: event)
+        guard SignOutFlow.revokes(signOutStage), !SignOutFlow.revokes(previous) else { return }
+        Task {
+            let outcome = await session.signOut()
+            advanceSignOut(.revokeReturned(outcome))
+        }
     }
 
     private func load() async {
