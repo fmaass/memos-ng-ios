@@ -242,6 +242,91 @@ struct ReferenceLinkTests {
         #expect(indented.map(\.text) == ["[evil]: javascript:alert(1)\n"])
     }
 
+    // MARK: - where a definition is allowed to sit
+
+    /// The same memo an LF editor would have written, with CRLF line endings.
+    nonisolated static let crlfFenceMemo =
+        "```\r\ncode\r\n```\r\n\r\n[evil]: javascript:alert(1)\r\n\r\n[click][evil]"
+
+    /// Every text the projection shows, wherever it sits: a definition neutralised inside a list
+    /// item lands in `items`, one in a paragraph lands in `text`.
+    private func texts(_ markdown: String) -> [String] {
+        projection(markdown).flatMap { block in
+            [block.text] + (block.items ?? []) + (block.rows?.flatMap { $0 } ?? [])
+        }
+    }
+
+    /// CommonMark registers a link reference definition written inside a LIST ITEM for the whole
+    /// document, so `[click][evil]` anywhere below resolves against it. A prefix scanner that
+    /// knows about `>` but not about `-`, `*`, `+` or `1.` never sees that line, and the scheme
+    /// rule is bypassed by indenting the definition under a bullet.
+    @Test(
+        "a definition inside a list item answers to the scheme rule too",
+        arguments: [
+            ("bullet", "- [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("star", "* [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("plus", "+ [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("ordered", "1. [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("ordered with a paren", "1) [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("quoted list", "> - [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("continuation line", "- item\n\n  [evil]: javascript:alert(1)\n\n[click][evil]"),
+        ]
+    )
+    func definitionsInsideListItems(name: String, markdown: String) {
+        let shown = texts(markdown)
+        #expect(
+            shown.contains { $0.contains("[click][evil]") },
+            "\(name): the reference resolved — \(shown)"
+        )
+        #expect(
+            shown.contains { $0.contains("[evil]: javascript:alert(1)") },
+            "\(name): the refused definition vanished — \(shown)"
+        )
+    }
+
+    /// A memo written on a device that ends its lines with CRLF is the same memo. If the closing
+    /// fence is compared with the `\r` still on it, the fence never closes, everything after it
+    /// counts as code, and the definition below is never looked at — while cmark, which
+    /// normalises line endings, closes the fence and resolves the reference.
+    @Test("a CRLF memo neutralises what an LF memo neutralises")
+    func carriageReturnsDoNotHideADefinition() {
+        let shown = texts(Self.crlfFenceMemo)
+        #expect(shown.contains { $0.contains("[click][evil]") }, "resolved — \(shown)")
+        #expect(shown.contains { $0.contains("[evil]: javascript:alert(1)") }, "\(shown)")
+        // And the fence itself is untouched: an escape inside code would be visible as a backslash.
+        #expect(shown.contains("code\n"), "the fenced code was rewritten — \(shown)")
+    }
+
+    /// A blank line is not the only thing that ends a block: an indented code block ends at the
+    /// first line that is not indented, and a definition on that line is a definition. Missing
+    /// that means the label is never registered, so the reference image below it is not the
+    /// app's to drop — and the renderer fetches a URL the SPA never requests.
+    @Test("an image whose definition follows indented code is still dropped")
+    func imagesResolvedAfterIndentedCodeAreDropped() {
+        let markdown = "    code line\n[pic]: https://example.com/red.png\n\n![shot][pic]"
+        // The renderer's own output, because a dropped image leaves nothing for the projection to
+        // show either way — what matters is that it was never handed the picture.
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(!html.contains("<img"), "the renderer was handed an image:\n\(html)")
+        #expect(!html.contains("example.com/red.png"), "the remote URL survived:\n\(html)")
+        // The code block is still code, and still says what the author wrote.
+        #expect(html.contains("code line"), "the code block was rewritten:\n\(html)")
+    }
+
+    /// The liveness half of the two claims above, read off the rendered view rather than off an
+    /// `href` cmark's HTML renderer would have blanked anyway.
+    @Test(
+        "neither spelling paints a live link",
+        arguments: [
+            ("in a list item", "- [evil]: javascript:alert(1)\n\n[click][evil]"),
+            ("after a CRLF fence", Self.crlfFenceMemo),
+        ]
+    )
+    func neitherSpellingIsPainted(name: String, markdown: String) throws {
+        let painted = try accentPixels(in: markdown)
+        #expect(painted == 0, "\(name): \(painted) accent pixels — the reference stayed a link")
+    }
+
     /// The end of the pipeline, past the projection: what the reader's eye can tell apart. A link
     /// is painted in the accent, ordinary text is not, so counting the accent-coloured pixels in a
     /// rendered memo answers "is this tappable" without an `href` to read — which matters here

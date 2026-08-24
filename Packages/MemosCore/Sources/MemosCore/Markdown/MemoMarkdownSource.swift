@@ -254,8 +254,15 @@ extension MemoMarkdownSource {
 
         for index in lines.indices {
             let line = lines[index]
+            // A memo written on a device that ends its lines with CRLF is the same memo, and
+            // cmark normalises the endings before it parses. So every line-shaped question here
+            // is asked of the line WITHOUT its carriage return — a `\r` left on a closing fence
+            // makes the fence never close, and everything below it stops being looked at. The
+            // escape is still inserted into the line as the author wrote it.
+            let body = withoutCarriageReturn(line)
+            let openedThisBlock = atBlockStart
             if let open = fence {
-                if let closing = fenceMarker(line), closing.character == open.character,
+                if let closing = fenceMarker(body), closing.character == open.character,
                     closing.length >= open.length, closing.info.isEmpty
                 {
                     fence = nil
@@ -263,13 +270,17 @@ extension MemoMarkdownSource {
                 }
                 continue
             }
-            if let opening = fenceMarker(line) {
+            if let opening = fenceMarker(body) {
                 fence = (opening.character, opening.length)
                 atBlockStart = false
                 continue
             }
-            guard let definition = definitionLine(line) else {
-                atBlockStart = endsABlock(line)
+            guard let definition = definitionLine(body) else {
+                // A blank line is not the only thing that ends a block: an indented code block
+                // ends at the first line that is not indented, and a definition may sit on that
+                // line. Missing it leaves the label unregistered, and an unregistered label is a
+                // reference image this code will not drop.
+                atBlockStart = endsABlock(body) || (openedThisBlock && isIndentedCode(body))
                 continue
             }
 
@@ -277,7 +288,7 @@ extension MemoMarkdownSource {
             if destination == nil, index + 1 < lines.count {
                 // CommonMark lets the destination sit on the line after the label. cmark-gfm
                 // registers that spelling; markdown-it validates it the same as any other.
-                destination = firstToken(of: lines[index + 1])
+                destination = firstToken(of: withoutCarriageReturn(lines[index + 1]))
             }
             guard let href = destination, !href.isEmpty else {
                 atBlockStart = false
@@ -295,6 +306,28 @@ extension MemoMarkdownSource {
             atBlockStart = definition.destination != nil
         }
         return ReferenceScan(source: lines.joined(separator: "\n"), labels: labels)
+    }
+
+    private static func withoutCarriageReturn(_ line: String) -> String {
+        line.hasSuffix("\r") ? String(line.dropLast()) : line
+    }
+
+    /// Four columns of indent with something after them: an indented code block. No definition
+    /// can sit inside one, and the first line that is not indented ends it.
+    private static func isIndentedCode(_ line: String) -> Bool {
+        var columns = 0
+        for character in line {
+            if character == " " {
+                columns += 1
+                continue
+            }
+            if character == "\t" {
+                columns += 4
+                continue
+            }
+            return columns >= 4
+        }
+        return false
     }
 
     /// True when nothing on this line can be continued by the next one, so the next line begins a
@@ -363,6 +396,15 @@ extension MemoMarkdownSource {
                 if index < chars.count, chars[index] == " " { index += 1 }
                 continue
             }
+            // A list marker opens a block a definition may sit in, and CommonMark registers a
+            // definition written inside a list item for the WHOLE document — so
+            // `- [evil]: javascript:…` is a definition, and a prefix scanner that knows `>` but
+            // not `-` is one bullet away from letting the scheme rule be bypassed.
+            if let marker = listMarkerWidth(chars, at: index) {
+                index += marker
+                indent = 0
+                continue
+            }
             break
         }
         let bracketOffset = index
@@ -381,6 +423,26 @@ extension MemoMarkdownSource {
             destination: destinationToken(rest),
             bracketOffset: bracketOffset
         )
+    }
+
+    /// How wide the list marker starting here is, the space that must follow it included:
+    /// `- `, `* `, `+ `, `1. `, `12) `. `nil` when this is not one — `-[x]` opens no list item.
+    private static func listMarkerWidth(_ chars: [Character], at start: Int) -> Int? {
+        var index = start
+        if chars[index] == "-" || chars[index] == "+" || chars[index] == "*" {
+            index += 1
+        } else {
+            var digits = 0
+            while index < chars.count, ("0"..."9").contains(chars[index]), digits < 9 {
+                index += 1
+                digits += 1
+            }
+            guard digits > 0, index < chars.count, chars[index] == "." || chars[index] == ")"
+            else { return nil }
+            index += 1
+        }
+        guard index < chars.count, chars[index] == " " else { return nil }
+        return index + 1 - start
     }
 
     /// The destination as CommonMark reads it: either `<…>` or an unbroken run of characters.

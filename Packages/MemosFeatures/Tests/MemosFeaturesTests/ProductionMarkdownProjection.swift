@@ -202,6 +202,10 @@ enum ProductionMarkdownProjection {
                 piece.raw = child.rawText
             case "hr":
                 continue
+            case "li":
+                // A list item's own text is inline content, not a child block — walking only the
+                // element children of the item would flatten a quoted list to nothing at all.
+                piece = inlineContent(of: child)
             default:
                 piece = flatten(child)
             }
