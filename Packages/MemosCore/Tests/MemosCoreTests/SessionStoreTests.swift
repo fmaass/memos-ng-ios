@@ -732,6 +732,106 @@ struct SessionSettingsTests {
         #expect(session.lastError == nil)
     }
 
+    /// A reply can outlive the question it answered.
+    ///
+    /// Dropping the client does not reliably cancel a request already on the wire, so the settings
+    /// call started for account A can resolve after somebody has signed in as B. Without the
+    /// generation check it assigns A's answer into B's session, and the compose sheet then tells B
+    /// their memos default to whatever A had chosen — a wrong promise about who can read something.
+    @Test("an answer that arrives after the account changed is discarded")
+    func aLateAnswerCannotCrossAccounts() async {
+        let entered = Gate()
+        let release = Gate()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    guard operation == settingsOperation else { return Stub.json(Stub.user) }
+                    entered.open()
+                    await release.wait()
+                    return Stub.json(
+                        """
+                        {"default_visibility":"PUBLIC","theme":"d","avatar":null}
+                        """
+                    )
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+
+        let inFlight = Task { await session.loadSettings() }
+        // Not "probably started": the stub says so before anything is allowed to change.
+        await entered.wait()
+
+        session.signOutWithoutRevoking()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_b")
+
+        release.open()
+        await inFlight.value
+
+        #expect(session.defaultVisibility == nil)
+        #expect(session.state.user?.subject == "fabian")
+    }
+
+    /// The control for the test above. The same slow call, with nobody signing in behind it, still
+    /// lands — so what that test proves is about the account changing, not about slowness.
+    @Test("an answer for the session that asked for it is still assigned")
+    func aSlowAnswerForTheSameSessionLands() async {
+        let entered = Gate()
+        let release = Gate()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    guard operation == settingsOperation else { return Stub.json(Stub.user) }
+                    entered.open()
+                    await release.wait()
+                    return Stub.json(
+                        """
+                        {"default_visibility":"PUBLIC","theme":"d","avatar":null}
+                        """
+                    )
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+
+        let inFlight = Task { await session.loadSettings() }
+        await entered.wait()
+        release.open()
+        await inFlight.value
+
+        #expect(session.defaultVisibility == .public)
+    }
+
+    /// A 401 here is not "the setting could not be read", it is the server saying this credential
+    /// is dead — which is the one error this codebase never treats as best-effort, wherever it
+    /// turns up. A token revoked between opening the timeline and reading the settings is still a
+    /// revoked token.
+    @Test("a 401 from the settings call ends the session like any other")
+    func anUnauthorisedSettingsCallEndsTheSession() async {
+        let credentials = InMemoryCredentials()
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    operation == settingsOperation
+                        ? Stub.empty(.unauthorized) : Stub.json(Stub.user)
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+        #expect(session.state.user != nil)
+
+        await session.loadSettings()
+
+        #expect(session.state.user == nil)
+        #expect(session.defaultVisibility == nil)
+        #expect(session.lastError != nil)
+        // The dead credential is gone from the device, not merely from memory.
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == nil)
+    }
+
     /// One account's setting must never be shown to the next one.
     @Test("signing out forgets the account's default")
     func theDefaultDoesNotOutliveTheAccount() async {
@@ -746,5 +846,35 @@ struct SessionSettingsTests {
         session.signOutWithoutRevoking()
 
         #expect(session.defaultVisibility == nil)
+    }
+}
+
+/// A place a stubbed request can stop, so a test can say exactly when a call is in flight and
+/// exactly when it is allowed to finish. Without it "start a slow load, then switch accounts" is
+/// a race the test would sometimes win by accident.
+final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var isOpen = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let alreadyOpen: Bool = lock.withLock {
+                if isOpen { return true }
+                waiter = continuation
+                return false
+            }
+            if alreadyOpen { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let waiting: CheckedContinuation<Void, Never>? = lock.withLock {
+            isOpen = true
+            let held = waiter
+            waiter = nil
+            return held
+        }
+        waiting?.resume()
     }
 }

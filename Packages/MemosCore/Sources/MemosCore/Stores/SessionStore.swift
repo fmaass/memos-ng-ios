@@ -71,6 +71,14 @@ public final class SessionStore {
     /// identity that can still queue captures — outlives the call that failed to remove it, and
     /// the next `restore()` is where it is tried again.
     private var licenceRevocationFailed = false
+    /// Which session this is. Bumped wherever the account licence is published or revoked — the
+    /// same two moments, and the only two, at which "who this device is signed in as" changes.
+    ///
+    /// It exists because a reply can outlive the question. A request already on the wire is not
+    /// reliably cancelled by dropping the client that made it, so an answer about account A can
+    /// arrive after someone has signed in as B, and anything that assigns it without checking
+    /// would be telling B a fact about A.
+    private var sessionGeneration = 0
     private var client: (any APIProtocol)?
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
@@ -324,7 +332,11 @@ public final class SessionStore {
         self.configuration = configuration
         self.client = client
         // Whatever the last account's default was, it is not this one's until it is fetched.
+        // This lifecycle is deliberately the licence's: the default is account-scoped in exactly
+        // the way the published binding is, so it is reset where that is published and cleared
+        // where that is revoked, and never anywhere else.
         defaultVisibility = nil
+        sessionGeneration += 1
         state = .signedIn(user)
         account?.publish(
             AccountBinding(serverBaseURL: configuration.baseURL, ownerSubject: user.subject)
@@ -409,8 +421,10 @@ public final class SessionStore {
         client = nil
         configuration = nil
         // The account's default belongs to the account. Carrying it into the next sign-in would
-        // have the compose sheet promise someone else's setting.
+        // have the compose sheet promise someone else's setting. Cleared here, alongside the
+        // licence this method revokes, because they scope to the identity together.
         defaultVisibility = nil
+        sessionGeneration += 1
         state = .signedOut
     }
 
@@ -481,12 +495,32 @@ public final class SessionStore {
     }
 
     /// Reads the account's settings. Best-effort by design: it is called from a screen that is
-    /// already usable without it, and a failure leaves `defaultVisibility` as it was rather than
-    /// interrupting anything.
+    /// already usable without it, and most failures leave `defaultVisibility` as it was rather
+    /// than interrupting anything.
+    ///
+    /// Two things it is NOT allowed to be casual about.
+    ///
+    /// It may not answer a question nobody asked any more. The generation is taken before the
+    /// call and checked before the assignment, because dropping a client does not reliably cancel
+    /// a request already on the wire: without the check, a reply about the account that was signed
+    /// in when this started could be written into the session of the one signed in now.
+    ///
+    /// And a 401 is not a failure to read a setting, it is the server saying this credential is
+    /// dead — which ends the session here exactly as it does everywhere else. A token revoked
+    /// between opening the timeline and reading the settings is still a revoked token.
     public func loadSettings() async {
         guard let client else { return }
+        let generation = sessionGeneration
         do {
-            defaultVisibility = try await Self.settings(client)
+            let visibility = try await Self.settings(client)
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("GET /api/settings answered for a session that has ended")
+                return
+            }
+            defaultVisibility = visibility
+        } catch let error as APIError where error == .unauthorized {
+            guard generation == sessionGeneration else { return }
+            await handle(.unauthorized)
         } catch {
             MemosLog.session.info("GET /api/settings did not answer; the default stays unnamed")
         }
