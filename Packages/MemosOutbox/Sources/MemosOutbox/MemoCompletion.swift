@@ -16,11 +16,11 @@ public enum MemoCompletionOutcome: Sendable, Equatable {
 
 /// The seam the completion path lives behind.
 ///
-/// Everything else in this package is finished; the memo create is the one call whose contract —
-/// the `idempotency_key` field and the strict `409 uploads_unlinkable` refusal — is backend work
-/// that lands alongside this phase. Keeping it behind one protocol means the drain, the recovery
-/// rules and every test around them are exercised against a scripted completion, and the day the
-/// contract merges exactly one implementation is re-verified against the merged schema.
+/// One protocol, one implementation: the drain, the recovery rules and every test around them are
+/// exercised against a scripted completion, and the wire contract is asserted in exactly one place
+/// against the vendored document (see `ContractTests`). That is what makes the hand-rolled
+/// transport safe to keep — a schema re-sync that moves any of these fields fails a test rather
+/// than silently changing what the outbox sends.
 public protocol MemoCompleting: Sendable {
     func create(job: UploadJob, credentials: OutboxCredentials) async -> MemoCompletionOutcome
 }
@@ -28,10 +28,15 @@ public protocol MemoCompleting: Sendable {
 /// The completion path, spoken to the strict contract.
 ///
 /// - every attempt carries the job's `idempotency_key`, so a crash between the server's commit and
-///   the local delete produces the SAME memo on the retry rather than a second one;
-/// - `201` means the memo exists with all originals linked — under the strict contract the server
-///   no longer skips uploads it cannot link, so a success is not ambiguous;
+///   the local delete produces the SAME memo on the retry rather than a second one. A replay
+///   answers `201` with the memo the first call stored — the same status as the original create,
+///   deliberately: the body is the answer, and a safe retry looks exactly like the success it is
+///   repeating;
+/// - `201` means the memo exists with all originals linked — the server no longer skips uploads it
+///   cannot link, so a success is not ambiguous;
 /// - `409 uploads_unlinkable` is read as per-file recovery, and nothing else is;
+/// - `503 create_raced` is the server saying nothing was stored under the key: retry it, with the
+///   same key, which is exactly what the key is for;
 /// - a plain `422` is a validation error, not upload loss: it holds the job rather than starting a
 ///   re-upload loop.
 public struct MemoCompletionEndpoint: MemoCompleting {
@@ -75,6 +80,9 @@ public struct MemoCompletionEndpoint: MemoCompleting {
                 return .unlinkable(failure)
             }
             return .refused("The server refused the memo (409).")
+        case 503 where OutboxWire.detailCode(response.body) == Self.racedCode:
+            // Concurrent writes raced this keyed create and nothing was stored under the key.
+            return .retry("The server raced this memo; retrying with the same key.")
         case 408, 425, 429, 500...599:
             return .retry("The server could not take the memo (\(response.statusCode)).")
         case 401:
@@ -83,6 +91,9 @@ public struct MemoCompletionEndpoint: MemoCompleting {
             return .refused("The server rejected the memo (\(response.statusCode)).")
         }
     }
+
+    /// The one refusal code that means "nothing was stored, repeat the identical request".
+    public static let racedCode = "create_raced"
 
     private static func uid(from body: Data) -> String? {
         struct Created: Decodable {

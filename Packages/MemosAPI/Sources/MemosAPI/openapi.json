@@ -423,6 +423,38 @@
     "title": "Body_upload_print_api_attachments__uid__print_post",
     "type": "object"
    },
+   "CreateRacedDetail": {
+    "description": "Why a keyed create could not be resolved (MEMNG-110): concurrent writes raced it and the\nmemo they raced for was deleted before it could be read back. Retrying with the same key is\nsafe \u2014 that is what the key is for \u2014 which is why this is a 5xx the client may repeat and not\na 4xx telling it to stop.",
+    "properties": {
+     "code": {
+      "const": "create_raced",
+      "title": "Code",
+      "type": "string"
+     },
+     "message": {
+      "title": "Message",
+      "type": "string"
+     }
+    },
+    "required": [
+     "code",
+     "message"
+    ],
+    "title": "CreateRacedDetail",
+    "type": "object"
+   },
+   "CreateRacedError": {
+    "properties": {
+     "detail": {
+      "$ref": "#/components/schemas/CreateRacedDetail"
+     }
+    },
+    "required": [
+     "detail"
+    ],
+    "title": "CreateRacedError",
+    "type": "object"
+   },
    "HTTPValidationError": {
     "properties": {
      "detail": {
@@ -478,6 +510,17 @@
      "created_at": {
       "format": "date-time",
       "title": "Created At",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "idempotency_key": {
+      "description": "Optional client-generated retry token: a UUID, or any opaque 8-64 character token of [A-Za-z0-9_-], unique per logical create. Posting it a second time returns the memo the first call stored \u2014 same uid, same attachments \u2014 and returns it with **201, the same status as the original create**. The body is the whole answer (the uid tells a client which memo is now stored), so the status is not used as a second channel, and a safe retry looks exactly like the success it is repeating. Two owners may reuse one token. Without a key, a retry stores a SECOND memo.",
+      "maxLength": 64,
+      "minLength": 8,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "title": "Idempotency Key",
       "type": [
        "string",
        "null"
@@ -1319,6 +1362,49 @@
     "title": "UploadOut",
     "type": "object"
    },
+   "UploadsUnlinkableDetail": {
+    "description": "Why a memo write was refused: the requested uploads cannot become attachments (MEMNG-113).\n\nA dedicated 409 with a machine-readable `code`, NOT the 422 FastAPI already uses for a malformed\nrequest \u2014 a retrying client has to tell \"that upload is gone, re-upload the bytes\" apart from\n\"this request is malformed, never send it again\", and a body it cannot classify is how an outbox\nloops forever. The two buckets carry different remedies: `missing` (never existed, or expired\nand reaped \u2014 an upload owned by another user reads as missing too) needs a fresh upload;\n`incomplete` (bytes_received < declared size) needs the transfer resumed from HEAD.",
+    "properties": {
+     "code": {
+      "const": "uploads_unlinkable",
+      "title": "Code",
+      "type": "string"
+     },
+     "incomplete_upload_uids": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Incomplete Upload Uids",
+      "type": "array"
+     },
+     "missing_upload_uids": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Missing Upload Uids",
+      "type": "array"
+     }
+    },
+    "required": [
+     "code",
+     "missing_upload_uids",
+     "incomplete_upload_uids"
+    ],
+    "title": "UploadsUnlinkableDetail",
+    "type": "object"
+   },
+   "UploadsUnlinkableError": {
+    "properties": {
+     "detail": {
+      "$ref": "#/components/schemas/UploadsUnlinkableDetail"
+     }
+    },
+    "required": [
+     "detail"
+    ],
+    "title": "UploadsUnlinkableError",
+    "type": "object"
+   },
    "UserOut": {
     "properties": {
      "auth_kind": {
@@ -1503,6 +1589,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "List Attachments",
     "tags": [
      "assets"
@@ -1539,6 +1633,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Delete Attachment",
     "tags": [
      "assets"
@@ -1579,6 +1681,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Attachment Meta",
     "tags": [
      "assets"
@@ -1632,6 +1742,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Upload Print",
     "tags": [
      "assets"
@@ -1677,6 +1795,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Delete Rendition",
     "tags": [
      "assets"
@@ -1725,6 +1851,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Serve Rendition",
     "tags": [
      "assets"
@@ -1772,6 +1906,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "List Renditions",
     "tags": [
      "assets"
@@ -1823,6 +1965,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Attach Rendition",
     "tags": [
      "assets"
@@ -1920,6 +2070,15 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     },
+     {}
+    ],
     "summary": "Serve Asset",
     "tags": [
      "assets"
@@ -1996,7 +2155,45 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Native Logout",
+    "tags": [
+     "auth"
+    ]
+   }
+  },
+  "/api/auth/native/renew": {
+   "post": {
+    "description": "Rotate the presenting device token: mint a successor and revoke the presenter, atomically.\n\nA device token is deliberately bounded \u2014 it lives on hardware that gets lost, and nobody\nrevokes what they have not noticed is gone \u2014 which without this route means every phone set up\na year ago signs out one morning with no warning and no way back except a full login. Renewal\nrefreshes that lifetime from USE instead of removing the bound.\n\nIt ROTATES rather than extends: the successor is a new secret and the presenter is gone in the\nsame statement, so a token copied out of a backup or a log stops working at the owner's next\nrenewal instead of living the full year twice over.\n\nRestricted to a token that carries an expiry. `pats` has no column that tells a device token\nfrom an SPA-created one \u2014 carrying `expires_at` is the only thing that does, imperfectly \u2014 and\nonly a token that expires can silently sign out, so an unbounded PAT is refused\n(`token_not_renewable`) rather than rotated: token management stays behind a browser session\n(Decision 5), and this route reaches no further than the class it exists for.\n\nBearer-only, like `native/logout`: the presenting token is the subject of the request, and a\nsession cookie names no token at all.",
+    "operationId": "native_renew_api_auth_native_renew_post",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/NativeExchangeOut"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
+    "summary": "Native Renew",
     "tags": [
      "auth"
     ]
@@ -2017,6 +2214,14 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Whoami",
     "tags": [
      "auth"
@@ -2036,6 +2241,14 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Events",
     "tags": [
      "assets"
@@ -2169,6 +2382,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Export Memos",
     "tags": [
      "export"
@@ -2294,6 +2515,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Export Photobook",
     "tags": [
      "export"
@@ -2464,6 +2693,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "List Memos",
     "tags": [
      "memos"
@@ -2492,6 +2729,16 @@
       },
       "description": "Successful Response"
      },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UploadsUnlinkableError"
+        }
+       }
+      },
+      "description": "A requested upload_uid is missing, expired or incomplete. No memo is created and no attachment is linked \u2014 resolve the named uploads and retry."
+     },
      "422": {
       "content": {
        "application/json": {
@@ -2501,8 +2748,26 @@
        }
       },
       "description": "Validation Error"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CreateRacedError"
+        }
+       }
+      },
+      "description": "Concurrent writes raced this keyed create. Nothing was stored under the key \u2014 retry the same request, idempotency_key included."
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Create Memo",
     "tags": [
      "memos"
@@ -2538,6 +2803,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Delete Memo",
     "tags": [
      "memos"
@@ -2578,6 +2851,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Get Memo",
     "tags": [
      "memos"
@@ -2617,6 +2898,16 @@
       },
       "description": "Successful Response"
      },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UploadsUnlinkableError"
+        }
+       }
+      },
+      "description": "A requested upload_uid is missing, expired or incomplete. No memo is created and no attachment is linked \u2014 resolve the named uploads and retry."
+     },
      "422": {
       "content": {
        "application/json": {
@@ -2628,6 +2919,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Patch Memo",
     "tags": [
      "memos"
@@ -2670,6 +2969,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Pin Memo",
     "tags": [
      "memos"
@@ -2722,6 +3029,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "React",
     "tags": [
      "memos"
@@ -2773,6 +3088,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Unreact",
     "tags": [
      "memos"
@@ -2815,6 +3138,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Unpin Memo",
     "tags": [
      "memos"
@@ -2840,6 +3171,11 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "List Pats",
     "tags": [
      "pats"
@@ -2879,6 +3215,11 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Create Pat",
     "tags": [
      "pats"
@@ -2914,6 +3255,11 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Revoke Pat",
     "tags": [
      "pats"
@@ -2948,6 +3294,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Unsubscribe",
     "tags": [
      "push"
@@ -2980,6 +3334,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Subscribe",
     "tags": [
      "push"
@@ -3023,6 +3385,14 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Get Settings",
     "tags": [
      "settings"
@@ -3062,6 +3432,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Update Settings",
     "tags": [
      "settings"
@@ -3087,6 +3465,14 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Stats Heatmap",
     "tags": [
      "memos"
@@ -3112,6 +3498,14 @@
       "description": "Successful Response"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "List Tags",
     "tags": [
      "memos"
@@ -3153,6 +3547,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Start Upload",
     "tags": [
      "uploads"
@@ -3180,7 +3582,15 @@
         "schema": {}
        }
       },
-      "description": "Successful Response"
+      "description": "Successful Response",
+      "headers": {
+       "Upload-Offset": {
+        "description": "Bytes the server now holds for this upload session \u2014 the offset the next chunk must start at.",
+        "schema": {
+         "type": "integer"
+        }
+       }
+      }
      },
      "422": {
       "content": {
@@ -3193,6 +3603,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Upload Offset",
     "tags": [
      "uploads"
@@ -3221,6 +3639,17 @@
       }
      }
     ],
+    "requestBody": {
+     "content": {
+      "application/octet-stream": {
+       "schema": {
+        "format": "binary",
+        "type": "string"
+       }
+      }
+     },
+     "required": true
+    },
     "responses": {
      "200": {
       "content": {
@@ -3230,7 +3659,30 @@
         }
        }
       },
-      "description": "Successful Response"
+      "description": "Successful Response",
+      "headers": {
+       "Upload-Offset": {
+        "description": "Bytes the server now holds for this upload session \u2014 the offset the next chunk must start at.",
+        "schema": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "detail": {
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "Offset gap \u2014 re-sync with HEAD and resend from the offset it reports."
      },
      "422": {
       "content": {
@@ -3243,6 +3695,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Append Chunk",
     "tags": [
      "uploads"
@@ -3285,6 +3745,14 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {
+      "sessionCookie": []
+     }
+    ],
     "summary": "Finalize Upload",
     "tags": [
      "uploads"
@@ -3350,6 +3818,12 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {}
+    ],
     "summary": "List Memos Compat",
     "tags": [
      "compat"
@@ -3390,6 +3864,12 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {}
+    ],
     "summary": "Get Memo Compat",
     "tags": [
      "compat"
@@ -3450,6 +3930,12 @@
       "description": "Validation Error"
      }
     },
+    "security": [
+     {
+      "bearerAuth": []
+     },
+     {}
+    ],
     "summary": "Serve File Compat",
     "tags": [
      "compat"

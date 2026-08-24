@@ -160,6 +160,11 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Packages/MemosOutbox/Tests/MemosOutboxTests
+      # The outbox hand-rolls its transport (the chunk PATCH and the offset HEAD cannot be
+      # generated), so the contract it hand-rolls against is read out of this bundle at run time
+      # and asserted — vendored from ONE memos-ng commit, same as the parity fixture.
+      - path: Packages/MemosAPI/Sources/MemosAPI/openapi.json
+        buildPhase: resources
     dependencies:
       - package: MemosOutbox
       - target: MemosNG

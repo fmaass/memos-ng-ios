@@ -90,6 +90,22 @@ public enum OutboxWire {
     public static func decodeSession(_ data: Data) -> UploadSession? {
         try? JSONDecoder().decode(UploadSession.self, from: data)
     }
+
+    /// The machine-readable `code` of a structured refusal, when the body carries one.
+    ///
+    /// The server distinguishes its refusals by this string rather than by status alone, and the
+    /// difference decides whether an outbox re-uploads, waits, or stops — so it is read, not
+    /// inferred from the status code.
+    public static func detailCode(_ data: Data) -> String? {
+        struct Coded: Decodable {
+            struct Detail: Decodable {
+                var code: String
+            }
+
+            var detail: Detail
+        }
+        return (try? JSONDecoder().decode(Coded.self, from: data))?.detail.code
+    }
 }
 
 /// Date shapes the server expects, in one place because each one is a different unit.
@@ -135,8 +151,11 @@ public struct UploadsUnlinkableFailure: Sendable, Equatable {
     private struct Envelope: Decodable {
         struct Detail: Decodable {
             var code: String
-            var missingUploadUIDs: [String]?
-            var incompleteUploadUIDs: [String]?
+            // Both arrays are REQUIRED by the contract. Decoding them as optional would let a
+            // body that is merely shaped like the refusal be treated as one, and "no uids named"
+            // is not a recovery instruction.
+            var missingUploadUIDs: [String]
+            var incompleteUploadUIDs: [String]
 
             enum CodingKeys: String, CodingKey {
                 case code
@@ -154,8 +173,8 @@ public struct UploadsUnlinkableFailure: Sendable, Equatable {
             envelope.detail.code == code
         else { return nil }
         return UploadsUnlinkableFailure(
-            missingUploadUIDs: envelope.detail.missingUploadUIDs ?? [],
-            incompleteUploadUIDs: envelope.detail.incompleteUploadUIDs ?? []
+            missingUploadUIDs: envelope.detail.missingUploadUIDs,
+            incompleteUploadUIDs: envelope.detail.incompleteUploadUIDs
         )
     }
 }

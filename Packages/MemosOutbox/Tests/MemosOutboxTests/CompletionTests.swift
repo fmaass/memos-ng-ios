@@ -3,9 +3,10 @@ import MemosOutbox
 import Testing
 
 extension Tag {
-    /// Asserts the memo-create wire contract (`idempotency_key` on create, the strict
-    /// `409 uploads_unlinkable` refusal). Tagged so every assertion that depends on that contract
-    /// can be found and re-checked against the schema the day it merges.
+    /// Asserts the memo-create wire contract as VENDORED — `idempotency_key` on create, the
+    /// strict `409 uploads_unlinkable` refusal, the `503 create_raced` retry. Tagged so that a
+    /// schema re-sync has one list of everything the hand-rolled transport depends on:
+    /// `swift test --filter` them, or read them next to `Packages/MemosAPI/OPENAPI_SOURCE`.
     @Tag static var contract: Self
 }
 
@@ -114,6 +115,42 @@ struct CompletionTests {
                 Issue.record("\(status) should hold the job rather than loop")
             }
         }
+    }
+
+    @Test("a raced keyed create is retried with the same key, not refused", .tags(.contract))
+    func racedCreateIsRetried() {
+        let endpoint = MemoCompletionEndpoint(http: ScriptedHTTP { _ in .init(statusCode: 503) })
+        let raced = Data(
+            #"{"detail":{"code":"create_raced","message":"Concurrent writes raced."}}"#.utf8)
+        let outcome = endpoint.outcome(for: OutboxHTTPResponse(statusCode: 503, body: raced))
+        guard case .retry(let message) = outcome else {
+            Issue.record("a raced create must be retried with the same idempotency key")
+            return
+        }
+        #expect(message.contains("same key"))
+        // Nothing was stored under the key, so this must never look like a refusal that holds.
+        #expect(outcome != .refused(message))
+    }
+
+    @Test(
+        "a replay answers with the ORIGINAL memo, at the same status as the first create",
+        .tags(.contract))
+    func replayIsIndistinguishableFromSuccess() async {
+        let http = ScriptedHTTP { _ in ScriptedHTTP.json(["uid": "m1"], status: 201) }
+        let endpoint = MemoCompletionEndpoint(http: http)
+        let job = job(uids: ["u1"])
+        let first = await endpoint.create(job: job, credentials: Fixture.credentials())
+        let replay = await endpoint.create(job: job, credentials: Fixture.credentials())
+        #expect(first == .created(uid: "m1"))
+        #expect(replay == first)
+        // Same key on both attempts is what makes the second one a replay rather than a memo.
+        let keys = http.requests.compactMap { request -> String? in
+            guard let body = request.httpBody,
+                let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            else { return nil }
+            return json["idempotency_key"] as? String
+        }
+        #expect(keys == [job.idempotencyKey.uuidString, job.idempotencyKey.uuidString])
     }
 
     @Test("a connection that failed is retried, never refused", .tags(.contract))
