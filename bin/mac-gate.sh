@@ -550,6 +550,27 @@ s_deps() {
   else
     echo "DEPRULE FAIL: positive control missing — MemosFeatures does not reference MemosCore"; rc=1
   fi
+  # Every raw Security call lives in ONE file. A SecItemDelete whose query names no access group
+  # matches items in every group the app can reach, which is how the device credential deleted
+  # itself; confining the SecItem calls to Keychain.swift, where the access group is not optional,
+  # is what makes "every query names its group" checkable instead of habitual. Sources only —
+  # a test may plant a corrupt item to prove the wrapper raises on it.
+  echo "--- keychain rule (raw SecItem calls live in Keychain.swift) ---"
+  local strays
+  strays="$(grep -rl 'SecItem' --include='*.swift' Packages/*/Sources Sources \
+    | grep -v '^Packages/MemosCore/Sources/MemosCore/Security/Keychain.swift$')"
+  if [ -n "$strays" ]; then
+    echo "KEYCHAIN FAIL: raw SecItem calls outside Keychain.swift:"
+    echo "$strays"
+    rc=1
+  else
+    echo "KEYCHAIN ok: no raw SecItem call outside Keychain.swift"
+  fi
+  if grep -q 'SecItemDelete' Packages/MemosCore/Sources/MemosCore/Security/Keychain.swift; then
+    echo "KEYCHAIN ok (positive control): Keychain.swift is where SecItemDelete lives"
+  else
+    echo "KEYCHAIN FAIL: positive control missing — Keychain.swift has no SecItemDelete"; rc=1
+  fi
   return $rc
 }
 
