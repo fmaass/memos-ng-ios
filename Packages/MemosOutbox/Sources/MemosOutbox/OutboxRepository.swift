@@ -132,10 +132,14 @@ public actor OutboxRepository {
                 continue
             }
         }
-        // One capture, one row. A manifest set aside a moment ago is already in the sweep below,
-        // and a stale file under an id the queue can still read is the queue's to speak for.
+        // One capture, one row. A manifest set aside a moment ago is already spoken for above, and
+        // an id can have been set aside more than ONCE — a capture that failed to be read on two
+        // launches has two files under the same id. Each id speaks once here; the older file stays
+        // on disk, unread and untouched, because a second row nobody can tell apart from the first
+        // is a queue that cannot be acted on at all.
         for entry in try quarantinedJobs() where !seen.contains(entry.id) {
             jobs.append(entry)
+            seen.insert(entry.id)
         }
         return jobs.sorted { $0.capturedAt < $1.capturedAt }
     }
@@ -170,6 +174,57 @@ public actor OutboxRepository {
         try? FileManager.default.removeItem(at: manifestURL(job.id))
         try? FileManager.default.removeItem(at: mediaDirectory(job.id))
         removeChunks(forJob: job.id)
+    }
+
+    /// Throws one capture away because a PERSON said so: its manifest, whatever was set aside under
+    /// its id, its originals and any chunk.
+    ///
+    /// This is the only path in the package that destroys a capture the server never took, and it
+    /// exists because the alternative is worse. A capture whose manifest cannot be read can never
+    /// be sent and can never be cleared by anything automatic — without this it sits in the pending
+    /// list for the life of the install. Nothing calls it on a timer, a sweep or a launch: it is
+    /// reached from a button, once, per capture.
+    ///
+    /// It throws rather than going quiet: a removal that half-happened brings the row back on the
+    /// next read, and the person is owed the reason instead of a row that will not go away.
+    public func discard(_ id: UUID) throws {
+        // Both directories are scanned rather than the manifest's own name alone: a row can stand
+        // for a copy set aside on an earlier launch, or for a file whose name is not a job id at
+        // all, and a Remove that leaves one behind puts the row straight back on the next read.
+        for url in try files(surfacingAs: id, in: jobsRoot) {
+            try remove(url)
+        }
+        for url in try files(surfacingAs: id, in: quarantineRoot) {
+            try remove(url)
+        }
+        try remove(mediaDirectory(id))
+        removeChunks(forJob: id)
+    }
+
+    /// Every file in a directory that a pending row under this id was made from: the manifest
+    /// itself, and each copy set aside under that id on an earlier launch.
+    private nonisolated func files(surfacingAs id: UUID, in directory: URL) throws -> [URL] {
+        let contents: [URL]
+        do {
+            contents = try FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil
+            )
+        } catch let error as CocoaError where Self.isMissing(error) {
+            return []
+        }
+        return contents.filter { url in
+            let name = url.lastPathComponent
+            return (Self.jobID(named: name) ?? Self.derivedID(from: name)) == id
+        }
+    }
+
+    /// Removing what is already gone is the outcome that was asked for; anything else is not.
+    private nonisolated func remove(_ url: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as CocoaError where Self.isMissing(error) {
+            return
+        }
     }
 
     // MARK: - manifests that cannot be read

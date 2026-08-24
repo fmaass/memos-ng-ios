@@ -29,11 +29,14 @@ public final class Outbox {
     /// The queue, oldest capture first. Read straight from disk after every change, because disk
     /// is the truth: a job that only exists in memory is a memo that a force-quit loses.
     public private(set) var jobs: [UploadJob] = []
-    /// What went wrong, of the three things that can: the capture just written, the queue itself,
-    /// and a write the drain could not make. They are held apart because they clear at different
-    /// moments — a disk that has started answering again must not leave a sentence about it on
-    /// screen, and must not wipe the one about the memo that never got saved either.
-    public var lastError: String? { enqueueError ?? queueError ?? persistenceError }
+    /// What went wrong, of the four things that can: the capture just written, the queue itself,
+    /// a write the drain could not make, and a capture a person asked to be rid of. They are held
+    /// apart because they clear at different moments — a disk that has started answering again must
+    /// not leave a sentence about it on screen, and must not wipe the one about the memo that never
+    /// got saved either.
+    public var lastError: String? {
+        enqueueError ?? queueError ?? persistenceError ?? removalError
+    }
     /// Bumped when a job LEAVES the queue, which only happens on a server-confirmed memo. It is
     /// the timeline's cue to reload: a capture that vanishes from Pending and does not reappear
     /// as a memo looks exactly like a lost one.
@@ -42,6 +45,7 @@ public final class Outbox {
     private var enqueueError: String?
     private var queueError: String?
     private var persistenceError: String?
+    private var removalError: String?
 
     private let repository: OutboxRepository
     private let credentials: any OutboxCredentialsProviding
@@ -175,5 +179,19 @@ public final class Outbox {
         await engine.release(jobID: jobID)
         await refresh()
         await engine.drain()
+    }
+
+    /// Throws a capture away on purpose — the "Remove" offered by a row whose manifest could not be
+    /// read, which is the only row nothing else can ever move. A capture leaves this device because
+    /// a person decided it should, never because something swept.
+    public func discard(_ jobID: UUID) async {
+        do {
+            try await repository.discard(jobID)
+            removalError = nil
+        } catch {
+            removalError =
+                "This capture could not be removed: \(error.localizedDescription)"
+        }
+        await refresh()
     }
 }

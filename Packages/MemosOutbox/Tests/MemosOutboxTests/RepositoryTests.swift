@@ -230,6 +230,85 @@ struct RepositoryTests {
         }
     }
 
+    @Test("one capture set aside twice is one row, and both files it left are still there")
+    func aTwiceQuarantinedCaptureIsOneRow() async throws {
+        try await withRepository { repository, root in
+            // What two launches that each failed to read the same manifest leave behind: the
+            // second copy keeps the id at the front of its name, which is how the sweep knows the
+            // originals under it are still spoken for.
+            let quarantine = root.appending(path: "outbox").appending(path: "quarantine")
+            let id = UUID()
+            let first = quarantine.appending(path: "\(id.uuidString).json")
+            let second = quarantine.appending(path: "\(id.uuidString).\(UUID().uuidString).json")
+            let firstBytes = Data(#"{"id":"the first attempt"}"#.utf8)
+            let secondBytes = Data(#"{"id":"the second attempt"}"#.utf8)
+            try firstBytes.write(to: first)
+            try secondBytes.write(to: second)
+
+            let jobs = try await repository.loadJobs()
+
+            #expect(jobs.count == 1, "two files under one id is still one capture")
+            #expect(jobs[0].id == id)
+            // Nothing was thrown away or merged to get there: both files are byte for byte as they
+            // were, because the older one may still be worth something to somebody.
+            #expect(try Data(contentsOf: first) == firstBytes)
+            #expect(try Data(contentsOf: second) == secondBytes)
+            // And a launch can plan over what came back — a duplicate id used to take the whole
+            // queue down here rather than one row.
+            #expect(OutboxReconciliation.plan(jobs: jobs, inFlight: []).drainable == [id])
+        }
+    }
+
+    @Test("a capture nobody can read leaves the device whole when a person says to")
+    func discardsAQuarantinedCapture() async throws {
+        try await withRepository { repository, root in
+            let source = try Fixture.file(in: root, named: "one.heic", bytes: 2048)
+            let job = try await repository.enqueue(
+                content: "on the beach",
+                visibility: nil,
+                capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+                binding: Fixture.binding(),
+                sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+            )
+            let media = repository.mediaURL(job: job, file: job.files[0])
+            let outbox = root.appending(path: "outbox")
+            let manifest = outbox.appending(path: "jobs/\(job.id.uuidString).json")
+            let chunk = try await repository.sliceChunk(
+                job: job, file: job.files[0], offset: 0, length: 16
+            )
+            // Corrupted, set aside, and corrupted again: the capture has two files in quarantine,
+            // which is the state a person is actually looking at when they press Remove.
+            try Data(#"{"id":"not a job"}"#.utf8).write(to: manifest)
+            _ = try await repository.loadJobs()
+            try Data(#"{"id":"still not a job"}"#.utf8).write(to: manifest)
+            let rows = try await repository.loadJobs()
+            #expect(rows.count == 1)
+            #expect(rows[0].holdReason == .unreadableManifest)
+
+            try await repository.discard(job.id)
+
+            #expect(try await repository.loadJobs().isEmpty, "the row does not come back")
+            let mediaDirectory = outbox.appending(path: "media/\(job.id.uuidString)")
+            #expect(
+                !FileManager.default.fileExists(atPath: media.path(percentEncoded: false)),
+                "the originals go with it"
+            )
+            #expect(
+                !FileManager.default.fileExists(
+                    atPath: mediaDirectory.path(percentEncoded: false)
+                )
+            )
+            #expect(
+                !FileManager.default.fileExists(atPath: chunk.path(percentEncoded: false)),
+                "and so does the slice that was in flight"
+            )
+            let left = try FileManager.default.contentsOfDirectory(
+                at: outbox.appending(path: "quarantine"), includingPropertiesForKeys: nil
+            )
+            #expect(left.isEmpty, "including every copy that was set aside under that id")
+        }
+    }
+
     @Test("a jobs directory that cannot be listed is an error, never an empty queue")
     func anUnlistableQueueIsAnError() async throws {
         try await withRepository { repository, root in

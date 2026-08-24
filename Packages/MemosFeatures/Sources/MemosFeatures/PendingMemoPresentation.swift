@@ -1,27 +1,42 @@
 import Foundation
 import MemosOutbox
 
+/// The one thing a stopped row lets a person do about it.
+public enum PendingAction: Sendable, Equatable {
+    /// The queue is still working on this capture: there is nothing to press.
+    case none
+    /// A hold a person can clear — "Try again".
+    case retry
+    /// A capture nothing can move on: its manifest could not be read, so it can never be sent and
+    /// no hold can be cleared. What is left is throwing it away deliberately, files and all.
+    case remove
+}
+
 /// One queued capture, as a row.
 public struct PendingRow: Sendable, Equatable, Identifiable {
     public var id: UUID
     public var snippet: String
     public var status: String
     public var attachmentCount: Int
-    /// True when the job is stopped and only a person can move it — the row offers "Try again".
-    public var needsAttention: Bool
+    /// What the row offers, decided here rather than by the view drawing it.
+    public var action: PendingAction
+
+    /// True when the job is stopped and only a person can move it — the row says so and offers the
+    /// one thing that would help.
+    public var needsAttention: Bool { action != .none }
 
     public init(
         id: UUID,
         snippet: String,
         status: String,
         attachmentCount: Int,
-        needsAttention: Bool
+        action: PendingAction
     ) {
         self.id = id
         self.snippet = snippet
         self.status = status
         self.attachmentCount = attachmentCount
-        self.needsAttention = needsAttention
+        self.action = action
     }
 }
 
@@ -40,12 +55,26 @@ public enum PendingMemoPresentation {
                     snippet: snippet(job.content),
                     status: status(for: job),
                     attachmentCount: job.files.count,
-                    // A capture whose manifest could not be read has nothing to try again: the
-                    // row says what happened and what is being kept, and offers no button that
-                    // would do nothing.
-                    needsAttention: job.state == .held && job.holdReason != .unreadableManifest
+                    action: action(for: job)
                 )
             }
+    }
+
+    /// What a row lets a person do, which is never more than one thing.
+    ///
+    /// A capture whose manifest could not be read is the exception every other state is measured
+    /// against: "Try again" would clear a hold nothing is holding, so the row would offer a button
+    /// that does nothing and sit in the pending list for ever. What it offers instead is the only
+    /// move left — throwing the capture away on purpose, which is a person's decision to make and
+    /// nothing else's.
+    public static func action(for job: UploadJob) -> PendingAction {
+        guard job.state == .held else { return .none }
+        switch job.holdReason {
+        case .unreadableManifest:
+            return .remove
+        case .accountMismatch, .serverRefused, .storageFailed, .none:
+            return .retry
+        }
     }
 
     public static func status(for job: UploadJob) -> String {

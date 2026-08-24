@@ -189,9 +189,11 @@ public struct TimelineView: View {
             if let outbox, !outbox.jobs.isEmpty {
                 Section {
                     ForEach(PendingMemoPresentation.rows(for: outbox.jobs)) { row in
-                        PendingCard(row: row) {
-                            Task { await outbox.retry(row.id) }
-                        }
+                        PendingCard(
+                            row: row,
+                            retry: { Task { await outbox.retry(row.id) } },
+                            remove: { Task { await outbox.discard(row.id) } }
+                        )
                         .cardRow()
                     }
                 } header: {

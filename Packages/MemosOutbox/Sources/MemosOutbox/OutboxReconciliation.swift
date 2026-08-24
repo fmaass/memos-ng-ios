@@ -32,7 +32,13 @@ public enum OutboxReconciliation {
         var adopted: [OutboxTaskIdentity] = []
         var cancelled: [OutboxTaskIdentity] = []
         var claimed: Set<UUID> = []
-        let jobsByID = Dictionary(uniqueKeysWithValues: jobs.map { ($0.id, $0) })
+        // Whatever the disk hands over, one id is one job here. A capture that was set aside twice
+        // used to arrive twice, and this ran on the LAUNCH path: a duplicate key would have taken
+        // the whole queue down with it rather than one row. The first in capture order wins, so the
+        // same list always plans the same way.
+        let jobsByID = Dictionary(
+            jobs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
+        )
 
         for task in inFlight {
             guard let job = jobsByID[task.jobID],
@@ -50,7 +56,15 @@ public enum OutboxReconciliation {
             adopted.append(task)
         }
 
-        let drainable = jobs.filter { !claimed.contains($0.id) }.map(\.id)
+        var listed: Set<UUID> = []
+        var drainable: [UUID] = []
+        for job in jobs where !claimed.contains(job.id) {
+            // The same reason as above, on the other side of the plan: an id listed twice would be
+            // advanced twice in one pass, which is the double upload this whole type exists to
+            // prevent.
+            guard listed.insert(job.id).inserted else { continue }
+            drainable.append(job.id)
+        }
         return ReconciliationPlan(adopted: adopted, cancelled: cancelled, drainable: drainable)
     }
 }

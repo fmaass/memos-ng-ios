@@ -35,7 +35,7 @@ public enum JobState: String, Codable, Sendable, Equatable {
 }
 
 /// Why a job stopped needing a person.
-public enum HoldReason: String, Codable, Sendable, Equatable {
+public enum HoldReason: String, Codable, Sendable, Equatable, CaseIterable {
     /// Captured under a different account or a different server than the one signed in now.
     case accountMismatch
     /// The server refused in a way that repeating cannot fix.

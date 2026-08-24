@@ -8,7 +8,8 @@ import Testing
 /// a queue that cannot be listed, and a write that does not land — are followed all the way to the
 /// sentence a person reads, rather than asserted at the repository and assumed at the top. Both are
 /// made to happen for real, by taking the permissions off the directory the queue lives in: that is
-/// the shape a container that has gone away, or a disk with nothing left on it, actually has.
+/// the shape a container that has gone away, or a disk with nothing left on it, actually has. The
+/// third test is the way OUT of the one of those that never mends itself.
 @MainActor
 @Suite("An outbox whose disk says no")
 struct SurfacingTests {
@@ -74,5 +75,28 @@ struct SurfacingTests {
 
         #expect(outbox.jobs.count == 1, "the capture is still there, whole")
         #expect(outbox.lastError?.contains("could not be saved on this device") == true)
+    }
+
+    @Test("a capture nobody can read can be thrown away from the list it is stuck in")
+    func aQuarantinedCaptureCanBeRemoved() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        try await capture(in: repository, root: root, bytes: 128)
+        let outbox = facade(repository, http: .standard(health: 500))
+        await outbox.refresh()
+        let captured = try #require(outbox.jobs.first)
+
+        try Data(#"{"id":"not a job"}"#.utf8)
+            .write(to: root.appending(path: "outbox/jobs/\(captured.id.uuidString).json"))
+        await outbox.refresh()
+        #expect(outbox.jobs.count == 1, "it is surfaced rather than dropped")
+        #expect(outbox.jobs[0].holdReason == .unreadableManifest)
+
+        // Nothing automatic will ever move that row: this is the recourse, and it is a person's.
+        await outbox.discard(captured.id)
+
+        #expect(outbox.jobs.isEmpty, "and it stays gone on the read that follows")
+        #expect(outbox.lastError == nil)
     }
 }

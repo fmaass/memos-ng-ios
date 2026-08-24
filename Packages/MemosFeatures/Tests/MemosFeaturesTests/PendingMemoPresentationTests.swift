@@ -83,8 +83,10 @@ struct PendingMemoPresentationTests {
                 == "This capture could not be read — its files are kept"
         )
         // "Try again" would clear a hold that is not the queue's to clear, so the row does not
-        // offer it — what it promises instead is that nothing was thrown away.
-        #expect(!PendingMemoPresentation.rows(for: [defective])[0].needsAttention)
+        // offer it — what it offers is the one move left on a capture nothing else can move.
+        let row = PendingMemoPresentation.rows(for: [defective])[0]
+        #expect(row.action == .remove)
+        #expect(row.needsAttention, "a row only a person can end still asks for that person")
 
         let unwritable = job(
             state: .held, holdReason: .storageFailed,
@@ -95,6 +97,32 @@ struct PendingMemoPresentationTests {
                 == "This capture could not be saved on this device: no space left"
         )
         #expect(PendingMemoPresentation.rows(for: [unwritable])[0].needsAttention)
+        #expect(PendingMemoPresentation.rows(for: [unwritable])[0].action == .retry)
+    }
+
+    @Test("every hold offers exactly one thing, and only the unreadable one offers Remove")
+    func actionPerHoldReason() {
+        // The switch is what makes this exhaustive: a hold reason added later does not compile
+        // until someone has said what its row lets a person do about it.
+        for reason in HoldReason.allCases {
+            let held = job(state: .held, holdReason: reason)
+            switch reason {
+            case .unreadableManifest:
+                #expect(PendingMemoPresentation.action(for: held) == .remove)
+                #expect(PendingMemoPresentation.rows(for: [held])[0].action == .remove)
+            case .accountMismatch, .serverRefused, .storageFailed:
+                #expect(PendingMemoPresentation.action(for: held) == .retry)
+                #expect(PendingMemoPresentation.rows(for: [held])[0].action == .retry)
+            }
+        }
+        // A hold with no reason recorded is still a hold a person may clear.
+        #expect(PendingMemoPresentation.action(for: job(state: .held)) == .retry)
+        // Nothing that is still moving asks anything of anybody.
+        for state in [JobState.waiting, .uploading, .creating] {
+            let moving = job(state: state)
+            #expect(PendingMemoPresentation.action(for: moving) == .none)
+            #expect(!PendingMemoPresentation.rows(for: [moving])[0].needsAttention)
+        }
     }
 
     @Test("a text-only capture is not stuck at 0 %")
