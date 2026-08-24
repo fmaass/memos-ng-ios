@@ -12,6 +12,8 @@ public struct RootView: View {
             switch session.state {
             case .signedIn:
                 TimelineView()
+            case .unreachable(let message):
+                UnreachableView(message: message)
             case .signedOut, .signingIn:
                 SignInView()
             }
@@ -30,6 +32,44 @@ public struct RootView: View {
             }
             #endif
             await session.restore()
+        }
+    }
+}
+
+/// A stored sign-in that could not be confirmed: the server was unreachable, not the token
+/// wrong. Retry is the headline; walking away from the stored credential is the explicit,
+/// consequence-labelled alternative — never the default.
+struct UnreachableView: View {
+    let message: String
+    @Environment(SessionStore.self) private var session
+    @State private var confirmDiscard = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            ContentUnavailableView(
+                "Can't reach your memos",
+                systemImage: "wifi.exclamationmark",
+                description: Text(message)
+            )
+            Button("Try again") { Task { await session.restore() } }
+                .buttonStyle(.borderedProminent)
+            Button("Sign in differently") { confirmDiscard = true }
+                .font(.footnote)
+        }
+        .confirmationDialog(
+            "Discard the saved sign-in?",
+            isPresented: $confirmDiscard,
+            titleVisibility: .visible
+        ) {
+            Button("Discard and sign in again", role: .destructive) {
+                session.signOutWithoutRevoking()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "The saved credential stays valid on the server until it expires or is"
+                    + " revoked from the web app."
+            )
         }
     }
 }

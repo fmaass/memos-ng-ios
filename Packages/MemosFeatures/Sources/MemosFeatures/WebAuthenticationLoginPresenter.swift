@@ -61,6 +61,16 @@ extension WebAuthenticationLoginPresenter: ASWebAuthenticationPresentationContex
     nonisolated public func presentationAnchor(
         for session: ASWebAuthenticationSession
     ) -> ASPresentationAnchor {
-        MainActor.assumeIsolated { ASPresentationAnchor() }
+        MainActor.assumeIsolated {
+            // A freshly constructed window is attached to nothing and AuthenticationServices
+            // refuses to present from it — the anchor must be the window someone is looking at.
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            if let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow)
+                ?? scenes.first?.windows.first
+            {
+                return window
+            }
+            return ASPresentationAnchor()
+        }
     }
 }

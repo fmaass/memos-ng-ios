@@ -121,3 +121,165 @@ struct TimelineStoreTests {
         #expect(store.shouldLoadMore(after: 3, lookahead: 3))
     }
 }
+
+// MARK: - writes
+
+extension TimelineStoreTests {
+    private func seeded(_ uids: [String], client: any APIProtocol) async -> TimelineStore {
+        let store = TimelineStore()
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        return store
+    }
+
+    @Test("a created memo enters at the position its pin flag earns")
+    func createInsertsSorted() async {
+        let client = Stub.client { request, _, operation in
+            operation == "create_memo_api_memos_post"
+                ? Stub.json(Stub.memo(uid: "new"), status: .created)
+                : Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+        }
+        let store = await seeded(["a", "b"], client: client)
+
+        #expect(await store.create(content: "hello", using: client, baseURL: Stub.baseURL))
+        #expect(store.memos.map(\.uid) == ["new", "a", "b"])
+    }
+
+    @Test("a rejected create reports and adds nothing")
+    func createRejected() async {
+        let client = Stub.client { _, _, operation in
+            operation == "create_memo_api_memos_post"
+                ? Stub.empty(.unprocessableContent)
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        let store = await seeded(["a"], client: client)
+
+        #expect(!(await store.create(content: "", using: client, baseURL: Stub.baseURL)))
+        #expect(store.memos.count == 1)
+        #expect(store.lastError != nil)
+    }
+
+    @Test("an edit replaces the loaded copy with the server's")
+    func editApplies() async {
+        let client = Stub.client { _, _, operation in
+            operation == "patch_memo_api_memos__uid__patch"
+                ? Stub.json(Stub.memo(uid: "a", content: "edited"))
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        let store = await seeded(["a"], client: client)
+
+        #expect(await store.edit(uid: "a", content: "edited", using: client, baseURL: Stub.baseURL))
+        #expect(store.memos.first?.content == "edited")
+    }
+
+    @Test("a delete removes the row only on the server's word")
+    func deleteRemovesOnNoContent() async {
+        let client = Stub.client { _, _, operation in
+            operation == "delete_memo_api_memos__uid__delete"
+                ? Stub.empty(.noContent)
+                : Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+        }
+        let store = await seeded(["a", "b"], client: client)
+
+        #expect(await store.delete(uid: "a", using: client))
+        #expect(store.memos.map(\.uid) == ["b"])
+    }
+
+    @Test("a failed delete keeps the row and says why")
+    func deleteKeepsOnFailure() async {
+        let client = Stub.client { _, _, operation in
+            operation == "delete_memo_api_memos__uid__delete"
+                ? Stub.empty(.internalServerError)
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        let store = await seeded(["a"], client: client)
+
+        #expect(!(await store.delete(uid: "a", using: client)))
+        #expect(store.memos.count == 1)
+        #expect(store.lastError != nil)
+    }
+
+    @Test("pinning routes through the pin endpoint and moves the memo to the front")
+    func pinRoutesAndReorders() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, operation in
+            paths.set(paths.get() + [request.path ?? ""])
+            return operation == "pin_memo_api_memos__uid__pin_post"
+                ? Stub.json(Stub.memo(uid: "b", pinned: true))
+                : Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+        }
+        let store = await seeded(["a", "b"], client: client)
+
+        #expect(await store.setPinned(true, uid: "b", using: client, baseURL: Stub.baseURL))
+        #expect(
+            store.memos.map(\.uid) == ["b", "a"], "the pinned memo leads the pinned-first list")
+        #expect(paths.get().contains { $0.hasSuffix("/b/pin") })
+    }
+
+    @Test("a visibility change patches and applies the server's answer")
+    func visibilityPatches() async {
+        let client = Stub.client { _, _, operation in
+            operation == "patch_memo_api_memos__uid__patch"
+                ? Stub.json(Stub.memo(uid: "a", visibility: "PUBLIC"))
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        let store = await seeded(["a"], client: client)
+
+        #expect(
+            await store.setVisibility(.public, uid: "a", using: client, baseURL: Stub.baseURL)
+        )
+        #expect(store.memos.first?.visibility == .public)
+    }
+
+    @Test("a task toggle is optimistic and rolls back when the server refuses")
+    func toggleRollsBack() async {
+        let client = Stub.client { _, _, operation in
+            if operation == "patch_memo_api_memos__uid__patch" {
+                return Stub.empty(.internalServerError)
+            }
+            let list = """
+                {"items":[\(Stub.memo(uid: "a", content: "- [ ] milk"))],\
+                "nextCursor":null,"totalCount":null}
+                """
+            return Stub.json(list)
+        }
+        let store = await seeded(["a"], client: client)
+        let before = store.memos.first?.content
+
+        let toggled = await store.toggleTask(at: 0, in: "a", using: client, baseURL: Stub.baseURL)
+
+        #expect(!toggled)
+        #expect(store.memos.first?.content == before, "the flip is undone when the PATCH fails")
+        #expect(store.lastError != nil)
+    }
+
+    @Test("a 403 on a write reports without ending the session")
+    func forbiddenWriteDoesNotSignOut() async {
+        let unauthorizedCalled = LockedValue<Bool>(false)
+        let store = TimelineStore(onUnauthorized: { unauthorizedCalled.set(true) })
+        let client = Stub.client { _, _, operation in
+            operation == "delete_memo_api_memos__uid__delete"
+                ? Stub.empty(.forbidden)
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        #expect(!(await store.delete(uid: "a", using: client)))
+        #expect(!unauthorizedCalled.get(), "someone else's memo must not cost this session")
+        #expect(store.lastError != nil)
+    }
+
+    @Test("a 401 on a write does end the session")
+    func unauthorizedWriteSignsOut() async {
+        let unauthorizedCalled = LockedValue<Bool>(false)
+        let store = TimelineStore(onUnauthorized: { unauthorizedCalled.set(true) })
+        let client = Stub.client { _, _, operation in
+            operation == "delete_memo_api_memos__uid__delete"
+                ? Stub.empty(.unauthorized)
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        #expect(!(await store.delete(uid: "a", using: client)))
+        #expect(unauthorizedCalled.get())
+    }
+}

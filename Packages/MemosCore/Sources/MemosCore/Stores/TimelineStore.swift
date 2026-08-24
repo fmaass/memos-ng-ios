@@ -167,7 +167,14 @@ public final class TimelineStore {
                 case .undocumented(let statusCode, _): throw APIError.fromStatus(statusCode)
                 }
             }
-            apply(Memo(json, baseURL: baseURL))
+            // Pinning is also a MOVE: the list is pinned-first, so the updated memo re-enters at
+            // the position its new flag earns. (Fine-grained recency ordering is the server's;
+            // the next refresh settles it.)
+            let updated = Memo(json, baseURL: baseURL)
+            if let position = memos.firstIndex(where: { $0.uid == updated.uid }) {
+                memos.remove(at: position)
+                memos.insert(updated, at: Self.insertionIndex(for: updated, in: memos))
+            }
             lastError = nil
             return true
         } catch {

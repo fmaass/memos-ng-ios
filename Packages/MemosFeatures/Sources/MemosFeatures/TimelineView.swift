@@ -81,40 +81,46 @@ public struct TimelineView: View {
                     MemoRow(memo: memo)
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
-                        Task {
-                            guard let client = session.api else { return }
-                            await timeline.delete(uid: memo.uid, using: client)
+                    if memo.mine {
+                        Button(role: .destructive) {
+                            Task {
+                                guard let client = session.api else { return }
+                                await timeline.delete(uid: memo.uid, using: client)
+                            }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
-                    } label: {
-                        Label("Delete", systemImage: "trash")
                     }
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    Button {
-                        Task {
-                            guard let client = session.api,
-                                let baseURL = session.serverBaseURL
-                            else { return }
-                            await timeline.setPinned(
-                                !memo.pinned, uid: memo.uid, using: client, baseURL: baseURL
+                    if memo.mine {
+                        Button {
+                            Task {
+                                guard let client = session.api,
+                                    let baseURL = session.serverBaseURL
+                                else { return }
+                                await timeline.setPinned(
+                                    !memo.pinned, uid: memo.uid, using: client, baseURL: baseURL
+                                )
+                            }
+                        } label: {
+                            Label(
+                                memo.pinned ? "Unpin" : "Pin",
+                                systemImage: memo.pinned ? "pin.slash" : "pin"
                             )
                         }
-                    } label: {
-                        Label(
-                            memo.pinned ? "Unpin" : "Pin",
-                            systemImage: memo.pinned ? "pin.slash" : "pin"
-                        )
+                        .tint(.orange)
                     }
-                    .tint(.orange)
                 }
                 .contextMenu {
-                    Button {
-                        composing = .edit(uid: memo.uid, content: memo.content)
-                    } label: {
-                        Label("Edit", systemImage: "pencil")
+                    if memo.mine {
+                        Button {
+                            composing = .edit(uid: memo.uid, content: memo.content)
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        visibilityMenu(for: memo, in: timeline)
                     }
-                    visibilityMenu(for: memo, in: timeline)
                 }
                 .task {
                     guard timeline.shouldLoadMore(after: index) else { return }

@@ -41,6 +41,8 @@ public struct MemoDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Tasks").font(.headline)
                         ForEach(Array(tasks.enumerated()), id: \.offset) { index, task in
+                            // Someone else's checklist is read: a 403 round trip teaches
+                            // nothing a disabled row does not.
                             Button {
                                 Task { await toggle(index) }
                             } label: {
@@ -55,6 +57,7 @@ public struct MemoDetailView: View {
                                 .foregroundStyle(task.checked ? .secondary : .primary)
                             }
                             .buttonStyle(.plain)
+                            .disabled(!memo.mine)
                         }
                     }
                 }

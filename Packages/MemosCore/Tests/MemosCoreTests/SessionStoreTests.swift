@@ -197,3 +197,22 @@ final class LockedValue<Value>: @unchecked Sendable {
     func get() -> Value { lock.withLock { value } }
     func set(_ newValue: Value) { lock.withLock { value = newValue } }
 }
+
+extension SessionStoreTests {
+    @Test("an unreachable server parks the session instead of inviting a second sign-in")
+    func restoreParksWhenUnreachable() async {
+        struct Offline: Error {}
+        let credentials = InMemoryCredentials()
+        try? credentials.set("memos_pat_stored", for: SessionStore.tokenAccount)
+        try? credentials.set("https://memos.example.invalid", for: SessionStore.serverAccount)
+
+        let session = store(credentials: credentials) { _, _, _ in throw Offline() }
+        await session.restore()
+
+        guard case .unreachable = session.state else {
+            Issue.record("expected .unreachable, got \(session.state)")
+            return
+        }
+        #expect(!credentials.isEmpty, "an unconfirmed token is kept for the retry")
+    }
+}

@@ -8,6 +8,9 @@ import Foundation
 public enum APIError: Error, Sendable, Equatable {
     /// The credential was missing, wrong or revoked. Drives sign-out; never retried silently.
     case unauthorized
+    /// The credential is fine but this object is not yours. NEVER ends the session — conflating
+    /// it with `unauthorized` made a 403 on someone else's memo delete a still-valid token.
+    case forbidden
     case notFound
     case server(status: Int)
     case transport(description: String)
@@ -17,7 +20,8 @@ public enum APIError: Error, Sendable, Equatable {
     /// Classifies a status code the generated client reported as undocumented.
     public static func fromStatus(_ status: Int) -> APIError {
         switch status {
-        case 401, 403: .unauthorized
+        case 401: .unauthorized
+        case 403: .forbidden
         case 404: .notFound
         default: .server(status: status)
         }
@@ -28,6 +32,7 @@ extension APIError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unauthorized: "Your access token was rejected. Sign in again."
+        case .forbidden: "That memo belongs to someone else."
         case .notFound: "That item no longer exists."
         case .server(let status): "The server returned an error (HTTP \(status))."
         case .transport(let description): "The server could not be reached: \(description)"

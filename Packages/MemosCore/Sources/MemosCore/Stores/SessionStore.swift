@@ -7,6 +7,11 @@ public enum SessionState: Sendable, Equatable {
     case signedOut
     case signingIn
     case signedIn(User)
+    /// A stored credential exists but the server could not be asked about it. NOT signed out:
+    /// showing the sign-in screen here invites a second sign-in that would orphan the stored,
+    /// still-valid token. The screen for this state retries, and abandoning the credential is
+    /// its explicit, labelled choice.
+    case unreachable(String)
 
     public var user: User? {
         if case .signedIn(let user) = self { return user }
@@ -122,11 +127,11 @@ public final class SessionStore {
                 makeClient(configuration) { nil }, code: code, verifier: verifier
             )
             let token = exchanged.token
+            let stored = persist(token: token, configuration: configuration)
             self.configuration = configuration
             self.client = makeClient(configuration) { token }
             state = .signedIn(exchanged.user)
-            try? credentials.set(token, for: Self.tokenAccount)
-            try? credentials.set(configuration.baseURL.absoluteString, for: Self.serverAccount)
+            if !stored { lastError = Self.storageWarning }
             return true
         } catch let error as NativeLoginError {
             failSignIn(error)
@@ -155,9 +160,9 @@ public final class SessionStore {
         let client = makeClient(configuration) { trimmed }
         do {
             let user = try await Self.whoami(client)
+            let stored = persist(token: trimmed, configuration: configuration)
             adopt(client: client, configuration: configuration, user: user)
-            try? credentials.set(trimmed, for: Self.tokenAccount)
-            try? credentials.set(configuration.baseURL.absoluteString, for: Self.serverAccount)
+            if !stored { lastError = Self.storageWarning }
         } catch {
             state = .signedOut
             self.client = nil
@@ -187,9 +192,11 @@ public final class SessionStore {
             wipeCredential()
             lastError = error.errorDescription
         } catch {
-            state = .signedOut
+            // The token was neither confirmed nor rejected. Park, keep, retry — see `unreachable`.
             self.client = nil
-            lastError = (error as? APIError)?.errorDescription ?? error.localizedDescription
+            state = .unreachable(
+                (error as? APIError)?.errorDescription ?? error.localizedDescription
+            )
         }
     }
 
@@ -265,6 +272,23 @@ public final class SessionStore {
         state = .signedOut
         client = nil
         lastError = error.message
+    }
+
+    /// The device credential could not be written where it survives the process. Sign-in still
+    /// succeeds — the token works from memory and a proper sign-out can still revoke it — but
+    /// silence here is how a live server credential gets orphaned by a force-quit.
+    static let storageWarning =
+        "Signed in, but the credential could not be saved on this device. "
+        + "It will not survive quitting the app - sign out properly before you do."
+
+    private func persist(token: String, configuration: ServerConfiguration) -> Bool {
+        do {
+            try credentials.set(token, for: Self.tokenAccount)
+            try credentials.set(configuration.baseURL.absoluteString, for: Self.serverAccount)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func wipeCredential() {
