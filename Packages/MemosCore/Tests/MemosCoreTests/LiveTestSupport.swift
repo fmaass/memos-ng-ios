@@ -218,12 +218,14 @@ extension MediaEventClient {
 }
 
 extension [MediaEventStreamItem] {
-    var events: [MediaEvent] {
+    var envelopes: [MediaEventEnvelope] {
         compactMap {
-            guard case .event(let event) = $0 else { return nil }
-            return event
+            guard case .event(let envelope) = $0 else { return nil }
+            return envelope
         }
     }
+
+    var events: [MediaEvent] { envelopes.map(\.event) }
 
     var states: [MediaEventConnectionState] {
         compactMap {

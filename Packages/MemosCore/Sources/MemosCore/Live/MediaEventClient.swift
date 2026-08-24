@@ -51,11 +51,41 @@ public enum MediaEventConnectionState: Sendable, Equatable {
     case stopped(MediaEventStopReason)
 }
 
+/// One event, stamped with the identity generation the connection that carried it was fenced to.
+///
+/// The stamp exists because a fence inside the channel cannot be sound on its own, however tightly
+/// it is written: a delivered event sits in the stream's buffer and is consumed AFTER the check,
+/// so the device can become another account in between and no amount of atomicity in the producer
+/// closes that window. The question can only be answered where the answer is used, and
+/// `MediaIdentity` rotates on the main actor — so a consumer that asks there is asking a clock
+/// that cannot move underneath it.
+public struct MediaEventEnvelope: Sendable, Equatable {
+    public let event: MediaEvent
+    /// The generation the channel was fenced to when this event arrived.
+    public let generation: Int
+
+    public init(event: MediaEvent, generation: Int) {
+        self.event = event
+        self.generation = generation
+    }
+
+    /// The event to apply, or `nil` if the device has become another account since it arrived.
+    ///
+    /// THE CONSUMER CONTRACT: apply only what this returns, never `envelope.event` directly. An
+    /// attachment uid means nothing across accounts, so an event applied past a rotation patches
+    /// the new account's timeline with the previous account's photo.
+    @MainActor
+    public func eventIfCurrent(for identity: MediaIdentity = .shared) -> MediaEvent? {
+        generation == identity.generation ? event : nil
+    }
+}
+
 /// Everything the channel reports, in the order it happens: state changes and events on one
 /// stream, so a consumer cannot see an event from a connection whose `open` it has not seen yet.
 public enum MediaEventStreamItem: Sendable, Equatable {
     case state(MediaEventConnectionState)
-    case event(MediaEvent)
+    /// Stamped, and to be read through `MediaEventEnvelope.eventIfCurrent(for:)` — see the fence.
+    case event(MediaEventEnvelope)
 }
 
 /// The live media channel: `GET /api/events`, parsed, decoded, and reconnected.
@@ -82,6 +112,13 @@ public enum MediaEventStreamItem: Sendable, Equatable {
 /// account B — an attachment uid means nothing across accounts, so an event delivered across that
 /// line would patch B's timeline with A's photo. It is the same clock `MediaIdentity` gives the
 /// image cache, rotated at the same two moments by `SessionStore`.
+///
+/// Those reads are an EARLY EXIT, not the fence that decides. They turn the stream off promptly,
+/// and they cannot do more than that: this client is `Sendable` and runs off the main actor, while
+/// rotation is serialized ON it, and an event yielded here is consumed by the app later still. So
+/// every event is delivered STAMPED, as a `MediaEventEnvelope`, and the deciding check belongs to
+/// the consumer: apply only what `MediaEventEnvelope.eventIfCurrent(for:)` returns — never
+/// `envelope.event` — which reads the live clock on the actor that owns it.
 public final class MediaEventClient: Sendable {
     /// The path the events route is mounted at (memos-ng `app/routers/assets.py:822-823`).
     public static let path = "api/events"
@@ -257,12 +294,14 @@ public final class MediaEventClient: Sendable {
                 serverRetryHint = parser.reconnectionTime
                 if Task.isCancelled { return result(.cancelled) }
                 // The second gate: whatever this connection was opened for, it is not this
-                // device's business any more once the account has moved.
+                // device's business any more once the account has moved. An early exit only —
+                // what protects an event already delivered is the stamp it carries.
                 guard await generation() == fence else { return result(.identityChanged) }
                 for frame in frames {
                     do {
                         let event = try MediaEvent.decode(frame)
-                        continuation.yield(.event(event))
+                        let stamped = MediaEventEnvelope(event: event, generation: fence)
+                        continuation.yield(.event(stamped))
                     } catch {
                         MemosLog.media.info(
                             "media event skipped: \(String(describing: error), privacy: .public)"

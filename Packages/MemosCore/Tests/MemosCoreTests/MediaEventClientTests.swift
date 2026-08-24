@@ -181,6 +181,67 @@ struct MediaEventClientTests {
         #expect(await transport.connectCount == 1)
     }
 
+    @Test("an event already delivered is refused once the device is another account")
+    @MainActor
+    func stampedEventIsRefusedAfterRotation() {
+        // The window the in-channel gate cannot cover: the event was received, stamped and
+        // buffered under this generation, and the account rotates before anything applies it.
+        // No sleeping, no scheduling — rotation is just the clock moving between the two calls.
+        let identity = MediaIdentity()
+        let envelope = MediaEventEnvelope(
+            event: SSEFixture.liveEvents[0],
+            generation: identity.generation
+        )
+
+        identity.rotate()
+
+        #expect(
+            envelope.eventIfCurrent(for: identity) == nil,
+            "an event fenced to the previous account must not reach the new one's timeline"
+        )
+    }
+
+    @Test("an event still fenced to the account the device is on is handed over to be applied")
+    @MainActor
+    func stampedEventIsAcceptedWhileCurrent() {
+        let identity = MediaIdentity()
+        identity.rotate()
+        let envelope = MediaEventEnvelope(
+            event: SSEFixture.liveEvents[2],
+            generation: identity.generation
+        )
+
+        #expect(envelope.eventIfCurrent(for: identity) == SSEFixture.liveEvents[2])
+    }
+
+    @Test("every delivered event is stamped with the generation the channel was fenced to")
+    @MainActor
+    func deliveredEventsCarryTheFence() async throws {
+        let identity = MediaIdentity()
+        identity.rotate()
+        identity.rotate()
+        let store = InMemoryCredentials()
+        try store.set("memos_pat_stored", for: SessionStore.tokenAccount)
+        try store.set("https://memos.stored.invalid", for: SessionStore.serverAccount)
+        let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
+        let sleeper = RecordingSleeper(budget: 1)
+        let client = MediaEventClient.device(
+            credentials: store,
+            identity: identity,
+            transport: transport,
+            sleeper: sleeper
+        )
+
+        let items = await client.collect()
+
+        #expect(items.events == SSEFixture.liveEvents)
+        #expect(
+            items.envelopes.allSatisfy { $0.generation == 2 },
+            "the stamp is the live clock the channel read, not a constant"
+        )
+        #expect(items.envelopes.allSatisfy { $0.eventIfCurrent(for: identity) != nil })
+    }
+
     @Test("frames this client cannot read are skipped, and the ones around them still arrive")
     func unknownFramesAreSkipped() async {
         let stream =
@@ -208,8 +269,8 @@ struct MediaEventClientTests {
 
         var received: [MediaEvent] = []
         for await item in client.stream() {
-            guard case .event(let event) = item else { continue }
-            received.append(event)
+            guard case .event(let envelope) = item else { continue }
+            received.append(envelope.event)
             break
         }
         #expect(received == [SSEFixture.liveEvents[0]])
