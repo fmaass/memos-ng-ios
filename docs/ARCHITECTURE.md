@@ -123,6 +123,19 @@ Recorded here rather than quietly absorbed, for the review that turns v0 into v1
    with the app group and the pre-entitlement `<team>.<bundle>` group emptied into it on read.
    Every query names its group. What the simulator cannot prove — that the extension is actually
    refused — is a device ceremony; the gate checks the generated entitlement files instead.
+
+   **The migration window is a known residual.** A device that was signed in on an older build
+   still has its token in the app group until the new build RUNS once, and the share extension
+   belongs to that app group for the container it needs. So on such a device, between installing
+   the update and the app's first launch, the extension could still read the token it will never
+   be given again. Nothing about the new entitlement closes that: the token has to be readable
+   from the old namespace to be moved out of it, and only the app can move it. The window is
+   inherent to migrating rather than signing everybody out, it is closed per device by the first
+   read after launch (`restore()` migrates before anything else touches the credential), and it
+   is bounded by how long the person waits before opening the app. Closing it completely would
+   mean a NEW app group for the extension and leaving the old one app-only — a bigger change than
+   this round, and one that trades the window for a second migration of the queue and identity
+   files. Accepted, recorded, not forgotten.
 2. **`MemosCore` and `MemosAPI` declare macOS as well as iOS.** Not because the app runs there,
    but because SwiftPM is the only way to build those two targets with `-warnings-as-errors`, and
    SwiftPM builds for the host. The Features layer stays iOS-only.

@@ -764,7 +764,13 @@ struct MediaViewerLoadingTests {
         let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
         let url = try #require(page.stillURL)
 
-        let cache = URLCache.shared
+        // The cache the PAGE evicts from, which is the media session's own — `evictExpired`
+        // defaults to it because images are fetched through `MediaSession`. Seeding
+        // `URLCache.shared` instead only worked while the app's composition root had won a race
+        // at launch (`URLCache.shared = MediaSession.shared.cache` is a no-op once the shared
+        // session has been made), and under load it lost: the entry was seeded in one cache and
+        // evicted from another, and the test failed after its full three-second budget.
+        let cache = MediaSession.shared.cache
         cache.memoryCapacity = max(cache.memoryCapacity, 4 * 1024 * 1024)
         let request = URLRequest(url: url)
         let response = try #require(

@@ -1,5 +1,5 @@
 import Foundation
-import MemosCore
+@testable import MemosCore
 import Security
 import Testing
 

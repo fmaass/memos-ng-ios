@@ -52,7 +52,7 @@ public enum DeviceCredentials {
     public static func keychain() -> any CredentialStore { shared }
 
     /// The three namespaces, as stores.
-    public static func namespaces() -> CredentialNamespaces? {
+    static func namespaces() -> CredentialNamespaces? {
         guard let plan = plan() else { return nil }
         return CredentialNamespaces(
             primary: CredentialNamespace(
@@ -62,12 +62,16 @@ public enum DeviceCredentials {
             legacies: plan.legacies.map {
                 CredentialNamespace(
                     Keychain(service: service, accessGroup: $0.accessGroup), reach: $0.reach)
-            }
+            },
+            // A home that is not the entitlement's own group reads and clears, and refuses to
+            // take a new credential. The alternative — storing it somewhere weaker without
+            // saying so — is a security policy changing itself quietly.
+            homeIsDedicated: plan.dedicatedGroupInEffect
         )
     }
 
     /// The plan for THIS build, or nil while the probe will not resolve.
-    public static func plan() -> KeychainNamespacePlan? {
+    static func plan() -> KeychainNamespacePlan? {
         KeychainAccessGroup.appDefault.flatMap(plan(default:))
     }
 
@@ -83,7 +87,7 @@ public enum DeviceCredentials {
     /// - Parameter probed: what `KeychainAccessGroup.appDefault` reported.
     /// - Returns: nil when nothing usable can be named — including the one answer that must never
     ///   be used, the app group itself.
-    public static func plan(default probed: String) -> KeychainNamespacePlan? {
+    static func plan(default probed: String) -> KeychainNamespacePlan? {
         guard !probed.isEmpty, probed != appGroup else { return nil }
         let shared = KeychainNamespacePlan.Namespace(
             accessGroup: appGroup, reach: .sharedWithExtensions)
@@ -143,23 +147,25 @@ public enum DeviceCredentials {
 /// A value of this type is only ever constructed with a primary no extension can reach and
 /// legacies that are all different from it — the initializer refuses anything else, so a plan
 /// that would put the token where the share extension can read it has no representation.
-public struct KeychainNamespacePlan: Equatable, Sendable {
-    public struct Namespace: Equatable, Sendable {
-        public let accessGroup: String
-        public let reach: CredentialReach
+struct KeychainNamespacePlan: Equatable, Sendable {
+    struct Namespace: Equatable, Sendable {
+        let accessGroup: String
+        let reach: CredentialReach
 
-        public init(accessGroup: String, reach: CredentialReach) {
+        init(accessGroup: String, reach: CredentialReach) {
             self.accessGroup = accessGroup
             self.reach = reach
         }
     }
 
-    public let primary: Namespace
-    public let legacies: [Namespace]
-    /// True when the probe PROVED the dedicated app-only group is in effect on this build.
-    public let dedicatedGroupInEffect: Bool
+    let primary: Namespace
+    let legacies: [Namespace]
+    /// True when the probe PROVED the dedicated app-only group is in effect on this build. False
+    /// is not a fallback to a weaker home for WRITES — see `CredentialNamespaces.homeIsDedicated`
+    /// — it is a device that can still read and still sign out, and cannot sign in.
+    let dedicatedGroupInEffect: Bool
 
-    public init?(primary: Namespace, legacies: [Namespace], dedicatedGroupInEffect: Bool) {
+    init?(primary: Namespace, legacies: [Namespace], dedicatedGroupInEffect: Bool) {
         guard primary.reach == .appOnly, !primary.accessGroup.isEmpty else { return nil }
         guard !legacies.contains(where: { $0.accessGroup.isEmpty }) else { return nil }
         // Disjoint by name, which is what makes "a delete in one cannot reach the other" true of

@@ -103,7 +103,17 @@ targets:
         com.apple.security.application-groups:
           - group.live.discomarder.memosng
         keychain-access-groups:
+          # ORDER IS LOAD-BEARING. The first entry is the DEFAULT access group — the one an
+          # unqualified add lands in — and the runtime probe reads it back to decide which
+          # namespace the token lives in. The dedicated group stays first; moving the app group
+          # above it would make the app group the default, which the plan refuses outright.
           - "$(AppIdentifierPrefix)live.discomarder.memosng.credentials"
+          # The migration source, named rather than assumed. An App Group entitlement is
+          # documented to carry keychain access with it, but a token sitting in that group has to
+          # be READABLE to be moved out of it, and this line says so instead of depending on a
+          # platform subtlety. The extension gains nothing from it: it is in the APP's
+          # entitlements, and the extension's list has no keychain group at all.
+          - group.live.discomarder.memosng
     # Two keys have no INFOPLIST_KEY_ build setting to express them, so they live in a generated
     # plist that the INFOPLIST_KEY_ values below are merged into. The file is generated from THIS
     # spec (and gitignored) — it is not a hand-maintained Info.plist coming back through the door.

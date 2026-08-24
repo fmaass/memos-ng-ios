@@ -1,6 +1,6 @@
 import Foundation
 import MemosAPI
-import MemosCore
+@testable import MemosCore
 import MemosOutbox
 import Testing
 
@@ -214,6 +214,42 @@ struct SessionStoreTests {
         #expect(session.lastError == SessionStore.storageUnreadable)
         #expect(credentials.removalCount == 0, "a read that failed must not delete anything")
         #expect(calls.count == 0, "and nothing was sent anywhere on the strength of it")
+    }
+
+    /// The licence is what lets the share extension enqueue a capture, and it is revoked when a
+    /// launch finds no credential. A launch that could not READ the credential has found nothing
+    /// of the sort: it has found storage that will not answer, and revoking on that evidence takes
+    /// the share sheet away from somebody who is still signed in.
+    @Test("a launch that cannot read storage leaves the extension's licence alone")
+    func unreadableStorageKeepsTheLicence() async {
+        let licence = SpyAccountStore()
+        licence.publish(
+            AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "fabian")
+        )
+        // A vault whose namespaces all refuse to read — which is what a device with a broken
+        // keychain hands the session, and what a device that lost an entitlement hands it too.
+        let vault = CredentialVault(
+            CredentialNamespaces(
+                primary: CredentialNamespace(InMemoryCredentials(), reach: .appOnly),
+                legacies: [
+                    CredentialNamespace(UnreadableCredentials(), reach: .sharedWithExtensions),
+                    CredentialNamespace(UnreadableCredentials(), reach: .appOnly),
+                ]
+            )
+        )
+        let session = SessionStore(
+            credentials: vault,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            account: licence
+        )
+
+        await session.restore()
+
+        #expect(licence.clearCount == 0, "the licence was revoked on a read that never answered")
+        #expect(licence.published != nil)
+        #expect(session.lastError == SessionStore.storageUnreadable)
     }
 
     /// A sign-out that could not clear the device must not look like one that did. The token is

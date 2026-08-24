@@ -84,18 +84,23 @@ extension WebAuthenticationLoginPresenter: ASWebAuthenticationPresentationContex
         MainActor.assumeIsolated {
             // A freshly constructed window is attached to nothing and AuthenticationServices
             // refuses to present from it — the anchor must be the window someone is looking at.
+            // `connectedScenes` is a SET: it has no order, so "the first one" is not the one in
+            // front. The foreground-active scenes go first, and only then the rest — otherwise a
+            // background scene's window can be picked to present from on a device with more than
+            // one, and the sheet appears somewhere nobody is looking.
             let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            if let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow)
-                ?? scenes.first?.windows.first
+            let ordered =
+                scenes.filter { $0.activationState == .foregroundActive }
+                + scenes.filter { $0.activationState != .foregroundActive }
+            if let window = ordered.flatMap(\.windows).first(where: \.isKeyWindow)
+                ?? ordered.first?.windows.first
             {
                 return window
             }
             // No window in any connected scene yet. A window built ON a scene is at least
             // attached to something, and it is the only way left to build one: UIWindow's
             // scene-less initialisers are deprecated as of iOS 26 in favour of this one.
-            if let scene = scenes.first(where: { $0.activationState == .foregroundActive })
-                ?? scenes.first
-            {
+            if let scene = ordered.first {
                 return ASPresentationAnchor(windowScene: scene)
             }
             return Self.detachedAnchor()

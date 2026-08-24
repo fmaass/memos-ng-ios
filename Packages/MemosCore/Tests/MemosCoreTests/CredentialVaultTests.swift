@@ -1,5 +1,5 @@
 import Foundation
-import MemosCore
+@testable import MemosCore
 import Testing
 
 /// The device credential's state machine: where it lives, how it gets there from the two places it
@@ -376,8 +376,13 @@ struct CredentialVaultTests {
         #expect(legacy.snapshot()[account] == "memos_pat_old")
     }
 
-    @Test("a namespace being emptied that will not read is stepped over, not raised")
-    func unreadableLegacyNamespaceIsSteppedOver() async throws {
+    /// The namespaces are ordered newest home first, so a namespace that will not answer is not
+    /// one to step over: the value it could not hand back may well have been the newest, and the
+    /// one below it is by definition older. Promoting the older one is how a stale credential
+    /// wins — and the tidy-up that follows a promotion would then delete the newer copy nobody
+    /// could read.
+    @Test("a newer namespace that will not read is not stepped over for an older one")
+    func anUnreadableNewerNamespaceBlocksAnOlderOne() async throws {
         let home = InMemoryCredentials()
         let older = InMemoryCredentials()
         try older.set("memos_pat_old", for: account)
@@ -389,8 +394,202 @@ struct CredentialVaultTests {
             ]
         )
 
+        await #expect(throws: UnreadableCredentials.Unreadable.self) {
+            _ = try await vault.string(for: account)
+        }
+        #expect(
+            home.isEmpty,
+            "an older credential was promoted past a namespace that never answered"
+        )
+        #expect(older.snapshot()[account] == "memos_pat_old", "and nothing was deleted")
+    }
+
+    /// A fallback copy sits BELOW every namespace it is written under, so it may only be written
+    /// when every one of them has been proven absent. A stale value above it is what a read
+    /// answers with first, and the app would run on one token while storing another.
+    @Test("a fallback is refused while a stale copy sits above it")
+    func fallbackRefusedWhileAStaleCopySitsAbove() async throws {
+        let appGroup = InMemoryCredentials()
+        try appGroup.set("memos_pat_old", for: account)
+        let appOnly = InMemoryCredentials()
+        let vault = vault(
+            primary: ForgetfulCredentials(),
+            legacies: [
+                CredentialNamespace(appGroup, reach: .sharedWithExtensions),
+                CredentialNamespace(appOnly, reach: .appOnly),
+            ]
+        )
+
+        await #expect(throws: CredentialStoreError.notReadableBack(account: account)) {
+            try await vault.set("memos_pat_new", for: account)
+        }
+        #expect(appOnly.isEmpty, "a copy written under a stale value would never be answered with")
+        #expect(
+            appGroup.snapshot()[account] == "memos_pat_old",
+            "and nothing is deleted to make room for it"
+        )
+    }
+
+    // MARK: - a namespace this build may not look in
+
+    /// `errSecMissingEntitlement` says the app has lost the right to LOOK, not that there is
+    /// nothing there. Each read path gets its own test, because each one used to have its own way
+    /// of turning an error into "nothing here".
+
+    @Test("a home namespace this build may not look in is raised")
+    func lostEntitlementOnTheHomeNamespaceIsRaised() async {
+        let vault = vault(primary: NotEntitledCredentials(), legacies: [])
+
+        await #expect(throws: Keychain.Failure.notEntitled) {
+            _ = try await vault.string(for: account)
+        }
+    }
+
+    @Test("a namespace being emptied that this build may not look in is raised, not skipped")
+    func lostEntitlementOnALegacyNamespaceIsRaised() async throws {
+        let home = InMemoryCredentials()
+        let older = InMemoryCredentials()
+        try older.set("memos_pat_old", for: account)
+        let vault = vault(
+            primary: home,
+            legacies: [
+                CredentialNamespace(NotEntitledCredentials(), reach: .sharedWithExtensions),
+                CredentialNamespace(older, reach: .appOnly),
+            ]
+        )
+
+        await #expect(throws: Keychain.Failure.notEntitled) {
+            _ = try await vault.string(for: account)
+        }
+        #expect(home.isEmpty, "the token may be in the namespace nobody could look in")
+    }
+
+    @Test("the read the recovery path takes raises it too, and writes nothing")
+    func lostEntitlementOnTheRecoveryReadIsRaised() async {
+        let appOnly = InMemoryCredentials()
+        let vault = vault(
+            primary: NotEntitledCredentials(),
+            legacies: [CredentialNamespace(appOnly, reach: .appOnly)]
+        )
+
+        await #expect(throws: Keychain.Failure.notEntitled) {
+            try await vault.set("memos_pat_new", for: account)
+        }
+        #expect(appOnly.isEmpty)
+    }
+
+    // MARK: - a policy that will not weaken quietly
+
+    /// The probe could not confirm that the token's home is the group the entitlement names. A
+    /// device already holding a credential keeps working — it can read it and it can sign out —
+    /// but nothing new is stored, because storing it somewhere weaker instead is a security
+    /// policy changing itself where nobody would see it.
+    @Test("a home that is not the entitlement's own group reads and clears, and will not store")
+    func aDegradedHomeRefusesWrites() async throws {
+        let home = InMemoryCredentials()
+        try home.set("memos_pat_old", for: account)
+        let vault = CredentialVault(
+            CredentialNamespaces(
+                primary: CredentialNamespace(home, reach: .appOnly),
+                legacies: [],
+                homeIsDedicated: false
+            )
+        )
+
         #expect(try await vault.string(for: account) == "memos_pat_old")
-        #expect(home.snapshot()[account] == "memos_pat_old")
+        await #expect(throws: CredentialStoreError.storageDegraded) {
+            try await vault.set("memos_pat_new", for: account)
+        }
+        #expect(home.snapshot()[account] == "memos_pat_old", "the refused write changed nothing")
+
+        try await vault.remove(account)
+        #expect(home.isEmpty, "a sign-out still clears the device")
+    }
+
+    // MARK: - both halves of a sign-in
+
+    /// A sign-in is two items, and between two calls a sign-out fits. If it lands there the
+    /// device keeps a server address with no token beside it — a state nothing else produces and
+    /// nothing repairs. One call, one critical section, and the sign-out runs before it or after
+    /// it but never inside it.
+    @Test("a sign-out cannot land between the two halves of a sign-in")
+    func bothHalvesOfASignInAreOneCall() throws {
+        let keychain = KeychainNamespaces()
+        let gate = GatedWriteCredentials(wrapping: keychain.grouped(credentials))
+        // Held as the seam the session holds it by: the atomicity has to survive the dispatch
+        // the app actually takes, not only a direct call on the concrete actor.
+        let vault: any CredentialStore = CredentialVault(
+            CredentialNamespaces(
+                primary: CredentialNamespace(gate, reach: .appOnly), legacies: []
+            )
+        )
+        let token = SessionStore.tokenAccount
+        let server = SessionStore.serverAccount
+        let group = credentials
+
+        let persisted = DispatchSemaphore(value: 0)
+        Task.detached {
+            try? await vault.setAll([
+                token: "memos_pat_new", server: "https://memos.example.invalid",
+            ])
+            persisted.signal()
+        }
+        // One half is stored and the other is not.
+        gate.entered.wait()
+
+        let wipeStarted = DispatchSemaphore(value: 0)
+        let wiped = DispatchSemaphore(value: 0)
+        Task.detached {
+            wipeStarted.signal()
+            try? await vault.removeAll([token, server])
+            wiped.signal()
+        }
+        wipeStarted.wait()
+        gate.proceed.signal()
+        persisted.wait()
+        wiped.wait()
+
+        // The sign-out ran after BOTH halves, never between them: what it found, it cleared.
+        #expect(keychain.value(group, token) == nil, "a token was left behind by a sign-out")
+        #expect(keychain.value(group, server) == nil, "a server address outlived its token")
+    }
+
+    /// A write that failed says nothing about what the namespace holds — and a namespace that
+    /// will not READ says nothing either. Writing the fallback copy anyway would put a second
+    /// value underneath a live one nobody can see, which is the app running on one token while
+    /// storing another. The rule this round set is that an unreadable namespace is never read as
+    /// an empty one, and the recovery path is not an exception to it.
+    @Test("a fallback is refused over a home namespace that will not read")
+    func fallbackRefusesAnUnreadableHome() async throws {
+        let home = UnreadableCredentials()
+        let appOnly = InMemoryCredentials()
+        let vault = vault(
+            primary: home,
+            legacies: [CredentialNamespace(appOnly, reach: .appOnly)]
+        )
+
+        await #expect(throws: UnreadableCredentials.Unreadable.self) {
+            try await vault.set("memos_pat_new", for: account)
+        }
+        #expect(appOnly.isEmpty, "a copy written under an unreadable value would be shadowed by it")
+    }
+
+    /// Every namespace failing to read is not "nobody is signed in". It is the storage subsystem
+    /// saying nothing at all, and answering nil for it signs a device out on no evidence — and,
+    /// one layer up, revokes the share extension's licence with it.
+    @Test("a read where nothing could be read is raised, not answered as nothing stored")
+    func everyNamespaceUnreadableIsRaised() async {
+        let vault = vault(
+            primary: InMemoryCredentials(),
+            legacies: [
+                CredentialNamespace(UnreadableCredentials(), reach: .sharedWithExtensions),
+                CredentialNamespace(UnreadableCredentials(), reach: .appOnly),
+            ]
+        )
+
+        await #expect(throws: UnreadableCredentials.Unreadable.self) {
+            _ = try await vault.string(for: account)
+        }
     }
 
     // MARK: - a vault that cannot name its namespaces

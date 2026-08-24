@@ -1,7 +1,7 @@
 import Foundation
 import HTTPTypes
 import MemosAPI
-import MemosCore
+@testable import MemosCore
 import OpenAPIRuntime
 
 /// Substitutes the network, not the client.
@@ -455,6 +455,60 @@ final class UnwipeableCredentials: KeychainNamespaceStore, CredentialStore, @unc
     func remove(_ account: String) throws { throw Stuck() }
 
     func snapshot() -> [String: String] { lock.withLock { storage } }
+}
+
+/// A namespace this build has lost the right to look in — `errSecMissingEntitlement`, which is
+/// what a keychain group missing from the signed entitlements answers. It is the one status that
+/// must never be read as "nothing here": the token may be sitting in exactly this namespace.
+final class NotEntitledCredentials: KeychainNamespaceStore, CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var removals = 0
+
+    func set(_ value: String, for account: String) throws { throw Keychain.Failure.notEntitled }
+    func add(_ value: String, for account: String) throws -> Bool {
+        throw Keychain.Failure.notEntitled
+    }
+    func string(for account: String) throws -> String? { throw Keychain.Failure.notEntitled }
+    func remove(_ account: String) throws { lock.withLock { removals += 1 } }
+
+    var removalCount: Int { lock.withLock { removals } }
+}
+
+/// Stops a namespace's FIRST write halfway, so another operation can be let at it.
+///
+/// The interesting question about a sign-in is what a sign-out arriving mid-way would leave
+/// behind, and the only way to ask it is to hold the sign-in open between its two halves.
+final class GatedWriteCredentials: KeychainNamespaceStore, @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let proceed = DispatchSemaphore(value: 0)
+
+    private let wrapped: any KeychainNamespaceStore
+    private let lock = NSLock()
+    private var armed = true
+
+    init(wrapping wrapped: any KeychainNamespaceStore) { self.wrapped = wrapped }
+
+    func set(_ value: String, for account: String) throws {
+        try wrapped.set(value, for: account)
+        if takeGate() {
+            entered.signal()
+            proceed.wait()
+        }
+    }
+
+    func add(_ value: String, for account: String) throws -> Bool {
+        try wrapped.add(value, for: account)
+    }
+    func string(for account: String) throws -> String? { try wrapped.string(for: account) }
+    func remove(_ account: String) throws { try wrapped.remove(account) }
+
+    private func takeGate() -> Bool {
+        lock.withLock {
+            guard armed else { return false }
+            armed = false
+            return true
+        }
+    }
 }
 
 /// One value written on one thread and read on another, without tripping strict concurrency.

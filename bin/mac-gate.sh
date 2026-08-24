@@ -343,10 +343,22 @@ s_entitlements() {
     echo "--- $f"
     plutil -p "$f"
   done
-  if grep -qF '$(AppIdentifierPrefix)live.discomarder.memosng.credentials' "$app"; then
-    echo "ENTITLEMENT ok: the app declares the app-only credential keychain group"
+  # Read by INDEX, because the order is the security property: the first entry of
+  # keychain-access-groups is the default access group, and the app writes the token to whichever
+  # group that is. A list whose first entry drifted to the app group would put every new token
+  # where the share extension can read it.
+  local first second
+  first="$(plutil -extract keychain-access-groups.0 raw -o - "$app" 2>/dev/null)"
+  second="$(plutil -extract keychain-access-groups.1 raw -o - "$app" 2>/dev/null)"
+  if [ "$first" = '$(AppIdentifierPrefix)live.discomarder.memosng.credentials' ]; then
+    echo "ENTITLEMENT ok: the credential group is FIRST, so it is the default access group"
   else
-    echo "ENTITLEMENT FAIL: $app does not declare the credential keychain group"; rc=1
+    echo "ENTITLEMENT FAIL: the first keychain access group is '$first'"; rc=1
+  fi
+  if [ "$second" = 'group.live.discomarder.memosng' ]; then
+    echo "ENTITLEMENT ok: the app group is named as a migration source, after it"
+  else
+    echo "ENTITLEMENT FAIL: the second keychain access group is '$second'"; rc=1
   fi
   if grep -q 'keychain-access-groups' "$ext"; then
     echo "ENTITLEMENT FAIL: $ext declares a keychain access group; the token would be readable"
@@ -550,17 +562,19 @@ s_deps() {
   else
     echo "DEPRULE FAIL: positive control missing — MemosFeatures does not reference MemosCore"; rc=1
   fi
-  # Every raw Security call lives in ONE file. A SecItemDelete whose query names no access group
-  # matches items in every group the app can reach, which is how the device credential deleted
-  # itself; confining the SecItem calls to Keychain.swift, where the access group is not optional,
-  # is what makes "every query names its group" checkable instead of habitual. Sources only —
-  # a test may plant a corrupt item to prove the wrapper raises on it.
+  # Every raw Security call lives in ONE file. A delete whose query names no access group matches
+  # items in every group the app can reach, which is how the device credential deleted itself;
+  # confining those calls to Keychain.swift, where the access group is not optional, is what makes
+  # "every query names its group" checkable instead of habitual. Sources only — a test may plant a
+  # corrupt item to prove the wrapper raises on it. Like the dependency rule this is a LITERAL
+  # text grep, so no other source file may carry the string at all, comments included: prose
+  # elsewhere names the statuses in words.
   echo "--- keychain rule (raw SecItem calls live in Keychain.swift) ---"
   local strays
   strays="$(grep -rl 'SecItem' --include='*.swift' Packages/*/Sources Sources \
     | grep -v '^Packages/MemosCore/Sources/MemosCore/Security/Keychain.swift$')"
   if [ -n "$strays" ]; then
-    echo "KEYCHAIN FAIL: raw SecItem calls outside Keychain.swift:"
+    echo "KEYCHAIN FAIL: the Security call prefix appears outside Keychain.swift:"
     echo "$strays"
     rc=1
   else

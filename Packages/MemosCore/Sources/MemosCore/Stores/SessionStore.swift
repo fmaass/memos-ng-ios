@@ -420,9 +420,14 @@ public final class SessionStore {
     ) async -> CredentialPersistence {
         guard clearAccountLicence() else { return .licenceNotRevoked }
         do {
-            try await credentials.set(token, for: Self.tokenAccount)
-            try await credentials.set(
-                configuration.baseURL.absoluteString, for: Self.serverAccount)
+            // ONE call. Two awaits are two critical sections with a gap between them, and this
+            // method's own callers run in that gap: a 401 handled or a sign-out tapped between
+            // the token landing and the address landing would wipe the token and leave the
+            // address — a state nothing else produces and nothing repairs.
+            try await credentials.setAll([
+                Self.tokenAccount: token,
+                Self.serverAccount: configuration.baseURL.absoluteString,
+            ])
             return .stored
         } catch {
             let detail = String(describing: error)
@@ -467,27 +472,20 @@ public final class SessionStore {
     /// who signed out has no way of knowing.
     private func wipeCredential() async {
         clearAccountLicence()
-        // Both, whatever either does: a wipe that stopped at the first failure would leave the
-        // server address next to a token it could not delete. A failure is REMEMBERED rather than
-        // dropped — a device that believes it is signed out while a credential is still on it is
-        // the one thing a sign-out must never do quietly.
+        // Both halves, whatever either does: a wipe that stopped at the first failure would
+        // leave the server address next to a token it could not delete. A failure is REMEMBERED
+        // rather than dropped — a device that believes it is signed out while a credential is
+        // still on it is the one thing a sign-out must never do quietly.
         credentialWipeFailed = false
         do {
-            try await credentials.remove(Self.tokenAccount)
+            // ONE call, the mirror of the sign-in's: a sign-in that landed between two deletions
+            // would have half of itself deleted behind it.
+            try await credentials.removeAll([Self.tokenAccount, Self.serverAccount])
         } catch {
             credentialWipeFailed = true
             let detail = String(describing: error)
             MemosLog.session.error(
-                "the device credential would not delete: \(detail, privacy: .public)"
-            )
-        }
-        do {
-            try await credentials.remove(Self.serverAccount)
-        } catch {
-            credentialWipeFailed = true
-            let detail = String(describing: error)
-            MemosLog.session.error(
-                "the stored server address would not delete: \(detail, privacy: .public)"
+                "the stored credential would not delete: \(detail, privacy: .public)"
             )
         }
         client = nil

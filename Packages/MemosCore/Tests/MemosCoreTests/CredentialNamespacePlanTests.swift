@@ -1,5 +1,5 @@
 import Foundation
-import MemosCore
+@testable import MemosCore
 import Security
 import Testing
 
@@ -161,6 +161,19 @@ struct CredentialNamespacePlanTests {
     }
 
     // MARK: - what this build can actually reach
+
+    /// The entitlement is a line in a YAML file until the running build agrees with it. The group
+    /// it names is the DEFAULT access group exactly when it is in effect, and the probe reads that
+    /// back — so this is the assertion that says the keychain entitlement actually arrived. A
+    /// build where it is false still reads and still signs out; it stores nothing new at all.
+    @Test("the entitlement's own group is the one this build writes to")
+    func theDedicatedGroupIsInEffect() throws {
+        let plan = try #require(DeviceCredentials.plan())
+        #expect(
+            plan.dedicatedGroupInEffect,
+            "the probe reported \(plan.primary.accessGroup), which is not the entitlement's group"
+        )
+    }
 
     /// The property the whole design rests on: this build can NAME a namespace of its own, and it
     /// is not the app group. Without a name there is nothing to migrate from, nothing to delete,
