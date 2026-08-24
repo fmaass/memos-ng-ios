@@ -83,6 +83,8 @@ final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     private let lock = NSLock()
     private var bodies: [Int: Data] = [:]
     private var handler: (any OutboxChunkHandling)?
+    /// What is still being written to disk. The system's completion handler waits on this.
+    private let pending = PendingHandlerWork()
 
     func attach(_ handler: any OutboxChunkHandling) {
         lock.withLock { self.handler = handler }
@@ -110,10 +112,21 @@ final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked 
             errorDescription: error?.localizedDescription
         )
         guard let handler = lock.withLock({ self.handler }) else { return }
-        Task { await handler.handle(result) }
+        // Counted BEFORE the work is spawned: the session can say "no more events" in the very
+        // next callback, and the app must not answer that until this has reached the disk.
+        pending.enter()
+        Task {
+            await handler.handle(result)
+            pending.leave()
+        }
     }
 
+    /// The session has delivered everything it had. Only once the handling of it has finished is
+    /// the system told — answering earlier is an invitation to be suspended mid-write, with the
+    /// server's byte count banked nowhere.
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        Task { @MainActor in OutboxBackgroundCompletion.shared.fire() }
+        pending.onDrained {
+            Task { @MainActor in OutboxBackgroundCompletion.shared.fire() }
+        }
     }
 }

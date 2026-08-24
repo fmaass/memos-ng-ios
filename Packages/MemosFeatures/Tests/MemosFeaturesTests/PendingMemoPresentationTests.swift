@@ -160,3 +160,28 @@ struct PickedMediaTests {
         )
     }
 }
+
+@Suite("Attaching files")
+struct ComposeAttachmentsTests {
+    @Test("what the attach row says about what was picked")
+    func summaries() {
+        #expect(ComposeAttachments.summary(imported: 0, failed: 0) == nil)
+        #expect(ComposeAttachments.summary(imported: 1, failed: 0) == "1 file attached")
+        #expect(ComposeAttachments.summary(imported: 3, failed: 0) == "3 files attached")
+        #expect(
+            ComposeAttachments.summary(imported: 2, failed: 1)
+                == "1 of 3 could not be read. Remove them, or pick them again."
+        )
+    }
+
+    @Test("a file that could not be read blocks Post rather than being dropped quietly")
+    func failedImportBlocksPost() {
+        #expect(ComposeAttachments.canPost(text: "hi", imported: 0, failed: 0, isBusy: false))
+        #expect(ComposeAttachments.canPost(text: "", imported: 1, failed: 0, isBusy: false))
+        #expect(!ComposeAttachments.canPost(text: "", imported: 0, failed: 0, isBusy: false))
+        #expect(!ComposeAttachments.canPost(text: "   ", imported: 0, failed: 0, isBusy: false))
+        // The one that matters: words plus a photo that did not arrive is NOT postable.
+        #expect(!ComposeAttachments.canPost(text: "hi", imported: 1, failed: 1, isBusy: false))
+        #expect(!ComposeAttachments.canPost(text: "hi", imported: 1, failed: 0, isBusy: true))
+    }
+}

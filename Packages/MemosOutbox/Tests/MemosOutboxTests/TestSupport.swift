@@ -143,6 +143,35 @@ final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
     var idempotencyKeys: [UUID] { lock.withLock { attempts } }
 }
 
+/// A clock a test can move, for the parts of the drain that only happen later.
+final class MutableClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: Date
+
+    init(_ instant: Date) { self.instant = instant }
+
+    var now: Date { lock.withLock { instant } }
+
+    func advance(_ interval: TimeInterval) {
+        lock.withLock { instant += interval }
+    }
+}
+
+/// Credentials that can disappear mid-run — a cold background wake before the session is
+/// restored, or a sign-out between two chunks.
+final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: OutboxCredentials?
+
+    init(_ current: OutboxCredentials?) { self.current = current }
+
+    func set(_ credentials: OutboxCredentials?) {
+        lock.withLock { current = credentials }
+    }
+
+    func currentCredentials() async -> OutboxCredentials? { lock.withLock { current } }
+}
+
 struct StaticCredentials: OutboxCredentialsProviding {
     var credentials: OutboxCredentials?
 
@@ -223,4 +252,14 @@ enum Fixture {
             chunkSize: chunkSize
         )
     }
+}
+
+/// Counts calls from a `@Sendable` closure without tripping strict concurrency.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() { lock.withLock { value += 1 } }
+
+    var count: Int { lock.withLock { value } }
 }

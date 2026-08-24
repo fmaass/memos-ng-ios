@@ -260,6 +260,11 @@ public actor OutboxEngine: OutboxChunkHandling {
     // MARK: - chunk answers
 
     /// Called by the background session, possibly in a process launched for this alone.
+    ///
+    /// This is the one entry point that runs in a process which may know nothing else: no screen,
+    /// no restored session, nothing but a finished upload. So it banks what the server said FIRST
+    /// and needs a credential only for the parts that talk to the server again. A byte count
+    /// thrown away because nobody was signed in yet is a chunk re-uploaded for no reason.
     public func handle(_ result: ChunkResult) async {
         await repository.removeChunk(
             at: repository.chunkURL(
@@ -268,28 +273,31 @@ public actor OutboxEngine: OutboxChunkHandling {
                 offset: result.identity.offset
             )
         )
-        guard let credentials = await credentials.currentCredentials(),
-            let job = await repository.job(result.identity.jobID)
+        guard let job = await repository.job(result.identity.jobID) else { return }
+        // An answer from a superseded attempt — a task a reconcile cancelled, or a duplicate that
+        // outlived the one whose answer already landed. The job has moved on, and applying this
+        // would rewind the cursor and re-send bytes the server already holds.
+        guard let file = job.file(result.identity.fileID),
+            file.bytesConfirmed == result.identity.offset
         else { return }
 
         let fileID = result.identity.fileID
+        let credentials = await credentials.currentCredentials()
         var next = job
+        // Set when only the server can say where the upload stands, which is the one decision
+        // here that cannot be made offline.
+        var askTheServer: String?
+
         switch result.statusCode {
         case .some(let code) where (200..<300).contains(code):
             if let session = OutboxWire.decodeSession(result.body) {
                 next = job.advancing(fileID: fileID, bytesConfirmed: session.bytesReceived)
-            } else if let resynced = await resync(job, fileID: fileID, credentials: credentials) {
-                next = resynced
             } else {
-                next = job.backingOff(at: clock(), error: "The server's answer was unreadable.")
+                askTheServer = "The server's answer was unreadable."
             }
         case .some(409):
             // An offset gap: the server and this device disagree, and the server is right.
-            if let resynced = await resync(job, fileID: fileID, credentials: credentials) {
-                next = resynced
-            } else {
-                next = job.backingOff(at: clock(), error: "The upload lost its place.")
-            }
+            askTheServer = "The upload lost its place."
         case .some(404):
             next = job.clearingLostUpload(fileID: fileID)
         case .some(let code) where (400..<500).contains(code) && code != 408 && code != 429:
@@ -301,8 +309,22 @@ public actor OutboxEngine: OutboxChunkHandling {
                 at: clock(), error: result.errorDescription ?? "The upload did not finish."
             )
         }
+
+        if let askTheServer {
+            if let credentials,
+                let resynced = await resync(job, fileID: fileID, credentials: credentials)
+            {
+                next = resynced
+            } else {
+                next = job.backingOff(at: clock(), error: askTheServer)
+            }
+        }
+
         await save(next)
         await onChange()
+        // Nobody is signed in yet (a cold background wake, before the session is restored). What
+        // the server said is on disk; the next drain carries on from there.
+        guard let credentials else { return }
         await advance(next, credentials: credentials)
         await onChange()
     }

@@ -85,3 +85,27 @@ nonisolated public struct PickedMedia: Transferable, Identifiable, Equatable {
         StagedSource(url: url, filename: filename, mime: mime, lastModified: lastModified)
     }
 }
+
+/// What the attach row has to say about what was picked.
+///
+/// A file the picker cannot export — an iCloud original that never came down, a corrupt asset — is
+/// the one case that must not pass quietly: dropping it silently means someone posts a memo
+/// believing a photo went with it and finds out weeks later that it did not.
+nonisolated public enum ComposeAttachments {
+    public static func summary(imported: Int, failed: Int) -> String? {
+        if failed > 0 {
+            let total = imported + failed
+            return "\(failed) of \(total) could not be read. Remove them, or pick them again."
+        }
+        guard imported > 0 else { return nil }
+        return imported == 1 ? "1 file attached" : "\(imported) files attached"
+    }
+
+    /// A capture may be posted when it has words or files, and never while a pick is unresolved:
+    /// posting now would silently leave a photo behind.
+    public static func canPost(text: String, imported: Int, failed: Int, isBusy: Bool) -> Bool {
+        guard failed == 0, !isBusy else { return false }
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasText || imported > 0
+    }
+}

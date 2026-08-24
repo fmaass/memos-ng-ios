@@ -47,10 +47,14 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 await MainActor.run { session.state.user?.subject }
             }
         )
-        // Registration has to happen before launch finishes, whatever else is true of this launch.
+        // Registration has to happen before launch finishes, whatever else is true of this
+        // launch. The queue is named EXPLICITLY: with `nil` the system delivers the launch handler
+        // on a background queue, where assuming main-actor isolation is a trap rather than a hop —
+        // and a `BGTask` is not `Sendable`, so hopping with a Task would mean carrying it across
+        // an isolation boundary unsafely. Asking for the main queue makes the assumption true.
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.refreshIdentifier,
-            using: nil
+            using: .main
         ) { task in
             MainActor.assumeIsolated { self.run(task) }
         }
@@ -71,17 +75,42 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
             return
         }
         OutboxBackgroundCompletion.shared.store(completionHandler)
-        Task { await outbox?.start() }
+        Task { @MainActor in await self.startOutbox() }
+    }
+
+    /// Everything a background launch has to do before the queue can move.
+    ///
+    /// This process may exist only because an upload finished: no window, no `RootView`, and so
+    /// nobody to restore the stored credential. The outbox will not send a capture it cannot bind
+    /// to an account, so without this a woken app drains nothing at all and the job sits there
+    /// looking as though it had been tried.
+    private func startOutbox() async {
+        if session.state.user == nil {
+            await session.restore()
+        }
+        await outbox?.start()
     }
 
     private func run(_ task: BGTask) {
         // Re-armed FIRST: a drain that crashes must not also end the chain of future wakes.
         scheduleRefresh()
-        let work = Task { @MainActor in
-            await outbox?.start()
-            task.setTaskCompleted(success: true)
+
+        let run = BackgroundRun()
+        // Set BEFORE the work starts. The system may expire a task the moment it hands it over,
+        // and whichever of the two arrives first, the system is told exactly once — never twice,
+        // and never not at all, which is what gets an app's background time taken away.
+        task.expirationHandler = {
+            run.expire()
+            if run.claimCompletion() { task.setTaskCompleted(success: false) }
         }
-        task.expirationHandler = { work.cancel() }
+        run.attach(
+            Task { @MainActor in
+                await self.startOutbox()
+                if run.claimCompletion() {
+                    task.setTaskCompleted(success: !Task.isCancelled)
+                }
+            }
+        )
     }
 
     private func scheduleRefresh() {

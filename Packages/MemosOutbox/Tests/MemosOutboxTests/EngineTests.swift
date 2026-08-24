@@ -8,9 +8,11 @@ private struct Harness {
     let repository: OutboxRepository
     let http: ScriptedHTTP
     let scheduler: ScriptedScheduler
-    let completion: ScriptedCompletion
+    let completion: any MemoCompleting
     let engine: OutboxEngine
     let job: UploadJob
+    let clock: MutableClock
+    let credentials: SwitchableCredentials
     let now = Date(timeIntervalSince1970: 1_750_000_000)
 
     var file: OutboxFile { job.files[0] }
@@ -19,7 +21,7 @@ private struct Harness {
         bytes: Int = 1000,
         content: String = "on the beach",
         http: ScriptedHTTP,
-        completion: ScriptedCompletion = ScriptedCompletion([.created(uid: "m1")]),
+        completion: (any MemoCompleting)? = nil,
         scheduler: ScriptedScheduler = ScriptedScheduler(),
         credentials: OutboxCredentials? = Fixture.credentials(),
         binding: AccountBinding = Fixture.binding()
@@ -32,6 +34,11 @@ private struct Harness {
             sources = [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
         }
         let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let clock = MutableClock(now)
+        let provider = SwitchableCredentials(credentials)
+        // Nil means the REAL completion path, driven by the same scripted server: the tests that
+        // care about what a create actually sends and reads use that rather than a stand-in.
+        let completion = completion ?? MemoCompletionEndpoint(http: http)
         let job = try await repository.enqueue(
             content: content,
             visibility: "PRIVATE",
@@ -41,11 +48,11 @@ private struct Harness {
         )
         let engine = OutboxEngine(
             repository: repository,
-            credentials: StaticCredentials(credentials: credentials),
+            credentials: provider,
             http: http,
             scheduler: scheduler,
             completion: completion,
-            clock: { now }
+            clock: { clock.now }
         )
         return Harness(
             root: root,
@@ -54,7 +61,9 @@ private struct Harness {
             scheduler: scheduler,
             completion: completion,
             engine: engine,
-            job: job
+            job: job,
+            clock: clock,
+            credentials: provider
         )
     }
 
@@ -171,12 +180,13 @@ struct EngineTests {
 
     @Test("a memo leaves the outbox only when the server has confirmed it")
     func completesAndClearsTheQueue() async throws {
-        let harness = try await Harness.make(bytes: 0, http: .standard())
+        let completion = ScriptedCompletion([.created(uid: "m1")])
+        let harness = try await Harness.make(bytes: 0, http: .standard(), completion: completion)
         defer { harness.cleanUp() }
 
         await harness.engine.drain()
 
-        #expect(harness.completion.idempotencyKeys == [harness.job.idempotencyKey])
+        #expect(completion.idempotencyKeys == [harness.job.idempotencyKey])
         #expect(await harness.reload() == nil)
         #expect(await harness.repository.loadJobs().isEmpty)
     }
@@ -358,5 +368,196 @@ struct EngineTests {
         let released = try #require(await harness.reload())
         #expect(released.state == .waiting)
         #expect(released.holdReason == nil)
+    }
+}
+
+@Suite("Not letting go too early")
+struct DurabilityTests {
+    /// A create that answers 2xx with something this client cannot read is NOT proof a memo was
+    /// stored — and the originals are deleted on that proof. The capture stays, the retry carries
+    /// the same key, and the replay is the second chance to read the same answer.
+    @Test("an unreadable success keeps the capture, and the replay finishes it")
+    func unreadableSuccessDoesNotDelete() async throws {
+        let attempts = Counter()
+        let http = ScriptedHTTP { request in
+            let path = request.url?.path() ?? ""
+            switch (request.httpMethod ?? "", path) {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("POST", "/api/memos"):
+                attempts.increment()
+                // The first answer is a 201 nobody can read; the replay is readable.
+                let body =
+                    attempts.count == 1
+                    ? Data("<html>gateway</html>".utf8) : Data(#"{"uid":"m1"}"#.utf8)
+                return OutboxHTTPResponse(statusCode: 201, body: body)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+        // No `completion:` — the real completion path, so the decode is what is under test.
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        let kept = try #require(await harness.reload())
+        #expect(kept.state == .waiting)
+        #expect(kept.attemptCount == 1)
+        #expect(kept.lastError?.contains("same key") == true)
+
+        harness.clock.advance(20 * 60)
+        await harness.engine.drain()
+
+        #expect(await harness.reload() == nil)
+        #expect(attempts.count == 2)
+        let keys = harness.http.requests(method: "POST").compactMap { request -> String? in
+            guard let body = request.httpBody,
+                let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            else { return nil }
+            return json["idempotency_key"] as? String
+        }
+        #expect(
+            keys == [harness.job.idempotencyKey.uuidString, harness.job.idempotencyKey.uuidString])
+    }
+
+    /// A cold background wake can arrive before anyone has restored the stored credential. The
+    /// server's byte count must still reach the disk — throwing it away means re-uploading a
+    /// chunk the server already has, every time.
+    @Test("a chunk answer is banked even when nobody is signed in yet")
+    func banksProgressWithoutCredentials() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let identity = harness.scheduler.uploads[0].identity
+
+        // The process was relaunched for this callback alone: no session yet.
+        harness.credentials.set(nil)
+        await harness.engine.handle(
+            ChunkResult(
+                identity: identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].bytesConfirmed == 400)
+        // Nothing was scheduled without a credential, and nothing was lost either.
+        #expect(harness.scheduler.uploads.count == 1)
+
+        harness.credentials.set(Fixture.credentials())
+        await harness.engine.drain()
+        #expect(harness.scheduler.uploads.count == 2)
+        #expect(harness.scheduler.uploads[1].identity.offset == 400)
+    }
+
+    /// A task a reconcile cancelled can still report. Its answer describes an offset the job has
+    /// moved past, and applying it would rewind the cursor and re-send bytes the server holds.
+    @Test("an answer from a superseded attempt is ignored")
+    func ignoresStaleChunkAnswers() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let first = harness.scheduler.uploads[0].identity
+
+        await harness.engine.handle(
+            ChunkResult(
+                identity: first,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+        #expect(try #require(await harness.reload()).files[0].bytesConfirmed == 400)
+
+        // The same task reports again — a duplicate, or a cancelled one that landed late.
+        await harness.engine.handle(
+            ChunkResult(
+                identity: first,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].bytesConfirmed == 400)
+        // No third chunk was queued off the back of the stale answer.
+        #expect(harness.scheduler.uploads.count == 2)
+    }
+}
+
+@Suite("Background bookkeeping")
+struct BackgroundWorkTests {
+    @Test("the system is told a session finished only once its results are written")
+    func completionWaitsForHandlerWork() async {
+        let pending = PendingHandlerWork()
+        let fired = Counter()
+
+        pending.enter()
+        pending.onDrained { fired.increment() }
+        // The session says "no more events" while the last result is still being written.
+        #expect(fired.count == 0)
+        #expect(pending.outstandingCount == 1)
+
+        pending.leave()
+        #expect(fired.count == 1)
+    }
+
+    @Test("nothing outstanding answers immediately, and only once")
+    func drainsImmediatelyWhenIdle() {
+        let pending = PendingHandlerWork()
+        let fired = Counter()
+        pending.onDrained { fired.increment() }
+        #expect(fired.count == 1)
+
+        pending.enter()
+        pending.leave()
+        #expect(fired.count == 1)
+    }
+
+    @Test("several results in flight all have to land")
+    func waitsForEveryOutstandingResult() {
+        let pending = PendingHandlerWork()
+        let fired = Counter()
+        pending.enter()
+        pending.enter()
+        pending.onDrained { fired.increment() }
+        pending.leave()
+        #expect(fired.count == 0)
+        pending.leave()
+        #expect(fired.count == 1)
+    }
+
+    @Test("a background task's end is reported exactly once, whoever gets there first")
+    func completionIsClaimedOnce() {
+        let run = BackgroundRun()
+        #expect(run.claimCompletion())
+        #expect(!run.claimCompletion())
+        #expect(run.isFinished)
+    }
+
+    @Test("work attached after the run ended is cancelled rather than left going")
+    func attachAfterExpiry() async {
+        let run = BackgroundRun()
+        _ = run.claimCompletion()
+        let work = Task<Void, Never> { try? await Task.sleep(for: .seconds(30)) }
+        run.attach(work)
+        await work.value
+        #expect(work.isCancelled)
+    }
+
+    @MainActor
+    @Test("expiring stops the work in flight")
+    func expireCancels() async {
+        let run = BackgroundRun()
+        let started = Counter()
+        let work = Task<Void, Never> {
+            started.increment()
+            try? await Task.sleep(for: .seconds(30))
+        }
+        run.attach(work)
+        run.expire()
+        await work.value
+        #expect(work.isCancelled)
     }
 }

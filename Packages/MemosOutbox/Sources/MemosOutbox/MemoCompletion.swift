@@ -2,9 +2,12 @@ import Foundation
 
 /// How creating the memo ended.
 public enum MemoCompletionOutcome: Sendable, Equatable {
-    /// The memo exists, exactly once, with every original linked to it. This is the ONLY outcome
-    /// that lets a job — and the originals it holds — leave the outbox.
-    case created(uid: String?)
+    /// The memo exists, exactly once, with every original linked to it, and the server SAID SO by
+    /// naming it. This is the ONLY outcome that lets a job — and the originals it holds — leave
+    /// the outbox, so it carries the uid rather than an optional: a success nobody can read is not
+    /// proof that anything was stored, and deleting someone's only copy of a photo on the strength
+    /// of a status code is the one mistake in this file that cannot be undone.
+    case created(uid: String)
     /// The server refused to link the uploads and said which ones, per file.
     case unlinkable(UploadsUnlinkableFailure)
     /// Try again later with the same idempotency key: a timeout, a 5xx, a lost connection. Safe by
@@ -74,7 +77,13 @@ public struct MemoCompletionEndpoint: MemoCompleting {
     public func outcome(for response: OutboxHTTPResponse) -> MemoCompletionOutcome {
         switch response.statusCode {
         case 200, 201:
-            return .created(uid: Self.uid(from: response.body))
+            guard let uid = Self.uid(from: response.body) else {
+                // A success this client cannot read. The capture STAYS, and the retry carries the
+                // same idempotency key — a replay answers with the memo the first call stored, so
+                // the next attempt is another chance to read the same answer, not a second memo.
+                return .retry("The server's answer could not be read; retrying with the same key.")
+            }
+            return .created(uid: uid)
         case 409:
             if let failure = UploadsUnlinkableFailure.decode(response.body) {
                 return .unlinkable(failure)

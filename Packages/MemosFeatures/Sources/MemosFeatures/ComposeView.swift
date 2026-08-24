@@ -38,6 +38,10 @@ public struct ComposeView: View {
     @State private var visibility: MemoVisibility?
     @State private var picked: [PhotosPickerItem] = []
     @State private var attachments: [PickedMedia] = []
+    @State private var failedImports = 0
+    /// Which pick the loading in flight belongs to. Choosing again before the first load has
+    /// finished is ordinary behaviour, and the older, slower result must not overwrite the newer.
+    @State private var importGeneration = 0
     @State private var isImporting = false
     @State private var isSaving = false
     @FocusState private var editorFocused: Bool
@@ -57,10 +61,15 @@ public struct ComposeView: View {
         return false
     }
 
-    /// A memo with photos and no words is a memo. Only an empty capture is refused.
+    /// A memo with photos and no words is a memo. Only an empty capture — or one whose files did
+    /// not all arrive — is refused.
     private var canSave: Bool {
-        let hasText = !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return (hasText || !attachments.isEmpty) && !isSaving && !isImporting
+        ComposeAttachments.canPost(
+            text: content,
+            imported: attachments.count,
+            failed: failedImports,
+            isBusy: isSaving || isImporting
+        )
     }
 
     public var body: some View {
@@ -124,13 +133,18 @@ public struct ComposeView: View {
                     ProgressView()
                 }
             }
-            if !attachments.isEmpty {
-                Text(
-                    attachments.count == 1
-                        ? "1 file attached" : "\(attachments.count) files attached"
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            if let summary = ComposeAttachments.summary(
+                imported: attachments.count, failed: failedImports
+            ) {
+                HStack(spacing: 8) {
+                    Text(summary)
+                        .font(.footnote)
+                        .foregroundStyle(failedImports > 0 ? .orange : .secondary)
+                    if failedImports > 0 {
+                        Button("Remove them") { clearPicked() }
+                            .font(.footnote)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -143,15 +157,31 @@ public struct ComposeView: View {
     /// The picker hands back its own temporary export; each one is copied here, in order, and the
     /// copies are what the outbox takes over.
     private func importPicked(_ items: [PhotosPickerItem]) async {
+        importGeneration += 1
+        let generation = importGeneration
         isImporting = true
-        defer { isImporting = false }
         var imported: [PickedMedia] = []
+        var failed = 0
         for item in items {
             guard let media = try? await item.loadTransferable(type: PickedMedia.self) else {
+                // Counted, not skipped: see ComposeAttachments.
+                failed += 1
                 continue
             }
             imported.append(media)
         }
+        // A newer pick started while this one was loading; that one owns the outcome.
+        guard generation == importGeneration else { return }
         attachments = imported
+        failedImports = failed
+        isImporting = false
+    }
+
+    private func clearPicked() {
+        importGeneration += 1
+        picked = []
+        attachments = []
+        failedImports = 0
+        isImporting = false
     }
 }
