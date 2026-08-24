@@ -58,7 +58,7 @@ public struct SignedMediaURL: Sendable, Equatable {
     }
 }
 
-/// The image cache the timeline uses.
+/// The image cache the timeline uses — the ON-DISK, across-launches half of the picture.
 ///
 /// Two mechanisms, and it is worth being exact about which does what. The server's
 /// `Cache-Control: private, max-age` is what normally bounds an entry's life, and `URLCache`
@@ -66,6 +66,10 @@ public struct SignedMediaURL: Sendable, Equatable {
 /// so `evictExpired` is the client's own enforcement: before an image is requested, an entry
 /// whose signature has already lapsed is dropped, because it can only be stale and re-serving it
 /// hides the moment the signature stopped working.
+///
+/// A cache only counts if the session doing the fetching actually holds it, which is why the
+/// image layer builds its own session around one of these (`MediaSession`) instead of installing
+/// it into `URLCache.shared` and hoping the shared session had not already been made.
 public enum MediaCache {
     /// Sized for a scrolling timeline of thumbnails, not for an offline archive: an on-disk cache
     /// that outgrows the signatures in it is just a pile of URLs that no longer verify.
@@ -82,21 +86,27 @@ public enum MediaCache {
 
     /// Drops a cached response whose signed URL has expired. Returns whether anything was dropped.
     ///
-    /// `AsyncImage` loads through `URLSession.shared`, which reads `URLCache.shared`, and it takes
-    /// a `URL` rather than a `URLRequest` — so a per-request cache policy cannot be handed to it.
-    /// Evicting the entry first achieves the same thing from the other side.
+    /// A response held past `exp` can only be stale, and the signature it was fetched under will
+    /// not verify again — so re-serving it hides the moment the URL stopped working, and the fix
+    /// is a freshly minted URL from the feed rather than a reload of this one.
+    ///
+    /// The cache it names by default is the MEDIA session's, not `URLCache.shared`: images are
+    /// fetched through `MediaSession`, and evicting out of a cache the fetches never consult is a
+    /// no-op that reads like an eviction.
     @discardableResult
     public static func evictExpired(
         _ url: URL,
         at now: Date = Date(),
-        cache: URLCache = .shared
+        cache: URLCache = MediaSession.shared.cache
     ) -> Bool {
         guard SignedMediaURL(url: url).isExpired(at: now) else { return false }
         cache.removeCachedResponse(for: URLRequest(url: url))
         return true
     }
 
-    /// For a caller that wants its own session rather than the shared one.
+    /// The configuration `MediaSession` is built from. `useProtocolCachePolicy` is named rather
+    /// than left implicit: it is the policy that makes the server's `max-age`/`ETag` decide, which
+    /// is the whole reason the tiers carry those headers.
     public static func makeSessionConfiguration(cache: URLCache) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.default
         configuration.urlCache = cache

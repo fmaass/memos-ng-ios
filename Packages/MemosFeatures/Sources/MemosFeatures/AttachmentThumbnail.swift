@@ -1,35 +1,31 @@
 import MemosCore
 import SwiftUI
 
-/// Which of the three things a tile can be showing. `AsyncImagePhase` is not `Equatable` and
-/// carries the loaded image with it; this is the part a test can name.
+/// Which of the three things a tile can be showing. Named separately from the loader so a stalled
+/// load can be rendered and asserted without a network.
 public enum ThumbnailPhase: Equatable, Sendable {
     case loading
     case loaded
     case failed
-
-    /// Anything that is not a delivered image or a reported failure is still loading — including
-    /// whatever cases a future SwiftUI adds, which must not turn into a warning triangle.
-    public static func of(_ phase: AsyncImagePhase) -> ThumbnailPhase {
-        switch phase {
-        case .success: .loaded
-        case .failure: .failed
-        default: .loading
-        }
-    }
 }
 
 /// One attachment in the timeline.
 ///
-/// `AsyncImage` loads through `URLSession.shared`, and therefore through the bounded
-/// `URLCache.shared` the app installs at launch. How long an entry lives is normally the server's
-/// `Cache-Control` decision; what the server cannot express is that the URL's own signature
-/// expires, so an entry whose signature has lapsed is evicted here before the image is requested
-/// (`MediaCache.evictExpired`).
+/// The photo comes from `MediaImageLoader`, which is the whole point of this view's shape. A
+/// `List` builds a fresh `AttachmentThumbnail` every time a row scrolls back, so the tile is asked
+/// for its picture again and again — and with `AsyncImage` each of those started at "no image" and
+/// flashed the blurhash before the photo reappeared, when it did not go back to the server for it.
+/// Here
+/// `MediaImageLoader.cached(for:)` is read in `body`, synchronously: a remounted row that has been
+/// seen before paints the decoded photo in the very frame it appears in, and never enters
+/// `.loading` at all.
 ///
-/// Underneath every tile, always, is the attachment's own BlurHash. That is what a tile shows
-/// while the photo is in flight: the picture's colours, in the picture's shape — not a spinner,
-/// and not a grey box that makes the whole timeline reflow when the image lands.
+/// A tile that has NOT been seen keeps the old sequence exactly: blurhash first, photo when it
+/// lands. Underneath every tile, always, is the attachment's own BlurHash — the picture's colours,
+/// in the picture's shape, not a spinner and not a grey box that reflows the timeline.
+///
+/// The signature is still enforced here: an entry whose signed URL has lapsed can only be stale,
+/// so it is dropped from the media cache before the fetch (`MediaCache.evictExpired`).
 struct AttachmentThumbnail: View {
     let attachment: MemoAttachment
     var tier: MediaTier = .thumb
@@ -38,34 +34,62 @@ struct AttachmentThumbnail: View {
     /// the image lands — and the blurhash underneath gets that identical frame.
     var slot: AttachmentSlot
 
+    /// What THIS view instance loaded, tagged with the key it was loaded for. The tag is not
+    /// bookkeeping: a tile whose attachment or tier changes under it would otherwise keep painting
+    /// the previous photo until the new one arrived, which is the one wrong picture a cache is
+    /// able to show.
+    @State private var loaded: (key: MediaImageKey, image: Image)?
+    /// The key whose load came back with nothing. Also tagged, for the same reason.
+    @State private var failedKey: MediaImageKey?
+
     private var url: URL? { MemoPresentation.url(for: attachment, tier: tier) }
+    private var key: MediaImageKey { MediaImageLoader.key(for: attachment, tier: tier) }
+
+    /// Read in `body`, and synchronous on both paths. The cache lookup is what makes a scroll-back
+    /// free; `loaded` is only how an async arrival gets a frame to be drawn in.
+    private var image: Image? {
+        if let loaded, loaded.key == key { return loaded.image }
+        return MediaImageLoader.cached(for: key)
+    }
+
+    private var phase: ThumbnailPhase {
+        if image != nil { return .loaded }
+        if url == nil || failedKey == key { return .failed }
+        return .loading
+    }
 
     var body: some View {
         Color.clear
             .aspectRatio(slot.aspectRatio, contentMode: .fit)
             .overlay {
-                if let url {
-                    AsyncImage(url: url) { phase in
-                        ThumbnailContent(
-                            attachment: attachment,
-                            phase: .of(phase),
-                            image: phase.image,
-                            contentMode: slot.contentMode
-                        )
-                    }
-                } else {
-                    ThumbnailContent(
-                        attachment: attachment,
-                        phase: .failed,
-                        image: nil,
-                        contentMode: slot.contentMode
-                    )
-                }
+                ThumbnailContent(
+                    attachment: attachment,
+                    phase: phase,
+                    image: image,
+                    contentMode: slot.contentMode
+                )
             }
-            .task(id: url) {
-                if let url { MediaCache.evictExpired(url) }
-            }
+            .task(id: url) { await load() }
             .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+    }
+
+    private func load() async {
+        guard let url else { return }
+        MediaCache.evictExpired(url)
+        // Already decoded: `body` has painted it already, and there is nothing to fetch, nothing
+        // to decode and no state to change.
+        if MediaImageLoader.cached(for: key) != nil { return }
+
+        // Captured before the await: the view can be handed a different attachment while the
+        // fetch is in flight, and the answer belongs to the key it was asked for.
+        let requested = key
+        let image = await MediaImageLoader.image(for: requested, url: url)
+        if let image {
+            loaded = (requested, image)
+            if failedKey == requested { failedKey = nil }
+        } else {
+            failedKey = requested
+        }
     }
 }
 

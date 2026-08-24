@@ -80,12 +80,6 @@ struct ThumbnailTests {
         #expect(BlurHashImage.cached(for: nil) == nil)
     }
 
-    @Test("only a delivered image is loaded and only a reported failure is a failure")
-    func phaseMapping() {
-        #expect(ThumbnailPhase.of(.empty) == .loading)
-        #expect(ThumbnailPhase.of(.failure(URLError(.timedOut))) == .failed)
-        #expect(ThumbnailPhase.of(.success(Image(systemName: "photo"))) == .loaded)
-    }
 }
 
 @MainActor
