@@ -124,6 +124,7 @@ public final class SessionStore {
             return false
         }
 
+        let previousState = state
         state = .signingIn
         lastError = nil
         do {
@@ -140,13 +141,17 @@ public final class SessionStore {
                 makeClient(configuration) { nil }, code: code, verifier: verifier
             )
             let token = exchanged.token
-            let stored = persist(token: token, configuration: configuration)
+            let persistence = persist(token: token, configuration: configuration)
+            guard persistence != .licenceNotRevoked else {
+                abandonSignIn(restoring: previousState)
+                return false
+            }
             adopt(
                 client: makeClient(configuration) { token },
                 configuration: configuration,
                 user: exchanged.user
             )
-            if !stored { lastError = Self.storageWarning }
+            if persistence == .storedNowhere { lastError = Self.storageWarning }
             return true
         } catch let error as NativeLoginError {
             failSignIn(error)
@@ -170,14 +175,22 @@ public final class SessionStore {
             return
         }
 
+        let previousState = state
         state = .signingIn
         lastError = nil
         let client = makeClient(configuration) { trimmed }
         do {
             let user = try await Self.whoami(client)
-            let stored = persist(token: trimmed, configuration: configuration)
-            adopt(client: client, configuration: configuration, user: user)
-            if !stored { lastError = Self.storageWarning }
+            switch persist(token: trimmed, configuration: configuration) {
+            case .licenceNotRevoked:
+                abandonSignIn(restoring: previousState)
+                return
+            case .stored:
+                adopt(client: client, configuration: configuration, user: user)
+            case .storedNowhere:
+                adopt(client: client, configuration: configuration, user: user)
+                lastError = Self.storageWarning
+            }
         } catch {
             state = .signedOut
             self.client = nil
@@ -326,21 +339,53 @@ public final class SessionStore {
         "Signed in, but the credential could not be saved on this device. "
         + "It will not survive quitting the app - sign out properly before you do."
 
-    /// Stores the credential, and revokes the outgoing licence BEFORE it does.
+    /// How a sign-in's two writes went.
+    private enum CredentialPersistence {
+        case stored
+        /// The keychain refused. The session still works from memory, and says so.
+        case storedNowhere
+        /// The OUTGOING licence would not go, so NOTHING was written: not the credential, not a
+        /// new licence, and the session is left exactly as it was found.
+        case licenceNotRevoked
+    }
+
+    /// Stores the credential, and revokes the outgoing licence BEFORE it does — or does neither.
     ///
-    /// Signing in as B while A is signed in is two writes, and the order decides what a crash
-    /// between them leaves: this way, A's credential with no licence (the extension is denied, and
+    /// Signing in as B while A is signed in is two writes, and the order decides what an
+    /// interruption leaves: this way, A's credential with no licence (the extension is denied, and
     /// the next `restore` republishes). The other way round it is B's credential with A's licence,
     /// and a shared photo lands in the wrong account.
-    private func persist(token: String, configuration: ServerConfiguration) -> Bool {
-        clearAccountLicence()
+    ///
+    /// A revocation that FAILS is not an interruption but a refusal, and it aborts the sign-in
+    /// rather than carrying on: swapping accounts on the SAME server leaves a stale licence that
+    /// nothing else can detect — `restore` compares servers, and only the server knows who a
+    /// credential belongs to
+    /// — so A's licence would sit next to B's credential until some later publish happened to
+    /// overwrite it, and for good if that publish failed too. A sign-in someone can retry is a
+    /// far smaller harm than a capture posted into the wrong account.
+    private func persist(
+        token: String, configuration: ServerConfiguration
+    ) -> CredentialPersistence {
+        guard clearAccountLicence() else { return .licenceNotRevoked }
         do {
             try credentials.set(token, for: Self.tokenAccount)
             try credentials.set(configuration.baseURL.absoluteString, for: Self.serverAccount)
-            return true
+            return .stored
         } catch {
-            return false
+            return .storedNowhere
         }
+    }
+
+    /// What a sign-in says when it refused to touch anything.
+    static let licenceBlockedSignIn =
+        "The account already on this device could not be cleared, so nothing was changed. "
+        + "Try signing in again."
+
+    /// Puts the session back where the sign-in found it. Nothing was written, so there is nothing
+    /// to undo — only the `.signingIn` this attempt announced.
+    private func abandonSignIn(restoring previous: SessionState) {
+        state = previous
+        lastError = Self.licenceBlockedSignIn
     }
 
     /// Forgets the credential — and revokes the share extension's licence FIRST.

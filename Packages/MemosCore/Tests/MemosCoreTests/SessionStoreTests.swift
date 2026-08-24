@@ -571,3 +571,89 @@ struct AccountLicenceOrderTests {
         )
     }
 }
+
+extension AccountLicenceOrderTests {
+    /// Swapping accounts on the SAME server is the case nothing downstream can catch: `restore`
+    /// compares server addresses, and only the server knows whose a credential is. So a refused
+    /// revocation has to stop the sign-in where it stands rather than carry on and hope.
+    @Test("a licence that will not go stops the sign-in and changes nothing at all")
+    func refusedRevocationAbortsSignIn() async {
+        let credentials = InMemoryCredentials()
+        let account = SpyAccountStore()
+        let session = store(credentials: credentials, account: account) { _, _, _ in
+            Stub.json(Stub.user)
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_a")
+        let credentialsBefore = credentials.snapshot()
+        let licenceBefore = account.published
+        #expect(licenceBefore != nil)
+
+        account.refuseNextClears(1)
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+
+        #expect(
+            credentials.snapshot() == credentialsBefore,
+            "the new credential must not be stored while the old licence is still standing"
+        )
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_a")
+        #expect(
+            account.published == licenceBefore,
+            "and the old licence is untouched, not half-replaced"
+        )
+        #expect(session.state.user != nil, "the session is left exactly as the sign-in found it")
+        #expect(
+            session.lastError?.contains("Try signing in again") == true,
+            "a sign-in that changed nothing has to say so, or it looks like it worked"
+        )
+    }
+
+    @Test("the browser-brokered sign-in aborts on the same refusal, and reports it")
+    func refusedRevocationAbortsNativeSignIn() async {
+        let credentials = InMemoryCredentials()
+        let account = SpyAccountStore()
+        let session = store(credentials: credentials, account: account) { _, _, operation in
+            // Two operations, two answers: the first sign-in is what establishes the account this
+            // test then proves untouched, so its whoami cannot be answered with an exchange.
+            operation == whoamiOperation
+                ? Stub.json(Stub.user) : Stub.json(Stub.exchange(token: "memos_pat_device"))
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_a")
+        let credentialsBefore = credentials.snapshot()
+        let licenceBefore = account.published
+        #expect(credentialsBefore[SessionStore.tokenAccount] == "memos_pat_a")
+        #expect(licenceBefore != nil)
+
+        account.refuseNextClears(1)
+        let signedIn = await session.signInNatively(
+            serverAddress: "memos.example.invalid",
+            deviceName: "iPhone",
+            presenter: StubPresenter(
+                behaviour: .callback(
+                    "https://memos.example.invalid/ios/auth/callback?code=handoff-123"
+                )
+            ),
+            pkce: PKCE()
+        )
+
+        #expect(!signedIn, "the caller has to learn that nothing happened")
+        #expect(credentials.snapshot() == credentialsBefore)
+        #expect(account.published == licenceBefore)
+        #expect(session.lastError?.contains("Try signing in again") == true)
+    }
+
+    @Test("a sign-in whose licence WAS revoked still goes through")
+    func revocationThatWorksDoesNotBlockASignIn() async {
+        let credentials = InMemoryCredentials()
+        let account = SpyAccountStore()
+        let session = store(credentials: credentials, account: account) { _, _, _ in
+            Stub.json(Stub.user)
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_a")
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_b")
+        #expect(account.published?.ownerSubject == "fabian")
+        #expect(session.lastError == nil)
+    }
+}
