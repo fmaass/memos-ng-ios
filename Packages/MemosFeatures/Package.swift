@@ -11,6 +11,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../MemosCore"),
+        .package(path: "../MemosOutbox"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0"),
     ],
     targets: [
@@ -18,6 +19,7 @@ let package = Package(
             name: "MemosFeatures",
             dependencies: [
                 .product(name: "MemosCore", package: "MemosCore"),
+                .product(name: "MemosOutbox", package: "MemosOutbox"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ],
             swiftSettings: [
@@ -27,7 +29,10 @@ let package = Package(
         ),
         .testTarget(
             name: "MemosFeaturesTests",
-            dependencies: ["MemosFeatures"],
+            dependencies: [
+                "MemosFeatures",
+                .product(name: "MemosOutbox", package: "MemosOutbox"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .defaultIsolation(MainActor.self),

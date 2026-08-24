@@ -1,10 +1,14 @@
 import MemosCore
+import MemosOutbox
 import SwiftUI
 
 /// The timeline: one cursor-paginated page at a time, pull to refresh — and, since Phase 4,
 /// the place memos are made and managed.
 public struct TimelineView: View {
     @Environment(SessionStore.self) private var session
+    // Optional: a preview or a test host has no outbox, and a missing environment value must not
+    // be a crash on the app's main screen.
+    @Environment(Outbox.self) private var outbox: Outbox?
     @State private var timeline: TimelineStore?
     @State private var composing: ComposeView.Mode?
     @State private var signOutDecision: SignOutFlow.Decision?
@@ -48,8 +52,8 @@ public struct TimelineView: View {
         }
         .sheet(item: $composing) { mode in
             if let timeline {
-                ComposeView(mode: mode) { content, visibility in
-                    await submit(mode, content: content, visibility: visibility, to: timeline)
+                ComposeView(mode: mode) { submission in
+                    await submit(mode, submission: submission, to: timeline)
                 }
             }
         }
@@ -76,12 +80,28 @@ public struct TimelineView: View {
                 })
             }
             await load()
+            // Adopt whatever the last run left in flight before anything new is scheduled.
+            await outbox?.start()
+        }
+        // A capture that leaves the queue has become a memo on the server; the list it belongs in
+        // is reloaded so it does not appear to have vanished.
+        .onChange(of: outbox?.lastCompletedAt) { _, _ in
+            Task { await load() }
         }
     }
 
     @ViewBuilder
     private func content(_ timeline: TimelineStore) -> some View {
         List {
+            if let outbox, !outbox.jobs.isEmpty {
+                Section("Pending") {
+                    ForEach(PendingMemoPresentation.rows(for: outbox.jobs)) { row in
+                        PendingRowView(row: row) {
+                            Task { await outbox.retry(row.id) }
+                        }
+                    }
+                }
+            }
             // Session-level notices (a credential that could not be saved, a failed revoke)
             // must survive into the signed-in surface — a warning nobody can see is not one.
             if let notice = session.lastError {
@@ -158,7 +178,9 @@ public struct TimelineView: View {
         .listStyle(.plain)
         .refreshable { await load() }
         .overlay {
-            if timeline.memos.isEmpty && !timeline.isLoading {
+            // A queued capture is not "no memos yet" — the empty state must not paint over the
+            // one thing a person is waiting on.
+            if timeline.memos.isEmpty && !timeline.isLoading && (outbox?.jobs.isEmpty ?? true) {
                 ContentUnavailableView("No memos yet", systemImage: "note.text")
             }
         }
@@ -190,20 +212,29 @@ public struct TimelineView: View {
         }
     }
 
+    /// A new memo is written to the OUTBOX, never straight to the network: the screen closes as
+    /// soon as the capture is on disk, and the upload happens when the phone is somewhere it can.
+    /// An edit still goes to the server directly — editing needs the memo to exist.
     private func submit(
         _ mode: ComposeView.Mode,
-        content: String,
-        visibility: MemoVisibility?,
+        submission: ComposeSubmission,
         to timeline: TimelineStore
     ) async -> Bool {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return false }
         switch mode {
         case .create:
-            return await timeline.create(
-                content: content, visibility: visibility, using: client, baseURL: baseURL
+            guard let outbox else { return false }
+            return await outbox.enqueue(
+                content: submission.content,
+                visibility: submission.visibility?.rawValue,
+                sources: submission.attachments.map(\.stagedSource)
             )
         case .edit(let uid, _):
-            return await timeline.edit(uid: uid, content: content, using: client, baseURL: baseURL)
+            guard let client = session.api, let baseURL = session.serverBaseURL else {
+                return false
+            }
+            return await timeline.edit(
+                uid: uid, content: submission.content, using: client, baseURL: baseURL
+            )
         }
     }
 
@@ -235,6 +266,38 @@ extension MemoVisibility {
         case .protected: "Protected"
         case .public: "Public"
         }
+    }
+}
+
+/// A capture that has not reached the server yet, said plainly.
+struct PendingRowView: View {
+    let row: PendingRow
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: row.needsAttention ? "exclamationmark.circle" : "clock.arrow.up")
+                    .foregroundStyle(row.needsAttention ? .orange : .secondary)
+                Text(row.status)
+                    .font(.caption)
+                    .foregroundStyle(row.needsAttention ? .orange : .secondary)
+                if row.attachmentCount > 0 {
+                    Label("\(row.attachmentCount)", systemImage: "paperclip")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !row.snippet.isEmpty {
+                Text(row.snippet).font(.body)
+            }
+            if row.needsAttention {
+                Button("Try again", action: retry)
+                    .font(.footnote)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
