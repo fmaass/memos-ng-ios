@@ -39,11 +39,12 @@ struct AttachmentThumbnail: View {
                 if let url { MediaCache.evictExpired(url) }
             }
             .clipShape(.rect(cornerRadius: 10))
-            .overlay(alignment: .bottomTrailing) {
+            .overlay {
                 if attachment.isVideo {
                     Image(systemName: "play.circle.fill")
-                        .padding(6)
+                        .font(.system(size: 44))
                         .foregroundStyle(.white)
+                        .shadow(radius: 6)
                 }
             }
     }
