@@ -34,7 +34,7 @@ set -uo pipefail
 GATE_ROOT_REMOTE='$HOME/build/memos-ng-ios/gate'
 SIMULATOR="${MAC_GATE_SIMULATOR:-iPhone 17}"
 # Always enforced. MAC_GATE_TEST_BUNDLES may only ADD to this list.
-MANDATORY_TEST_BUNDLES="MemosAPITests MemosCoreTests MemosOutboxTests MemosFeaturesTests"
+MANDATORY_TEST_BUNDLES="MemosAPITests MemosCoreTests MemosOutboxTests MemosFeaturesTests MemosShareKitTests"
 TEST_BUNDLES="$MANDATORY_TEST_BUNDLES"
 for extra in ${MAC_GATE_TEST_BUNDLES:-}; do
   case " $TEST_BUNDLES " in
@@ -323,6 +323,14 @@ s_deps() {
     echo "DEPRULE FAIL: MemosOutbox names another layer"; rc=1
   else
     echo "DEPRULE ok: MemosOutbox/Package.swift names no other layer"
+  fi
+  # The share extension may carry no client, no session and no credential, so the package it
+  # takes its logic from may name no layer but the outbox. An extension is a separate process
+  # with a fraction of the memory and its own entitlements; whatever it links, it ships.
+  if grep -n "MemosAPI\|MemosCore\|MemosFeatures" Packages/MemosShareKit/Package.swift; then
+    echo "DEPRULE FAIL: MemosShareKit names a layer the share extension may not carry"; rc=1
+  else
+    echo "DEPRULE ok: MemosShareKit/Package.swift names no layer but MemosOutbox"
   fi
   if grep -n "MemosCore" Packages/MemosFeatures/Package.swift; then
     echo "DEPRULE ok (positive control): MemosFeatures/Package.swift references MemosCore"

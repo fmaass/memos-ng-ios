@@ -1,6 +1,7 @@
 # generated project (XcodeGen)
 *.xcodeproj
 Support/Info.plist
+Support/MemosShare-Info.plist
 *.xcworkspace
 # build products
 .build/
@@ -20,3 +21,4 @@ Secrets*.xcconfig
 # per-machine signing (see signing.local.yml.example)
 signing.local.yml
 MemosNG.entitlements
+MemosShare.entitlements
