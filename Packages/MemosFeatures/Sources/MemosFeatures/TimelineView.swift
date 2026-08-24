@@ -1,10 +1,13 @@
 import MemosCore
 import SwiftUI
 
-/// The timeline: one cursor-paginated page at a time, pull to refresh.
+/// The timeline: one cursor-paginated page at a time, pull to refresh — and, since Phase 4,
+/// the place memos are made and managed.
 public struct TimelineView: View {
     @Environment(SessionStore.self) private var session
     @State private var timeline: TimelineStore?
+    @State private var composing: ComposeView.Mode?
+    @State private var signOutDecision: SignOutFlow.Decision?
 
     public init() {}
 
@@ -20,13 +23,46 @@ public struct TimelineView: View {
             .navigationTitle("Memos")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Sign out") { Task { await session.signOut() } }
+                    Button {
+                        composing = .create
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .accessibilityLabel("New memo")
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Sign out") { Task { await signOut() } }
                 }
             }
         }
+        .sheet(item: $composing) { mode in
+            if let timeline {
+                ComposeView(mode: mode) { content, visibility in
+                    await submit(mode, content: content, visibility: visibility, to: timeline)
+                }
+            }
+        }
+        .alert(
+            "Could not sign out",
+            isPresented: .init(
+                get: { signOutDecision != nil },
+                set: { if !$0 { signOutDecision = nil } }
+            ),
+            presenting: signOutDecision
+        ) { decision in
+            Button("Try again") { Task { await signOut() } }
+            Button(decision.discardTitle, role: .destructive) {
+                session.signOutWithoutRevoking()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { decision in
+            Text(decision.message)
+        }
         .task {
             if timeline == nil {
-                timeline = TimelineStore(onUnauthorized: { [session] in await session.signOut() })
+                timeline = TimelineStore(onUnauthorized: { [session] in
+                    await session.handle(.unauthorized)
+                })
             }
             await load()
         }
@@ -40,14 +76,51 @@ public struct TimelineView: View {
             }
             ForEach(Array(timeline.memos.enumerated()), id: \.element.uid) { index, memo in
                 NavigationLink {
-                    MemoDetailView(memo: memo)
+                    MemoDetailView(uid: memo.uid, initial: memo, timeline: timeline)
                 } label: {
                     MemoRow(memo: memo)
                 }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        Task {
+                            guard let client = session.api else { return }
+                            await timeline.delete(uid: memo.uid, using: client)
+                        }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    Button {
+                        Task {
+                            guard let client = session.api,
+                                let baseURL = session.serverBaseURL
+                            else { return }
+                            await timeline.setPinned(
+                                !memo.pinned, uid: memo.uid, using: client, baseURL: baseURL
+                            )
+                        }
+                    } label: {
+                        Label(
+                            memo.pinned ? "Unpin" : "Pin",
+                            systemImage: memo.pinned ? "pin.slash" : "pin"
+                        )
+                    }
+                    .tint(.orange)
+                }
+                .contextMenu {
+                    Button {
+                        composing = .edit(uid: memo.uid, content: memo.content)
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    visibilityMenu(for: memo, in: timeline)
+                }
                 .task {
                     guard timeline.shouldLoadMore(after: index) else { return }
-                    guard let client = session.api, let baseURL = session.serverBaseURL
-                    else { return }
+                    guard let client = session.api, let baseURL = session.serverBaseURL else {
+                        return
+                    }
                     await timeline.loadMore(using: client, baseURL: baseURL)
                 }
             }
@@ -68,11 +141,77 @@ public struct TimelineView: View {
         }
     }
 
-    private func load() async {
-        guard let timeline, let client = session.api, let baseURL = session.serverBaseURL else {
-            return
+    @ViewBuilder
+    private func visibilityMenu(for memo: Memo, in timeline: TimelineStore) -> some View {
+        Menu {
+            ForEach(MemoVisibility.allCases, id: \.self) { option in
+                Button {
+                    Task {
+                        guard let client = session.api,
+                            let baseURL = session.serverBaseURL
+                        else { return }
+                        await timeline.setVisibility(
+                            option, uid: memo.uid, using: client, baseURL: baseURL
+                        )
+                    }
+                } label: {
+                    if memo.visibility == option {
+                        Label(option.label, systemImage: "checkmark")
+                    } else {
+                        Text(option.label)
+                    }
+                }
+            }
+        } label: {
+            Label("Visibility", systemImage: "eye")
         }
-        await timeline.refresh(using: client, baseURL: baseURL)
+    }
+
+    private func submit(
+        _ mode: ComposeView.Mode,
+        content: String,
+        visibility: MemoVisibility?,
+        to timeline: TimelineStore
+    ) async -> Bool {
+        guard let client = session.api, let baseURL = session.serverBaseURL else { return false }
+        switch mode {
+        case .create:
+            return await timeline.create(
+                content: content, visibility: visibility, using: client, baseURL: baseURL
+            )
+        case .edit(let uid, _):
+            return await timeline.edit(uid: uid, content: content, using: client, baseURL: baseURL)
+        }
+    }
+
+    private func signOut() async {
+        signOutDecision = SignOutFlow.decision(for: await session.signOut())
+    }
+
+    private func load() async {
+        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        await timeline?.refresh(using: client, baseURL: baseURL)
+    }
+
+}
+
+extension ComposeView.Mode: Identifiable {
+    public var id: String {
+        switch self {
+        case .create: "create"
+        case .edit(let uid, _): "edit-\(uid)"
+        }
+    }
+}
+
+extension MemoVisibility {
+    /// The label the SPA uses for the same choice, so the two apps speak one language.
+    var label: String {
+        switch self {
+        case .private: "Private"
+        case .protected: "Protected"
+        case .public: "Public"
+        }
     }
 }
 

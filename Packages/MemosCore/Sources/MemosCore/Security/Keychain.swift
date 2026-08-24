@@ -1,25 +1,30 @@
 import Foundation
 import Security
 
-/// The device credential's only home.
-///
-/// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` is the deliberate choice: the token must
-/// survive a reboot for background work, must never leave this device, and must not be readable
-/// while the device is locked from cold boot. `accessGroup` stays `nil` until an app group and the
-/// Keychain Sharing entitlement exist — setting `kSecAttrAccessGroup` without the entitlement
-/// fails every call with `errSecMissingEntitlement`, so the parameter is here to be filled in
-/// later, not now.
 /// What a session needs from secure storage.
 ///
-/// The seam exists so the session's own rules — validate before storing, wipe on sign-out even
-/// when the server call failed — are testable without a Keychain, which behaves differently in a
-/// test runner than on a device and would make those tests about entitlements instead.
+/// The seam exists so the session's own rules — validate before storing, and wipe on sign-out
+/// only when the revoke actually settled the token's fate — are testable without a Keychain,
+/// which behaves differently in a test runner than on a device and would make those tests about
+/// entitlements instead.
 public protocol CredentialStore: Sendable {
     func set(_ value: String, for account: String) throws
     func string(for account: String) throws -> String?
     func remove(_ account: String) throws
 }
 
+/// The device credential's only home.
+///
+/// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` is the deliberate choice: the token must
+/// survive a reboot for background work, must never leave this device, and must not be readable
+/// while the device is locked from cold boot.
+///
+/// One instance addresses ONE namespace. `accessGroup` names the app group the app and its
+/// extensions share (`DeviceCredentials.accessGroup`); `nil` is the default namespace a device
+/// signed in before those entitlements existed still holds its token in. They are two instances
+/// rather than one flag because setting `kSecAttrAccessGroup` without the matching Keychain
+/// Sharing entitlement fails EVERY call with `errSecMissingEntitlement` — a fallback has to be
+/// able to ask the other namespace, not the same one differently.
 public struct Keychain: CredentialStore, Sendable {
     public enum Failure: Error, Equatable {
         case unexpectedStatus(OSStatus)

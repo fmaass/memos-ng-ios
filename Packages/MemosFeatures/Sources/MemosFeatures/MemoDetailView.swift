@@ -1,16 +1,27 @@
 import MemosCore
 import SwiftUI
 
-/// One memo, in full.
+/// One memo, in full — and since Phase 4, the place its checkboxes are ticked.
 ///
-/// The checkboxes are READ-ONLY in this version: writing is Phase 4's job, and a checkbox that
-/// looks tappable but changes nothing is worse than one that plainly does not. The rows come from
-/// the same block projection the parity fixture pins, so their order and state are the SPA's.
+/// The view reads the memo FROM the timeline store rather than keeping the copy it was pushed
+/// with: a toggle patches the content, and a detail screen showing the pre-toggle text next to a
+/// post-toggle checkbox would be lying about which one the server has. The pushed copy remains
+/// only as the fallback for a memo that scrolled out of the loaded window.
 public struct MemoDetailView: View {
-    let memo: Memo
+    let uid: String
+    let initial: Memo
+    let timeline: TimelineStore
 
-    public init(memo: Memo) {
-        self.memo = memo
+    @Environment(SessionStore.self) private var session
+
+    public init(uid: String, initial: Memo, timeline: TimelineStore) {
+        self.uid = uid
+        self.initial = initial
+        self.timeline = timeline
+    }
+
+    private var memo: Memo {
+        timeline.memos.first { $0.uid == uid } ?? initial
     }
 
     private var tasks: [(text: String, checked: Bool)] {
@@ -29,13 +40,21 @@ public struct MemoDetailView: View {
                 if !tasks.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Tasks").font(.headline)
-                        ForEach(Array(tasks.enumerated()), id: \.offset) { _, task in
-                            Label {
-                                Text(task.text)
-                            } icon: {
-                                Image(systemName: task.checked ? "checkmark.square" : "square")
+                        ForEach(Array(tasks.enumerated()), id: \.offset) { index, task in
+                            Button {
+                                Task { await toggle(index) }
+                            } label: {
+                                Label {
+                                    Text(task.text)
+                                } icon: {
+                                    Image(
+                                        systemName: task.checked
+                                            ? "checkmark.square" : "square"
+                                    )
+                                }
+                                .foregroundStyle(task.checked ? .secondary : .primary)
                             }
-                            .foregroundStyle(task.checked ? .secondary : .primary)
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -49,5 +68,10 @@ public struct MemoDetailView: View {
         }
         .navigationTitle(memo.pinned ? "Pinned memo" : "Memo")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func toggle(_ index: Int) async {
+        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        await timeline.toggleTask(at: index, in: uid, using: client, baseURL: baseURL)
     }
 }

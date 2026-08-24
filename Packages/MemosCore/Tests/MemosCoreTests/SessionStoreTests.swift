@@ -100,8 +100,8 @@ struct SessionStoreTests {
         #expect(credentials.isEmpty)
     }
 
-    @Test("sign-out wipes the credential even when the revoke call fails")
-    func signOutWipesOnFailure() async {
+    @Test("a failed revoke keeps the credential and says so")
+    func signOutKeepsCredentialWhenRevokeFails() async {
         let credentials = InMemoryCredentials()
         let session = store(credentials: credentials) { _, _, operation in
             operation == whoamiOperation
@@ -110,10 +110,18 @@ struct SessionStoreTests {
         }
 
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
-        await session.signOut()
+        let outcome = await session.signOut()
 
+        // The revoke never reached the server, so the token is still live out there — wiping the
+        // only copy the app tracks would abandon it, signed out in appearance only.
+        #expect(outcome.failureDescription != nil)
+        #expect(session.state != .signedOut)
+        #expect(!credentials.isEmpty, "a live token must stay tracked until its fate is settled")
+
+        // The person can still decide otherwise, in the open.
+        session.signOutWithoutRevoking()
         #expect(session.state == .signedOut)
-        #expect(credentials.isEmpty, "a device that thinks it is signed out must hold no token")
+        #expect(credentials.isEmpty)
     }
 
     @Test("a stored credential is re-validated at launch, not trusted")
