@@ -247,6 +247,59 @@ extension TimelineStoreTests {
         #expect(store.memos.map(\.uid) == ["c", "a", "b"])
     }
 
+    @Test("a memo re-dated onto a timestamp others hold does not jump ahead of them")
+    func reDatingOntoATieKeepsTheRowsThatWereThere() async throws {
+        // a and b share one instant exactly — two memos backdated to the same minute, which the
+        // picker makes easy. c is re-dated onto that same instant.
+        let tied = "2026-08-22T09:00:00Z"
+        let page = Stub.page([
+            Stub.memo(uid: "a", createdAt: tied),
+            Stub.memo(uid: "b", createdAt: tied),
+            Stub.memo(uid: "c", createdAt: "2026-08-21T09:00:00Z"),
+        ])
+        let client = Stub.client { _, _, operation in
+            operation == "patch_memo_api_memos__uid__patch"
+                ? Stub.json(Stub.memo(uid: "c", createdAt: tied))
+                : Stub.json(page)
+        }
+        let store = await seeded(["a", "b", "c"], client: client)
+        let chosen = try instant(tied)
+
+        let edited = await store.edit(
+            uid: "c",
+            content: "same words",
+            createdAt: chosen,
+            using: client,
+            baseURL: Stub.baseURL
+        )
+        #expect(edited)
+        // The server settles a tie by `id DESC` and never sends the id (see `TimelineTie`), so an
+        // existing memo does not overtake the rows already on that timestamp. A comparator that
+        // treated a tie as "newer" would answer ["c", "a", "b"] here.
+        #expect(store.memos.map(\.uid) == ["a", "b", "c"])
+        #expect(store.memos.map(\.createdAt) == [chosen, chosen, chosen])
+    }
+
+    @Test("a memo the server has just created still leads at an identical timestamp")
+    func aNewMemoLeadsATie() async throws {
+        // The same tie, from the other side: a create holds the highest id in existence, so
+        // `id DESC` puts it first — and the app says so rather than filing it behind.
+        let tied = "2026-08-22T09:00:00Z"
+        let page = Stub.page([
+            Stub.memo(uid: "a", createdAt: tied),
+            Stub.memo(uid: "b", createdAt: tied),
+        ])
+        let client = Stub.client { _, _, operation in
+            operation == "create_memo_api_memos_post"
+                ? Stub.json(Stub.memo(uid: "new", createdAt: tied), status: .created)
+                : Stub.json(page)
+        }
+        let store = await seeded(["a", "b"], client: client)
+
+        #expect(await store.create(content: "hello", using: client, baseURL: Stub.baseURL))
+        #expect(store.memos.map(\.uid) == ["new", "a", "b"])
+    }
+
     @Test("a pinned memo that is re-dated stays in the pinned block")
     func reDatingKeepsThePinnedBlock() async throws {
         let moved = "2026-08-01T08:00:00Z"
