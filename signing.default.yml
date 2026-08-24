@@ -8,3 +8,10 @@ targets:
       base:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
+  # The extension is signed the same way, and for the same reason: an unsigned extension has no
+  # app-group container, so the queue it writes into would not be the app's.
+  MemosShare:
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual

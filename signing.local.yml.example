@@ -11,3 +11,11 @@ targets:
         DEVELOPMENT_TEAM: YOUR_TEAM_ID
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: Apple Development
+  # A device build signs the extension too, with the same team — its bundle id is a child of the
+  # app's, and the app group has to resolve to one container for both.
+  MemosShare:
+    settings:
+      base:
+        DEVELOPMENT_TEAM: YOUR_TEAM_ID
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
