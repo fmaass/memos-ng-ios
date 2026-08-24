@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 import OpenAPIRuntime
 
 /// Where the app is with respect to a credential.
@@ -56,6 +57,10 @@ public final class SessionStore {
     private let credentials: any CredentialStore
     private let makeClient:
         @Sendable (ServerConfiguration, @escaping @Sendable () async -> String?) -> any APIProtocol
+    /// Where the signed-in account is published for the processes that have no session of their
+    /// own — the share extension. Nil unless the app composes one, so a test never writes into
+    /// the real app group container.
+    private let account: (any OutboxAccountPublishing)?
     private var client: (any APIProtocol)?
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
@@ -70,10 +75,12 @@ public final class SessionStore {
                 ServerConfiguration, @escaping @Sendable () async -> String?
             ) -> any APIProtocol = { configuration, token in
                 APIClientFactory.make(configuration: configuration, token: token)
-            }
+            },
+        account: (any OutboxAccountPublishing)? = nil
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
+        self.account = account
     }
 
     /// The client every feature talks through, or `nil` while signed out.
@@ -130,9 +137,11 @@ public final class SessionStore {
             )
             let token = exchanged.token
             let stored = persist(token: token, configuration: configuration)
-            self.configuration = configuration
-            self.client = makeClient(configuration) { token }
-            state = .signedIn(exchanged.user)
+            adopt(
+                client: makeClient(configuration) { token },
+                configuration: configuration,
+                user: exchanged.user
+            )
             if !stored { lastError = Self.storageWarning }
             return true
         } catch let error as NativeLoginError {
@@ -264,10 +273,16 @@ public final class SessionStore {
 
     // MARK: - internals
 
+    /// The one place a session becomes a signed-in one, so it is also the one place the account
+    /// is published: this is the moment both halves of the binding — which server, and whose
+    /// subject — are known, and the subject is known nowhere else on the device.
     private func adopt(client: any APIProtocol, configuration: ServerConfiguration, user: User) {
         self.configuration = configuration
         self.client = client
         state = .signedIn(user)
+        account?.publish(
+            AccountBinding(serverBaseURL: configuration.baseURL, ownerSubject: user.subject)
+        )
     }
 
     private func failSignIn(_ error: NativeLoginError) {
@@ -296,6 +311,9 @@ public final class SessionStore {
     private func wipeCredential() {
         try? credentials.remove(Self.tokenAccount)
         try? credentials.remove(Self.serverAccount)
+        // The extension's licence to enqueue goes with the token: a capture shared after a sign-out
+        // would otherwise be stamped with an account nobody is signed into any more.
+        account?.clear()
         client = nil
         configuration = nil
         state = .signedOut

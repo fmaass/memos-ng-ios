@@ -1,6 +1,7 @@
 import Foundation
 import MemosAPI
 import MemosCore
+import MemosOutbox
 import Testing
 
 // The transport is handed the contract's own operationId, not the generated Swift method name.
@@ -214,5 +215,130 @@ extension SessionStoreTests {
             return
         }
         #expect(!credentials.isEmpty, "an unconfirmed token is kept for the retry")
+    }
+}
+
+/// What the app published about the signed-in account — which is everything a share extension
+/// will ever know about it, since it has no session and no credential of its own.
+final class SpyAccountStore: OutboxAccountPublishing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: AccountBinding?
+    private var clears = 0
+
+    func publish(_ binding: AccountBinding) { lock.withLock { value = binding } }
+
+    func clear() {
+        lock.withLock {
+            value = nil
+            clears += 1
+        }
+    }
+
+    var current: AccountBinding? { lock.withLock { value } }
+    var clearCount: Int { lock.withLock { clears } }
+}
+
+/// The account the share extension binds a capture to is published by the session, because the
+/// owner's subject exists nowhere else on the device: the keychain holds a token and a server
+/// address, and the subject comes back from the server.
+extension SessionStoreTests {
+    private func store(
+        credentials: InMemoryCredentials,
+        account: SpyAccountStore,
+        handler: @escaping StubTransport.Handler
+    ) -> SessionStore {
+        SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            account: account
+        )
+    }
+
+    @Test("signing in publishes the server and the owner a shared capture is bound to")
+    func signInPublishesTheAccount() async {
+        let account = SpyAccountStore()
+        let session = store(
+            credentials: InMemoryCredentials(), account: account
+        ) { _, _, _ in Stub.json(Stub.user) }
+        #expect(account.current == nil)
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+
+        #expect(
+            account.current
+                == AccountBinding(
+                    serverBaseURL: URL(string: "https://memos.example.invalid")!,
+                    ownerSubject: "fabian"
+                )
+        )
+    }
+
+    @Test("a restored session publishes it too, so an update does not silence the extension")
+    func restorePublishesTheAccount() async {
+        let credentials = InMemoryCredentials()
+        try? credentials.set("memos_pat_good", for: SessionStore.tokenAccount)
+        try? credentials.set("https://memos.example.invalid", for: SessionStore.serverAccount)
+        let account = SpyAccountStore()
+        let session = store(credentials: credentials, account: account) { _, _, _ in
+            Stub.json(Stub.user)
+        }
+
+        await session.restore()
+
+        #expect(account.current?.ownerSubject == "fabian")
+    }
+
+    @Test("the browser-brokered sign-in publishes the same account as a pasted token")
+    func nativeSignInPublishesTheAccount() async {
+        let account = SpyAccountStore()
+        let session = store(
+            credentials: InMemoryCredentials(), account: account
+        ) { _, _, _ in Stub.json(Stub.exchange(token: "memos_pat_device")) }
+
+        await session.signInNatively(
+            serverAddress: "memos.example.invalid",
+            deviceName: "iPhone",
+            presenter: StubPresenter(
+                behaviour: .callback(
+                    "https://memos.example.invalid/ios/auth/callback?code=handoff-123"
+                )
+            ),
+            pkce: PKCE()
+        )
+
+        #expect(session.state.user?.subject == "fabian")
+        #expect(session.serverBaseURL?.absoluteString == "https://memos.example.invalid")
+        #expect(account.current?.ownerSubject == "fabian")
+    }
+
+    @Test("signing out revokes the extension's account in the same breath as the token")
+    func signOutClearsTheAccount() async {
+        let account = SpyAccountStore()
+        let session = store(
+            credentials: InMemoryCredentials(), account: account
+        ) { _, _, operation in
+            operation == whoamiOperation ? Stub.json(Stub.user) : Stub.empty(.noContent)
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        #expect(account.current != nil)
+
+        await session.signOut()
+
+        #expect(account.current == nil)
+        #expect(account.clearCount == 1)
+    }
+
+    @Test("a 401 anywhere clears it as well — the extension must not queue for a dead account")
+    func unauthorizedClearsTheAccount() async {
+        let account = SpyAccountStore()
+        let session = store(
+            credentials: InMemoryCredentials(), account: account
+        ) { _, _, _ in Stub.json(Stub.user) }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        #expect(account.current != nil)
+
+        await session.handle(.unauthorized)
+
+        #expect(account.current == nil)
     }
 }

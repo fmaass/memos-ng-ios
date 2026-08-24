@@ -34,7 +34,9 @@ struct MemosNGApp: App {
 final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     static let refreshIdentifier = "live.discomarder.memosng.outbox-refresh"
 
-    let session = SessionStore()
+    // The account store is composed here, not defaulted inside the session: it writes into the
+    // app group, which only a real app has, and the share extension reads what it publishes.
+    let session = SessionStore(account: OutboxAccountStore.live())
     private(set) var outbox: Outbox?
 
     func application(
