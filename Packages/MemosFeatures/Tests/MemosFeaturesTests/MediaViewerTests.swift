@@ -448,20 +448,57 @@ struct MediaZoomTests {
     }
 }
 
-/// Which of a card's two targets a tap landed on.
+/// Which of a card's targets a tap landed on.
 ///
-/// This reverses a deliberate earlier decision — the card used to be one target edge to edge —
-/// and the reversal is only safe while BOTH halves hold: a tile opens the picture, and every
-/// other part of the card still opens the memo.
+/// This reverses a deliberate earlier decision — the card used to be one target edge to edge — and
+/// the reversal is only safe while BOTH halves hold: a tile opens the picture, and every other part
+/// of the card still opens the memo. The photos are laid out in justified rows now, so the router
+/// is exercised over that real geometry rather than over a strip that no longer exists.
 @Suite("Card tap routing")
 struct MemoCardTapTests {
-    /// A three-tile strip laid out the way the card lays one out: the card's own horizontal inset,
-    /// square tiles, the card's gap between them.
-    private func strip(cardWidth: CGFloat = 358, top: CGFloat = 120) -> [MemoCardTap.Tile] {
+    /// The tiles a card actually draws, taken from the SAME solver the card lays them out with:
+    /// the card's horizontal inset, the row gap, the row target height. A router test over invented
+    /// rectangles would prove only that rectangles contain points.
+    private func justifiedTiles(
+        ratios: [Double],
+        cardWidth: CGFloat = 370,
+        inset: CGFloat = 16,
+        top: CGFloat = 120,
+        plays: Set<Int> = []
+    ) -> [MemoCardTap.Tile] {
+        let gap = Double(DesignTokens.Space.tight)
+        let rows = JustifiedGallery.rows(
+            ratios: ratios,
+            containerWidth: Double(cardWidth - 2 * inset),
+            targetHeight: Double(DesignTokens.Metric.photoRow),
+            gap: gap
+        )
+        var tiles: [MemoCardTap.Tile] = []
+        var y = Double(top)
+        for row in rows {
+            var x = Double(inset)
+            for tile in row.tiles {
+                tiles.append(
+                    MemoCardTap.Tile(
+                        uid: "a\(tile.index + 1)",
+                        frame: CGRect(x: x, y: y, width: tile.width, height: tile.height),
+                        plays: plays.contains(tile.index)
+                    )
+                )
+                x += tile.width + gap
+            }
+            y += row.height + gap
+        }
+        return tiles
+    }
+
+    /// The old three-square strip, kept as a fixture: the two-up and the solo still lay tiles out
+    /// in a row, and the router must not have become a thing that only understands justified rows.
+    private func pair(cardWidth: CGFloat = 358, top: CGFloat = 120) -> [MemoCardTap.Tile] {
         let inset: CGFloat = 16
         let gap: CGFloat = 8
-        let side = (cardWidth - 2 * inset - 2 * gap) / 3
-        return (0..<3).map { index in
+        let side = (cardWidth - 2 * inset - gap) / 2
+        return (0..<2).map { index in
             MemoCardTap.Tile(
                 uid: "a\(index + 1)",
                 frame: CGRect(
@@ -474,28 +511,50 @@ struct MemoCardTapTests {
         }
     }
 
-    @Test("a tap on a tile opens that picture")
+    @Test("a tap on a tile opens that picture, in any row of a justified card")
     func tileOpensThePicture() {
-        let tiles = strip()
+        let tiles = justifiedTiles(ratios: [1.5, 1.5, 1.5, 0.75, 1.0])
+        #expect(tiles.count == 5, "the fixture did not lay out every photo")
         for tile in tiles {
             let centre = CGPoint(x: tile.frame.midX, y: tile.frame.midY)
-            let destination = MemoCardTap.destination(at: centre, tiles: tiles)
-            #expect(destination == .attachment(uid: tile.uid))
+            #expect(MemoCardTap.destination(at: centre, tiles: tiles) == .attachment(uid: tile.uid))
+        }
+        for tile in pair() {
+            let centre = CGPoint(x: tile.frame.midX, y: tile.frame.midY)
+            #expect(MemoCardTap.destination(at: centre, tiles: tiles + [tile]) != .memo)
+        }
+    }
+
+    /// A tap on the eighth photo of a memo has to reach the eighth photo. The strip could not be
+    /// asked this question — it only ever drew three.
+    @Test("the photo a tap opens is the photo under the finger, at any count")
+    func everyPhotoIsItsOwnTarget() {
+        let tiles = justifiedTiles(ratios: Array(repeating: 1.5, count: 9))
+        #expect(tiles.count == 9)
+        for tile in tiles {
+            let inside = CGPoint(x: tile.frame.minX + 2, y: tile.frame.maxY - 2)
+            #expect(MemoCardTap.destination(at: inside, tiles: tiles) == .attachment(uid: tile.uid))
         }
     }
 
     @Test("a tap anywhere else on the card still opens the memo")
     func theRestOpensTheMemo() {
-        let tiles = strip()
+        let tiles = justifiedTiles(ratios: [1.5, 1.5, 1.5, 0.75, 1.0])
+        let first = tiles[0].frame
+        let last = tiles[tiles.count - 1].frame
         let elsewhere = [
             CGPoint(x: 60, y: 24),  // the name and the time
-            CGPoint(x: 200, y: 80),  // the body text
-            CGPoint(x: 40, y: 300),  // the tag row, below the photos
-            CGPoint(x: tiles[0].frame.maxX + 4, y: tiles[0].frame.midY),  // the gap between tiles
-            CGPoint(x: 4, y: tiles[0].frame.midY),  // the card's inset, beside the first tile
+            CGPoint(x: 200, y: 80),  // the body text, above the photos
+            CGPoint(x: 40, y: last.maxY + 20),  // the tag row, below the last row of photos
+            CGPoint(x: first.maxX + 2, y: first.midY),  // the gap between two tiles in a row
+            CGPoint(x: first.midX, y: first.maxY + 2),  // the gap between two rows
+            CGPoint(x: 4, y: first.midY),  // the card's inset, beside the first tile
         ]
         for point in elsewhere {
-            #expect(MemoCardTap.destination(at: point, tiles: tiles) == .memo)
+            #expect(
+                MemoCardTap.destination(at: point, tiles: tiles) == .memo,
+                "\(point) did not open the memo"
+            )
         }
     }
 
@@ -504,6 +563,84 @@ struct MemoCardTapTests {
     @Test("a card with no measured tiles is one target, as it always was")
     func unmeasuredCardOpensTheMemo() {
         #expect(MemoCardTap.destination(at: CGPoint(x: 100, y: 140), tiles: []) == .memo)
+    }
+
+    // MARK: - what a tap on a VIDEO means
+
+    /// Tapping a video used to open the viewer, which showed a still of the video with a play
+    /// button on it: the picture of the video, and a second tap needed before anything moved.
+    /// A tap on a video means play it.
+    @Test("a video tile plays and a photo tile opens the viewer — directionally, not by accident")
+    func videoPlaysAndPhotoOpens() {
+        // Index 1 is the video; the other two are photos.
+        let tiles = justifiedTiles(ratios: [1.5, 1.777, 1.5], plays: [1])
+        let video = tiles[1]
+        let photos = [tiles[0], tiles[2]]
+
+        func tapped(_ tile: MemoCardTap.Tile) -> MemoCardTap.Destination {
+            MemoCardTap.destination(
+                at: CGPoint(x: tile.frame.midX, y: tile.frame.midY), tiles: tiles
+            )
+        }
+
+        #expect(tapped(video) == .playback(uid: video.uid))
+        for photo in photos {
+            #expect(
+                tapped(photo) == .attachment(uid: photo.uid),
+                "a photo tile started playing something"
+            )
+        }
+        // And the two are genuinely different answers, not two spellings of one.
+        #expect(MemoCardTap.Destination.playback(uid: "a2") != .attachment(uid: "a2"))
+    }
+
+    /// Which attachments that routing applies to, case by case. A video with nothing streamable
+    /// has nothing to play, so it falls back to the viewer, where its poster is at least something.
+    @Test("only a video with a streamable rendition plays on tap")
+    func playsIsAboutTheStream() {
+        let playable = MemoAttachment(
+            uid: "v1",
+            mime: "video/quicktime",
+            status: .ready,
+            webURL: URL(string: "https://memos.example.invalid/w.mp4"),
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+        let unstreamable = MemoAttachment(
+            uid: "v2",
+            mime: "video/quicktime",
+            status: .ready,
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+        let photo = MemoAttachment(
+            uid: "a1",
+            mime: "image/jpeg",
+            status: .ready,
+            thumbnailURL: URL(string: "https://memos.example.invalid/t")
+        )
+        #expect(MemoCardTap.plays(playable))
+        #expect(!MemoCardTap.plays(unstreamable))
+        #expect(!MemoCardTap.plays(photo))
+    }
+
+    /// The other half of the rule, and the half that must NOT change: inside the viewer a video
+    /// page reached by swiping keeps its poster and its play button. Autoplaying something
+    /// somebody swiped past is the surprising behaviour there, and the page still carries both the
+    /// still it shows and the stream it waits to be asked for.
+    @Test("a video page inside the viewer still waits to be asked")
+    func inViewerVideoStillWaits() {
+        let video = MemoAttachment(
+            uid: "v1",
+            mime: "video/quicktime",
+            status: .ready,
+            thumbnailURL: URL(string: "https://memos.example.invalid/t"),
+            webURL: URL(string: "https://memos.example.invalid/w.mp4"),
+            posterURL: URL(string: "https://memos.example.invalid/p")
+        )
+        let pages = MediaViewerPresentation.pages(for: [video])
+        #expect(pages.count == 1)
+        #expect(pages[0].kind == .video)
+        #expect(pages[0].stillURL != nil, "the page lost the poster it shows until it is tapped")
+        #expect(pages[0].playbackURL != nil)
     }
 }
 

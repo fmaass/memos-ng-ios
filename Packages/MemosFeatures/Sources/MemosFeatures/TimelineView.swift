@@ -27,6 +27,9 @@ public struct TimelineView: View {
     @State private var feedback = MemoFeedbackTrigger()
     /// The picture a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
+    /// The video a tile tap started. A tapped video plays; it does not open a page showing a
+    /// still of itself with a play button on it.
+    @State private var playing: VideoPlayback?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
 
@@ -42,7 +45,13 @@ public struct TimelineView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("memosng")
+            // No large title. The app's own name over its only screen told nobody anything, and a
+            // large title spends a whole band of the screen before the first memo — on the surface
+            // where the content is the point. The toolbar keeps both its controls exactly where
+            // they were, and the day headings become what the top of the scroll reads as, which is
+            // what they already looked like they were.
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: MemoRoute.self) { route in
                 if let timeline, let memo = memo(route.uid, in: timeline) {
                     MemoDetailView(uid: route.uid, initial: memo, timeline: timeline)
@@ -103,6 +112,11 @@ public struct TimelineView: View {
                     await submit(mode, submission: submission, to: timeline)
                 }
             }
+        }
+        // Attached here rather than beside the viewer's cover above: two presentations on ONE view
+        // is how one of them silently stops appearing.
+        .fullScreenCover(item: $playing) { playback in
+            VideoPlayerView(playback: playback)
         }
         // The question the menu tap asks. It is not drawn under the anchor, so no repeat of the
         // tap that opened the menu can land on it.
@@ -206,7 +220,8 @@ public struct TimelineView: View {
                             memo: memo,
                             mediaZoom: mediaZoom,
                             openMemo: { path.append(MemoRoute(uid: memo.uid)) },
-                            openAttachment: { open($0, of: memo) }
+                            openAttachment: { open($0, of: memo) },
+                            openPlayback: { play($0) }
                         )
                         .cardRow()
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -252,6 +267,14 @@ public struct TimelineView: View {
                             guard let client = session.api, let baseURL = session.serverBaseURL
                             else { return }
                             await timeline.loadMore(using: client, baseURL: baseURL)
+                        }
+                        // Ends the WAITING treatment without anybody pulling the timeline down.
+                        // Keyed on whether this memo is still waiting, so the loop is started when
+                        // it becomes true and torn down when it stops being true — and cancelled
+                        // by SwiftUI when the row itself goes away.
+                        .task(id: memo.isAwaitingTiers) {
+                            guard memo.isAwaitingTiers else { return }
+                            await pollTiers(memo.uid, in: timeline)
                         }
                     }
                 } header: {
@@ -320,6 +343,28 @@ public struct TimelineView: View {
         } else {
             path.append(MemoRoute(uid: memo.uid))
         }
+    }
+
+    /// A tapped video plays, immediately. The viewer's poster page for it is what a SWIPE reaches
+    /// — a direct tap on a video is unambiguous, and it means play it.
+    ///
+    /// A video with no streamable rendition never routes here (`MemoCardTap.plays`), so there is
+    /// nothing to fall back to.
+    private func play(_ attachment: MemoAttachment) {
+        guard let url = MemoPresentation.playbackURL(for: attachment) else { return }
+        playing = VideoPlayback(url: url)
+    }
+
+    /// Re-reads a memo whose attachments the server has not finished deriving, on a capped
+    /// backoff, until it has.
+    ///
+    /// SEAM (phase 5c): this is the INTERIM. `GET /api/events` (SSE) already pushes media-ready
+    /// events to the web app; when this client subscribes to that stream, this call and
+    /// `TierReadinessPoll` behind it go, and `TimelineStore.refreshMemo` becomes the handler for
+    /// one event.
+    private func pollTiers(_ uid: String, in timeline: TimelineStore) async {
+        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        await TierReadinessPoll.run(uid: uid, in: timeline, using: client, baseURL: baseURL)
     }
 
     private func delete(_ memo: Memo, in timeline: TimelineStore) async {

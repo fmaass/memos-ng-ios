@@ -33,9 +33,14 @@ public enum DesignTokens {
 
     /// Corner radii. `card` is the generous one the timeline is built from; `tile` is concentric
     /// inside it (a smaller radius inset by the card's own padding reads as parallel, not nested).
+    ///
+    /// The tile radius is small on purpose. Photos in a justified gallery sit four points apart,
+    /// and at 14 the rounding ate the corner of every one of them and turned a row of pictures into
+    /// a row of lozenges — the curve has to be a detail of the tile, not a shape imposed on the
+    /// picture inside it.
     public enum Radius {
         public static let card: CGFloat = 20
-        public static let tile: CGFloat = 14
+        public static let tile: CGFloat = 8
     }
 
     /// Dimensions that must grow with the type size. Every one of these is read through
@@ -43,8 +48,15 @@ public enum DesignTokens {
     /// defect this scale exists to prevent.
     public enum Metric {
         public static let avatar: CGFloat = 28
-        public static let photoStrip: CGFloat = 132
-        public static let photoSolo: CGFloat = 220
+        /// The square two-up: two photos side by side, cropped into one shared shape.
+        public static let photoPair: CGFloat = 132
+        /// The tallest a lone photo may stand. It is a CAP, not a height: a photo below it is
+        /// shown at its own proportions and nothing is cropped, and one above it narrows rather
+        /// than losing its top and bottom.
+        public static let photoSolo: CGFloat = 300
+        /// The row height the justified packing aims for at a card's content width. Rows come out
+        /// at or below it; the trailing row stands exactly on it.
+        public static let photoRow: CGFloat = 150
         public static let pickedThumbnail: CGFloat = 72
         public static let signInMark: CGFloat = 96
     }

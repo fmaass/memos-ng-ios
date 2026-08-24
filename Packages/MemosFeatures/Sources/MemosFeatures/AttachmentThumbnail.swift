@@ -2,12 +2,37 @@ import MemosCore
 import SwiftUI
 import UIKit
 
-/// Which of the three things a tile can be showing. Named separately from the loader so a stalled
+/// Which of the four things a tile can be showing. Named separately from the loader so a stalled
 /// load can be rendered and asserted without a network.
+///
+/// `waiting` is the one that was missing, and its absence is what put a row of "!" marks on the
+/// first real post: the server derives an attachment's tiers AFTER the memo exists, the tile asked
+/// for a picture that was not there yet, the fetch came back with nothing, and a perfectly good
+/// photo wore the glyph that means "this file is broken". Waiting and failed are different facts
+/// and they now look different.
 public enum ThumbnailPhase: Equatable, Sendable {
     case loading
     case loaded
+    /// The server has not produced this rendition yet. Nothing is wrong; something is coming.
+    case waiting
     case failed
+}
+
+/// What a tile does while it waits, and the one thing that changes it.
+public enum WaitingTreatment {
+    public enum Motion: Equatable, Sendable {
+        /// A sheen travelling across the tile.
+        case shimmer
+        /// The same veil, standing still.
+        case still
+    }
+
+    /// Reduce Motion means STILL, not "slower": the setting is a request for no movement, and a
+    /// gentler animation is still an animation. The waiting is still legible — the veil stays,
+    /// it just stops travelling.
+    public static func motion(reduceMotion: Bool) -> Motion {
+        reduceMotion ? .still : .shimmer
+    }
 }
 
 /// One attachment in the timeline.
@@ -71,9 +96,49 @@ struct AttachmentThumbnail: View {
     }
 
     private var phase: ThumbnailPhase {
-        if image != nil { return .loaded }
-        if url == nil || failedKey == key { return .failed }
-        return .loading
+        Self.phase(
+            readiness: attachment.readiness,
+            hasImage: image != nil,
+            hasURL: url != nil,
+            loadFailed: failedKey == key
+        )
+    }
+
+    /// The three-way projection, as a function of what the SERVER said and what this instance
+    /// managed to load. Pure, so each of the three can be asserted distinctly instead of being
+    /// inferred from a rendered tile.
+    ///
+    /// The server's word comes first, and only `failed` produces the failure glyph. An attachment
+    /// the server is still working on waits — even though its derived-tier URL is already in the
+    /// payload and a fetch for it would 404, which is precisely the trap the old two-way version
+    /// fell into. A picture that somehow arrived anyway is shown rather than covered up.
+    ///
+    /// A `ready` attachment whose fetch comes back with nothing is still a failure: the tiers are
+    /// supposed to exist, so something IS wrong with this one.
+    static func phase(
+        readiness: AttachmentReadiness,
+        hasImage: Bool,
+        hasURL: Bool,
+        loadFailed: Bool
+    ) -> ThumbnailPhase {
+        switch readiness {
+        case .failed:
+            return .failed
+        case .waiting:
+            return hasImage ? .loaded : .waiting
+        case .ready:
+            if hasImage { return .loaded }
+            if !hasURL || loadFailed { return .failed }
+            return .loading
+        }
+    }
+
+    /// What a re-load has to depend on. The URL alone is not enough: a pending attachment's
+    /// derived-tier URL is already in the payload and does not change when the worker finishes, so
+    /// keying on it would leave the tile waiting forever after the status flipped.
+    nonisolated private struct LoadTrigger: Equatable, Sendable {
+        let url: URL?
+        let readiness: AttachmentReadiness
     }
 
     var body: some View {
@@ -87,12 +152,14 @@ struct AttachmentThumbnail: View {
                     contentMode: slot.contentMode
                 )
             }
-            .task(id: url) { await load() }
+            .task(id: LoadTrigger(url: url, readiness: attachment.readiness)) { await load() }
             .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
     }
 
     private func load() async {
-        guard let url else { return }
+        // Nothing to fetch while the server is still deriving it, and nothing to fetch for a file
+        // it gave up on. Asking anyway is what turned a pending photo into a failure glyph.
+        guard attachment.readiness == .ready, let url else { return }
         MediaCache.evictExpired(url)
 
         // Captured before the await: the view can be handed a different attachment while the
@@ -155,6 +222,8 @@ struct ThumbnailContent: View {
     /// what should be behind it, not a grey bar.
     var contentMode: TileContentMode = .fill
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         ZStack {
             BlurHashBackdrop(blurhash: attachment.blurhash)
@@ -167,19 +236,76 @@ struct ThumbnailContent: View {
                     }
                 }
             }
+            // The ONLY place the failure glyph is drawn, and only for an attachment the server
+            // actually failed on.
             if phase == .failed {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.title3)
                     .foregroundStyle(.white)
                     .shadow(radius: 4)
             }
-            if attachment.isVideo && phase != .failed {
+            // A video whose poster has not been derived yet has nothing to play, so it does not
+            // offer to.
+            if attachment.isVideo && phase != .failed && phase != .waiting {
                 Image(systemName: "play.circle.fill")
                     .font(.largeTitle)
                     .foregroundStyle(.white)
                     .shadow(radius: 6)
             }
         }
+        // An overlay rather than another layer of the stack: a veil must never be able to change
+        // the size of the tile it is a veil over.
+        .overlay {
+            if phase == .waiting {
+                WaitingVeil(motion: WaitingTreatment.motion(reduceMotion: reduceMotion))
+            }
+        }
         .clipped()
+    }
+}
+
+/// The veil over a tile whose picture the server has not finished making.
+///
+/// A sheen that travels rather than a spinner: the tile already has the picture's own colours under
+/// it (the blurhash), and a spinner on top of that says "loading" where the truth is "being made".
+/// The plain fill `BlurHashBackdrop` falls back to is what it covers when there is no hash.
+///
+/// It never draws the failure glyph, which is the whole point of it existing.
+struct WaitingVeil: View {
+    let motion: WaitingTreatment.Motion
+
+    @State private var travelling = false
+
+    var body: some View {
+        Group {
+            switch motion {
+            case .still:
+                // Reduce Motion: the same brightening, standing still. Something is clearly
+                // happening to this tile; nothing on it moves.
+                Rectangle().fill(.white.opacity(0.14))
+            case .shimmer:
+                GeometryReader { proxy in
+                    let width = proxy.size.width
+                    let band = max(width * 0.5, 32)
+                    LinearGradient(
+                        colors: [
+                            .white.opacity(0), .white.opacity(0.32), .white.opacity(0),
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: band)
+                    .offset(x: travelling ? width : -band)
+                    .animation(
+                        .linear(duration: 1.4).repeatForever(autoreverses: false),
+                        value: travelling
+                    )
+                }
+                .onAppear { travelling = true }
+            }
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }

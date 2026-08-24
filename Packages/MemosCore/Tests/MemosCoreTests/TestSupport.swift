@@ -65,12 +65,36 @@ enum Stub {
         content: String = "hello",
         pinned: Bool = false,
         visibility: String = "PRIVATE",
-        createdAt: String = "2026-08-23T09:00:00Z"
+        createdAt: String = "2026-08-23T09:00:00Z",
+        attachments: [String] = []
     ) -> String {
         """
         {"uid":"\(uid)","owner":"fabian","mine":true,"content":"\(jsonEscaped(content))",\
         "visibility":"\(visibility)","pinned":\(pinned),"created_at":"\(createdAt)",\
-        "updated_at":"2026-08-23T09:00:00.443000Z","archived_at":null,"tags":[],"attachments":[]}
+        "updated_at":"2026-08-23T09:00:00.443000Z","archived_at":null,"tags":[],\
+        "attachments":[\(attachments.joined(separator: ","))]}
+        """
+    }
+
+    /// One attachment on a memo, at whatever stage of processing the test needs. The derived-tier
+    /// URLs are present whatever the status — which is the whole point: they exist in the payload
+    /// from the moment the attachment does, long before the worker has produced anything to serve
+    /// from them.
+    static func attachment(
+        uid: String,
+        status: String,
+        mime: String = "image/jpeg"
+    ) -> String {
+        """
+        {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
+        "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
+        "hasLegacyPrint":false,"renditions":[],\
+        "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
+        "previewUrl":"/api/attachments/\(uid)/mobile",\
+        "webUrl":"/api/attachments/\(uid)/web",\
+        "posterUrl":"/api/attachments/\(uid)/poster",\
+        "downloadUrl":"/api/attachments/\(uid)/download",\
+        "printUrl":"/api/attachments/\(uid)/print"}
         """
     }
 

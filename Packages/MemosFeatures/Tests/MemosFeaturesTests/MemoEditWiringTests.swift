@@ -178,6 +178,154 @@ struct MemoEditWiringTests {
     }
 }
 
+/// Deleting a memo from the sheet it is being edited in.
+///
+/// The edit screen could change a memo and could not remove one, so the only way to delete was a
+/// swipe on its card back in the timeline. The affordance now lives where somebody who has opened a
+/// memo to deal with it is already looking — behind a question, because it is the one act on this
+/// screen that cannot be taken back.
+///
+/// Mine-gating is INHERENT and deliberately not re-tested here: the sheet is opened only by
+/// `MemoEditFlow.begin(MemoDetailPresentation.editMode(for:))`, which is nil for a memo that is not
+/// mine (`beginRefusesANotMineMemo`, above). There is no way to reach a delete affordance on
+/// somebody else's memo without first defeating that gate.
+@MainActor
+@Suite("Memo delete wiring")
+struct MemoDeleteWiringTests {
+    private let created = Date(timeIntervalSince1970: 1_750_000_000)
+
+    private func opened() -> MemoEditFlow {
+        let flow = MemoEditFlow()
+        flow.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        return flow
+    }
+
+    /// The load-bearing property, stated as the machine rather than as a screenshot of an alert:
+    /// there is NO path from idle to deleting. A `confirmed` that arrives without a question
+    /// having been asked — a stray event, a re-render, a second tap landing somewhere unexpected —
+    /// is ignored rather than obeyed.
+    @Test("nothing is deleted without a question that was actually asked")
+    func noPathToDeleteWithoutConfirmation() {
+        typealias Flow = MemoEditFlow
+        #expect(Flow.nextDelete(.idle, on: .confirmed) == .idle)
+        #expect(Flow.nextDelete(.idle, on: .cancelled) == .idle)
+        #expect(Flow.nextDelete(.idle, on: .returned(true)) == .idle)
+        // The only door into the request is asking first, then being answered yes.
+        #expect(Flow.nextDelete(.idle, on: .tapped) == .asking)
+        #expect(Flow.nextDelete(.asking, on: .confirmed) == .deleting)
+        // And the request is the only stage that may talk to the server.
+        #expect(Flow.deletes(.deleting))
+        #expect(!Flow.deletes(.idle))
+        #expect(!Flow.deletes(.asking))
+    }
+
+    @Test("a repeat tap is one question, and cannot restart a request in flight")
+    func tapIsIdempotent() {
+        typealias Flow = MemoEditFlow
+        #expect(Flow.nextDelete(.asking, on: .tapped) == .asking)
+        #expect(Flow.nextDelete(.deleting, on: .tapped) == .deleting)
+        // A dismissal answers no — except once the request is gone, which cannot be recalled.
+        #expect(Flow.nextDelete(.asking, on: .cancelled) == .idle)
+        #expect(Flow.nextDelete(.deleting, on: .cancelled) == .deleting)
+        // An answer is only meaningful for a request that was sent.
+        #expect(Flow.nextDelete(.deleting, on: .returned(true)) == .idle)
+        #expect(Flow.nextDelete(.deleting, on: .returned(false)) == .idle)
+        #expect(Flow.nextDelete(.asking, on: .returned(true)) == .asking)
+    }
+
+    /// The seam the screen acts on: once the server says the memo is gone, the sheet closes AND
+    /// the flow says the memo is gone, which is what `MemoDetailView` pops the detail screen on.
+    /// Landing back on a detail view of a memo that no longer exists is the bug this prevents.
+    @Test("a delete that worked closes the sheet and says the screen must go too")
+    func successClosesBoth() {
+        let flow = opened()
+        #expect(!flow.memoDeleted)
+
+        flow.advanceDelete(.tapped)
+        #expect(flow.deleteStage == .asking)
+        flow.advanceDelete(.confirmed)
+        #expect(flow.deleteStage == .deleting)
+        flow.advanceDelete(.returned(true))
+
+        #expect(flow.deleteStage == .idle)
+        #expect(flow.editing == nil, "the sheet stayed open over a memo that no longer exists")
+        #expect(flow.memoDeleted, "nothing told the detail screen to go")
+        #expect(flow.lastError == nil)
+    }
+
+    /// A delete that failed changes nothing and says so — through the same `lastError` a failed
+    /// save uses, on the same screen, with the sheet still open.
+    @Test("a delete that failed keeps the sheet open and says so")
+    func failureKeepsTheSheet() {
+        let flow = opened()
+        flow.advanceDelete(.tapped)
+        flow.advanceDelete(.confirmed)
+        flow.advanceDelete(.returned(false))
+
+        #expect(flow.deleteStage == .idle)
+        #expect(flow.editing != nil, "a failed delete threw away the sheet anyway")
+        #expect(!flow.memoDeleted, "a failed delete told the screen to pop")
+        #expect(flow.lastError == MemoEditFlow.deleteFailureMessage)
+        #expect(flow.lastError != MemoEditFlow.failureMessage, "a delete said it was a save")
+    }
+
+    @Test("the delete acts on the memo the sheet is open on")
+    func theUidComesFromTheSheet() {
+        let flow = MemoEditFlow()
+        #expect(flow.editingUID == nil)
+        flow.begin(.edit(uid: "m9", content: "x", createdAt: created))
+        #expect(flow.editingUID == "m9")
+    }
+
+    @Test("opening the sheet again starts the conversation over")
+    func beginResetsTheDeleteState() {
+        let flow = opened()
+        flow.advanceDelete(.tapped)
+        flow.advanceDelete(.confirmed)
+        flow.advanceDelete(.returned(false))
+        #expect(flow.lastError != nil)
+
+        flow.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        #expect(flow.deleteStage == .idle)
+        #expect(!flow.memoDeleted)
+        #expect(flow.lastError == nil)
+    }
+
+    // MARK: - the affordance itself
+
+    /// That the row is on the screen at all. It is a body element rather than a toolbar item, but
+    /// the probe is the same one the Edit button uses and the positive control is the same idea:
+    /// if this cannot see the sheet's own Save, its silence about Delete would prove nothing.
+    @Test("an edit sheet with a delete really shows it, and one without does not")
+    func theDeleteRowIsOnTheSheet() {
+        let mode = ComposeView.Mode.edit(uid: "m1", content: "the boiler man", createdAt: created)
+        let withDelete = ScreenProbe.labels(
+            of: ComposeView(
+                mode: mode,
+                delete: ComposeDelete(isAsking: false, send: { _ in })
+            ) { _ in true }
+        )
+        #expect(
+            withDelete.contains { $0.contains("Save") },
+            "the probe found nothing of the sheet at all: \(withDelete)"
+        )
+        #expect(
+            withDelete.contains("Delete memo"),
+            "no Delete affordance on the edit sheet: \(withDelete)"
+        )
+
+        // A NEW memo has nothing to delete, and says nothing about deleting.
+        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in true })
+        // Cancel rather than Post as the control: Post is disabled on an empty capture, and a
+        // control that may be missing for its own reasons controls nothing.
+        #expect(
+            creating.contains { $0.contains("Cancel") },
+            "the probe found nothing of the new-memo sheet: \(creating)"
+        )
+        #expect(!creating.contains("Delete memo"), "a new memo offered to delete itself")
+    }
+}
+
 /// The counting store the wiring is asserted against: what was submitted, on which memo, how often.
 @MainActor
 final class SubmissionRecorder {

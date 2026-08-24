@@ -8,29 +8,32 @@ import Testing
 @MainActor
 @Suite("Memo card presentation")
 struct MemoCardPresentationTests {
-    @Test("the photo arrangement has a case for every count, and counts the rest")
+    @Test("the photo arrangement has a case for every count, and three or more justifies")
     func photoLayouts() {
         #expect(MemoCardPresentation.photoLayout(for: 0) == .none)
         #expect(MemoCardPresentation.photoLayout(for: 1) == .solo)
         #expect(MemoCardPresentation.photoLayout(for: 2) == .pair)
-        #expect(MemoCardPresentation.photoLayout(for: 3) == .strip(overflow: 0))
-        #expect(MemoCardPresentation.photoLayout(for: 4) == .strip(overflow: 1))
-        #expect(MemoCardPresentation.photoLayout(for: 12) == .strip(overflow: 9))
+        #expect(MemoCardPresentation.photoLayout(for: 3) == .justified)
+        #expect(MemoCardPresentation.photoLayout(for: 4) == .justified)
+        #expect(MemoCardPresentation.photoLayout(for: 12) == .justified)
         // A negative count cannot happen, and must not be a crash if it ever does.
         #expect(MemoCardPresentation.photoLayout(for: -1) == .none)
     }
 
-    @Test("what is drawn never exceeds what is there")
+    /// The property the capped strip broke: a memo with six photos showed three and a "+3". Every
+    /// photo is drawn now, at every count, and nothing is hidden behind a number.
+    @Test("every photo a memo holds is drawn — nothing is hidden behind a count")
     func tileCounts() {
         for count in 0...12 {
             let layout = MemoCardPresentation.photoLayout(for: count)
-            let tiles = MemoCardPresentation.tileCount(for: layout)
-            #expect(tiles <= count)
-            #expect(tiles <= 3)
-            if case .strip(let overflow) = layout {
-                #expect(tiles + overflow == count)
-            }
+            let tiles = MemoCardPresentation.tileCount(for: layout, of: count)
+            #expect(tiles == count, "\(count) photos drew \(tiles) tiles")
         }
+        // The arrangements cap at what is actually there, so a mismatched pair cannot index past
+        // the end of the array.
+        #expect(MemoCardPresentation.tileCount(for: .pair, of: 1) == 1)
+        #expect(MemoCardPresentation.tileCount(for: .solo, of: 0) == 0)
+        #expect(MemoCardPresentation.tileCount(for: .justified, of: -1) == 0)
     }
 
     @Test("the avatar letter comes from the name, not the address")

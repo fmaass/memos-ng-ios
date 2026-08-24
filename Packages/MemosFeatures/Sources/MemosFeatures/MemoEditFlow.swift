@@ -20,8 +20,20 @@ public final class MemoEditFlow {
     /// Why the last save did not work, or nil. A haptic is not a message: before this, a failed
     /// save left the sheet open and said nothing at all.
     public private(set) var lastError: String?
+    /// How far the delete conversation has got. See `nextDelete`.
+    public private(set) var deleteStage = DeleteStage.idle
+    /// Set once the server has confirmed the memo is gone. The screen it was open on has to go
+    /// with it — a detail view of a memo that no longer exists is a screen showing a lie.
+    public private(set) var memoDeleted = false
 
     public init() {}
+
+    /// The memo the sheet is open on. The delete acts on THIS uid rather than on one the caller
+    /// carries separately, so the sheet and the request cannot come to be about different memos.
+    public var editingUID: String? {
+        guard case .edit(let uid, _, _) = editing else { return nil }
+        return uid
+    }
 
     /// What `.sheet(item:)` binds to. Only dismissal comes back through it — the sheet is opened
     /// by `begin`, never by an assignment from the outside.
@@ -34,11 +46,79 @@ public final class MemoEditFlow {
     public func begin(_ mode: ComposeView.Mode?) {
         guard let mode else { return }
         lastError = nil
+        deleteStage = .idle
+        memoDeleted = false
         editing = mode
     }
 
     public func dismiss() {
         editing = nil
+        // A dismissal cannot abort a request already sent — see `nextDelete(_:on:)`.
+        if deleteStage != .deleting { deleteStage = .idle }
+    }
+
+    // MARK: - deleting
+
+    /// How far the delete conversation has got. `deleting` is the ONLY stage in which the app is
+    /// allowed to tell the server to remove anything.
+    public enum DeleteStage: Equatable, Sendable {
+        case idle
+        case asking
+        case deleting
+    }
+
+    public enum DeleteEvent: Equatable, Sendable {
+        /// The destructive row in the edit sheet was tapped. Deliberately harmless.
+        case tapped
+        /// The question was answered yes, in the alert.
+        case confirmed
+        /// The question was dismissed, by Cancel or by the alert going away.
+        case cancelled
+        /// The server answered.
+        case returned(Bool)
+    }
+
+    /// The same discipline the sign-out flow is built on, for the same reason: the tap that opens
+    /// the conversation and the tap that destroys something are different events, and only one of
+    /// them reaches the server. There is NO path from `idle` to `deleting` — a `confirmed` that
+    /// arrives without a question having been asked is ignored rather than obeyed, so no stray
+    /// event, repeat tap or re-render can delete a memo nobody agreed to delete.
+    public static func nextDelete(_ stage: DeleteStage, on event: DeleteEvent) -> DeleteStage {
+        switch event {
+        case .tapped:
+            // Idempotent: a double tap is one question, asked once, and it cannot restart a
+            // delete already in flight.
+            return stage == .idle ? .asking : stage
+        case .confirmed:
+            return stage == .asking ? .deleting : stage
+        case .cancelled:
+            // Dismissal cannot abort a request that has already been sent: it is gone, and
+            // pretending otherwise would leave the screen disagreeing with the server.
+            return stage == .deleting ? .deleting : .idle
+        case .returned:
+            return stage == .deleting ? .idle : stage
+        }
+    }
+
+    /// The one stage that is allowed to reach the network. The view starts the request when the
+    /// machine ENTERS it, so there is exactly one place a delete can begin.
+    public static func deletes(_ stage: DeleteStage) -> Bool { stage == .deleting }
+
+    /// Feeds one event to the delete machine and applies what it means to the sheet.
+    ///
+    /// A delete that WORKED closes the sheet and marks the memo gone. One that failed keeps the
+    /// sheet open and says why through the same `lastError` a failed save uses — the memo is still
+    /// there, and so is the screen it was being edited on.
+    public func advanceDelete(_ event: DeleteEvent) {
+        deleteStage = Self.nextDelete(deleteStage, on: event)
+        guard case .returned(let succeeded) = event else { return }
+        if succeeded {
+            lastError = nil
+            memoDeleted = true
+            editing = nil
+        } else {
+            lastError = Self.deleteFailureMessage
+        }
     }
 
     /// Runs the save and answers what `ComposeView` asks: may the sheet close?
@@ -58,4 +138,6 @@ public final class MemoEditFlow {
     }
 
     static let failureMessage = "This memo could not be saved. Nothing was changed on the server."
+    static let deleteFailureMessage =
+        "This memo could not be deleted. It is still on the server."
 }
