@@ -92,6 +92,60 @@ struct BlurHashTests {
         }
     }
 
+    /// The hash is server-controlled. Before this guard, `Array(hash)` materialised whatever
+    /// arrived — grapheme-breaking and allocating a multi-megabyte string on whichever thread had
+    /// asked for a placeholder — and only THEN reached the length check that was going to reject
+    /// it. The refusal now happens on the byte count, so an eight-million-character string costs
+    /// a comparison rather than a stall. The bound below is roughly two orders of magnitude below
+    /// what materialising that string takes, and far above what refusing it takes.
+    @Test("an absurdly long hash is refused before it is ever copied")
+    func overLengthIsRefusedWithoutMaterialising() {
+        let flood = String(repeating: "L", count: 8_000_000)
+        var result: [UInt8]?
+        // Refused a THOUSAND times. One rejection is too quick to measure reliably, and a bound
+        // loose enough not to flake on a single one turned out to be loose enough to let a
+        // materialise-then-check implementation pass. A thousand refusals cost a thousand integer
+        // comparisons here and a thousand eight-megabyte copies without the guard — seconds
+        // against microseconds, which no amount of machine-to-machine variation closes.
+        let elapsed = ContinuousClock().measure {
+            for _ in 0..<1000 { result = BlurHash.decode(flood, width: 32, height: 24) }
+        }
+        #expect(result == nil)
+        #expect(
+            elapsed < .milliseconds(100),
+            "1000 refusals of an over-length hash took \(elapsed) — it is being copied first"
+        )
+        #expect(BlurHash.averageColor(flood) == nil)
+        // One character over the maximum is still over the maximum.
+        #expect(BlurHash.decode(String(repeating: "L", count: 167), width: 4, height: 4) == nil)
+    }
+
+    /// The size flag is `(numX - 1) + (numY - 1) * 9`, so the format defines 0...80 — but a
+    /// base83 digit runs to 82. Read naively, 81 and 82 claim a tenth row of components, which no
+    /// encoder writes and which the arithmetic below has no business trusting.
+    @Test("a size the format does not define is refused, not interpreted")
+    func undefinedSizeFlagsAreRefused() {
+        // '}' is 81 and would claim 1x10; '~' is 82 and would claim 2x10. Both strings are
+        // exactly the length that claim implies, so only the flag bound can reject them.
+        let claimsTenRows = "}" + String(repeating: "0", count: 23)
+        let claimsTwentyPairs = "~" + String(repeating: "0", count: 43)
+        #expect(claimsTenRows.count == 24)
+        #expect(claimsTwentyPairs.count == 44)
+        #expect(BlurHash.decode(claimsTenRows, width: 4, height: 4) == nil)
+        #expect(BlurHash.decode(claimsTwentyPairs, width: 4, height: 4) == nil)
+    }
+
+    /// The positive control for both bounds above: the largest hash the format CAN describe —
+    /// nine by nine components, 166 characters, size flag 80 — still decodes. A cap set one
+    /// character too tight, or a flag bound of 79, would fail here.
+    @Test("the largest hash the format allows still decodes")
+    func maximumSizeHashIsAccepted() throws {
+        let largest = "|07Da1" + String(repeating: "M", count: 160)
+        #expect(largest.count == 166)
+        let pixels = try #require(BlurHash.decode(largest, width: 4, height: 4))
+        #expect(pixels.count == 4 * 4 * 4)
+    }
+
     @Test("a malformed hash is nothing, not a crash")
     func malformedInputIsRejected() {
         #expect(BlurHash.decode("", width: 4, height: 4) == nil)

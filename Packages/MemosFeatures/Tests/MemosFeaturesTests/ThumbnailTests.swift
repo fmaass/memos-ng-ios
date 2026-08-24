@@ -16,7 +16,11 @@ struct ThumbnailTests {
     private static let flatGreenHash = "007Da1"
 
     @Test("a tile whose image has not arrived is painted with the picture's own colour")
-    func stalledLoadingShowsTheDecodedBlurhash() throws {
+    func stalledLoadingShowsTheDecodedBlurhash() async throws {
+        // The decode runs off the main actor now, so it is awaited here exactly as the tile's own
+        // `.task` awaits it. What is asserted is unchanged: once the placeholder exists, it is
+        // what a tile with no image on it paints.
+        #expect(await BlurHashImage.image(for: Self.flatGreenHash) != nil)
         let view = ThumbnailContent(
             attachment: MemoFixture.attachment(blurhash: Self.flatGreenHash),
             phase: .loading,
@@ -48,18 +52,32 @@ struct ThumbnailTests {
     }
 
     @Test("a malformed blurhash is a plain fill, not a crash")
-    func malformedBlurhashDoesNotCrash() {
-        #expect(BlurHashImage.image(for: "not-a-blurhash") == nil)
-        #expect(BlurHashImage.image(for: "") == nil)
-        #expect(BlurHashImage.image(for: nil) == nil)
-        #expect(BlurHashImage.image(for: Self.flatGreenHash) != nil)
+    func malformedBlurhashDoesNotCrash() async {
+        #expect(await BlurHashImage.image(for: "not-a-blurhash") == nil)
+        #expect(await BlurHashImage.image(for: "") == nil)
+        #expect(await BlurHashImage.image(for: nil) == nil)
+        #expect(await BlurHashImage.image(for: String(repeating: "L", count: 8_000_000)) == nil)
+        #expect(await BlurHashImage.image(for: Self.flatGreenHash) != nil)
     }
 
     @Test("a decoded blurhash is derived once and reused")
-    func decodesAreCached() throws {
-        let first = try #require(BlurHashImage.uiImage(for: Self.flatGreenHash))
-        let second = try #require(BlurHashImage.uiImage(for: Self.flatGreenHash))
+    func decodesAreCached() async throws {
+        let first = try #require(await BlurHashImage.uiImage(for: Self.flatGreenHash))
+        let second = try #require(await BlurHashImage.uiImage(for: Self.flatGreenHash))
         #expect(first === second)
+    }
+
+    /// The synchronous path a view body takes. Nothing is cached until the off-main decode has
+    /// finished, and everything is afterwards — which is what keeps a tile scrolled back into
+    /// view from flashing its plain fill again.
+    @Test("a hash is answered synchronously only after it has been decoded")
+    func theCacheIsTheSynchronousPath() async {
+        // Its own hash, so no other test in this suite can have warmed it first.
+        let hash = "001{~h"
+        #expect(BlurHashImage.cached(for: hash) == nil)
+        #expect(await BlurHashImage.image(for: hash) != nil)
+        #expect(BlurHashImage.cached(for: hash) != nil)
+        #expect(BlurHashImage.cached(for: nil) == nil)
     }
 
     @Test("only a delivered image is loaded and only a reported failure is a failure")

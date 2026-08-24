@@ -19,11 +19,28 @@ public enum BlurHash {
             + "#$%*+,-.:;=?@[]^_{|}~"
     )
 
+    /// The shortest a hash can be: a size flag, a quantised maximum, and four for the DC term.
+    static let minimumLength = 6
+    /// The longest. The size flag cannot describe more than 9x9 components, so the most a hash
+    /// can hold is 1 + 1 + 4 + 2 * (81 - 1) = 166 characters. Anything longer is not a blurhash
+    /// that any encoder produced, whatever else it might be.
+    static let maximumLength = 166
+    /// The size flag is `(numX - 1) + (numY - 1) * 9` with both between 1 and 9, so 80 is the
+    /// largest value the format defines. A base83 digit runs to 82, and 81 and 82 read naively
+    /// claim a tenth row no encoder ever writes — so they are refused rather than interpreted.
+    static let maximumSizeFlag = 80
+
     /// Decodes to straight RGBA bytes, four per pixel, row-major, alpha always 255.
     ///
     /// Returns `nil` for anything that is not a well-formed hash — a truncated string, a
-    /// character outside the alphabet, a length that disagrees with the component count in its
-    /// own first character. A placeholder is not worth a crash.
+    /// character outside the alphabet, a size the format does not define, a length that disagrees
+    /// with the component count in its own first character. A placeholder is not worth a crash.
+    ///
+    /// The order of the checks is the security-relevant part. This string arrives from the
+    /// server, and the two cheapest facts about it — how long it is and what size it claims to be
+    /// — are established BEFORE a single byte is copied. `Array(hash)` on a multi-megabyte string
+    /// would grapheme-break and materialise the whole thing first, on whichever thread happened
+    /// to want a placeholder, and only then reach a length check that was going to reject it.
     public static func decode(
         _ hash: String,
         width: Int,
@@ -31,9 +48,15 @@ public enum BlurHash {
         punch: Float = 1
     ) -> [UInt8]? {
         guard width > 0, height > 0 else { return nil }
+        // A blurhash is ASCII, so the UTF-8 count is the character count — and for a native
+        // Swift string it is already known rather than counted.
+        let byteCount = hash.utf8.count
+        guard byteCount >= minimumLength, byteCount <= maximumLength else { return nil }
+        guard let flag = hash.first, let sizeFlag = base83(flag), sizeFlag <= maximumSizeFlag
+        else { return nil }
+        // Only now, on a string proven to be at most 166 bytes.
         let characters = Array(hash)
-        guard characters.count >= 6 else { return nil }
-        guard let sizeFlag = base83(characters[0..<1]) else { return nil }
+        guard characters.count >= minimumLength else { return nil }
         let componentsX = (sizeFlag % 9) + 1
         let componentsY = (sizeFlag / 9) + 1
         guard characters.count == 4 + 2 * componentsX * componentsY else { return nil }
@@ -111,15 +134,26 @@ public enum BlurHash {
     /// decoding anything else. It is what a one-pixel decode would give, for a fraction of the
     /// work, and it is enough wherever a tint rather than a picture is wanted.
     public static func averageColor(_ hash: String) -> (r: UInt8, g: UInt8, b: UInt8)? {
+        // Bounded before it is copied, for the same reason `decode` is.
+        let byteCount = hash.utf8.count
+        guard byteCount >= minimumLength, byteCount <= maximumLength else { return nil }
         let characters = Array(hash)
-        guard characters.count >= 6, let dc = base83(characters[2..<6]) else { return nil }
+        guard characters.count >= minimumLength, let dc = base83(characters[2..<6]) else {
+            return nil
+        }
         return (UInt8((dc >> 16) & 255), UInt8((dc >> 8) & 255), UInt8(dc & 255))
+    }
+
+    /// One digit, read without a copy — which is what lets the size flag be bounded before the
+    /// string is materialised.
+    static func base83(_ character: Character) -> Int? {
+        alphabet.firstIndex(of: character)
     }
 
     static func base83(_ characters: ArraySlice<Character>) -> Int? {
         var value = 0
         for character in characters {
-            guard let digit = alphabet.firstIndex(of: character) else { return nil }
+            guard let digit = base83(character) else { return nil }
             value = value * 83 + digit
         }
         return value

@@ -36,7 +36,6 @@ public enum DesignTokens {
     public enum Radius {
         public static let card: CGFloat = 20
         public static let tile: CGFloat = 14
-        public static let pill: CGFloat = 999
     }
 
     /// Dimensions that must grow with the type size. Every one of these is read through

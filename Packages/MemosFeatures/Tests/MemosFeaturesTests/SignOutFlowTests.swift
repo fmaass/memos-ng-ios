@@ -55,26 +55,60 @@ struct SignOutConfirmationTests {
         #expect(stage == .asking)
     }
 
-    /// The general form of the same promise: no sequence of taps on the anchor, with or without
-    /// dismissals, ever reaches the stage that talks to the server. Only an answer to the question
-    /// does — and the question is asked somewhere the anchor is not.
-    @Test("no amount of tapping and dismissing can reach the server")
+    /// The general form of the same promise, over the WHOLE event alphabet bar one.
+    ///
+    /// Every event the machine can receive is injected at every stage it can be in — taps,
+    /// dismissals, and each of the three revoke outcomes, including outcomes for revokes this
+    /// screen never asked for. The single event left out is `confirmed`, which is the answer to
+    /// the question and the only thing that is ALLOWED to reach the server. If any other
+    /// sequence, at any depth, arrives at `revoking`, this fails.
+    @Test("no sequence of events short of an answer can reach the server")
     func onlyAnAnswerRevokes() {
-        let harmless: [SignOutFlow.Event] = [.menuTapped, .cancelled]
+        let failure = SignOutOutcome.revokeFailed(.server(status: 502))
+        let unauthorised: [SignOutFlow.Event] = [
+            .menuTapped,
+            .cancelled,
+            .revokeReturned(.revoked),
+            .revokeReturned(.alreadyRevoked),
+            .revokeReturned(failure),
+        ]
         var reached: Set<String> = []
         func walk(_ stage: SignOutFlow.Stage, depth: Int) {
-            #expect(!SignOutFlow.revokes(stage), "reached \(stage) without confirming")
+            #expect(!SignOutFlow.revokes(stage), "reached \(stage) without an answer")
             reached.insert("\(stage)")
-            guard depth < 7 else { return }
-            for event in harmless {
+            guard depth < 5 else { return }
+            for event in unauthorised {
                 walk(SignOutFlow.next(stage, on: event), depth: depth + 1)
             }
         }
         walk(.idle, depth: 0)
-        // Positive control: the walk really did move the machine around rather than sitting still.
+        // Positive control: the walk really did move the machine around rather than sit still,
+        // and it did reach the stage where a failed revoke is being explained.
         #expect(reached.count > 1)
+        #expect(reached.contains("asking"))
         // And the one event it never used is the one that does reach the server.
         #expect(SignOutFlow.revokes(SignOutFlow.next(.asking, on: .confirmed)))
+    }
+
+    /// An outcome is only ever the answer to a request this screen made. One that arrives in any
+    /// other stage — a late reply, a duplicate, anything a confused caller might deliver — leaves
+    /// the machine exactly where it was, and in particular never moves it toward revoking.
+    @Test("an unsolicited revoke outcome moves nothing, from any stage")
+    func unsolicitedOutcomesAreInert() throws {
+        let failure = SignOutOutcome.revokeFailed(.server(status: 502))
+        let decision = try #require(SignOutFlow.decision(for: failure))
+        let outcomes: [SignOutOutcome] = [.revoked, .alreadyRevoked, failure]
+        let idleStages: [SignOutFlow.Stage] = [.idle, .asking, .explaining(decision)]
+        for stage in idleStages {
+            for outcome in outcomes {
+                let next = SignOutFlow.next(stage, on: .revokeReturned(outcome))
+                #expect(next == stage, "\(outcome) moved \(stage) to \(next)")
+                #expect(!SignOutFlow.revokes(next))
+            }
+        }
+        // Positive control: the SOLICITED case does move, so the assertions above are about
+        // provenance rather than about outcomes never doing anything.
+        #expect(SignOutFlow.next(.revoking, on: .revokeReturned(.revoked)) == .idle)
     }
 
     @Test("a confirmation nobody asked for is ignored rather than obeyed")
