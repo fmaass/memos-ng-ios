@@ -114,7 +114,7 @@ struct IngestTests {
             )
 
             #expect(outcome == .notSignedIn)
-            #expect(await repository.loadJobs().isEmpty)
+            #expect(try await repository.loadJobs().isEmpty)
         }
     }
 
@@ -131,7 +131,7 @@ struct IngestTests {
             )
 
             #expect(outcome == .nothingToPost)
-            #expect(await repository.loadJobs().isEmpty)
+            #expect(try await repository.loadJobs().isEmpty)
         }
     }
 
@@ -153,7 +153,7 @@ struct IngestTests {
             )
 
             #expect(outcome == .notSignedIn)
-            #expect(await repository.loadJobs().isEmpty)
+            #expect(try await repository.loadJobs().isEmpty)
         }
     }
 
@@ -177,7 +177,7 @@ struct IngestTests {
 
             #expect(outcome == .accountChanged)
             #expect(
-                await repository.loadJobs().isEmpty,
+                try await repository.loadJobs().isEmpty,
                 "posting into the account someone was NOT looking at is not a smaller mistake"
             )
         }
@@ -205,7 +205,7 @@ struct IngestTests {
                 )
             }
 
-            #expect(await repository.loadJobs().isEmpty)
+            #expect(try await repository.loadJobs().isEmpty)
             let media = root.appending(path: "outbox/media")
             let leftovers =
                 (try? FileManager.default.contentsOfDirectory(

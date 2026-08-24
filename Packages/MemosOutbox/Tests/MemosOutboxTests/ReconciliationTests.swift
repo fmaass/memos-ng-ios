@@ -55,6 +55,28 @@ struct ReconciliationTests {
         #expect(plan.drainable.isEmpty)
     }
 
+    @Test("the same job id arriving twice is planned, not died on")
+    func duplicateJobIDsArePlannedOnce() {
+        let file = Fixture.file(uploadUID: "u1", byteSize: 3000, bytesConfirmed: 1000)
+        let job = Fixture.job(files: [file], state: .uploading)
+        // What a capture set aside under one id more than once used to hand this: two entries,
+        // one id. It runs on the launch path, so dying here loses the whole queue, not one row.
+        let plan = OutboxReconciliation.plan(
+            jobs: [job, job],
+            inFlight: [OutboxTaskIdentity(jobID: job.id, fileID: file.id, offset: 1000)]
+        )
+        #expect(plan.adopted.count == 1)
+        #expect(plan.cancelled.isEmpty)
+        #expect(plan.drainable.isEmpty)
+
+        let waiting = Fixture.job(files: [Fixture.file(byteSize: 10)], state: .waiting)
+        let idle = OutboxReconciliation.plan(jobs: [waiting, waiting], inFlight: [])
+        #expect(
+            idle.drainable == [waiting.id],
+            "one id is one job to drain — twice would be two uploads of the same bytes"
+        )
+    }
+
     @Test("a task whose job is gone, held, or already complete is cancelled")
     func cancelsOrphans() {
         let done = Fixture.file(uploadUID: "u1", byteSize: 3000, bytesConfirmed: 3000)

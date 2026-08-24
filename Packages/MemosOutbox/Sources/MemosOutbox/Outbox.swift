@@ -29,11 +29,23 @@ public final class Outbox {
     /// The queue, oldest capture first. Read straight from disk after every change, because disk
     /// is the truth: a job that only exists in memory is a memo that a force-quit loses.
     public private(set) var jobs: [UploadJob] = []
-    public private(set) var lastError: String?
+    /// What went wrong, of the four things that can: the capture just written, the queue itself,
+    /// a write the drain could not make, and a capture a person asked to be rid of. They are held
+    /// apart because they clear at different moments — a disk that has started answering again must
+    /// not leave a sentence about it on screen, and must not wipe the one about the memo that never
+    /// got saved either.
+    public var lastError: String? {
+        enqueueError ?? queueError ?? persistenceError ?? removalError
+    }
     /// Bumped when a job LEAVES the queue, which only happens on a server-confirmed memo. It is
     /// the timeline's cue to reload: a capture that vanishes from Pending and does not reappear
     /// as a memo looks exactly like a lost one.
     public private(set) var lastCompletedAt: Date?
+
+    private var enqueueError: String?
+    private var queueError: String?
+    private var persistenceError: String?
+    private var removalError: String?
 
     private let repository: OutboxRepository
     private let credentials: any OutboxCredentialsProviding
@@ -103,10 +115,20 @@ public final class Outbox {
 
     public func refresh() async {
         let previous = jobs.map(\.id)
-        jobs = await repository.loadJobs()
-        if OutboxProgress.didComplete(previous: previous, current: jobs.map(\.id)) {
-            lastCompletedAt = Date()
+        do {
+            let loaded = try await repository.loadJobs()
+            jobs = loaded
+            queueError = nil
+            if OutboxProgress.didComplete(previous: previous, current: loaded.map(\.id)) {
+                lastCompletedAt = Date()
+            }
+        } catch {
+            // A queue that could not be read is NOT an empty queue. What is on screen stays on
+            // screen, and the reason it could not be re-read is said out loud.
+            queueError =
+                "The queue on this device could not be read: \(error.localizedDescription)"
         }
+        persistenceError = await engine.lastPersistenceFailure
     }
 
     /// Where a queued capture's first original actually is, so a row can show it without the view
@@ -130,7 +152,7 @@ public final class Outbox {
         sources: [StagedSource]
     ) async -> Bool {
         guard let credentials = await credentials.currentCredentials() else {
-            lastError = "Sign in before writing a memo."
+            enqueueError = "Sign in before writing a memo."
             return false
         }
         do {
@@ -141,9 +163,10 @@ public final class Outbox {
                 binding: credentials.binding,
                 sources: sources
             )
-            lastError = nil
+            enqueueError = nil
         } catch {
-            lastError = "This memo could not be saved on the device: \(error.localizedDescription)"
+            enqueueError =
+                "This memo could not be saved on the device: \(error.localizedDescription)"
             return false
         }
         await refresh()
@@ -156,5 +179,19 @@ public final class Outbox {
         await engine.release(jobID: jobID)
         await refresh()
         await engine.drain()
+    }
+
+    /// Throws a capture away on purpose — the "Remove" offered by a row whose manifest could not be
+    /// read, which is the only row nothing else can ever move. A capture leaves this device because
+    /// a person decided it should, never because something swept.
+    public func discard(_ jobID: UUID) async {
+        do {
+            try await repository.discard(jobID)
+            removalError = nil
+        } catch {
+            removalError =
+                "This capture could not be removed: \(error.localizedDescription)"
+        }
+        await refresh()
     }
 }

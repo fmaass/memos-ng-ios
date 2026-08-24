@@ -24,6 +24,25 @@ public struct StagedSource: Sendable, Equatable {
     }
 }
 
+/// The queue on disk, as everything above it needs to see it.
+///
+/// The drain talks to this rather than to `OutboxRepository` for one reason: a write to the queue
+/// is allowed to FAIL, and the only way to show that the drain does the right thing when one does
+/// is to make one fail. Every other dependency of the drain is already a protocol for the same
+/// reason — this was the last concrete one.
+public protocol OutboxPersisting: Sendable {
+    func loadJobs() async throws -> [UploadJob]
+    func job(_ id: UUID) async -> UploadJob?
+    func save(_ job: UploadJob) async throws
+    func delete(_ job: UploadJob) async
+    func sweepOrphans() async throws
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL
+    func removeChunk(at url: URL) async
+    func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL
+}
+
 /// The outbox on disk.
 ///
 /// Everything lives in the app group's container so that the app, a share extension and a
@@ -32,6 +51,7 @@ public struct StagedSource: Sendable, Equatable {
 ///     jobs/<job>.json      the manifest — a job EXISTS exactly when this file does
 ///     media/<job>/<file>   the captured originals, copied byte for byte
 ///     chunks/<...>.part    the single slice currently with the background session
+///     quarantine/<job>.json  a manifest nobody could decode, kept byte for byte
 ///
 /// The order matters: media is copied first and the manifest is written last, atomically, so a
 /// crash mid-capture leaves at worst an unreferenced media directory (swept on the next launch)
@@ -41,7 +61,7 @@ public actor OutboxRepository {
 
     public init(root: URL) throws {
         self.root = root
-        for directory in [jobsRoot, mediaRoot, chunksRoot] {
+        for directory in [jobsRoot, mediaRoot, chunksRoot, quarantineRoot] {
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true
             )
@@ -64,6 +84,7 @@ public actor OutboxRepository {
     private nonisolated var jobsRoot: URL { root.appending(path: "jobs") }
     private nonisolated var mediaRoot: URL { root.appending(path: "media") }
     private nonisolated var chunksRoot: URL { root.appending(path: "chunks") }
+    private nonisolated var quarantineRoot: URL { root.appending(path: "quarantine") }
 
     private nonisolated func manifestURL(_ jobID: UUID) -> URL {
         jobsRoot.appending(path: "\(jobID.uuidString).json")
@@ -80,28 +101,65 @@ public actor OutboxRepository {
     // MARK: - reading and writing
 
     /// Every queued capture, oldest first: the queue drains in the order things were captured.
-    public func loadJobs() -> [UploadJob] {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let contents =
-            (try? FileManager.default.contentsOfDirectory(
-                at: jobsRoot, includingPropertiesForKeys: nil))
-            ?? []
-        return
-            contents
-            .filter { $0.pathExtension == "json" }
-            .compactMap { url -> UploadJob? in
-                guard let data = try? Data(contentsOf: url) else { return nil }
-                return try? decoder.decode(UploadJob.self, from: data)
+    ///
+    /// Two silences are deliberately gone from here. A jobs directory that cannot be LISTED throws:
+    /// an empty answer is indistinguishable from an empty outbox, and everything that deletes — the
+    /// sweep above all — reads this list as the whole truth. And a manifest that cannot be DECODED
+    /// is set aside rather than skipped: it comes back as a held job that says so, its bytes kept
+    /// and the originals it named untouched.
+    public func loadJobs() throws -> [UploadJob] {
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: jobsRoot, includingPropertiesForKeys: nil
+        )
+        var jobs: [UploadJob] = []
+        var seen: Set<UUID> = []
+        for url in contents where url.pathExtension == "json" {
+            switch readJob(at: url) {
+            case .decoded(let job):
+                jobs.append(job)
+                seen.insert(job.id)
+            case .undecodable(let reason):
+                let entry = quarantine(url, reason: reason)
+                jobs.append(entry)
+                seen.insert(entry.id)
+            case .unreadable(let reason):
+                // Left exactly where it is: a read that failed once may well succeed on the next
+                // pass, and moving it would turn a passing error into a permanent quarantine.
+                let entry = Self.defective(at: url, reason: reason)
+                jobs.append(entry)
+                seen.insert(entry.id)
+            case .vanished:
+                continue
             }
-            .sorted { $0.capturedAt < $1.capturedAt }
+        }
+        // One capture, one row. A manifest set aside a moment ago is already spoken for above, and
+        // an id can have been set aside more than ONCE — a capture that failed to be read on two
+        // launches has two files under the same id. Each id speaks once here; the older file stays
+        // on disk, unread and untouched, because a second row nobody can tell apart from the first
+        // is a queue that cannot be acted on at all.
+        for entry in try quarantinedJobs() where !seen.contains(entry.id) {
+            jobs.append(entry)
+            seen.insert(entry.id)
+        }
+        return jobs.sorted { $0.capturedAt < $1.capturedAt }
     }
 
+    /// One job, or nil when nothing actionable stands under that id.
+    ///
+    /// A manifest that cannot be decoded is quarantined here too, so that a background wake — which
+    /// only ever asks for the one job its chunk belongs to — still sets aside what it cannot read,
+    /// and the next refresh says so, rather than answering "no such capture" for ever.
     public func job(_ id: UUID) -> UploadJob? {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: manifestURL(id)) else { return nil }
-        return try? decoder.decode(UploadJob.self, from: data)
+        let url = manifestURL(id)
+        switch readJob(at: url) {
+        case .decoded(let job):
+            return job
+        case .undecodable(let reason):
+            quarantine(url, reason: reason)
+            return nil
+        case .unreadable, .vanished:
+            return nil
+        }
     }
 
     public func save(_ job: UploadJob) throws {
@@ -116,6 +174,197 @@ public actor OutboxRepository {
         try? FileManager.default.removeItem(at: manifestURL(job.id))
         try? FileManager.default.removeItem(at: mediaDirectory(job.id))
         removeChunks(forJob: job.id)
+    }
+
+    /// Throws one capture away because a PERSON said so: its manifest, whatever was set aside under
+    /// its id, its originals and any chunk.
+    ///
+    /// This is the only path in the package that destroys a capture the server never took, and it
+    /// exists because the alternative is worse. A capture whose manifest cannot be read can never
+    /// be sent and can never be cleared by anything automatic — without this it sits in the pending
+    /// list for the life of the install. Nothing calls it on a timer, a sweep or a launch: it is
+    /// reached from a button, once, per capture.
+    ///
+    /// It throws rather than going quiet: a removal that half-happened brings the row back on the
+    /// next read, and the person is owed the reason instead of a row that will not go away.
+    public func discard(_ id: UUID) throws {
+        // Both directories are scanned rather than the manifest's own name alone: a row can stand
+        // for a copy set aside on an earlier launch, or for a file whose name is not a job id at
+        // all, and a Remove that leaves one behind puts the row straight back on the next read.
+        for url in try files(surfacingAs: id, in: jobsRoot) {
+            try remove(url)
+        }
+        for url in try files(surfacingAs: id, in: quarantineRoot) {
+            try remove(url)
+        }
+        try remove(mediaDirectory(id))
+        removeChunks(forJob: id)
+    }
+
+    /// Every file in a directory that a pending row under this id was made from: the manifest
+    /// itself, and each copy set aside under that id on an earlier launch.
+    private nonisolated func files(surfacingAs id: UUID, in directory: URL) throws -> [URL] {
+        let contents: [URL]
+        do {
+            contents = try FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil
+            )
+        } catch let error as CocoaError where Self.isMissing(error) {
+            return []
+        }
+        return contents.filter { url in
+            let name = url.lastPathComponent
+            return (Self.jobID(named: name) ?? Self.derivedID(from: name)) == id
+        }
+    }
+
+    /// Removing what is already gone is the outcome that was asked for; anything else is not.
+    private nonisolated func remove(_ url: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as CocoaError where Self.isMissing(error) {
+            return
+        }
+    }
+
+    // MARK: - manifests that cannot be read
+
+    private enum ManifestRead {
+        case decoded(UploadJob)
+        /// Read whole, but not a job: corrupt bytes, a truncated write, another format.
+        case undecodable(String)
+        /// There, but not readable right now — permissions, a bad block, a container that went.
+        case unreadable(String)
+        /// Removed between the listing and the read: a job that completed, not a defect.
+        case vanished
+    }
+
+    private func readJob(at url: URL) -> ManifestRead {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch let error as CocoaError where Self.isMissing(error) {
+            return .vanished
+        } catch {
+            return .unreadable(error.localizedDescription)
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            return .decoded(try decoder.decode(UploadJob.self, from: data))
+        } catch {
+            return .undecodable(Self.explain(error))
+        }
+    }
+
+    /// Sets a manifest nobody can decode aside, byte for byte, and returns the entry that says so.
+    ///
+    /// Never deleted and never rewritten — MOVED, so whatever a later look might recover from it is
+    /// still there. The capture's media directory is not touched either: the entry carries the
+    /// manifest's own id, so the sweep goes on counting those originals as spoken for.
+    @discardableResult
+    private func quarantine(_ url: URL, reason: String) -> UploadJob {
+        do {
+            let destination = quarantineDestination(for: url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: destination)
+            return Self.defective(at: destination, reason: reason)
+        } catch {
+            // It could not be moved. It stays in the queue and is reported all the same, and the
+            // next load tries again; what must never happen is that it goes unmentioned.
+            return Self.defective(at: url, reason: reason)
+        }
+    }
+
+    private nonisolated func quarantineDestination(for name: String) -> URL {
+        let candidate = quarantineRoot.appending(path: name)
+        guard FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) else {
+            return candidate
+        }
+        // The id stays the first 36 characters, which is how the sweep recognises that the
+        // originals under it are still spoken for.
+        let base = URL(filePath: name).deletingPathExtension().lastPathComponent
+        return quarantineRoot.appending(path: "\(base).\(UUID().uuidString).json")
+    }
+
+    /// What was set aside earlier, read again on every load so the entry keeps saying why.
+    private func quarantinedJobs() throws -> [UploadJob] {
+        let contents: [URL]
+        do {
+            contents = try FileManager.default.contentsOfDirectory(
+                at: quarantineRoot, includingPropertiesForKeys: nil
+            )
+        } catch let error as CocoaError where Self.isMissing(error) {
+            // An outbox that has never had to set anything aside. Nothing was lost.
+            return []
+        }
+        return
+            contents
+            .filter { $0.pathExtension == "json" }
+            .compactMap { url -> UploadJob? in
+                switch readJob(at: url) {
+                case .undecodable(let reason), .unreadable(let reason):
+                    return Self.defective(at: url, reason: reason)
+                case .decoded:
+                    return Self.defective(at: url, reason: Self.setAsideEarlier)
+                case .vanished:
+                    return nil
+                }
+            }
+    }
+
+    private static let setAsideEarlier =
+        "This capture was set aside earlier because its manifest could not be read."
+
+    /// The stand-in for a manifest that could not be read: a held job that says so out loud.
+    ///
+    /// It carries the manifest's own id, so the sweep counts the capture's originals as live and
+    /// leaves them alone, and a binding that names the FILE instead of a server — which is both
+    /// true and impossible for any credential to match, so no drain can mistake it for work.
+    private nonisolated static func defective(at url: URL, reason: String) -> UploadJob {
+        let name = url.lastPathComponent
+        let id = jobID(named: name) ?? derivedID(from: name)
+        return UploadJob(
+            id: id,
+            idempotencyKey: id,
+            content: "",
+            capturedAt: creationDate(of: url) ?? .distantPast,
+            files: [],
+            binding: AccountBinding(serverBaseURL: url, ownerSubject: ""),
+            state: .held,
+            holdReason: .unreadableManifest,
+            lastError: reason
+        )
+    }
+
+    private nonisolated static func isMissing(_ error: CocoaError) -> Bool {
+        error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile
+    }
+
+    private nonisolated static func jobID(named name: String) -> UUID? {
+        UUID(uuidString: String(name.prefix(36)))
+    }
+
+    /// A stable stand-in id for a manifest whose name is not a job id — a foreign file, or one
+    /// renamed by hand. Derived from the name so the row keeps its identity from one refresh to the
+    /// next; it is not an identity anything outside this file may rely on.
+    private nonisolated static func derivedID(from name: String) -> UUID {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        for (index, byte) in Array(name.utf8).enumerated() {
+            bytes[index % 16] = bytes[index % 16] &* 31 &+ byte
+        }
+        return bytes.withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
+    }
+
+    /// A missing timestamp costs the entry only its place in capture order — it is surfaced either
+    /// way — so this failure is not worth carrying up.
+    private nonisolated static func creationDate(of url: URL) -> Date? {
+        try? url.resourceValues(forKeys: [.creationDateKey]).creationDate
+    }
+
+    /// Enough of the failure to say WHY. A decoding error names the field and the path it fell over
+    /// on, all of which `localizedDescription` throws away for a single generic sentence.
+    private nonisolated static func explain(_ error: any Error) -> String {
+        error is DecodingError ? String(describing: error) : error.localizedDescription
     }
 
     // MARK: - capturing
@@ -231,22 +480,25 @@ public actor OutboxRepository {
     /// Drops media and chunks that belong to no job: what a crash mid-capture, or a job that was
     /// completed as the process died, leaves behind. Files belonging to a live job are never
     /// touched here — a chunk may be in flight.
-    public func sweepOrphans() {
-        let live = Set(loadJobs().map(\.id.uuidString))
-        let directories =
-            (try? FileManager.default.contentsOfDirectory(
-                at: mediaRoot, includingPropertiesForKeys: nil))
-            ?? []
+    ///
+    /// Every deletion below rests on the list of live jobs, so when that list cannot be produced
+    /// NOTHING here runs: an empty one would take every capture's originals with it.
+    public func sweepOrphans() throws {
+        let live = Set(try loadJobs().map(\.id.uuidString))
+        let directories = try FileManager.default.contentsOfDirectory(
+            at: mediaRoot, includingPropertiesForKeys: nil
+        )
         for directory in directories where !live.contains(directory.lastPathComponent) {
             try? FileManager.default.removeItem(at: directory)
         }
-        let chunks =
-            (try? FileManager.default.contentsOfDirectory(
-                at: chunksRoot, includingPropertiesForKeys: nil))
-            ?? []
+        let chunks = try FileManager.default.contentsOfDirectory(
+            at: chunksRoot, includingPropertiesForKeys: nil
+        )
         for chunk in chunks {
             let owner = String(chunk.lastPathComponent.prefix(36))
             if !live.contains(owner) { try? FileManager.default.removeItem(at: chunk) }
         }
     }
 }
+
+extension OutboxRepository: OutboxPersisting {}

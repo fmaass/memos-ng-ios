@@ -336,6 +336,7 @@ struct VisibilityPill: View {
 struct PendingCard: View {
     let row: PendingRow
     let retry: () -> Void
+    let remove: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
@@ -356,11 +357,20 @@ struct PendingCard: View {
             if !row.snippet.isEmpty {
                 Text(row.snippet).font(.body)
             }
-            if row.needsAttention {
+            switch row.action {
+            case .retry:
                 Button("Try again", action: retry)
                     .font(.footnote)
                     .buttonStyle(.bordered)
                     .tint(DesignTokens.accent)
+            case .remove:
+                // The only move left on a capture the queue cannot read, and the one destructive
+                // button in the timeline: a person presses it, nothing here ever decides it.
+                Button("Remove", role: .destructive, action: remove)
+                    .font(.footnote)
+                    .buttonStyle(.bordered)
+            case .none:
+                EmptyView()
             }
         }
         .padding(DesignTokens.Space.roomy)

@@ -6,6 +6,10 @@ import Testing
 private struct Harness {
     let root: URL
     let repository: OutboxRepository
+    /// What the ENGINE writes through — the repository itself, unless a test asked for a disk that
+    /// refuses. `repository` stays the real one either way, so a test can set the scene and read
+    /// the outcome back through writes that always land.
+    let persistence: any OutboxPersisting
     let http: ScriptedHTTP
     let scheduler: ScriptedScheduler
     let completion: any MemoCompleting
@@ -24,7 +28,8 @@ private struct Harness {
         completion: (any MemoCompleting)? = nil,
         scheduler: ScriptedScheduler = ScriptedScheduler(),
         credentials: OutboxCredentials? = Fixture.credentials(),
-        binding: AccountBinding = Fixture.binding()
+        binding: AccountBinding = Fixture.binding(),
+        refusedSaves: Int = 0
     ) async throws -> Harness {
         let root = try Fixture.temporaryDirectory()
         let repository = try OutboxRepository(root: root.appending(path: "outbox"))
@@ -46,8 +51,12 @@ private struct Harness {
             binding: binding,
             sources: sources
         )
+        var persistence: any OutboxPersisting = repository
+        if refusedSaves > 0 {
+            persistence = FaultyPersistence(repository, refusals: refusedSaves)
+        }
         let engine = OutboxEngine(
-            repository: repository,
+            repository: persistence,
             credentials: provider,
             http: http,
             scheduler: scheduler,
@@ -57,6 +66,7 @@ private struct Harness {
         return Harness(
             root: root,
             repository: repository,
+            persistence: persistence,
             http: http,
             scheduler: scheduler,
             completion: completion,
@@ -188,7 +198,7 @@ struct EngineTests {
 
         #expect(completion.idempotencyKeys == [harness.job.idempotencyKey])
         #expect(await harness.reload() == nil)
-        #expect(await harness.repository.loadJobs().isEmpty)
+        #expect(try await harness.repository.loadJobs().isEmpty)
     }
 
     @Test("a crash between the server's commit and the local delete cannot produce two memos")
@@ -559,5 +569,74 @@ struct BackgroundWorkTests {
         run.expire()
         await work.value
         #expect(work.isCancelled)
+    }
+
+    @Test("a transition the disk would not take is not taken")
+    func aRefusedWriteStopsTheDrain() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000, http: .standard(chunkSize: 400), refusedSaves: .max
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        // The server handed out an upload session and nothing on this device could write it down,
+        // so no chunk goes out against a uid a relaunch would have no way to resume.
+        #expect(harness.http.requests(method: "POST").count == 1)
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].uploadUID == nil)
+        #expect(saved.state == .waiting)
+        #expect(await harness.engine.lastPersistenceFailure != nil, "and it is said out loud")
+    }
+
+    @Test("a capture whose own manifest cannot be written is held, saying so")
+    func aRefusedWriteHoldsTheCapture() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000, http: .standard(chunkSize: 400), refusedSaves: 1
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        #expect(harness.scheduler.uploads.isEmpty, "nothing moves on from a state nobody wrote")
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .storageFailed)
+        #expect(saved.lastError?.contains("could not be saved on this device") == true)
+    }
+
+    @Test("a chunk answer that cannot be written down does not move the cursor on")
+    func aRefusedWriteDoesNotMoveTheCursor() async throws {
+        let scheduler = ScriptedScheduler()
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            scheduler: scheduler,
+            refusedSaves: .max
+        )
+        defer { harness.cleanUp() }
+        // A chunk is with the background session, written down while the disk still took writes.
+        var started = harness.job
+        started.files[0].uploadUID = "u1"
+        started.files[0].chunkSize = 400
+        started.state = .uploading
+        try await harness.repository.save(started)
+
+        await harness.engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(
+                    jobID: started.id, fileID: started.files[0].id, offset: 0
+                ),
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].bytesConfirmed == 0, "the cursor is the server's count ON DISK")
+        // Sending the next chunk from a count only this process holds is how the answer to it
+        // becomes unusable: it would no longer match the offset the manifest still carries.
+        #expect(scheduler.uploads.isEmpty)
     }
 }

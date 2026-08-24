@@ -13,7 +13,7 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// drain, and hands the job to the ordinary backoff instead.
     static let maxStepsPerPass = 32
 
-    private let repository: OutboxRepository
+    private let repository: any OutboxPersisting
     private let credentials: any OutboxCredentialsProviding
     private let http: any OutboxHTTPPerforming
     private let scheduler: any OutboxChunkScheduling
@@ -22,8 +22,13 @@ public actor OutboxEngine: OutboxChunkHandling {
     private let onChange: @Sendable () async -> Void
     private var isDraining = false
 
+    /// The last write to the queue that did not happen, in the words a person gets to read, or nil
+    /// while the last one went through. It is a channel of its own because the ordinary one — the
+    /// job's own manifest, saying it is held and why — is exactly what could not be written.
+    public private(set) var lastPersistenceFailure: String?
+
     public init(
-        repository: OutboxRepository,
+        repository: any OutboxPersisting,
         credentials: any OutboxCredentialsProviding,
         http: any OutboxHTTPPerforming,
         scheduler: any OutboxChunkScheduling,
@@ -46,9 +51,9 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// fits, cancels what does not, and sweeps what belongs to no job. Runs BEFORE anything new is
     /// scheduled — that ordering is what keeps a relaunch from uploading the same bytes twice.
     @discardableResult
-    public func reconcile() async -> ReconciliationPlan {
-        await repository.sweepOrphans()
-        let jobs = await repository.loadJobs()
+    public func reconcile() async throws -> ReconciliationPlan {
+        try await repository.sweepOrphans()
+        let jobs = try await repository.loadJobs()
         let plan = OutboxReconciliation.plan(jobs: jobs, inFlight: await scheduler.inFlight())
         if !plan.cancelled.isEmpty {
             await scheduler.cancel(plan.cancelled)
@@ -64,7 +69,16 @@ public actor OutboxEngine: OutboxChunkHandling {
         defer { isDraining = false }
 
         guard let credentials = await credentials.currentCredentials() else { return }
-        let plan = await reconcile()
+        let plan: ReconciliationPlan
+        do {
+            plan = try await reconcile()
+        } catch {
+            // The queue could not be read. Nothing is drained, nothing is cancelled and nothing is
+            // swept on the strength of a list nobody could produce — an empty one would look
+            // exactly like an empty outbox. The facade says so on its next refresh.
+            await onChange()
+            return
+        }
         guard !plan.drainable.isEmpty else { return }
 
         // A job that belongs to another account is held here, before the probe: saying so does not
@@ -95,7 +109,7 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
         guard let job = await repository.job(jobID) else { return }
-        try? await repository.save(job.released(at: clock()))
+        await save(job.released(at: clock()))
         await onChange()
     }
 
@@ -164,7 +178,9 @@ public actor OutboxEngine: OutboxChunkHandling {
             return nil
         }
         let next = job.startingUpload(fileID: fileID, session: session)
-        await save(next)
+        // The server has handed out a session. Carrying on with it while the manifest still knows
+        // nothing about it is how a chunk gets sent against a uid a relaunch cannot resume.
+        guard await save(next) else { return nil }
         return next
     }
 
@@ -193,6 +209,9 @@ public actor OutboxEngine: OutboxChunkHandling {
         )
         let identity = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: offset)
         await scheduler.upload(request, fromFile: chunk, identity: identity)
+        // The chunk is already with the background session, and this write only records that. Its
+        // failure is reported, not acted on: the answer is applied against the manifest as it
+        // stands, which is exactly what `handle` re-reads.
         await save(job.with { $0.state = .uploading })
     }
 
@@ -223,7 +242,9 @@ public actor OutboxEngine: OutboxChunkHandling {
         credentials: OutboxCredentials
     ) async -> UploadJob? {
         var current = job.creatingMemo()
-        await save(current)
+        // Nothing is created against a queue that could not be written: the capture waits, whole,
+        // rather than being sent while the disk has no record that it was ever tried.
+        guard await save(current) else { return nil }
         switch await completion.create(job: current, credentials: credentials) {
         case .created:
             // The one exit. Everything the capture owns goes with it.
@@ -246,7 +267,7 @@ public actor OutboxEngine: OutboxChunkHandling {
                     current = next
                 }
             }
-            await save(current)
+            guard await save(current) else { return nil }
             return current
         case .retry(let message):
             await save(current.backingOff(at: clock(), error: message))
@@ -320,8 +341,12 @@ public actor OutboxEngine: OutboxChunkHandling {
             }
         }
 
-        await save(next)
+        // The cursor moves HERE or not at all. Going on to the next chunk from a count only this
+        // process holds is what makes the server's answer to it unusable: `handle` matches an
+        // answer against the offset on disk, and one that no longer matches is thrown away.
+        let persisted = await save(next)
         await onChange()
+        guard persisted else { return }
         // Nobody is signed in yet (a cold background wake, before the session is restored). What
         // the server said is on disk; the next drain carries on from there.
         guard let credentials else { return }
@@ -351,8 +376,38 @@ public actor OutboxEngine: OutboxChunkHandling {
         await save(job.held(reason, error: Self.message(for: reason)))
     }
 
-    private func save(_ job: UploadJob) async {
-        try? await repository.save(job)
+    /// Writes a transition down, and says whether it actually happened.
+    ///
+    /// The disk is the truth, so every caller stops where it stands when this returns false: a step
+    /// taken on a state only memory holds is how the drain cursor and the server's own count come
+    /// apart. One more thing is attempted first — the job, held, saying why — because when it is
+    /// this one manifest that cannot be written, that hold is what a person sees; when it is the
+    /// whole container, that write fails too and `lastPersistenceFailure` is the only answer left.
+    @discardableResult
+    private func save(_ job: UploadJob) async -> Bool {
+        do {
+            try await repository.save(job)
+            lastPersistenceFailure = nil
+            return true
+        } catch {
+            lastPersistenceFailure = Self.storageMessage(error)
+            await holdUnsaved(job, error: error)
+            return false
+        }
+    }
+
+    private func holdUnsaved(_ job: UploadJob, error: any Error) async {
+        guard job.state != .held || job.holdReason != .storageFailed else { return }
+        do {
+            try await repository.save(job.held(.storageFailed, error: Self.storageMessage(error)))
+        } catch {
+            // Nothing more can be written. It is already reported above, and the next pass finds
+            // the job exactly as the last write that did land left it.
+        }
+    }
+
+    static func storageMessage(_ error: any Error) -> String {
+        "This capture could not be saved on this device: \(error.localizedDescription)"
     }
 
     static func message(for reason: HoldReason) -> String {
@@ -361,6 +416,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             return "Captured under a different account."
         case .serverRefused:
             return "The server refused this memo."
+        case .unreadableManifest:
+            return "This capture could not be read from the queue."
+        case .storageFailed:
+            return "This capture could not be saved on this device."
         }
     }
 }
