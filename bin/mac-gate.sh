@@ -254,7 +254,13 @@ mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
 lock="$target.lock"
 if mkdir "$lock" 2>/dev/null; then
   printf '%s\n' "$lock_owner" > "$lock/owner" 2>/dev/null
-  echo "LOCK ACQUIRED"
+  # Read back, because the claim is only as good as what the next run will find in there.
+  lock_back="$(cat "$lock/owner" 2>/dev/null)"
+  if [ "$lock_back" = "$lock_owner" ]; then
+    echo "LOCK ACQUIRED"
+  else
+    echo "LOCK MISMATCH $lock_back"
+  fi
 else
   echo "LOCK HELD $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
 fi
@@ -311,7 +317,9 @@ lockdir="$(printf '%s\n' "$preflight_out" | sed -n 's/^LOCKDIR //p')"
 [ "$lockdir" = "$target.lock" ] \
   || die_refuse "the build host returned the lock $lockdir, not the expected $target.lock"
 
-if printf '%s\n' "$preflight_out" | grep -q '^LOCK ACQUIRED$'; then
+if printf '%s\n' "$preflight_out" | grep -q '^LOCK MISMATCH'; then
+  die_locked "the gate lock of $branch was written but reads back as somebody else's: $(printf '%s\n' "$preflight_out" | sed -n 's/^LOCK MISMATCH //p')"
+elif printf '%s\n' "$preflight_out" | grep -q '^LOCK ACQUIRED$'; then
   LOCK_DIR="$lockdir"
   say "gate lock   : taken ($LOCK_OWNER)"
 else
@@ -327,17 +335,85 @@ else
   if [ "$holder_alive" = yes ]; then
     die_locked "another run of $branch holds the gate lock on $host (${holder:-owner unknown}) — nothing was copied. Wait for it to finish, or clear it with: ssh $host rm -rf '$lockdir'"
   fi
+
+  # A dead controlling pid is only half the question. The tree this lock protects lives on the
+  # BUILD HOST, and a remote script whose ssh client was killed is not signalled — it keeps
+  # building until a write to the dead connection kills it. Reaping on the pid alone would hand
+  # this run an rsync --delete over a tree an orphaned build is still reading. So the build host
+  # is asked as well, and it has to answer twice: once about a control it can see (or its silence
+  # about this branch proves nothing), once about this branch.
+  branch_re="$(printf '%s' "$branch" | sed 's/[.[]/\\&/g')"
+  probe_out="$(
+    {
+      printf "lock='%s'\n" "$(esc "$lockdir")"
+      printf "branch_re='%s'\n" "$(esc "$branch_re")"
+      cat <<'PROBE_EOF'
+# The exact question: is the remote half of the run that took this lock still going? It writes
+# its pid in here, and it is this host's pid, so this host can answer.
+remote_pid="$(cat "$lock/remote-pid" 2>/dev/null | tr -d '[:space:]')"
+remote_alive=0
+if [ -n "$remote_pid" ] && kill -0 "$remote_pid" 2>/dev/null; then remote_alive=1; fi
+
+# And the wider question, for an orphan that lost its note: anything at all still working inside
+# this branch's gate or work tree. A search that finds nothing has to prove it can find
+# something, so it starts a process carrying a path of exactly that shape and looks for it first.
+control_dir="$HOME/build/memos-ng-ios/gate/PROBECONTROL-$$"
+mkdir -p "$control_dir" && : > "$control_dir/live"
+tail -f "$control_dir/live" >/dev/null 2>&1 &
+control_pid=$!
+sleep 1
+control_hits="$(pgrep -f "memos-ng-ios/gate/PROBECONTROL-$$/live" | wc -l | tr -d ' ')"
+live_hits="$(pgrep -f "memos-ng-ios/(gate|work)/$branch_re(/| |$)" | wc -l | tr -d ' ')"
+kill "$control_pid" >/dev/null 2>&1
+rm -rf "$control_dir"
+echo "PROBE control=$control_hits live=$live_hits remote_pid=${remote_pid:-none} remote_alive=$remote_alive"
+PROBE_EOF
+    } | ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' 2>&1
+  )"
+  probe_rc=$?
+  control_hits="$(printf '%s\n' "$probe_out" | sed -n 's/.*control=\([0-9][0-9]*\).*/\1/p')"
+  live_hits="$(printf '%s\n' "$probe_out" | sed -n 's/.*live=\([0-9][0-9]*\).*/\1/p')"
+  remote_alive="$(printf '%s\n' "$probe_out" | sed -n 's/.*remote_alive=\([0-9]\).*/\1/p')"
+  remote_pid="$(printf '%s\n' "$probe_out" | sed -n 's/.*remote_pid=\([^ ]*\).*/\1/p')"
+  if [ "$probe_rc" -ne 0 ] || [ -z "$control_hits" ] || [ -z "$live_hits" ] || [ -z "$remote_alive" ]; then
+    die_locked "could not ask $host whether a build of $branch is still running, so the lock stays where it is: ${probe_out:-no answer}"
+  fi
+  if [ "$control_hits" -lt 1 ]; then
+    die_locked "the liveness probe on $host could not even see its own control process, so its silence about $branch proves nothing — the lock stays where it is"
+  fi
+  if [ "$remote_alive" -ne 0 ]; then
+    die_locked "the run that took the lock on $branch lost its controlling shell (pid $holder_pid is gone here), but its build is still running on $host as pid $remote_pid — reaping now would rsync --delete the tree out from under it. Let it finish, or clear it with: ssh $host rm -rf '$lockdir'"
+  fi
+  if [ "$live_hits" -ne 0 ]; then
+    die_locked "the lock of $branch names a pid that is gone, but $live_hits process(es) on $host are still working in that branch's gate/work tree — an orphaned build outlives the ssh client that started it, so the lock stays. Let it finish, or clear it with: ssh $host rm -rf '$lockdir'"
+  fi
+
+  # The reap itself is one rename, because two runs can reach this point together: mv is atomic,
+  # so exactly one of them carries the old lock away and the other finds it gone. rm -rf followed
+  # by mkdir is not — the second run's rm would delete the first run's fresh lock.
   takeover_out="$(
     {
       printf "lock='%s'\n" "$(esc "$lockdir")"
       printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
+      printf "stamp='%s'\n" "$(esc "$$-$(date -u +%H%M%S)")"
       cat <<'TAKE_EOF'
-rm -rf "$lock" 2>/dev/null
-if mkdir "$lock" 2>/dev/null; then
-  printf '%s\n' "$owner" > "$lock/owner"
-  echo TAKEOVER_OK
+aside="$lock.reaped-$stamp"
+if mv "$lock" "$aside" 2>/dev/null; then
+  if mkdir "$lock" 2>/dev/null; then
+    printf '%s\n' "$owner" > "$lock/owner"
+    back="$(cat "$lock/owner" 2>/dev/null)"
+    if [ "$back" = "$owner" ]; then
+      rm -rf "$aside"
+      echo TAKEOVER_OK
+    else
+      echo "TAKEOVER_LOST the lock reads back as: $back"
+    fi
+  else
+    rm -rf "$aside"
+    echo "TAKEOVER_LOST another run claimed it: $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
+  fi
 else
-  echo "TAKEOVER_LOST $(cat "$lock/owner" 2>/dev/null | tr -d '\n')"
+  echo "TAKEOVER_LOST another run reaped it first"
 fi
 TAKE_EOF
     } | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1
@@ -345,7 +421,7 @@ TAKE_EOF
   case "$takeover_out" in
     *TAKEOVER_OK*)
       LOCK_DIR="$lockdir"
-      say "gate lock   : reaped a stale lock left by ${holder:-an unknown run} — pid $holder_pid is gone — and took it" ;;
+      say "gate lock   : reaped a stale lock left by ${holder:-an unknown run} — pid $holder_pid is gone and no build of $branch is running on $host — and took it" ;;
     *)
       die_locked "the stale lock of $branch was claimed by another run first: $takeover_out" ;;
   esac
@@ -414,6 +490,12 @@ DERIVED="$GATE_WORK/DerivedData"
 # device of its own and gives it back. The trap is the giving back, and it has to hold on the
 # paths nobody plans for: a failing step, a refusal, the SIGHUP this shell gets when the ssh
 # connection goes away. An undeleted device is disk on a build host that has little to spare.
+# The lock this run holds was taken by the controlling shell before anything was copied. That
+# shell can be killed outright, and this script would carry on regardless — so it writes its own
+# pid in there, on THIS host, where the next run can actually ask whether it is still alive.
+GATE_LOCK="$GATE_TARGET.lock"
+[ -d "$GATE_LOCK" ] && printf '%s\n' "$$" > "$GATE_LOCK/remote-pid" 2>/dev/null
+
 GATE_DEVICE_UDID=""
 device_cleanup() {
   [ -n "$GATE_DEVICE_UDID" ] || return 0
@@ -434,10 +516,20 @@ device_cleanup() {
   echo "MAC_GATE_DEVICE DELETE-FAILED $udid (delete by hand: xcrun simctl delete $udid)"
   return 1
 }
-trap 'device_cleanup' EXIT
-trap 'device_cleanup; exit 130' INT
-trap 'device_cleanup; exit 143' TERM
-trap 'device_cleanup; exit 129' HUP
+# Everything this run took on the build host goes back together: the device, and the note in the
+# lock that says a build is still running here. The note is removed only while it is still ours.
+gate_give_back() {
+  device_cleanup
+  local rc=$?
+  if [ -n "${GATE_LOCK:-}" ] && [ "$(cat "$GATE_LOCK/remote-pid" 2>/dev/null)" = "$$" ]; then
+    rm -f "$GATE_LOCK/remote-pid"
+  fi
+  return $rc
+}
+trap 'gate_give_back' EXIT
+trap 'gate_give_back; exit 130' INT
+trap 'gate_give_back; exit 143' TERM
+trap 'gate_give_back; exit 129' HUP
 
 if [ -n "$GATE_SIMULATOR" ]; then
   GATE_DESTINATION="platform=iOS Simulator,name=$GATE_SIMULATOR"
