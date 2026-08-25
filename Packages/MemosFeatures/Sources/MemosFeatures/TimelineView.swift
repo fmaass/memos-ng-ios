@@ -25,11 +25,9 @@ public struct TimelineView: View {
     @State private var signOutStage = SignOutFlow.Stage.idle
     @State private var path: [MemoRoute] = []
     @State private var feedback = MemoFeedbackTrigger()
-    /// The picture a tile tap opened, full screen.
+    /// The media a tile tap opened, full screen. A tapped video opens it too — on the video's
+    /// own page, already playing — so the rest of the memo stays one swipe away.
     @State private var viewing: MediaViewerSelection?
-    /// The video a tile tap started. A tapped video plays; it does not open a page showing a
-    /// still of itself with a play button on it.
-    @State private var playing: VideoPlayback?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
 
@@ -112,11 +110,6 @@ public struct TimelineView: View {
                     await submit(mode, submission: submission, to: timeline)
                 }
             }
-        }
-        // Attached here rather than beside the viewer's cover above: two presentations on ONE view
-        // is how one of them silently stops appearing.
-        .fullScreenCover(item: $playing) { playback in
-            VideoPlayerView(playback: playback)
         }
         // The question the menu tap asks. It is not drawn under the anchor, so no repeat of the
         // tap that opened the menu can land on it.
@@ -224,8 +217,7 @@ public struct TimelineView: View {
                             memo: memo,
                             mediaZoom: mediaZoom,
                             openMemo: { path.append(MemoRoute(uid: memo.uid)) },
-                            openAttachment: { open($0, of: memo) },
-                            openPlayback: { play($0) }
+                            openAttachment: { open($0, of: memo) }
                         )
                         .cardRow()
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -338,25 +330,16 @@ public struct TimelineView: View {
         timeline.memos.first { $0.uid == uid }
     }
 
-    /// A tapped tile opens that picture full screen, on the page it was tapped at. An attachment
-    /// the viewer cannot show — an upload that is neither picture nor video — falls back to the
-    /// memo, because a tap that does nothing at all reads as a broken card.
+    /// A tapped tile opens that attachment full screen, on the page it was tapped at — a video
+    /// included, and a video arrives playing (`MediaViewerPlayback`). An attachment the viewer
+    /// cannot show — an upload that is neither picture nor video — falls back to the memo,
+    /// because a tap that does nothing at all reads as a broken card.
     private func open(_ attachment: MemoAttachment, of memo: Memo) {
         if let selection = MediaViewerPresentation.viewer(for: memo, startingAt: attachment.uid) {
             viewing = selection
         } else {
             path.append(MemoRoute(uid: memo.uid))
         }
-    }
-
-    /// A tapped video plays, immediately. The viewer's poster page for it is what a SWIPE reaches
-    /// — a direct tap on a video is unambiguous, and it means play it.
-    ///
-    /// A video with no streamable rendition never routes here (`MemoCardTap.plays`), so there is
-    /// nothing to fall back to.
-    private func play(_ attachment: MemoAttachment) {
-        guard let url = MemoPresentation.playbackURL(for: attachment) else { return }
-        playing = VideoPlayback(url: url)
     }
 
     /// Re-reads a memo whose attachments the server has not finished deriving, on a capped

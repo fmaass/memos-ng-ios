@@ -611,7 +611,10 @@ struct MemoCardTapTests {
         }
         for tile in tiles {
             if tile.uid == "a2" {
-                #expect(tapped(tile) == .playback(uid: "a2"), "a video tile opened the pager")
+                #expect(
+                    tapped(tile) == .playback(uid: "a2"),
+                    "a video tile did not route as the tap that plays"
+                )
             } else {
                 #expect(
                     tapped(tile) == .attachment(uid: tile.uid),
@@ -716,7 +719,7 @@ struct MediaViewerChromeTests {
         let viewport = CGSize(width: 390, height: 844)
         let grid = try #require(
             PixelGrid.of(
-                MediaViewerPage(page: page, onZoomChange: { _ in }, play: { _ in })
+                MediaViewerPage(page: page, onZoomChange: { _ in }, player: nil, play: {})
                     .background(.black),
                 size: viewport
             )
@@ -791,7 +794,7 @@ struct MediaViewerLoadingTests {
         let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
         window.rootViewController = UIHostingController(
             rootView: MediaViewerPage(
-                page: page, onZoomChange: { _ in }, play: { _ in }, cache: cache
+                page: page, onZoomChange: { _ in }, player: nil, play: {}, cache: cache
             )
         )
         window.makeKeyAndVisible()
@@ -820,7 +823,9 @@ struct MediaViewerLoadingTests {
         let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
 
         // The default the memberwise initialiser applies — production passes no cache at all.
-        let unconfigured = MediaViewerPage(page: page, onZoomChange: { _ in }, play: { _ in })
+        let unconfigured = MediaViewerPage(
+            page: page, onZoomChange: { _ in }, player: nil, play: {}
+        )
         #expect(unconfigured.cache === MediaSession.shared.cache)
 
         // And the half that makes evicting from it worth doing: the session the images are

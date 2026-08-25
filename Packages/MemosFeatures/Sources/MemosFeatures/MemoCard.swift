@@ -20,9 +20,10 @@ struct MemoCard: View {
     /// test, where there is no viewer to animate into.
     let mediaZoom: Namespace.ID?
     let openMemo: () -> Void
+    /// Where BOTH tile destinations go. A photo opens on its own page and a video opens on its
+    /// own page already playing, and which of the two it is, is the viewer's decision from the
+    /// page it opened on — not a second route out of this card.
     let openAttachment: (MemoAttachment) -> Void
-    /// A video tapped directly. It plays; it does not open the pager on its own poster.
-    let openPlayback: (MemoAttachment) -> Void
     /// Publishes the tiles the card has MEASURED, as the router sees them.
     ///
     /// `nil` everywhere in the app — nothing in a running card needs them. It exists because the
@@ -49,14 +50,12 @@ struct MemoCard: View {
         mediaZoom: Namespace.ID? = nil,
         openMemo: @escaping () -> Void = {},
         openAttachment: @escaping (MemoAttachment) -> Void = { _ in },
-        openPlayback: @escaping (MemoAttachment) -> Void = { _ in },
         reportTiles: (([MemoCardTap.Tile]) -> Void)? = nil
     ) {
         self.memo = memo
         self.mediaZoom = mediaZoom
         self.openMemo = openMemo
         self.openAttachment = openAttachment
-        self.openPlayback = openPlayback
         self.reportTiles = reportTiles
     }
 
@@ -94,10 +93,10 @@ struct MemoCard: View {
         .accessibilityAction(.default, openMemo)
         .accessibilityActions {
             // A gesture-routed card has no targets a screen reader can find, so the two things a
-            // tap can do are offered by name. The video one is separate because it does something
-            // different: it plays, where the photo one opens a viewer.
+            // tap can do are offered by name. The video one is named for what it DOES — the
+            // viewer it opens is already playing — because "open photo" on a video says nothing.
             if let playable = memo.attachments.first(where: { MemoCardTap.plays($0) }) {
-                Button("Play video") { openPlayback(playable) }
+                Button("Play video") { openAttachment(playable) }
             }
             let openable = memo.attachments.first {
                 MediaViewerPresentation.isViewable($0) && !MemoCardTap.plays($0)
@@ -137,11 +136,14 @@ struct MemoCard: View {
             }
             openAttachment(attachment)
         case .playback(let uid):
+            // Same door as a photo tile. The two destinations still differ in what they MEAN,
+            // and the viewer acts on that difference when it opens; the card's job ends at
+            // opening it on the right page.
             guard let attachment = attachment(uid) else {
                 openMemo()
                 return
             }
-            openPlayback(attachment)
+            openAttachment(attachment)
         }
     }
 

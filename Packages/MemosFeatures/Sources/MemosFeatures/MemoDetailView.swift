@@ -19,7 +19,6 @@ public struct MemoDetailView: View {
     @Environment(SessionStore.self) private var session: SessionStore?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.dismiss) private var dismiss
-    @State private var playing: VideoPlayback?
     @State private var viewing: MediaViewerSelection?
     @State private var edit = MemoEditFlow()
     @State private var feedback = MemoFeedbackTrigger()
@@ -65,42 +64,27 @@ public struct MemoDetailView: View {
                 // container takes that shape from the metadata rather than from the decoded
                 // image, it is the right size before the download finishes, so the page does not
                 // jump and the blurhash sits in exactly the frame the photo will occupy.
+                // One destination for every attachment: the full-screen viewer, opened on the
+                // one that was tapped, growing out of exactly this frame. A video opens there
+                // ALREADY PLAYING — a tap on a video means play it — and the memo's other
+                // attachments stay one swipe away while it does, which is what a player
+                // presented over the pager took away.
                 ForEach(memo.attachments) { attachment in
                     let slot = MemoPresentation.detailSlot(for: attachment)
-                    // A video plays on the tap that lands on it — the same rule
-                    // `MemoCardTap.plays` states for a timeline tile, so a tap on the same video
-                    // does the same thing on both screens. Only inside the VIEWER does a video
-                    // wait to be asked, and that is deliberate: nothing should start playing
-                    // because somebody swiped past it.
-                    if let playbackURL = MemoPresentation.playbackURL(for: attachment) {
-                        Button {
-                            playing = VideoPlayback(url: playbackURL)
-                        } label: {
-                            AttachmentThumbnail(
-                                attachment: attachment,
-                                tier: .mobile,
-                                slot: slot
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        // A picture opens full screen, where it can be zoomed — and grows out of
-                        // exactly this frame on the way there.
-                        AttachmentThumbnail(attachment: attachment, tier: .mobile, slot: slot)
-                            .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
-                            .contentShape(.rect)
-                            .onTapGesture { open(attachment) }
-                            .accessibilityAddTraits(.isButton)
-                            .accessibilityLabel("Photo")
-                            .accessibilityHint("Opens full screen")
-                    }
+                    let video = attachment.isVideo
+                    let plays = MemoPresentation.playbackURL(for: attachment) != nil
+                    AttachmentThumbnail(attachment: attachment, tier: .mobile, slot: slot)
+                        .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
+                        .contentShape(.rect)
+                        .onTapGesture { open(attachment) }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(video ? "Video" : "Photo")
+                        .accessibilityHint(plays ? "Plays full screen" : "Opens full screen")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(DesignTokens.Space.roomy)
         }
-        // On the scroll view rather than beside the video cover below: two presentations attached
-        // to the SAME view is how one of them silently stops appearing.
         .fullScreenCover(item: $viewing) { selection in
             MediaViewerView(selection: selection)
                 .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
@@ -109,9 +93,6 @@ public struct MemoDetailView: View {
         .scrollEdgeEffectStyle(.soft, for: .top)
         .tint(DesignTokens.accent)
         .sensoryFeedback(trigger: feedback) { _, latest in latest.act?.feedback }
-        .fullScreenCover(item: $playing) { playback in
-            VideoPlayerView(playback: playback)
-        }
         .navigationTitle(memo.pinned ? "Pinned memo" : "Memo")
         .navigationBarTitleDisplayMode(.inline)
         // The only place editing is visible on the memo's own screen. Until this, changing a memo
