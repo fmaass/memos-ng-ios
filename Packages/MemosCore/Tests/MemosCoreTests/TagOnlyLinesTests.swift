@@ -31,6 +31,23 @@ struct TagOnlyLinesTests {
         #expect(stripTagOnlyLines("#curated\nMy trip photos") == "My trip photos")
     }
 
+    /// A tag-only line written on a device that ends its lines with CRLF keeps its carriage
+    /// return here, because it keeps it in the SPA: `TAG_ONLY_LINE` ends in `[ \t]*$` and
+    /// JavaScript's `$` matches only at the end of the STRING unless the regex carries `/m`, so
+    /// `#curated\r` does not match and the line is not dropped. Both clients then render it as
+    /// body text. Stripping it here would be spec-tidier and a parity break, which is the wrong
+    /// trade for this layer. (Probed against the SPA's own regex; MEMNG-144.)
+    @Test("a trailing carriage return keeps the line, exactly as the SPA keeps it")
+    func carriageReturnIsNotATagOnlyLine() {
+        #expect(!isTagOnlyLine("#curated\r"))
+        #expect(!isTagOnlyLine("#curated \r"))
+        #expect(!isTagOnlyLine("#a #b\r"))
+        #expect(stripTagOnlyLines("#curated\r\nHello") == "#curated\r\nHello")
+        // The control: the same line without the carriage return IS dropped, in both clients.
+        #expect(isTagOnlyLine("#curated"))
+        #expect(stripTagOnlyLines("#curated\nHello") == "Hello")
+    }
+
     @Test("isTagOnlyLine agrees with the SPA on the edge cases")
     func edgeCases() {
         #expect(isTagOnlyLine("#curated"))

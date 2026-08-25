@@ -190,6 +190,96 @@ struct MarkdownLiteralContentTests {
         #expect(shown.contains { $0.contains("[pic]:") }, "the paragraph went: \(shown)")
     }
 
+    /// A definition markdown-it refuses is not a definition: its rule declines the line, the
+    /// paragraph rule takes it, and nothing below it can be a definition until that paragraph
+    /// ends. So the duplicate under it never resolves, and the reference image that names the
+    /// label is text a reader sees. Probed on markdown-it 14: both definition lines come back as
+    /// one paragraph and `![alt][pic]` is still on screen. (MEMNG-144)
+    @Test("a duplicate definition under a refused one deletes nothing")
+    func aRefusedDefinitionOpensAParagraph() {
+        let markdown =
+            "[pic]: javascript:alert(1)\n[pic]: https://example.com/red.png\n\n![alt][pic]"
+        let shown = texts(markdown)
+        #expect(shown.contains { $0.contains("![alt][pic]") }, "the image reference went: \(shown)")
+        #expect(
+            !ProductionMarkdownProjection.html(markdown).contains("<img"),
+            "an image reached the renderer"
+        )
+    }
+
+    /// The same rule from the other end: a definition cannot interrupt a paragraph, so neither the
+    /// line after prose nor the one after THAT registers anything. (MEMNG-144)
+    @Test("definition-shaped lines inside a paragraph delete nothing")
+    func definitionsInsideAParagraphRegisterNothing() {
+        let markdown =
+            "prose\n[a]: https://example.com/a\n[pic]: https://example.com/red.png\n\n![alt][pic]"
+        let shown = texts(markdown)
+        #expect(shown.contains { $0.contains("![alt][pic]") }, "the image reference went: \(shown)")
+    }
+
+    /// Code the label would otherwise reach into: a resolved reference image written INSIDE a code
+    /// block is code, and the SPA shows every character of it. Deleting it there takes a line of
+    /// the author's code away with no trace. Read off the renderer's own HTML, byte for byte,
+    /// because the projection normalises whitespace. (MEMNG-144)
+    @Test(
+        "code keeps a reference image the label would otherwise delete",
+        arguments: [
+            ("tilde fence", "[pic]: https://example.com/red.png\n\n~~~\n![alt][pic]\n~~~"),
+            ("four-backtick", "[pic]: https://example.com/red.png\n\n````\n![alt][pic]\n````"),
+            ("indented code", "[pic]: https://example.com/red.png\n\n    ![alt][pic]"),
+            ("quoted fence", "[pic]: https://example.com/red.png\n\n> ~~~\n> ![alt][pic]\n> ~~~"),
+        ]
+    )
+    func codeKeepsAResolvedReferenceImage(name: String, markdown: String) {
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(
+            html.contains("<pre><code>![alt][pic]\n</code></pre>"),
+            "\(name): the code was rewritten:\n\(html)"
+        )
+        #expect(!html.contains("<img"), "\(name): an image reached the renderer:\n\(html)")
+    }
+
+    /// The other half of the same barrier: the ESCAPE must not reach code either. Only a
+    /// three-backtick fence used to survive this, and only by accident — its backticks toggled
+    /// the inline scanner's code-span flag, which a `~~~` fence and an indented block never do.
+    /// (MEMNG-144)
+    @Test(
+        "code keeps an unsafe link exactly as it was typed",
+        arguments: [
+            ("tilde fence", "~~~\n[x](javascript:alert(1))\n~~~"),
+            ("quoted tilde fence", "> ~~~\n> [x](javascript:alert(1))\n> ~~~"),
+            ("list tilde fence", "- ~~~\n  [x](javascript:alert(1))\n  ~~~"),
+            ("indented code", "    [x](javascript:alert(1))"),
+            ("indented code after a heading", "# Heading\n    [x](javascript:alert(1))"),
+        ]
+    )
+    func codeKeepsAnUnsafeLinkVerbatim(name: String, markdown: String) {
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(
+            html.contains("<pre><code>[x](javascript:alert(1))\n</code></pre>"),
+            "\(name): the code was rewritten:\n\(html)"
+        )
+        #expect(!html.contains("\\["), "\(name): a backslash leaked:\n\(html)")
+        // The barrier is not a hole: nothing in there is a destination the app would open.
+        let openable = ProductionMarkdownProjection.destinations(in: markdown)
+            .filter { MemoRenderPolicy.mayOpen(destination: $0) }
+        #expect(openable.isEmpty, "\(name): the app would open \(openable)")
+    }
+
+    /// The control for the code barrier: one indent level out, the same characters are prose, and
+    /// prose is where the rule applies. An indented line that merely continues a paragraph is
+    /// prose too — markdown-it renders `paragraph\n    [x](…)` as one paragraph, not as code.
+    @Test("prose that looks indented is still neutralised")
+    func lazyContinuationsAreStillProse() {
+        let html = ProductionMarkdownProjection.html("paragraph\n    [x](javascript:alert(1))")
+        #expect(!html.contains("<pre>"), "the lazy continuation became code:\n\(html)")
+        let shown = texts("paragraph\n    [x](javascript:alert(1))")
+        #expect(
+            shown.contains { $0.contains("[x](javascript:alert(1))") },
+            "the link is not literal text: \(shown)"
+        )
+    }
+
     /// The controls for the three above, so the fixes cannot be "stop registering anything": with
     /// the container or the blank line that CommonMark needs, these ARE definitions, and the
     /// image the SPA drops is dropped here too.
