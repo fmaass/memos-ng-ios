@@ -36,6 +36,22 @@ public final class TimelineStore {
     public private(set) var hasMore = true
 
     private var nextCursor: String?
+    /// Which loaded list this is. Bumped at the two moments the list stops being the one an
+    /// unanswered page was a continuation of: a refresh replacing it, and a delete taking a row
+    /// out of it.
+    ///
+    /// It exists because a page can outlive the list it was asked for. `refresh` and `loadMore`
+    /// genuinely overlap — a pull, or the reload a sign-in does, does not wait for a scroll that
+    /// is already fetching — and a page that started against the old list carries the old list's
+    /// rows AND the old list's cursor. Merged on arrival it shows a memo twice, puts back one the
+    /// delete has just taken away, and — the damage that outlives the merge — leaves `nextCursor`
+    /// pointing into a lineage nobody is reading any more, so every page after it is fetched from
+    /// the wrong place. So the generation is taken before the request and checked before the merge.
+    ///
+    /// The live media path deliberately does NOT bump it: `apply` and `refreshMemo` change what a
+    /// memo says, never which memos there are, so a page in flight is still a continuation of the
+    /// list they touched and must still land.
+    private var timelineGeneration = 0
     private let pageSize: Int
     private let onUnauthorized: @MainActor @Sendable () async -> Void
 
@@ -51,34 +67,71 @@ public final class TimelineStore {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
+        let generation = timelineGeneration
         do {
             let page = try await Self.page(client, cursor: nil, limit: pageSize, baseURL: baseURL)
+            // A first page read before a delete still has the deleted memo on it, so publishing it
+            // now would undo the delete on screen. It is dropped whole rather than filtered: the
+            // list stays as it is, which is the truth minus one row, and the next pull re-reads it.
+            guard generation == timelineGeneration else {
+                MemosLog.api.info("GET /api/memos answered for a list that has moved on")
+                return
+            }
             memos = page.memos
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
             lastError = nil
+            // This IS a different list — a new lineage, whose cursor no page in flight shares.
+            timelineGeneration += 1
         } catch {
             await report(error)
         }
     }
 
+    /// Reads the page that follows the loaded ones — and reads it AGAIN, itself, when the list it
+    /// was a continuation of is gone by the time it lands.
+    ///
+    /// The second read has to happen here, because nothing else would make it happen. The next
+    /// page is asked for when the last row appears, and a row already on screen does not appear a
+    /// second time: a reader sitting at the end of the list would be waiting for a page this
+    /// store had decided to throw away, and would go on waiting until they pulled or scrolled
+    /// about. So the drop and the read that replaces it are ONE operation, not two that something
+    /// above has to sequence.
+    ///
+    /// It is bounded by the thing that causes it. A drop asks again once, for the page that
+    /// follows the list as it stands NOW — so a list changing under a reader costs one extra read
+    /// per change, with never more than one in flight. A refresh already running is left to
+    /// finish instead: it is about to replace the list, cursor and all.
     public func loadMore(using client: any APIProtocol, baseURL: URL) async {
-        guard !isLoadingMore, !isLoading, hasMore, let cursor = nextCursor else { return }
+        guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
-        do {
-            let page = try await Self.page(
-                client, cursor: cursor, limit: pageSize, baseURL: baseURL
-            )
-            // A cursor page can overlap the one before it when a memo moved; appending blindly
-            // would show the same memo twice and break SwiftUI's identity.
-            let known = Set(memos.map(\.uid))
-            memos += page.memos.filter { !known.contains($0.uid) }
-            nextCursor = page.nextCursor
-            hasMore = page.nextCursor != nil
-            lastError = nil
-        } catch {
-            await report(error)
+        // The cursor and the generation are re-read on every pass: after a drop, the page that
+        // comes next is the CURRENT list's next page, not the one this call set out to fetch.
+        while !isLoading, hasMore, let cursor = nextCursor {
+            let generation = timelineGeneration
+            do {
+                let page = try await Self.page(
+                    client, cursor: cursor, limit: pageSize, baseURL: baseURL
+                )
+                // The continuation of a list that is gone continues nothing: its rows can include
+                // a memo the delete removed, and its cursor walks a lineage nobody is reading.
+                guard generation == timelineGeneration else {
+                    MemosLog.api.info("GET /api/memos answered for a list that has moved on")
+                    continue
+                }
+                // A cursor page can overlap the one before it when a memo moved; appending blindly
+                // would show the same memo twice and break SwiftUI's identity.
+                let known = Set(memos.map(\.uid))
+                memos += page.memos.filter { !known.contains($0.uid) }
+                nextCursor = page.nextCursor
+                hasMore = page.nextCursor != nil
+                lastError = nil
+                return
+            } catch {
+                await report(error)
+                return
+            }
         }
     }
 
@@ -234,6 +287,10 @@ public final class TimelineStore {
             switch response {
             case .noContent:
                 memos.removeAll { $0.uid == uid }
+                // The memo is gone from the server as well, so any page still in flight — read
+                // while the memo was still there, and cursor pages overlap — would put it back on
+                // screen. It belongs to the list that still had this row; this one does not.
+                timelineGeneration += 1
                 lastError = nil
                 return true
             case .unprocessableContent:
