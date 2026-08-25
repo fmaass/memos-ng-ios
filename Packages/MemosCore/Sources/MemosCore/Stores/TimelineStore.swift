@@ -88,31 +88,50 @@ public final class TimelineStore {
         }
     }
 
+    /// Reads the page that follows the loaded ones — and reads it AGAIN, itself, when the list it
+    /// was a continuation of is gone by the time it lands.
+    ///
+    /// The second read has to happen here, because nothing else would make it happen. The next
+    /// page is asked for when the last row appears, and a row already on screen does not appear a
+    /// second time: a reader sitting at the end of the list would be waiting for a page this
+    /// store had decided to throw away, and would go on waiting until they pulled or scrolled
+    /// about. So the drop and the read that replaces it are ONE operation, not two that something
+    /// above has to sequence.
+    ///
+    /// It is bounded by the thing that causes it. A drop asks again once, for the page that
+    /// follows the list as it stands NOW — so a list changing under a reader costs one extra read
+    /// per change, with never more than one in flight. A refresh already running is left to
+    /// finish instead: it is about to replace the list, cursor and all.
     public func loadMore(using client: any APIProtocol, baseURL: URL) async {
-        guard !isLoadingMore, !isLoading, hasMore, let cursor = nextCursor else { return }
+        guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
-        let generation = timelineGeneration
-        do {
-            let page = try await Self.page(
-                client, cursor: cursor, limit: pageSize, baseURL: baseURL
-            )
-            // The continuation of a list that is gone continues nothing. Dropping it costs one
-            // wasted fetch and nothing else: `nextCursor` is left as the CURRENT list's own, so
-            // the next scroll asks for the page that really does come next.
-            guard generation == timelineGeneration else {
-                MemosLog.api.info("GET /api/memos answered for a list that has moved on")
+        // The cursor and the generation are re-read on every pass: after a drop, the page that
+        // comes next is the CURRENT list's next page, not the one this call set out to fetch.
+        while !isLoading, hasMore, let cursor = nextCursor {
+            let generation = timelineGeneration
+            do {
+                let page = try await Self.page(
+                    client, cursor: cursor, limit: pageSize, baseURL: baseURL
+                )
+                // The continuation of a list that is gone continues nothing: its rows can include
+                // a memo the delete removed, and its cursor walks a lineage nobody is reading.
+                guard generation == timelineGeneration else {
+                    MemosLog.api.info("GET /api/memos answered for a list that has moved on")
+                    continue
+                }
+                // A cursor page can overlap the one before it when a memo moved; appending blindly
+                // would show the same memo twice and break SwiftUI's identity.
+                let known = Set(memos.map(\.uid))
+                memos += page.memos.filter { !known.contains($0.uid) }
+                nextCursor = page.nextCursor
+                hasMore = page.nextCursor != nil
+                lastError = nil
+                return
+            } catch {
+                await report(error)
                 return
             }
-            // A cursor page can overlap the one before it when a memo moved; appending blindly
-            // would show the same memo twice and break SwiftUI's identity.
-            let known = Set(memos.map(\.uid))
-            memos += page.memos.filter { !known.contains($0.uid) }
-            nextCursor = page.nextCursor
-            hasMore = page.nextCursor != nil
-            lastError = nil
-        } catch {
-            await report(error)
         }
     }
 

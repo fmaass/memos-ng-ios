@@ -46,13 +46,12 @@ struct TimelinePaginationFenceTests {
                 // cursor it hands back walks that same superseded lineage.
                 return Stub.json(Stub.memoList(["stale"], nextCursor: "page-3"))
             }
-            if path.contains("cursor=fresh-2") {
-                return Stub.json(Stub.memoList(["fresh-b"], nextCursor: nil))
-            }
             firstPages.increment()
+            // The refreshed list is complete — there is no page after it — so the drop is the
+            // only thing that happens here and can be read off the store directly.
             return firstPages.count == 1
                 ? Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
-                : Stub.json(Stub.memoList(["fresh-a"], nextCursor: "fresh-2"))
+                : Stub.json(Stub.memoList(["fresh-a"], nextCursor: nil))
         }
         let store = TimelineStore(pageSize: 1)
         await store.refresh(using: client, baseURL: Stub.baseURL)
@@ -69,17 +68,16 @@ struct TimelinePaginationFenceTests {
         await inFlight.value
 
         #expect(store.memos.map(\.uid) == ["fresh-a"], "the superseded page was merged anyway")
-        // The cursor is the damage that outlives the merge: the next page has to continue the list
-        // on screen, not the one the dropped page belonged to.
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
-        #expect(store.memos.map(\.uid) == ["fresh-a", "fresh-b"])
+        // The cursor is the damage that outlives the merge. The refreshed list ends where it ends;
+        // had the dropped page's `nextCursor` been adopted, the store would believe there is more.
+        #expect(!store.hasMore, "the dropped page's cursor was adopted")
         #expect(
             !paths.get().contains { $0.contains("cursor=page-3") },
-            "the dropped page's cursor was adopted"
+            "the dropped page's cursor was asked for"
         )
         #expect(
-            paths.get().contains { $0.contains("cursor=fresh-2") },
-            "control: the fresh list's own cursor is what the next page was asked for"
+            paths.get().contains { $0.contains("cursor=page-2") },
+            "control: the page that was dropped is one this store really did ask for"
         )
     }
 
@@ -184,10 +182,12 @@ struct TimelinePaginationFenceTests {
         await inFlight.value
 
         #expect(removed)
-        #expect(store.memos.map(\.uid) == ["a"], "the page in flight put the deleted memo back")
-        // Nothing is lost by dropping it: the cursor never advanced, so the next scroll asks for
-        // that page again and gets the list as it is now.
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        #expect(
+            !store.memos.map(\.uid).contains("b"),
+            "the page in flight put the deleted memo back"
+        )
+        // Nothing is lost by dropping it: the cursor never advanced, and the store asks again for
+        // that same page itself, so what lands is the list as it is now.
         #expect(store.memos.map(\.uid) == ["a", "c"])
         #expect(secondPages.count == 2, "the dropped page was never asked for again")
     }
@@ -246,5 +246,122 @@ struct TimelinePaginationFenceTests {
             "the live event did not land"
         )
         #expect(!store.hasMore)
+    }
+
+    /// The reader who cannot ask again.
+    ///
+    /// The app asks for the next page when the last row APPEARS, and a row already on screen does
+    /// not appear a second time: someone parked at the end of the list has already spent their
+    /// trigger. So a dropped page that waits to be re-requested waits for ever. This test is that
+    /// reader — after the drop it asks for nothing at all, and the list still has to fill.
+    @Test("a dropped page is asked for again by the store, with no second call from the reader")
+    func aDroppedPageIsAskedForAgainWithoutTheReader() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let paths = LockedValue<[String]>([])
+        let firstPages = Counter()
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            if path.contains("cursor=page-2") {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.json(Stub.memoList(["stale"], nextCursor: "page-3"))
+            }
+            if path.contains("cursor=fresh-2") {
+                return Stub.json(Stub.memoList(["fresh-b"], nextCursor: nil))
+            }
+            firstPages.increment()
+            return firstPages.count == 1
+                ? Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+                : Stub.json(Stub.memoList(["fresh-a"], nextCursor: "fresh-2"))
+        }
+        let store = TimelineStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        release.set(true)
+        await inFlight.value
+
+        // Not one line below this asks for a page. Everything here is the store's own doing.
+        #expect(
+            paths.get().contains { $0.contains("cursor=fresh-2") },
+            "the store dropped the page and never asked for the one that replaces it"
+        )
+        #expect(store.memos.map(\.uid) == ["fresh-a", "fresh-b"])
+        #expect(!store.memos.map(\.uid).contains("stale"), "the superseded page was merged")
+        #expect(!store.hasMore)
+        #expect(store.lastError == nil)
+    }
+
+    /// Asking again cannot become asking for ever. Each drop buys exactly one more read, of the
+    /// page that follows the list as it stands at that moment — so a list changing three times
+    /// under one reader costs three reads and no more, and the last one is an ordinary merge.
+    @Test("each drop asks again exactly once, however often the list changes underneath")
+    func theSecondAskIsBoundedByTheChangesThatCauseIt() async {
+        let enteredBeta = LockedValue<Bool>(false)
+        let releaseAlpha = LockedValue<Bool>(false)
+        let releaseBeta = LockedValue<Bool>(false)
+        let enteredAlpha = LockedValue<Bool>(false)
+        let paths = LockedValue<[String]>([])
+        let firstPages = Counter()
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            if path.contains("cursor=c-alpha") {
+                enteredAlpha.set(true)
+                try await Self.hold(until: releaseAlpha)
+                return Stub.json(Stub.memoList(["stale-alpha"], nextCursor: "c-alpha-next"))
+            }
+            if path.contains("cursor=c-beta") {
+                enteredBeta.set(true)
+                try await Self.hold(until: releaseBeta)
+                return Stub.json(Stub.memoList(["stale-beta"], nextCursor: "c-beta-next"))
+            }
+            if path.contains("cursor=c-gamma") {
+                return Stub.json(Stub.memoList(["gamma-2"], nextCursor: nil))
+            }
+            firstPages.increment()
+            switch firstPages.count {
+            case 1: return Stub.json(Stub.memoList(["alpha-1"], nextCursor: "c-alpha"))
+            case 2: return Stub.json(Stub.memoList(["beta-1"], nextCursor: "c-beta"))
+            default: return Stub.json(Stub.memoList(["gamma-1"], nextCursor: "c-gamma"))
+            }
+        }
+        let store = TimelineStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !enteredAlpha.get() {
+            await Task.yield()
+        }
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        releaseAlpha.set(true)
+        // The store asks again on its own — and the list changes under THAT read too. This wait
+        // is the only one with a deadline on it: if the second ask never comes, the point of the
+        // test is that it never comes, and that has to read as a failure rather than a hang.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !enteredBeta.get(), ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        #expect(enteredBeta.get(), "the store never asked again for the page it dropped")
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        releaseBeta.set(true)
+        await inFlight.value
+
+        #expect(store.memos.map(\.uid) == ["gamma-1", "gamma-2"])
+        #expect(!store.hasMore)
+        for cursor in ["c-alpha", "c-beta", "c-gamma"] {
+            let asked = paths.get().filter { $0.contains("cursor=\(cursor)") }.count
+            #expect(asked == 1, "\(cursor) was asked for \(asked) times, not once")
+        }
+        #expect(
+            !paths.get().contains { $0.contains("-next") },
+            "a superseded page's own cursor was followed"
+        )
     }
 }
