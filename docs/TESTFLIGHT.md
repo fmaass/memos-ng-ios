@@ -140,6 +140,14 @@ needs TestFlight still gets at least the Marketing role under Users and Access.
 In Xcode, with the project open (generate it first with `bin/generate.sh` — the `.xcodeproj` is not
 committed):
 
+That regeneration is load-bearing for the dependencies, not just for the project file:
+`bin/generate.sh` restores the committed `Package.resolved` into the regenerated project, so an
+archive taken after it links the same dependency graph the gate tested. Run it before every
+archive. If **File ▸ Packages ▸ Update to Latest Package Versions** is ever used, the pins have
+moved — re-record them from the project
+(`cp MemosNG.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved Package.resolved`),
+run the gate, and archive only once it is green. Never archive straight from an updated project.
+
 1. **Report navigator** → the **Cloud** button → **Get Started**.
 2. **Select a Product**: `MemosNG`. If I am on more than one Apple Developer Program team, pick the
    team the app is going to be distributed from.

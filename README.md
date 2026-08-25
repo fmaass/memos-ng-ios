@@ -21,6 +21,12 @@ Requires Xcode 26.6 and the iOS 26 simulator runtime. The three local packages u
 resolve on first build; `MemosAPI` generates its client from the vendored `openapi.json` as part of
 that build, so the first one takes a while.
 
+The remote dependencies are pinned. `Package.resolved` at the repo root holds the whole resolved
+graph, and because the generated project is where SwiftPM keeps that file, `bin/generate.sh` copies
+it in — so a fresh clone builds the same thirteen packages at the same versions. Re-record it after
+a deliberate dependency change: every gate run leaves what it resolved in
+`.gate-artifacts/Package.resolved`.
+
 ## The gate
 
 Every build, test and lint runs on a Mac build host, driven from wherever you are working:
@@ -28,11 +34,12 @@ Every build, test and lint runs on a Mac build host, driven from wherever you ar
     MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
 
 It mirrors the working tree to a disposable directory on that host and runs, in order and
-fail-fast: `bin/generate.sh` (xcodegen), `swift format lint --strict --recursive .`, `xcodebuild test`
-(three test bundles), `swift build -warnings-as-errors` for `MemosAPI` and `MemosCore`, the
-dependency-rule check, and a per-bundle test-count check. It prints one summary line of every
-step's exit code and returns the first non-zero one; the result bundle and any screenshots are
-copied back to `.gate-artifacts/`.
+fail-fast: `bin/generate.sh` (xcodegen), `swift format lint --strict --recursive .`, the
+dependency-pin check (the committed `Package.resolved` against what SwiftPM actually resolves),
+`xcodebuild test` (three test bundles), `swift build -warnings-as-errors` for `MemosAPI` and
+`MemosCore`, the dependency-rule check, and a per-bundle test-count check. It prints one summary
+line of every step's exit code and returns the first non-zero one; the result bundle and any
+screenshots are copied back to `.gate-artifacts/`.
 
 The gate directory on the build host is a mirror, never a checkout. Git is the only medium between
 the two machines.
