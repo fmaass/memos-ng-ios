@@ -40,6 +40,9 @@ let package = Package(
             dependencies: [
                 "MemosFeatures",
                 .product(name: "MemosOutbox", package: "MemosOutbox"),
+                // The parity suite projects what the RENDERER parsed rather than re-parsing the
+                // markdown itself, so it builds a `MarkdownContent` and links MarkdownUI directly.
+                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

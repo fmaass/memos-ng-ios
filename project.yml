@@ -54,6 +54,12 @@ packages:
   swift-http-types:
     url: https://github.com/apple/swift-http-types
     from: 1.6.0
+  # The Features test bundle projects what the RENDERER parsed, so it builds a `MarkdownContent`
+  # itself and has to link MarkdownUI directly. Keep the version in step with
+  # Packages/MemosFeatures/Package.swift — SwiftPM resolves one graph and will refuse a conflict.
+  swift-markdown-ui:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: 2.0.0
 
 # Every test bundle is hosted in the app. Two reasons, both learned the hard way: a host-less
 # unit-test bundle has no keychain entitlement in the simulator (the Keychain round trip fails with
@@ -308,10 +314,16 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Packages/MemosFeatures/Tests/MemosFeaturesTests
+      # The parity fixture is vendored next to openapi.json from one memos-ng commit and read out
+      # of this bundle at run time, where it is held against the renderer the app ships.
+      - path: Packages/MemosAPI/Sources/MemosAPI/Fixtures/markdown-parity.json
+        buildPhase: resources
     dependencies:
       - package: MemosFeatures
       - package: MemosCore
       - package: MemosOutbox
+      - package: swift-markdown-ui
+        product: MarkdownUI
       - target: MemosNG
     settings:
       base:
