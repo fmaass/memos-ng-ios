@@ -806,10 +806,14 @@ s_entitlements() {
   else
     echo "ENTITLEMENT FAIL: the first keychain access group is '$first'"; rc=1
   fi
-  if [ "$second" = 'group.live.discomarder.memosng' ]; then
-    echo "ENTITLEMENT ok: the app group is named as a migration source, after it"
+  # A second entry is a defect twice over: iOS provisioning validates every entry against the
+  # profile's `TEAMID.*` pattern (a raw `group.…` entry fails automatic signing on device
+  # builds), and any extra group widens where an unqualified write could land. The app group's
+  # keychain access rides on the application-groups entitlement, checked by the control below.
+  if [ -z "$second" ]; then
+    echo "ENTITLEMENT ok: keychain-access-groups has exactly one entry"
   else
-    echo "ENTITLEMENT FAIL: the second keychain access group is '$second'"; rc=1
+    echo "ENTITLEMENT FAIL: unexpected second keychain access group '$second'"; rc=1
   fi
   if grep -q 'keychain-access-groups' "$ext"; then
     echo "ENTITLEMENT FAIL: $ext declares a keychain access group; the token would be readable"
