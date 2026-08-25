@@ -102,7 +102,7 @@ public enum MemoCardTap {
         case memo
         /// One picture, full screen, in the swipeable viewer.
         case attachment(uid: String)
-        /// One video, playing. Not the viewer's poster page for it — see `plays(_:)`.
+        /// One video, on its own page of that same viewer, already playing — see `plays(_:)`.
         case playback(uid: String)
     }
 
@@ -110,11 +110,13 @@ public enum MemoCardTap {
     ///
     /// A tap on a video used to open the viewer, which showed the poster with a play button on it:
     /// the picture of the video, and a second tap needed before anything moved. Tapping a video is
-    /// unambiguous — it means play it — so it now goes straight to the player.
+    /// unambiguous — it means play it — so the viewer it opens is already playing when it gets
+    /// there (`MediaViewerPlayback`). Both destinations are that same viewer, on the page that was
+    /// tapped; what differs is what it does on arrival.
     ///
-    /// A video with no streamable rendition is NOT playable and falls back to the viewer, where its
-    /// poster is at least something. This is the same `playbackURL` rule the detail view uses, in
-    /// one place, so the two surfaces cannot disagree about what a tap on a video does.
+    /// A video with no streamable rendition is NOT playable: there is nothing to start, so its
+    /// page is the poster it has. This is the same `playbackURL` rule the detail view uses, in one
+    /// place, so the two surfaces cannot disagree about what a tap on a video does.
     ///
     /// Inside the viewer nothing changes: a video page reached by SWIPING keeps its poster and its
     /// play button, because starting a video somebody swiped past is the surprising thing there.

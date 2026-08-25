@@ -1,0 +1,108 @@
+import Foundation
+
+/// The one player the media viewer owns, and what opening it, swiping it, tapping it and leaving
+/// it do to that player.
+///
+/// A video is a PAGE of the pager now, not a screen presented over it, so "which video is
+/// playing" became a property of where the pager has settled — and a rule about a player's
+/// LIFETIME ("built when its page becomes current, gone when its page is two swipes away") is
+/// only worth anything if it can be asserted. It is decided here rather than inside the view
+/// body so that assertion needs no simulator, no `AVPlayer` and no sleep: the view's whole job is
+/// to make the real player match what these functions return.
+///
+/// The two lifetime rules the type exists to state:
+///
+/// - **One player.** `Player` is a single optional value, not a collection. Visiting five clips
+///   in a memo leaves one player behind, not five.
+/// - **Paused near, gone far.** Swiping off a playing video pauses it and keeps it, so swiping
+///   straight back resumes where it stopped instead of starting the download again. Swiping
+///   further than `retainedDistance` throws it away, because a player nobody can reach in one
+///   gesture is just memory holding a signed URL open.
+public enum MediaViewerPlayback {
+    /// The single player: which page it belongs to, what it plays, and whether it is running.
+    ///
+    /// A paused player still EXISTS — that is the difference between the pause a swipe to the
+    /// neighbouring page causes and the teardown a swipe past it causes, and the reason a swipe
+    /// back resumes rather than restarts.
+    public struct Player: Equatable, Sendable {
+        /// The id of the page it belongs to.
+        public let page: String
+        /// The streamable rendition it was built for — never the original (ADR-0008).
+        public let url: URL
+        public var isPlaying: Bool
+
+        public init(page: String, url: URL, isPlaying: Bool) {
+            self.page = page
+            self.url = url
+            self.isPlaying = isPlaying
+        }
+    }
+
+    /// The four things that can happen to the viewer's playback.
+    public enum Event: Equatable, Sendable {
+        /// The viewer appeared, on the page that was tapped.
+        case opened
+        /// The pager settled on a DIFFERENT page than the one it was on. The view sends this from
+        /// a change of its scroll position, so it never arrives for a page that was already
+        /// current — which is why arriving back at the player's own page means "swiped back".
+        case paged(to: String)
+        /// The play control on a video page was tapped.
+        case played(page: String)
+        /// The viewer is going away.
+        case dismissed
+    }
+
+    /// How many pages away a paused player is still kept. One: the page next door is one swipe
+    /// back, and the pager itself only keeps its neighbours built.
+    public static let retainedDistance = 1
+
+    /// The player the viewer should be holding after `event`.
+    ///
+    /// `nil` means no player at all: not a paused one, not a muted one — nothing, so the stream
+    /// stops being read and the memory goes back.
+    public static func player(
+        after event: Event,
+        player current: Player?,
+        in selection: MediaViewerSelection
+    ) -> Player? {
+        switch event {
+        case .opened:
+            // The entry page plays the moment it appears when the thing that was tapped was a
+            // video: a tap on a video means play it, and a poster with a play button on it
+            // asking for a second tap is the defect this behaviour replaced.
+            return started(selection.startPage)
+
+        case .played(let id):
+            guard let page = selection.pages.first(where: { $0.id == id }) else { return current }
+            // A new page's player REPLACES whatever was there, which is what keeps it to one.
+            return started(page) ?? current
+
+        case .paged(let to):
+            guard let current else { return nil }
+            if current.page == to {
+                // Swiped back onto it. It kept its position while it was paused, so this is a
+                // resume, not a restart.
+                return Player(page: current.page, url: current.url, isPlaying: true)
+            }
+            guard let arriving = selection.pages.firstIndex(where: { $0.id == to }),
+                let leaving = selection.pages.firstIndex(where: { $0.id == current.page })
+            else { return nil }
+            // Off-screen audio is the thing nobody wants: a video the pager has left is silent
+            // before it is anything else.
+            guard abs(arriving - leaving) <= retainedDistance else { return nil }
+            return Player(page: current.page, url: current.url, isPlaying: false)
+
+        case .dismissed:
+            return nil
+        }
+    }
+
+    /// A page's player, if that page is a video with something to stream.
+    ///
+    /// A video whose derived rendition the server has not produced is a poster and nothing else,
+    /// so it never becomes a player — there is no URL to build one from.
+    private static func started(_ page: MediaPage) -> Player? {
+        guard page.kind == .video, let url = page.playbackURL else { return nil }
+        return Player(page: page.id, url: url, isPlaying: true)
+    }
+}
