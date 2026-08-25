@@ -128,3 +128,86 @@ struct MarkdownDefinitionMatrixTests {
         #expect(!indentedHTML.contains("\\["), "\(endingName): a backslash leaked: \(indentedHTML)")
     }
 }
+
+/// The other half of the rule: what must NOT be touched.
+///
+/// Every finding here was an OVER-refusal — the scanner read a block boundary where CommonMark
+/// has none, registered a label from text that was never a definition, and then deleted a
+/// `![alt][pic]` a reader was meant to see. cmark and markdown-it agree on all three, so there is
+/// no parity to trade: the literal characters simply have to survive.
+@MainActor
+@Suite("literal content the scanner must leave alone")
+struct MarkdownLiteralContentTests {
+    private func texts(_ markdown: String) -> [String] {
+        ProductionMarkdownProjection.ignoringInvisibleParagraphs(
+            ProductionMarkdownProjection.project(markdown)
+        )
+        .flatMap { block in
+            [block.text] + (block.items ?? []) + (block.rows?.flatMap { $0 } ?? [])
+        }
+    }
+
+    /// A fenced block opened inside a list item stays open across the item's continuation lines —
+    /// they carry no marker of their own, and reading their depth as zero closes the fence early,
+    /// turns the code inside it into a definition and deletes the image reference below.
+    @Test("a fence opened in a list item keeps its content as code")
+    func fencesInsideListItemsStayOpen() {
+        let markdown = "- ~~~\n  [pic]: https://example.com/red.png\n  ~~~\n\n![alt][pic]"
+        let shown = texts(markdown)
+        #expect(shown.contains { $0.contains("![alt][pic]") }, "the image reference went: \(shown)")
+        // Byte for byte, read off the renderer's own output rather than the projection, which
+        // normalises whitespace: the code block still holds the line the author wrote, newline
+        // included, with no escape inside it.
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(
+            html.contains("<pre><code>[pic]: https://example.com/red.png\n</code></pre>"),
+            "the code was rewritten:\n\(html)"
+        )
+    }
+
+    /// An empty list item cannot interrupt a paragraph, and neither can an ordered marker whose
+    /// number is not 1. `2.` on a line of its own in the middle of a paragraph is text, the line
+    /// after it is text, and nothing there is a definition.
+    @Test("an empty marker in the middle of a paragraph starts nothing")
+    func emptyMarkersDoNotInterruptAParagraph() {
+        let markdown = "paragraph\n2.\n[pic]: https://example.com/red.png\n\n![alt][pic]"
+        let shown = texts(markdown)
+        #expect(shown.contains { $0.contains("![alt][pic]") }, "the image reference went: \(shown)")
+        #expect(
+            shown.contains { $0.contains("[pic]: https://example.com/red.png") },
+            "the paragraph lost its text: \(shown)"
+        )
+    }
+
+    /// A definition's destination may sit on the following line, but only while that line is part
+    /// of the same block. A list marker opens one of its own, so `- https://…` is a list item and
+    /// the `[pic]:` above it never became a definition.
+    @Test("a line that opens a list is not the destination of the line above")
+    func containersAreNotDestinationContinuations() {
+        let markdown = "[pic]:\n- https://example.com/red.png\n\n![alt][pic]"
+        let shown = texts(markdown)
+        #expect(shown.contains { $0.contains("![alt][pic]") }, "the image reference went: \(shown)")
+        #expect(shown.contains { $0.contains("[pic]:") }, "the paragraph went: \(shown)")
+    }
+
+    /// The controls for the three above, so the fixes cannot be "stop registering anything": with
+    /// the container or the blank line that CommonMark needs, these ARE definitions, and the
+    /// image the SPA drops is dropped here too.
+    @Test(
+        "the same shapes, one blank line different, still register",
+        arguments: [
+            (
+                "a list of its own",
+                "paragraph\n\n2.\n[pic]: https://example.com/red.png\n\n![alt][pic]"
+            ),
+            (
+                "an unindented line after the fence",
+                "- ~~~\n\n[pic]: https://example.com/red.png\n\n![alt][pic]"
+            ),
+        ]
+    )
+    func theSameShapesWithABlankLineStillRegister(name: String, markdown: String) {
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(!html.contains("<img"), "\(name): \(html)")
+    }
+}

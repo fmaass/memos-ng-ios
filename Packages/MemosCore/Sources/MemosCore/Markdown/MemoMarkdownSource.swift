@@ -258,10 +258,15 @@ extension MemoMarkdownSource {
             let line = lines[index]
 
             if let open = fence {
-                if line.depth < open.depth {
+                if line.depth < open.depth, line.indentColumns == 0 {
                     // The container that held the fence has ended. A fence inside a blockquote
                     // cannot swallow the rest of the document — and a scanner that lets it stops
                     // looking at every definition below.
+                    //
+                    // Only an UNINDENTED line ends it, though: the continuation lines of a list
+                    // item carry no marker of their own, so their depth reads as zero while they
+                    // are still inside the item. Closing on those turns the code inside a fenced
+                    // block into a definition and deletes the `![alt][ref]` below it.
                     fence = nil
                     atBlockStart = true
                 } else if let closing = fenceMarker(line), closing.character == open.character,
@@ -282,11 +287,19 @@ extension MemoMarkdownSource {
 
             let openedThisBlock = atBlockStart
             guard let definition = definitionLine(line) else {
-                // A blank line ends a block, and so does a line that was nothing but container
-                // markers, and so does the last line of an indented code block — the first line
-                // that is not indented begins a block of its own, and a definition may sit there.
-                atBlockStart =
-                    endsABlock(line.content) || (openedThisBlock && line.isIndentedCode)
+                if line.isMarkerOnly, !openedThisBlock {
+                    // An empty list item cannot interrupt a paragraph, and neither can an ordered
+                    // marker whose number is not 1. A lone `2.` in the middle of one is text, the
+                    // line after it is text, and nothing there is a definition.
+                    atBlockStart = false
+                } else {
+                    // A blank line ends a block, and so does a line that was nothing but container
+                    // markers, and so does the last line of an indented code block — the first
+                    // line that is not indented begins a block of its own, and a definition may
+                    // sit there.
+                    atBlockStart =
+                        endsABlock(line.content) || (openedThisBlock && line.isIndentedCode)
+                }
                 continue
             }
 
@@ -294,7 +307,15 @@ extension MemoMarkdownSource {
             if destination == nil, index + 1 < lines.count {
                 // CommonMark lets the destination sit on the line after the label. cmark-gfm
                 // registers that spelling; markdown-it validates it the same as any other.
-                destination = firstToken(of: lines[index + 1].content)
+                //
+                // Only while that line is still in the same block, though — which is a question
+                // about the line BEFORE its markers come off. `- https://…` opens a list item, so
+                // it is not the destination of the `[pic]:` above it, and reading it as one
+                // registers a label the document never defined.
+                let next = lines[index + 1]
+                if next.depth <= line.depth {
+                    destination = firstToken(of: next.content)
+                }
             }
             guard let href = destination, !href.isEmpty else {
                 atBlockStart = false
@@ -362,6 +383,12 @@ extension MemoMarkdownSource {
         /// definition can sit inside one, and the first line that is not indented ends it.
         var isIndentedCode: Bool {
             indentColumns >= 4 && !content.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+
+        /// Nothing but container markers: an empty list item, or an empty quote line. It opens a
+        /// block of its own only where it is allowed to interrupt what is already open.
+        var isMarkerOnly: Bool {
+            depth > 0 && content.trimmingCharacters(in: .whitespaces).isEmpty
         }
     }
 
