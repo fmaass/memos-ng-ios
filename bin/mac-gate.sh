@@ -426,14 +426,22 @@ summary_and_exit() {
 # gate that no build can check. Its suite runs HERE, on every run, fast path or not: a fast path
 # taken by a classifier nobody checked is a gate that passes what it never read.
 say "--- step: selftest ---"
-selftest_script="$repo_root/tests/gate/fastpath-classify-test.sh"
-if [ -x "$selftest_script" ]; then
+selftest_rc=0
+selftest_count=0
+for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
+  [ -x "$selftest_script" ] || continue
+  selftest_count=$((selftest_count + 1))
   "$selftest_script" 2>&1 | tee -a "$log"
-  record selftest "${PIPESTATUS[0]}"
-else
-  say "the gate's classifier test $selftest_script is missing or not executable"
-  record selftest 1
+  [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
+done
+# Counted, not just run: a suite that is deleted or loses its execute bit would otherwise take its
+# whole subject with it and the gate would still say selftest=0.
+if [ "$selftest_count" -lt 2 ]; then
+  say "the gate's own tests are missing: $selftest_count executable suite(s) in $repo_root/tests/gate," \
+      "expected at least the classifier and the warnings-flag reader"
+  selftest_rc=1
 fi
+record selftest "$selftest_rc"
 [ "$first_fail" -eq 0 ] || summary_and_exit
 
 # --- release-version authority ------------------------------------------------------------------
@@ -1551,7 +1559,8 @@ s_warnings() {
   echo "--- Packages/MemosFeatures with warnings as errors (xcodebuild, iOS simulator, Debug)"
   # A one-line pre-check, so a manifest that simply lost the declaration says so plainly instead of
   # through a build log.
-  if grep -q 'treatAllWarnings(as: .error' Packages/MemosFeatures/Package.swift; then
+  if sed 's|//.*||' Packages/MemosFeatures/Package.swift \
+     | grep -q 'treatAllWarnings(as: \.error'; then
     echo "ok (pre-check): MemosFeatures declares .treatAllWarnings(as: .error)"
   else
     echo "WARNAERR FAIL: Packages/MemosFeatures/Package.swift no longer declares" \
@@ -1583,42 +1592,19 @@ s_warnings() {
   # past is the diagnostics and the verdict line.
   grep -E 'error:|warning:|\*\* BUILD' "$warn_log" | tail -25
   cp "$warn_log" .gate-artifacts/MemosFeatures-warnings-build.log
-  /usr/bin/python3 - "$warn_log" <<'PY' || rc=1
-import sys
-
-log = sys.argv[1]
-target = "in target 'MemosFeatures' from project 'MemosFeatures'"
-try:
-    lines = open(log, encoding="utf-8", errors="replace").read().splitlines()
-except OSError as error:
-    print("WARNAERR FAIL: cannot read the build log %s: %s" % (log, error))
-    sys.exit(1)
-
-# A task's header names its target; the lines under it are that task's command. So the flag is
-# only ever credited to the target whose header it appeared beneath.
-tasks = flagged = 0
-mine = False
-for line in lines:
-    if "in target '" in line:
-        mine = target in line
-        if mine:
-            tasks += 1
-    if mine and "-warnings-as-errors" in line:
-        flagged += 1
-
-print("MemosFeatures build tasks in the log: %d" % tasks)
-print("of them carrying -warnings-as-errors: %d" % flagged)
-if tasks < 1:
-    print("WARNAERR FAIL: the build log holds no task for the MemosFeatures target, so it says "
-          "nothing about how that target was compiled")
-    sys.exit(1)
-if flagged < 1:
-    print("WARNAERR FAIL: no swift invocation for the MemosFeatures target carried "
-          "-warnings-as-errors, so its warnings were not fatal in this build")
-    sys.exit(1)
-print("ok: the MemosFeatures target was compiled with -warnings-as-errors")
-sys.exit(0)
-PY
+  # The reader lives in scripts/read-warnings-flag.py, where tests/gate/warnings-flag-test.sh can
+  # feed it a log instead of a ten-minute build — and it needs feeding: a reader that accepts the
+  # flag's TEXT anywhere under this target's task header is satisfied by a source file printing
+  # `#warning("-warnings-as-errors")`, in a build that exits 0 with its warnings not fatal. So the
+  # match is on the compiler INVOCATION for the MemosFeatures module, never on a line the compiler
+  # emitted.
+  local flag_reader="$GATE_TARGET/scripts/read-warnings-flag.py"
+  if [ -f "$flag_reader" ]; then
+    /usr/bin/python3 "$flag_reader" "$warn_log" || rc=1
+  else
+    echo "WARNAERR FAIL: $flag_reader is missing, so nothing here can read what the build did"
+    rc=1
+  fi
   return $rc
 }
 
