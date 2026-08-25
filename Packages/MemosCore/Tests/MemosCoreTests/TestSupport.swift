@@ -80,22 +80,30 @@ enum Stub {
     /// URLs are present whatever the status — which is the whole point: they exist in the payload
     /// from the moment the attachment does, long before the worker has produced anything to serve
     /// from them.
+    ///
+    /// `exp` and `sig` mint them the way the server does — `?exp=&scope=&sig=`, the shape
+    /// `sign_asset_url` writes — for the tests that are about the SIGNATURE having a life of its
+    /// own. Left off, the URLs carry no signature at all, which is what every other test wants:
+    /// nothing then expires and no test accidentally depends on the clock it runs under.
     static func attachment(
         uid: String,
         status: String,
-        mime: String = "image/jpeg"
+        mime: String = "image/jpeg",
+        exp: Int? = nil,
+        sig: String = "aaaa"
     ) -> String {
-        """
-        {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
-        "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
-        "hasLegacyPrint":false,"renditions":[],\
-        "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
-        "previewUrl":"/api/attachments/\(uid)/mobile",\
-        "webUrl":"/api/attachments/\(uid)/web",\
-        "posterUrl":"/api/attachments/\(uid)/poster",\
-        "downloadUrl":"/api/attachments/\(uid)/download",\
-        "printUrl":"/api/attachments/\(uid)/print"}
-        """
+        let query = exp.map { "?exp=\($0)&scope=1&sig=\(sig)" } ?? ""
+        return """
+            {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
+            "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
+            "hasLegacyPrint":false,"renditions":[],\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
+            "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
+            "webUrl":"/api/attachments/\(uid)/web\(query)",\
+            "posterUrl":"/api/attachments/\(uid)/poster\(query)",\
+            "downloadUrl":"/api/attachments/\(uid)/download",\
+            "printUrl":"/api/attachments/\(uid)/print"}
+            """
     }
 
     /// A memo's content is Markdown, so it carries newlines and quotes into these hand-built JSON

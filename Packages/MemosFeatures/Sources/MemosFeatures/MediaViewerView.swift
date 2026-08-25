@@ -353,19 +353,19 @@ struct MediaViewerPage: View {
         }
     }
 
-    /// The full-screen rendition: dropped from the media cache if its signature has lapsed, then
+    /// The full-screen rendition: dropped from both caches if its signature has lapsed, then
     /// fetched once and decoded once through the page's own transport.
     private func loadStill() async {
         guard let url = page.stillURL else { return }
-        // The signature can lapse while a cached copy is still on disk; re-serving it would hide
-        // the moment it stopped verifying (SignedMediaURL / LSN-0062). This drops it out of the
-        // cache the fetch below actually reads, which is the whole point of `transport` and
-        // `cache` being one pair.
-        MediaCache.evictExpired(url, cache: cache)
-
         // Captured before the await: the pager can hand this view a different page while the
         // fetch is in flight, and the answer belongs to the key it was asked for.
         let requested = page.stillKey
+        // The signature can lapse while a cached copy is still on disk; re-serving it would hide
+        // the moment it stopped verifying (SignedMediaURL / LSN-0062). This drops it out of the
+        // cache the fetch below actually reads, which is the whole point of `transport` and
+        // `cache` being one pair — and out of the decoded store, which `stillPicture` reads
+        // synchronously and would otherwise paint from in the very next frame.
+        MediaImageLoader.evictLapsedSignature(url: url, key: requested, cache: cache)
         // Already decoded — `body` has painted it in this very frame. Taken into this view's own
         // state anyway: that is what keeps it painted if the cache is emptied under a page that
         // stays on screen.

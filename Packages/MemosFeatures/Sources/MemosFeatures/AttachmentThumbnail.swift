@@ -51,7 +51,8 @@ public enum WaitingTreatment {
 /// in the picture's shape, not a spinner and not a grey box that reflows the timeline.
 ///
 /// The signature is still enforced here: an entry whose signed URL has lapsed can only be stale,
-/// so it is dropped from the media cache before the fetch (`MediaCache.evictExpired`).
+/// so it is dropped before the fetch — the response bytes and the decoded picture together
+/// (`MediaImageLoader.evictLapsedSignature`).
 struct AttachmentThumbnail: View {
     let attachment: MemoAttachment
     var tier: MediaTier = .thumb
@@ -160,11 +161,12 @@ struct AttachmentThumbnail: View {
         // Nothing to fetch while the server is still deriving it, and nothing to fetch for a file
         // it gave up on. Asking anyway is what turned a pending photo into a failure glyph.
         guard attachment.readiness == .ready, let url else { return }
-        MediaCache.evictExpired(url)
-
         // Captured before the await: the view can be handed a different attachment while the
         // fetch is in flight, and the answer belongs to the key it was asked for.
         let requested = key
+        // A lapsed signature is dropped from BOTH layers — the response bytes and the decoded
+        // picture — because either one alone would paint a frame the URL can no longer authorise.
+        MediaImageLoader.evictLapsedSignature(url: url, key: requested)
         // Already decoded — `body` has painted it in this very frame, and there is nothing to
         // fetch. It is still taken INTO this view's own state: the frame is already right, and
         // this is what keeps it right if the cache is emptied under a row that stays mounted.

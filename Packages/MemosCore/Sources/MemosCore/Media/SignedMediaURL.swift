@@ -25,9 +25,34 @@ public struct SignedMediaURL: Sendable, Equatable {
         return Date(timeIntervalSince1970: seconds)
     }
 
-    public func isExpired(at now: Date) -> Bool {
+    /// How much life a signature must have left for the fetch it authorises to be worth starting.
+    ///
+    /// `exp` is a deadline, not a promise about the request that reads it: a URL with seconds on
+    /// it is refused halfway through the fetch it was minted for, and what the reader sees is a
+    /// broken picture that a freshly signed URL would have shown. A minute covers a request on a
+    /// slow connection, and it can never be the reason a re-read happens on a URL somebody could
+    /// still have used: the server mints these with at least an hour of life
+    /// (`bucketed_exp` in memos-ng `app/services/asset_urls.py` rounds the mint time down to a
+    /// one-hour bucket and adds a two-hour TTL).
+    public static let horizon: TimeInterval = 60
+
+    /// Whether this signature is spent for a fetch STARTING at `now` — `exp` already past, or
+    /// close enough to it that the fetch would not finish inside it.
+    ///
+    /// `horizon` is a parameter and not only a constant because it is what makes the rule
+    /// assertable: a test says which side of the boundary it is on instead of waiting for one.
+    public func isPastHorizon(
+        at now: Date,
+        horizon: TimeInterval = SignedMediaURL.horizon
+    ) -> Bool {
         guard let expiresAt else { return false }
-        return expiresAt <= now
+        return expiresAt.timeIntervalSince(now) <= horizon
+    }
+
+    /// The same question with no margin at all: is the signature already refused. Expressed
+    /// through `isPastHorizon` so the two answers cannot drift apart.
+    public func isExpired(at now: Date) -> Bool {
+        isPastHorizon(at: now, horizon: 0)
     }
 
     /// Seconds this response may still be served from cache. Never negative, never beyond `exp`.
@@ -55,6 +80,28 @@ public struct SignedMediaURL: Sendable, Equatable {
     /// only be stale, and re-validating it is the whole point.
     public func cachePolicy(at now: Date) -> URLRequest.CachePolicy {
         isExpired(at: now) ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
+    }
+}
+
+extension MemoAttachment {
+    /// The derived-tier URLs this attachment was READ with — the ones a tile has in hand.
+    ///
+    /// All four are signed in one call (memos-ng `signed_tier_urls`), so they carry one `exp`
+    /// between them; all four are still checked, because which tier a surface asks for is the
+    /// surface's business and not this rule's.
+    public var tierURLs: [URL] {
+        [thumbnailURL, previewURL, webURL, posterURL].compactMap { $0 }
+    }
+
+    /// Whether the URLs in hand have outlived their signature.
+    ///
+    /// An UNSIGNED URL never has: `exp` is what expires, and a URL without one is bounded by the
+    /// server's own cache headers rather than by a signature this client can read.
+    public func isPastURLHorizon(
+        at now: Date,
+        horizon: TimeInterval = SignedMediaURL.horizon
+    ) -> Bool {
+        tierURLs.contains { SignedMediaURL(url: $0).isPastHorizon(at: now, horizon: horizon) }
     }
 }
 
