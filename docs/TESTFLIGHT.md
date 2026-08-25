@@ -24,7 +24,7 @@ the answers on the website and the answers inside the bundle say the same thing.
 | App group | `group.live.discomarder.memosng` |
 | Associated domain | `memos.discomarder.live` (webcredentials) |
 | Version (`CFBundleShortVersionString`) | `0.1.0` |
-| Build number (`CFBundleVersion`) | `1` in the repo — Xcode Cloud numbers its own builds |
+| Build number (`CFBundleVersion`) | `2` in the repo — an Xcode Cloud build numbers its own |
 | Export compliance | `ITSAppUsesNonExemptEncryption = false`, already in both bundles |
 | Data collected | none |
 | Tracking | none, and no tracking domains |
@@ -167,7 +167,8 @@ of it.
 
 ## Part 3 — the build number
 
-Nothing needs doing here. It is written down because it is the thing most likely to look wrong.
+A local archive needs the number bumped by hand; an Xcode Cloud build does not. Both halves are
+written down because this is the thing most likely to look wrong.
 
 Verified from Apple's documentation:
 
@@ -185,10 +186,16 @@ case is strong — the "next build number" setting exists to avoid *version coll
 occur if the number reaches App Store Connect — and that is the behaviour developers report. But I
 have not confirmed it against a document or a build.
 
-So: `CURRENT_PROJECT_VERSION` stays `1` in `project.yml` and is not bumped by hand. If a TestFlight
-upload is ever rejected for a duplicate build number, the fix is a `ci_scripts/ci_pre_xcodebuild.sh`
-that writes `$CI_BUILD_NUMBER` into the version before `xcodebuild` runs — not an edit to the
-repository's `1`.
+So `CURRENT_PROJECT_VERSION` is only load-bearing for an archive made **locally**, in Xcode — that
+one is uploaded under exactly the number in `project.yml`, and App Store Connect refuses a number
+it already holds. Build `1` was handed to the household on 2026-08-25 and is spoken for, so the
+value moved to `2` for the build that replaces it; it moves again for the next one. Move it on BOTH
+targets together.
+
+Under Xcode Cloud the value is expected to be ignored in favour of the assigned build number, which
+is why nothing here depends on it being right. The durable fix, if a duplicate build number is ever
+rejected there, is still a `ci_scripts/ci_pre_xcodebuild.sh` that writes `$CI_BUILD_NUMBER` into the
+version before `xcodebuild` runs, so that no hand edit is needed at all.
 
 `MARKETING_VERSION` is `0.1.0` on both targets and is bumped deliberately, by hand, when there is
 something to call a new version.
