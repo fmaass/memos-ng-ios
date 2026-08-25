@@ -1,6 +1,7 @@
 import AVKit
 import MemosCore
 import SwiftUI
+import UIKit
 
 /// A memo's pictures and videos, full screen: pinch to zoom, drag to move, double tap to go in and
 /// out, swipe sideways for the next one, and back down into the tile it came from.
@@ -193,10 +194,26 @@ struct MediaViewerPage: View {
     /// cache the image fetches actually go through; evicting out of any other one is a no-op
     /// that reads like an eviction.
     var cache: URLCache = MediaSession.shared.cache
+    /// What the still is fetched through, and the other half of the pair above: this session's
+    /// `urlCache` IS `cache`, which is what makes the eviction mean something. Both defaults are
+    /// asserted against each other by identity in `MediaViewerLoadingTests` — the fetch and the
+    /// eviction have to name ONE `URLCache` object, and stating it twice is not the same as
+    /// proving it. Injectable for the same reason the cache is: a page handed a scripted
+    /// transport can be watched fetching, which is how "the still goes through here" is a test
+    /// rather than a comment.
+    var transport: any MediaTransport = MediaSession.shared
 
     @State private var transform = MediaZoom.Transform.identity
     @GestureState private var magnification: CGFloat = 1
     @GestureState private var pan: CGSize = .zero
+    /// What THIS page loaded, tagged with the key it was loaded for — the same arrangement the
+    /// timeline tiles use, and for the same reason: `NSCache` may drop an entry under a view that
+    /// is still on screen, and a page reading only the cache would fall back to its blurhash and
+    /// stay there.
+    @State private var loaded: (key: MediaImageKey, image: UIImage)?
+    /// The key whose load came back with nothing. Tagged too, so a page that has been swiped on
+    /// does not wear the previous picture's failure.
+    @State private var failedKey: MediaImageKey?
 
     var body: some View {
         GeometryReader { proxy in
@@ -288,36 +305,88 @@ struct MediaViewerPage: View {
         }
     }
 
+    /// The picture, over its own colours.
+    ///
+    /// It goes through `MediaImageLoader` — the same loader, store and key a timeline tile uses —
+    /// and through the transport THIS page holds, whose cache is the one `loadStill` evicts from.
+    /// `AsyncImage` stood here before, and it fetches through `URLSession.shared`: a session
+    /// whose cache the app cannot guarantee it won the race to install, so the eviction beside it
+    /// was reaching into a cache the fetches never consulted, and a signed URL that had lapsed
+    /// could be re-served out of the one they did.
+    ///
+    /// The task hangs off the stack rather than off the picture: the picture is a conditional
+    /// that starts out as nothing at all, and a load that only runs once something is already
+    /// drawn never runs.
     private var still: some View {
         ZStack {
             BlurHashBackdrop(blurhash: page.blurhash)
-            if let url = page.stillURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        AspectPinnedLayer { image.resizable().scaledToFit() }
-                    case .failure:
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.largeTitle)
-                            .foregroundStyle(.white)
-                            .shadow(radius: 4)
-                    default:
-                        // The blurhash IS the loading state. A spinner over it would only hide it.
-                        // `default` rather than `.empty`: a phase this SwiftUI has not shipped yet
-                        // must read as still loading, never as a warning triangle.
-                        EmptyView()
-                    }
-                }
-                .task(id: url) {
-                    // The signature can lapse while a cached copy is still on disk; re-serving it
-                    // would hide the moment it stopped verifying (SignedMediaURL / LSN-0062).
-                    MediaCache.evictExpired(url, cache: cache)
-                }
+            if page.stillURL != nil {
+                stillPicture
             }
         }
+        .task(id: page.stillURL) { await loadStill() }
         .accessibilityElement()
         .accessibilityLabel(page.accessibilityLabel)
         .accessibilityAddTraits(.isImage)
+    }
+
+    /// What is painted over the blurhash: the decoded picture, the failure glyph, or — while it
+    /// is still coming — nothing, because the blurhash IS the loading state and a spinner over it
+    /// would only hide it.
+    @ViewBuilder
+    private var stillPicture: some View {
+        let key = page.stillKey
+        // Read synchronously in `body`, exactly as a tile does: a picture already decoded is
+        // painted in the frame the page appears in, without passing through the blurhash first.
+        let painted = AttachmentThumbnail.painted(
+            captured: loaded,
+            for: key,
+            cached: MediaImageLoader.cachedUIImage(for: key)
+        )
+        if let painted {
+            AspectPinnedLayer { Image(uiImage: painted).resizable().scaledToFit() }
+        } else if failedKey == key {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.largeTitle)
+                .foregroundStyle(.white)
+                .shadow(radius: 4)
+        }
+    }
+
+    /// The full-screen rendition: dropped from the media cache if its signature has lapsed, then
+    /// fetched once and decoded once through the page's own transport.
+    private func loadStill() async {
+        guard let url = page.stillURL else { return }
+        // The signature can lapse while a cached copy is still on disk; re-serving it would hide
+        // the moment it stopped verifying (SignedMediaURL / LSN-0062). This drops it out of the
+        // cache the fetch below actually reads, which is the whole point of `transport` and
+        // `cache` being one pair.
+        MediaCache.evictExpired(url, cache: cache)
+
+        // Captured before the await: the pager can hand this view a different page while the
+        // fetch is in flight, and the answer belongs to the key it was asked for.
+        let requested = page.stillKey
+        // Already decoded — `body` has painted it in this very frame. Taken into this view's own
+        // state anyway: that is what keeps it painted if the cache is emptied under a page that
+        // stays on screen.
+        if let hit = MediaImageLoader.cachedUIImage(for: requested) {
+            loaded = (requested, hit)
+            if failedKey == requested { failedKey = nil }
+            return
+        }
+
+        let generation = MediaImageLoader.store.generation
+        let image = await MediaImageLoader.uiImage(for: requested, url: url, transport: transport)
+        // The same fence the loader applies to its cache, applied to the screen: an answer about
+        // the account that was signed in when this started must not be painted for the one signed
+        // in now — not even as a failure.
+        guard generation == MediaImageLoader.store.generation else { return }
+        if let image {
+            loaded = (requested, image)
+            if failedKey == requested { failedKey = nil }
+        } else {
+            failedKey = requested
+        }
     }
 
     /// A real control rather than a tap on the poster, so it is reachable with VoiceOver.

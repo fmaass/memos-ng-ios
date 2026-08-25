@@ -18,6 +18,13 @@ public enum MediaKind: Equatable, Sendable {
 public struct MediaPage: Identifiable, Equatable, Sendable {
     public let attachment: MemoAttachment
     public let kind: MediaKind
+    /// The tier `stillURL` was taken at.
+    ///
+    /// Carried rather than recomputed where it is needed, because the decoded picture is filed
+    /// under `(uid, tier)` and nothing else: a key naming a tier the bytes did not come from
+    /// would file one rendition under another's name, and the two are only provably the same
+    /// tier if one value produces both.
+    public let stillTier: MediaTier
     /// The still to show: the full-screen tier for a picture, the poster for a video.
     public let stillURL: URL?
     /// The streamable rendition, for a video page only — never the original (ADR-0008).
@@ -28,6 +35,13 @@ public struct MediaPage: Identifiable, Equatable, Sendable {
 
     public var id: String { attachment.uid }
     public var blurhash: String? { attachment.blurhash }
+
+    /// What the decoded still is filed under — the same `(uid, tier)` key the timeline tiles use,
+    /// so a photo opened full screen at a tier the feed has already loaded is painted out of
+    /// memory rather than fetched a second time.
+    public var stillKey: MediaImageKey {
+        MediaImageKey(uid: attachment.uid, tier: stillTier.rawValue)
+    }
 
     /// The proportions to lay the picture out in before it arrives — the same measured-or-4:3
     /// decision the detail view makes, so a photo does not change shape on its way to full screen.
@@ -75,10 +89,12 @@ public enum MediaViewerPresentation {
     public static func pages(for attachments: [MemoAttachment]) -> [MediaPage] {
         let viewable = attachments.filter { isViewable($0) }
         return viewable.enumerated().map { index, attachment in
-            MediaPage(
+            let tier = MemoPresentation.fullScreenTier(for: attachment)
+            return MediaPage(
                 attachment: attachment,
                 kind: attachment.isVideo ? .video : .image,
-                stillURL: fullScreenStillURL(for: attachment),
+                stillTier: tier,
+                stillURL: MemoPresentation.url(for: attachment, tier: tier),
                 playbackURL: MemoPresentation.playbackURL(for: attachment),
                 position: index + 1,
                 total: viewable.count
