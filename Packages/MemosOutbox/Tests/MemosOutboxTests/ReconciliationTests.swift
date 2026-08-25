@@ -99,13 +99,19 @@ struct ReconciliationTests {
         #expect(plan.drainable == [finished.id, held.id])
     }
 
-    @Test("a background session's configuration cannot spend a phone plan")
+    /// The session no longer decides which network a capture goes over — the engine does, before
+    /// each request, against the path as it is at that instant. A session that refused cellular
+    /// itself could never be told otherwise: its configuration is fixed for the lifetime of the
+    /// process, so a toggle turned on this afternoon would hold every chunk until a force-quit.
+    /// Constrained stays refused here too: Low Data Mode is not the toggle's to override.
+    @Test("a background session leaves the network decision to the engine, except Low Data Mode")
     func backgroundConfiguration() {
         let configuration = OutboxSession.backgroundConfiguration(appGroup: "group.test.invalid")
         #expect(configuration.identifier == "live.discomarder.memosng.outbox")
         #expect(configuration.sharedContainerIdentifier == "group.test.invalid")
-        #expect(configuration.allowsCellularAccess == false)
-        #expect(configuration.allowsExpensiveNetworkAccess == false)
+        #expect(configuration.allowsCellularAccess == true)
+        #expect(configuration.allowsExpensiveNetworkAccess == true)
+        #expect(configuration.allowsConstrainedNetworkAccess == false)
         #expect(configuration.isDiscretionary == false)
         #expect(configuration.sessionSendsLaunchEvents == true)
         #expect(OutboxSession.identifier == "live.discomarder.memosng.outbox")

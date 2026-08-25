@@ -31,6 +31,9 @@ struct MemosNGApp: App {
                 // The device's own settings — read by the root view for the appearance it
                 // applies, and by the Settings screen for the control that chooses it.
                 .environment(AppSettings.shared)
+                // The upload preference, over the very store the outbox is listening to, so
+                // turning it on sends what is already queued instead of only the next capture.
+                .environment(appDelegate.uploadSettings)
         }
     }
 }
@@ -47,6 +50,10 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     // app group, which only a real app has, and the share extension reads what it publishes.
     let session = SessionStore(account: OutboxAccountStore.live())
     private(set) var outbox: Outbox?
+    /// Built from the outbox's own preference store rather than a second one over the same suite:
+    /// the drain acts on the object it was given, and a switch it never hears about is a switch
+    /// that only takes effect on the next launch.
+    private(set) var uploadSettings: UploadSettings?
 
     func application(
         _ application: UIApplication,
@@ -58,6 +65,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 await MainActor.run { session.state.user?.subject }
             }
         )
+        uploadSettings = outbox.map { UploadSettings(preferences: $0.uploadPreferences) }
         // Registration has to happen before launch finishes, whatever else is true of this
         // launch. The queue is named EXPLICITLY: with `nil` the system delivers the launch handler
         // on a background queue, where assuming main-actor isolation is a trap rather than a hop —

@@ -25,6 +25,9 @@ struct SettingsView: View {
     // Optional for the same reason the outbox is on the timeline: a preview or a test host has no
     // settings store, and a missing environment value must not be a crash.
     @Environment(AppSettings.self) private var settings: AppSettings?
+    /// Optional for the same reason, and the same object the outbox listens to — see
+    /// `Outbox.uploadPreferences`.
+    @Environment(UploadSettings.self) private var uploadSettings: UploadSettings?
 
     /// The one conversation, handed in by the screen that also puts it in the toolbar menu. Two
     /// stages would be two machines and, between them, two revokes — see `SignOutConversation`.
@@ -68,6 +71,7 @@ struct SettingsView: View {
             switch section {
             case .account: account
             case .defaults: defaults
+            case .uploads: uploads
             case .appearance: appearance
             case .storage: storage
             case .about: about
@@ -133,6 +137,11 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
+    private var uploads: some View {
+        UploadsSection(allowsMobileData: mobileData)
+    }
+
+    @ViewBuilder
     private var appearance: some View {
         SettingsCaption("System follows the phone, and switches when it does.")
         Picker("Appearance", selection: appearanceChoice) {
@@ -192,6 +201,15 @@ struct SettingsView: View {
         )
     }
 
+    /// Written through the store the drain reads, and awaited: the write is what a queued capture
+    /// is waiting for, and the drain it starts is what sends it without another tap.
+    private var mobileData: Binding<Bool> {
+        Binding(
+            get: { uploadSettings?.allowsMobileData ?? false },
+            set: { value in Task { await uploadSettings?.select(value) } }
+        )
+    }
+
     private var appearanceChoice: Binding<AppearancePreference> {
         Binding(
             get: { settings?.appearance ?? .system },
@@ -203,6 +221,26 @@ struct SettingsView: View {
         savingVisibility = true
         visibilityFailed = !(await session.setDefaultVisibility(visibility))
         savingVisibility = false
+    }
+}
+
+/// The Uploads section's contents, and the only control on this screen that decides whether bytes
+/// leave the phone.
+///
+/// A view of its own rather than a body inside `SettingsView`, and not for tidiness: the screen
+/// itself cannot be rendered in a test — it reads a `SessionStore`, and constructing one inlines
+/// the API layer the Features test bundle does not link (see `SettingsRenderTests`) — so a switch
+/// held only inside that body would be a control no test could see. This one is drawn by
+/// `SettingsRenderTests`, twice, and the two pictures have to differ.
+///
+/// The footer says what stays true with the switch ON, because a row that read as "send
+/// everything, always" would be lying about Low Data Mode, which the policy refuses either way.
+struct UploadsSection: View {
+    @Binding var allowsMobileData: Bool
+
+    var body: some View {
+        SettingsCaption(UploadSettings.footer)
+        Toggle(UploadSettings.title, isOn: $allowsMobileData)
     }
 }
 

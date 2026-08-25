@@ -17,7 +17,11 @@ struct CaptureDateTests {
             credentials: StaticCredentials(credentials: Fixture.credentials()),
             http: ScriptedHTTP.standard(health: 500),
             scheduler: ScriptedScheduler(),
-            completion: ScriptedCompletion([.retry("not now")], repeating: .retry("not now"))
+            completion: ScriptedCompletion([.retry("not now")], repeating: .retry("not now")),
+            // The home wifi: nothing here is about the network policy, and a stub that refused
+            // would stop these drains before the thing they are about.
+            network: StubNetworkPath(),
+            preferences: Fixture.preferences(name: "memosng.outbox.tests.facade").store
         )
     }
 

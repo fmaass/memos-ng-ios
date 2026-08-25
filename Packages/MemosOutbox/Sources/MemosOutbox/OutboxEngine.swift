@@ -2,7 +2,9 @@ import Foundation
 
 /// The drain: what actually moves a capture from this phone to the server.
 ///
-/// Three rules shape all of it. Nothing is sent before a cheap health probe says the server is
+/// Four rules shape all of it. Nothing goes out over a network the person did not agree to spend:
+/// the policy is asked immediately before every step that would produce a request, against the
+/// path as it is at that instant. Nothing is sent before a cheap health probe says the server is
 /// reachable, so a day on a foreign network costs one small request rather than a video. Exactly
 /// one chunk is in flight per job, and its offset comes from the server's own count, never from
 /// local arithmetic. And a job leaves the outbox on ONE condition — the memo was created with
@@ -18,9 +20,15 @@ public actor OutboxEngine: OutboxChunkHandling {
     private let http: any OutboxHTTPPerforming
     private let scheduler: any OutboxChunkScheduling
     private let completion: any MemoCompleting
+    private let network: any NetworkPathProviding
+    private let preferences: UploadPreferences
     private let clock: @Sendable () -> Date
     private let onChange: @Sendable () async -> Void
     private var isDraining = false
+    /// Something asked for a drain while one was already running. It is a flag rather than a queue
+    /// because every request means the same thing — look at the queue again — so one more pass
+    /// answers all of them.
+    private var drainRequested = false
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -33,6 +41,8 @@ public actor OutboxEngine: OutboxChunkHandling {
         http: any OutboxHTTPPerforming,
         scheduler: any OutboxChunkScheduling,
         completion: any MemoCompleting,
+        network: any NetworkPathProviding,
+        preferences: UploadPreferences,
         clock: @escaping @Sendable () -> Date = Date.init,
         onChange: @escaping @Sendable () async -> Void = {}
     ) {
@@ -41,6 +51,8 @@ public actor OutboxEngine: OutboxChunkHandling {
         self.http = http
         self.scheduler = scheduler
         self.completion = completion
+        self.network = network
+        self.preferences = preferences
         self.clock = clock
         self.onChange = onChange
     }
@@ -63,11 +75,28 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     // MARK: - draining
 
+    /// One pass at a time, and never an event dropped.
+    ///
+    /// A drain refuses to run twice at once, so a request that arrives while one is running is
+    /// remembered rather than discarded, and the running drain takes one more pass before it
+    /// stops. The two events this matters for are exactly the two that release a parked capture:
+    /// the wifi coming back and the toggle going on, both of which can land in the middle of the
+    /// pass that is writing down why the capture is parked. Dropped, they would leave it parked
+    /// until something unrelated happened to start another drain.
     public func drain() async {
-        guard !isDraining else { return }
+        guard !isDraining else {
+            drainRequested = true
+            return
+        }
         isDraining = true
         defer { isDraining = false }
+        repeat {
+            drainRequested = false
+            await drainOnce()
+        } while drainRequested
+    }
 
+    private func drainOnce() async {
         guard let credentials = await credentials.currentCredentials() else { return }
         let plan: ReconciliationPlan
         do {
@@ -93,6 +122,15 @@ public actor OutboxEngine: OutboxChunkHandling {
             candidates.append(job)
         }
         guard !candidates.isEmpty else {
+            await onChange()
+            return
+        }
+        // Before the probe, because the probe is itself a request: a phone on mobile data with the
+        // toggle off spends nothing at all, and every candidate says what it is waiting for.
+        guard permitsNetwork() else {
+            for job in candidates {
+                await waitForNetwork(job)
+            }
             await onChange()
             return
         }
@@ -125,6 +163,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             case .wait:
                 return
             case .startUpload(let fileID):
+                guard permitsNetwork() else {
+                    await waitForNetwork(current)
+                    return
+                }
                 guard
                     let next = await startUpload(
                         current, fileID: fileID, credentials: credentials
@@ -132,18 +174,48 @@ public actor OutboxEngine: OutboxChunkHandling {
                 else { return }
                 current = next
             case .uploadChunk(let fileID, let offset, let length):
+                guard permitsNetwork() else {
+                    await waitForNetwork(current)
+                    return
+                }
                 await schedule(
                     current, fileID: fileID, offset: offset, length: length,
                     credentials: credentials
                 )
                 return
             case .createMemo:
+                guard permitsNetwork() else {
+                    await waitForNetwork(current)
+                    return
+                }
                 guard let next = await complete(current, credentials: credentials) else { return }
                 current = next
             }
         }
         // Out of steps without settling: space it out rather than spin.
         await save(current.backingOff(at: clock(), error: "The server kept asking to start over."))
+    }
+
+    // MARK: - the network the phone is on
+
+    /// Whether bytes may leave this device RIGHT NOW.
+    ///
+    /// Read fresh at every step rather than once per pass: a drain that started on the home wifi
+    /// can reach its next chunk on a train, and the only honest moment to ask is the moment before
+    /// a request would go out. `advance` therefore asks again for each action it takes — including
+    /// the one `handle` re-enters it with when a chunk finishes.
+    private func permitsNetwork() -> Bool {
+        let policy = UploadNetworkPolicy(allowsMobileData: preferences.allowsMobileData)
+        return policy.permits(network.currentPath())
+    }
+
+    /// The capture waits for a network it is allowed to use, and the row says which.
+    ///
+    /// Written down only when the manifest does not already say it, so a phone that stays on
+    /// mobile data for a week does not rewrite every manifest on every drain.
+    private func waitForNetwork(_ job: UploadJob) async {
+        guard job.state != .waiting || job.waitReason != .homeNetwork else { return }
+        await save(job.waitingForNetwork())
     }
 
     // MARK: - the four calls
@@ -332,6 +404,14 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
 
         if let askTheServer {
+            // Only the server can say where this upload stands, and asking is a request like any
+            // other. On a network this capture may not use it is not asked: the capture parks,
+            // with nothing counted against it, because nothing was tried.
+            guard permitsNetwork() else {
+                await save(job.waitingForNetwork())
+                await onChange()
+                return
+            }
             if let credentials,
                 let resynced = await resync(job, fileID: fileID, credentials: credentials)
             {
