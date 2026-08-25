@@ -114,7 +114,7 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
                 self?.receive(.dismissed(attempt))
             }
             browser.onRedirect = { [weak self] url in
-                self?.browserRedirected(to: url, during: attempt)
+                self?.browserRedirected(to: url)
             }
             browser.onInitialLoad = { loaded in
                 MemosLog.session.info(
@@ -131,6 +131,12 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
                         callbackPath: live.callbackPath
                     )
                 else { return false }
+                guard Self.carriesAnAnswer(url) else {
+                    MemosLog.session.debug(
+                        "native sign-in: a stripped echo of the callback arrived; still waiting"
+                    )
+                    return false
+                }
                 self.receive(.callback(url, lane, attempt))
                 return true
             }
@@ -140,6 +146,27 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
             browser.present(from: host)
             watchPresentation(of: attempt)
         }
+    }
+
+    /// Whether a URL that IS on one of the callback's lanes carries a sign-in's answer at all.
+    ///
+    /// A real callback always has something on it — `code` when it worked, `error` when it was
+    /// refused — and the query is what carries it. So a lane-matched URL with no query is an ECHO
+    /// of the callback's address rather than the callback itself: iOS reports one that way on the
+    /// browser view's redirect delegate, with the parameters withheld, and an address can be
+    /// re-opened by hand just as emptily. Claiming one resolves the attempt with nothing in it,
+    /// which reaches the person as "the sign-in came back incomplete" over a sign-in whose real
+    /// callback is still coming. Refusing it leaves the attempt WAITING, which is the only state
+    /// the real one can still arrive into.
+    ///
+    /// It is the CLAIM — is this URL mine — and it deliberately does not read the parameters:
+    /// which lane a URL is on is still `NativeLoginReturn.lane`'s question and what is written on
+    /// it is still the callback parser's, and a URL that has a query but nothing usable in it is
+    /// claimed here and reported as a malformed callback, which is what it is.
+    private static func carriesAnAnswer(_ url: URL) -> Bool {
+        guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        else { return false }
+        return !items.isEmpty
     }
 
     /// The exchange that follows a delivered callback is the session store's, and its outcome is
@@ -181,29 +208,29 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
         }
     }
 
-    /// The browser followed a redirect while loading. Two things at once.
+    /// The browser followed a redirect while loading. A log line, and deliberately nothing else.
     ///
-    /// It is the log line that says how far a sign-in got, which is what was missing when the old
-    /// session failed — and only the scheme, host and path of it, never the query, because the
-    /// callback's query carries the one-shot handoff code.
+    /// It says how far a sign-in got, which is what was missing when the old session failed — and
+    /// only the scheme, host and path of it, never the query, because the callback's query
+    /// carries the one-shot handoff code.
     ///
-    /// It is also a third way for the callback to be noticed. A universal link opens the app when
-    /// somebody TAPS it; a server redirect to the same address inside a browser view often just
-    /// loads it. Seeing it here needs neither an association Apple has published nor a link
-    /// anybody tapped, and it hands the URL to the same machine, in the same lane, as the rest.
-    private func browserRedirected(to url: URL, during attempt: NativeLoginFlow.Attempt) {
+    /// It was also meant to be a third way for the callback to be NOTICED: a universal link opens
+    /// the app when somebody taps it, while a server redirect to the same address inside a browser
+    /// view often just loads it. That idea cannot be built on this delegate, and the field settled
+    /// it. iOS withholds the QUERY from `initialLoadDidRedirectTo:` — the address arrives with its
+    /// parameters removed — and a callback's entire answer is in that query. On a RETRY, where the
+    /// household sign-on cookie is still in the browser view's own storage, nothing is typed and
+    /// nothing is tapped: every hop through to the callback page is a redirect of the first load,
+    /// so this is the delegate the callback comes back on, stripped. Delivered, it ended the
+    /// attempt with a callback that had no code in it — the person read "the sign-in came back
+    /// incomplete" while the real page, already rendered with a handoff code on it, was still on
+    /// its way. So nothing here is ever delivered. The lanes that deliver are the callback page's
+    /// tap-to-return link and `onOpenURL`, and both of them carry the query.
+    private func browserRedirected(to url: URL) {
         let destination = "\(url.scheme ?? "?")://\(url.host() ?? "?")\(url.path())"
         MemosLog.session.info(
             "native sign-in: the browser went to \(destination, privacy: .public)"
         )
-        guard let live, live.attempt == attempt,
-            let lane = NativeLoginReturn.lane(
-                of: url,
-                callbackHost: live.callbackHost,
-                callbackPath: live.callbackPath
-            )
-        else { return }
-        receive(.callback(url, lane, attempt))
     }
 
     /// Every signal goes through the machine, and only the machine's answer is acted on.
