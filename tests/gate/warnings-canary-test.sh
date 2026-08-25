@@ -51,6 +51,9 @@ check "real 0, canary 70 (broke elsewhere)" 1 0 70
 # Nonsense in, refusal out — never a pass.
 check "a missing argument" 2 0 ""
 check "a non-numeric argument" 2 0 "sixty-five"
+# An exit code is a byte. Anything outside that range was not read from a process this gate ran.
+check "an out-of-range code" 2 0 256
+check "a negative code" 2 0 -1
 
 if [ "$pass_seen" -ne 1 ]; then
   echo "FAIL: no pair was accepted — a verdict that refuses everything would pass this suite"

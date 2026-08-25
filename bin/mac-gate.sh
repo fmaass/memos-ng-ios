@@ -1614,9 +1614,24 @@ s_warnings() {
   build_memos_features "$mf_build_log"
   local real_rc=$?
 
+  # The canary is written at ONE fixed path, and a file already sitting there is not ours to
+  # replace: it would be built as part of the target, and whatever its symbols refer to could fail
+  # the canary build for a reason that has nothing to do with warnings — which this step would read
+  # as the canary doing its job. So an occupied path stops the step instead.
+  local canary_path="$GATE_TARGET/Packages/MemosFeatures/Sources/MemosFeatures/GateWarningsCanary.swift"
+  local canary_rc=0
+  if [ -e "$canary_path" ] || [ -L "$canary_path" ]; then
+    echo "WARNAERR FAIL: something already exists at $canary_path, which is where this step writes"
+    echo "               its canary. It is never overwritten — a file of somebody else's failing"
+    echo "               that build would read as a warning being fatal. Rename it and run again."
+    echo "MemosFeatures build exit $real_rc; the canary build did not run, so this step cannot pass"
+    cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
+    [ "$rc" -ne 0 ] || rc=1
+    return $rc
+  fi
   # Named before it is written, so the give-back can take it away even if this shell is killed in
   # the middle of the build below.
-  GATE_CANARY_FILE="$GATE_TARGET/Packages/MemosFeatures/Sources/MemosFeatures/GateWarningsCanary.swift"
+  GATE_CANARY_FILE="$canary_path"
   cat > "$GATE_CANARY_FILE" <<'SWIFT'
 // Written by the gate for one build and deleted again: proof that a warning in this target cannot
 // compile. Two warnings that can never be anything but warnings on their own.
@@ -1627,15 +1642,15 @@ private func gateWarningsCanary() {
 }
 SWIFT
   build_memos_features "$mf_canary_log"
-  local canary_rc=$?
+  canary_rc=$?
   rm -f "$GATE_CANARY_FILE"
   GATE_CANARY_FILE=""
 
   cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
   cp "$mf_canary_log" .gate-artifacts/MemosFeatures-canary-build.log
-  echo "MemosFeatures build exit $real_rc; canary build exit $canary_rc (logs in .gate-artifacts)"
   # Diagnostics from the real build, for a human reading a failure. Evidence, not verdict.
   grep -E 'error:|warning:|\*\* BUILD' "$mf_build_log" | tail -15
+  echo "MemosFeatures build exit $real_rc; canary build exit $canary_rc (logs in .gate-artifacts)"
   local canary_verdict="$GATE_TARGET/scripts/warnings-canary-verdict.sh"
   if [ -x "$canary_verdict" ]; then
     "$canary_verdict" "$real_rc" "$canary_rc" || rc=1

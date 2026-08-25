@@ -23,12 +23,18 @@ if [ "$#" -ne 2 ]; then
   echo "CANARY FAIL: expected two exit codes (real, canary), got $#"
   exit 2
 fi
+# An exit code is a byte. Anything outside 0-255 was not read from a process this gate ran, and a
+# value nobody can account for is never a pass.
 for code in "$1" "$2"; do
   case "$code" in
     ''|*[!0-9]*)
       echo "CANARY FAIL: '$code' is not an exit code"
       exit 2 ;;
   esac
+  if [ "$code" -gt 255 ]; then
+    echo "CANARY FAIL: '$code' is outside the range an exit code can take (0-255)"
+    exit 2
+  fi
 done
 
 real_rc="$1"
