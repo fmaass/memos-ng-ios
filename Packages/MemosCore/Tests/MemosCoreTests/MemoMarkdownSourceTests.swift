@@ -145,6 +145,14 @@ struct MemoMarkdownSourceTests {
             ("quoted closer", "```\ncode one\n> ```\n[x](javascript:alert(1))\n```"),
             ("quoted tilde closer", "~~~\ncode one\n> ~~~\n[x](javascript:alert(1))\n~~~"),
             ("deeper closer", "> ```\n> code one\n> > ```\n> [x](javascript:alert(1))\n> ```"),
+            // A quote holds a line only while that line carries its marker — a fenced block is
+            // not a paragraph, so it cannot be lazily continued. An unquoted line therefore ENDS
+            // the quote at any indentation, and the fence it opens is a new one whose content is
+            // the author's code. Indentation of 1-3 columns used to make this line look like a
+            // list item's continuation, which closed the quoted fence and escaped inside code.
+            ("one-space unquoted line", "> ```\n> code\n ```\n[x](javascript:alert(1))"),
+            ("three-space unquoted line", "> ```\n> code\n   ```\n[x](javascript:alert(1))"),
+            ("one-space tilde marker", "> ```\n> code\n ~~~\n[x](javascript:alert(1))"),
         ]
     )
     func codeIsNeverRewritten(name: String, source: String) {
@@ -173,6 +181,44 @@ struct MemoMarkdownSourceTests {
             MemoMarkdownSource.prepare("- ~~~\n  code one\n  ~~~\n\n[x](javascript:alert(1))")
                 == "- ~~~\n  code one\n  ~~~\n\n\\[x](javascript:alert(1))"
         )
+    }
+
+    /// The other side of that boundary, all three probed against markdown-it.
+    ///
+    /// Four columns of indent is not a fence marker at all, so after the quote ends the line is an
+    /// indented code block and the line under it is prose again. At the SAME depth the tolerance
+    /// is the spec's: a closer may be indented 0-3 columns, and at 4 it stops being a closer and
+    /// stays content.
+    @Test("indentation decides what the line after a quoted fence is")
+    func indentationDecidesTheLineAfterAQuotedFence() {
+        // Four columns: the quote still ends, the marker is indented code, the link is prose.
+        #expect(
+            MemoMarkdownSource.prepare("> ```\n> code\n    ```\n[x](javascript:alert(1))")
+                == "> ```\n> code\n    ```\n\\[x](javascript:alert(1))"
+        )
+        // Three columns at the same depth: a closer, so what follows is prose.
+        #expect(
+            MemoMarkdownSource.prepare("```\ncode\n   ```\n[x](javascript:alert(1))")
+                == "```\ncode\n   ```\n\\[x](javascript:alert(1))"
+        )
+        // Four columns at the same depth: not a closer, so the block runs on and holds the link.
+        let unclosed = "```\ncode\n    ```\n[x](javascript:alert(1))"
+        #expect(MemoMarkdownSource.prepare(unclosed) == unclosed)
+    }
+
+    /// The trace a review walked by hand, pinned so it stops being accidental: an unquoted line
+    /// ends the quote AND the fence opened inside it, the lines after it are prose, and the next
+    /// fence is a new one whose content is code. markdown-it renders exactly that — an empty code
+    /// block in the quote, one paragraph, then a code block.
+    @Test("an unquoted line ends the quoted fence, and the next fence starts fresh")
+    func anUnquotedLineEndsAQuotedFence() {
+        #expect(
+            MemoMarkdownSource.prepare(
+                "> ```\n[x](javascript:alert(1))\nplain\n```\n[y](javascript:alert(1))"
+            ) == "> ```\n\\[x](javascript:alert(1))\nplain\n```\n[y](javascript:alert(1))"
+        )
+        let literal = "> ```\ncode\nplain\n```\nmore"
+        #expect(MemoMarkdownSource.prepare(literal) == literal)
     }
 
     /// A backtick fence's info string may not contain a backtick — that line is not a fence at

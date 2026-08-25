@@ -349,7 +349,7 @@ extension MemoMarkdownSource {
     ///   blank: it is a container whose content begins on the next line.
     private static func scanLines(_ lines: [SourceLine]) -> [LineScan] {
         var scans = [LineScan](repeating: LineScan(), count: lines.count)
-        var fence: (character: Character, length: Int, depth: Int)?
+        var fence: (character: Character, length: Int, markers: [Character])?
         var atBlockStart = true
         var inIndentedCode = false
 
@@ -357,7 +357,9 @@ extension MemoMarkdownSource {
             let line = lines[index]
 
             if let open = fence {
-                if line.depth < open.depth, line.indentColumns == 0 {
+                if leftAQuote(open.markers, line.markers)
+                    || (line.depth < open.markers.count && line.indentColumns == 0)
+                {
                     // The container that held the fence has ended. A fence inside a blockquote
                     // cannot swallow the rest of the document — and a scanner that lets it stops
                     // looking at every definition below.
@@ -380,7 +382,7 @@ extension MemoMarkdownSource {
                     // reads as zero while it is still inside the item, and it does close.
                     if let closing = fenceMarker(line), closing.character == open.character,
                         closing.length >= open.length, closing.info.isEmpty,
-                        line.depth <= open.depth
+                        line.depth <= open.markers.count
                     {
                         fence = nil
                     }
@@ -397,7 +399,7 @@ extension MemoMarkdownSource {
             if let opening = fenceMarker(line),
                 opening.character == "~" || !opening.info.contains("`")
             {
-                fence = (opening.character, opening.length, line.depth)
+                fence = (opening.character, opening.length, line.markers)
                 scans[index].isCode = true
                 inIndentedCode = false
                 atBlockStart = true
@@ -457,6 +459,22 @@ extension MemoMarkdownSource {
         return scans
     }
 
+    /// True when this line has stepped OUT of a blockquote the fence was opened inside.
+    ///
+    /// A blockquote holds a line only while that line carries its marker: a fenced block is not a
+    /// paragraph, so it cannot be lazily continued, and an unquoted line ends the quote — and the
+    /// fence in it — at ANY indentation (probed: markdown-it ends it at 0, 1, 2, 3 and 4 columns).
+    /// A LIST is the opposite: its continuation lines carry no marker at all and are held by their
+    /// indentation alone. Indentation therefore cannot be the test for both, and reading 1-3
+    /// columns as a list continuation is what let a quoted fence swallow the new top-level fence
+    /// below it and write a backslash into that fence's code.
+    private static func leftAQuote(_ open: [Character], _ line: [Character]) -> Bool {
+        for (index, marker) in open.enumerated() where marker == ">" {
+            guard index < line.count, line[index] == ">" else { return true }
+        }
+        return false
+    }
+
     /// CommonMark matches reference labels case-insensitively and treats any run of whitespace
     /// inside one as a single space.
     static func normalizedLabel(_ label: String) -> String {
@@ -492,11 +510,16 @@ extension MemoMarkdownSource {
         var content: String
         /// Where `content` begins inside `raw`, counted in Characters.
         var contentOffset: Int
-        /// How many containers were peeled off. A fence opened inside one cannot swallow lines
-        /// that sit outside it.
-        var depth: Int
+        /// The containers this line sits in, outermost first: `>` for a blockquote, `-` for a
+        /// list item of any spelling. Their COUNT is the depth, and their KINDS decide whether a
+        /// line that dropped one is still inside it — see `leftAQuote`.
+        var markers: [Character]
         /// Columns of indentation in front of the content, tabs advancing to 4-column tab stops.
         var indentColumns: Int
+
+        /// How many containers were peeled off. A fence opened inside one cannot swallow lines
+        /// that sit outside it.
+        var depth: Int { markers.count }
 
         /// Four columns of indent with something after them: an indented code block. No
         /// definition can sit inside one, and the first line that is not indented ends it.
@@ -552,7 +575,7 @@ extension MemoMarkdownSource {
     private static func makeLine(raw: String, ending: String) -> SourceLine {
         let chars = Array(raw)
         var index = 0
-        var depth = 0
+        var markers: [Character] = []
         var indentStart = 0
 
         while index < chars.count {
@@ -564,7 +587,7 @@ extension MemoMarkdownSource {
             if columnWidth(chars, from: indentStart, to: index) >= 4 { break }
             if chars[index] == ">" {
                 index += 1
-                depth += 1
+                markers.append(">")
                 // The marker may be followed by one space, which belongs to the marker.
                 if index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
                 indentStart = index
@@ -572,7 +595,7 @@ extension MemoMarkdownSource {
             }
             if let marker = listMarkerWidth(chars, at: index) {
                 index += marker
-                depth += 1
+                markers.append("-")
                 indentStart = index
                 continue
             }
@@ -588,7 +611,7 @@ extension MemoMarkdownSource {
             ending: ending,
             content: String(chars[indentStart...]),
             contentOffset: indentStart,
-            depth: depth,
+            markers: markers,
             indentColumns: columnWidth(chars, from: indentStart, to: contentEnd)
         )
     }

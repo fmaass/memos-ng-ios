@@ -288,6 +288,44 @@ struct MarkdownLiteralContentTests {
         #expect(!html.contains("\\["), "\(name): a backslash leaked:\n\(html)")
     }
 
+    /// A blockquote holds a line only while that line carries its marker: a fenced block is not a
+    /// paragraph, so it cannot be lazily continued, and an unquoted line ends the quote at ANY
+    /// indentation (probed: markdown-it ends it at 0, 1, 2, 3 and 4 columns). The fence that line
+    /// opens is a new one, and what follows is the author's code. Reading 1-3 columns of indent as
+    /// a list item's continuation instead closed the quoted fence and escaped inside that code.
+    /// (MEMNG-144)
+    @Test(
+        "an unquoted line ends the quote whatever its indentation",
+        arguments: [
+            ("one space", "> ```\n> code\n ```\n[x](javascript:alert(1))"),
+            ("three spaces", "> ```\n> code\n   ```\n[x](javascript:alert(1))"),
+            ("one space, tilde", "> ```\n> code\n ~~~\n[x](javascript:alert(1))"),
+        ]
+    )
+    func anUnquotedLineEndsTheQuoteAtAnyIndent(name: String, markdown: String) {
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(
+            html.contains("<pre><code>[x](javascript:alert(1))"),
+            "\(name): the link did not stay code:\n\(html)"
+        )
+        #expect(!html.contains("\\["), "\(name): a backslash leaked:\n\(html)")
+    }
+
+    /// The trace a review walked by hand, pinned so it stops being accidental: the unquoted line
+    /// ends the quote and the fence in it, the lines after it are prose, and the next fence is a
+    /// new one holding code. (MEMNG-144)
+    @Test("an unquoted line ends the quoted fence, and the next fence starts fresh")
+    func anUnquotedLineEndsAQuotedFence() {
+        let markdown = "> ```\ncode\nplain\n```\nmore"
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(html.contains("<pre><code>more"), "the last fence lost its content:\n\(html)")
+        let shown = texts(markdown)
+        #expect(
+            shown.contains { $0.contains("code") && $0.contains("plain") },
+            "the two unquoted lines are not one paragraph: \(shown)"
+        )
+    }
+
     /// The other side of the same classifier: a backtick fence whose info string contains a
     /// backtick is not a fence, and markdown-it renders both lines as one paragraph. Treating it
     /// as one leaves the prose under it unneutralised, so the renderer resolves a link the SPA
