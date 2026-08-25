@@ -46,19 +46,39 @@ App target (composition only)
 
 ## Concurrency
 
-Swift 6 mode everywhere; `MemosAPI` and `MemosCore` build with `-warnings-as-errors`. Every type
-crossing a package boundary is `Sendable`. MainActor default isolation on the app and Features;
-the API layer is `nonisolated`, because the transport calls its middleware off the main actor.
-Off-main work is structured concurrency. No Combine.
+Swift 6 mode everywhere; `MemosAPI` and `MemosCore` build with `-warnings-as-errors`. `Sendable`
+is keyed on crossing an ISOLATION boundary, not a package one — a type confined to the main actor
+may be used from another package without it, and a type handed to a `nonisolated` layer or a task
+needs it even inside one package. MainActor default isolation on the app and Features; the API
+layer is `nonisolated`, because the transport calls its middleware off the main actor. Off-main
+work is structured concurrency. No Combine.
+
+## Sign-in
+
+SSO runs in the ordinary web login, presented by the app itself in an `SFSafariViewController`
+(`LoginBrowser`, driven by the `NativeLoginFlow` state machine and `SafariLoginPresenter`).
+`ASWebAuthenticationSession` is BANNED: on a device it reported a missing domain association as
+plain user-cancellation (`Code=1`), indistinguishable from someone closing the sheet.
+
+The finished login comes back on the custom scheme `memosng://auth-callback`, and on this
+internal-only-DNS estate that is the PERMANENT PRIMARY lane, not a fallback — Apple's CDN can
+never fetch the AASA, so a universal link here is never associated and never opens the app. The
+HTTPS lane (`NativeLoginReturn`) stays in the code as a self-activating enhancement: it would
+start working the day a public split-horizon AASA stub is served, with nothing to change here.
+
+A callback is never taken from `initialLoadDidRedirectTo:` — iOS strips the query from that URL,
+so the code is not on it. That delegate is log-only.
 
 ## Errors and auth failures
 
 - The API layer surfaces a typed **`APIError`** — never an untyped `Error` at a package boundary.
 - **`401` → signed out.** There is no refresh lifecycle to fall back on: the token IS the
   credential. There is no silent retry, because retrying a revoked token only produces a spinner.
-- Sign-out revokes the presenting token (`POST /api/auth/native/logout`) and **wipes the stored
-  credential even if that call failed** — a device that believes it is signed out while still
-  holding a live token is the worse of the two states.
+- Sign-out revokes the presenting token (`POST /api/auth/native/logout`) and wipes the stored
+  credential only once the server has said it is dead — a 204, or a 401 meaning it already was.
+  **A failed revoke KEEPS the credential** and reports `revokeFailed`: a device that believes it
+  is signed out while a live token sits in whatever took it is the worse of the two states.
+  Discarding it anyway is a deliberate choice made on the screen (`signOutWithoutRevoking`).
 - A stored credential is **re-validated at launch**, not trusted, and removed when the server
   rejects it.
 
@@ -114,8 +134,11 @@ no AI attribution, leak nothing internal, and make only claims that are literall
 
 TCA (capable, but a household reference should be the mainstream answer a future contributor
 recognises without a framework tutorial); Combine; singletons for dependency injection;
-storyboards or a UIKit-first UI; custom URL-scheme auth callbacks; SwiftLint. Also out of scope for
-v1: push notifications, offline editing, widgets, App Intents, watchOS, macOS and iPad layout.
+storyboards or a UIKit-first UI; SwiftLint. Also out of scope for v1: push notifications, offline
+editing, widgets, App Intents, watchOS, macOS and iPad layout.
+
+Custom URL-scheme auth callbacks were on that list and are not any more. On an internal-only-DNS
+estate the custom scheme is the sign-in lane, permanently — see **Sign-in** above.
 
 ## Known deviations of the built skeleton from this draft
 
@@ -131,18 +154,32 @@ Recorded here rather than quietly absorbed, for the review that turns v0 into v1
    Every query names its group. What the simulator cannot prove — that the extension is actually
    refused — is a device ceremony; the gate checks the generated entitlement files instead.
 
-   **The migration window is a known residual.** A device that was signed in on an older build
-   still has its token in the app group until the new build RUNS once, and the share extension
-   belongs to that app group for the container it needs. So on such a device, between installing
-   the update and the app's first launch, the extension could still read the token it will never
-   be given again. Nothing about the new entitlement closes that: the token has to be readable
-   from the old namespace to be moved out of it, and only the app can move it. The window is
-   inherent to migrating rather than signing everybody out, it is closed per device by the first
-   read after launch (`restore()` migrates before anything else touches the credential), and it
-   is bounded by how long the person waits before opening the app. Closing it completely would
-   mean a NEW app group for the extension and leaving the old one app-only — a bigger change than
-   this round, and one that trades the window for a second migration of the queue and identity
-   files. Accepted, recorded, not forgotten.
+   **The app group remains a namespace the extension can name.** It is the legacy migration
+   SOURCE, and the share extension holds the app-group entitlement because it needs that
+   container for the outbox files and the identity JSON — on iOS that entitlement carries
+   keychain access with it. No entitlement change can take that away while the extension needs
+   the container. What protects the token is not reachability but two other things: no current
+   build WRITES there, and a device that still has a token there has it moved out lazily
+   (`CredentialVault` migrates on read, `restore()` before anything else touches the credential).
+
+   Two things have to go right for the legacy copy to be gone, and the second is not guaranteed
+   by the first. The move must be PROVEN — an `add` the home namespace accepted and a read-back
+   that returned the value. Until it is, nothing is deleted at all, deliberately, because deleting
+   on an unproven move can destroy the only copy on the device: an `add` the home namespace
+   refuses, a read-back that throws, and a read-back that answers nil each leave the token exactly
+   where it is and answer with it. Then the delete must actually succeed. It is ATTEMPTED on every
+   read that resolves the home value, not once — `tidy` is the last thing such a read does — and a
+   delete the keychain refuses is logged and attempted again on the next such read. So the copy
+   disappears when a `remove` succeeds: normally at the first successful migration, later on a
+   device whose keychain keeps refusing, and never on one that stops reading first. This is not a
+   bounded window; it is a residual that ends when a delete lands and not before.
+
+   One interval is uncoverable from this side entirely: between the extension being upgraded and
+   the host app's first launch, only the app can move the token and the app has not run. A
+   host-side sweep cannot cover a period in which the host does not execute. Closing all of it
+   would mean a NEW app group for the extension and leaving the old one app-only — a bigger
+   change than this round, and one that trades this residual for a second migration of the queue
+   and identity files. Accepted, recorded, not forgotten.
 2. **`MemosCore` and `MemosAPI` declare macOS as well as iOS.** Not because the app runs there,
    but because SwiftPM is the only way to build those two targets with `-warnings-as-errors`, and
    SwiftPM builds for the host. The Features layer stays iOS-only.

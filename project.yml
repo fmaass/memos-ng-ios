@@ -317,9 +317,11 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Packages/MemosOutbox/Tests/MemosOutboxTests
-      # The outbox hand-rolls its transport (the chunk PATCH and the offset HEAD cannot be
-      # generated), so the contract it hand-rolls against is read out of this bundle at run time
-      # and asserted — vendored from ONE memos-ng commit, same as the parity fixture.
+      # The outbox's hand-rolled wire types are licensed by ONE ground — its dependency rule: the
+      # package takes no dependencies, so the generated client is unreachable from it — and only on
+      # the condition that a contract test pins every semantic those mirrors consume. That is what
+      # this resource is for: the vendored document is read out of the bundle at run time and
+      # asserted against — from ONE memos-ng commit, same as the parity fixture.
       - path: Packages/MemosAPI/Sources/MemosAPI/openapi.json
         buildPhase: resources
     dependencies:

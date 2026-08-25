@@ -125,10 +125,15 @@ public final class SessionStore {
 
     // MARK: - signing in
 
-    /// The browser-brokered device login: the app opens the ordinary web login in an
-    /// authentication session, the server hands the finished login back on an HTTPS callback only
-    /// this app can receive, and the one-shot code on it is traded — together with the PKCE
-    /// verifier that never left the device — for a token.
+    /// The browser-brokered device login: the app presents the ordinary web login in a browser
+    /// it owns (`SFSafariViewController`), the server hands the finished login back on one of two
+    /// return lanes, and the one-shot code on it is traded — together with the PKCE verifier that
+    /// never left the device — for a token.
+    ///
+    /// The custom scheme (`memosng://auth-callback`) is the primary lane and stays that way here:
+    /// the server is on internal-only DNS, so the HTTPS lane's domain association can never be
+    /// fetched by Apple's CDN. The HTTPS lane is kept for the estates where it can be, and would
+    /// activate itself there with nothing to change.
     ///
     /// The verifier is destroyed on EVERY path out of here, success or failure: it is the half of
     /// the pair that makes an intercepted code useless, and it has no purpose after the exchange.

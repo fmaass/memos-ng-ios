@@ -1,11 +1,16 @@
 import CryptoKit
 import Foundation
 
-/// The proof that the device which STARTED a login is the one collecting its result.
+/// The binding between a handoff code and the flow that STARTED it.
 ///
 /// The challenge travels with the login through a browser; the verifier never leaves the device.
-/// That is the whole reason this app can use an HTTPS callback safely: an intercepted handoff code
-/// is inert without the verifier that produced its challenge (RFC 7636).
+/// So a handoff code INTERCEPTED on the way back is inert without the verifier that produced its
+/// challenge (RFC 7636) — which is what makes a return lane any app could claim safe to rely on.
+///
+/// What it does not cover: an attacker who starts their OWN flow against a live SSO session holds
+/// the verifier for it, and PKCE has nothing to say about that. That residual is an owner-level
+/// risk acceptance recorded in the doctrine, held down by household-device installation, LAN-only
+/// reachability and revocation — not by this type.
 ///
 /// A reference type rather than a value: the flow that owns it destroys the verifier the moment
 /// the exchange is over, and a struct copied into a closure would leave the caller holding a live
