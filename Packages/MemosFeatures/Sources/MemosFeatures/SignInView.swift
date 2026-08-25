@@ -45,6 +45,14 @@ public struct SignInView: View {
                     // the same notice card the timeline uses for everything it cannot do.
                     if let error = session.lastError {
                         NoticeCard(text: error, tone: .error)
+                        // One failure on this screen has a switch behind it, and it is the one a
+                        // first sign-in on the home wifi hits: the app cannot ask for the Local
+                        // Network permission again, so the only way forward is the Settings page
+                        // it lives on.
+                        if signInErrorAction(for: session.lastFailure) == .openSettings {
+                            Button("Open Settings", action: openSettings)
+                                .font(.footnote.weight(.semibold))
+                        }
                     }
                 }
                 Button("Advanced") { showAdvanced = true }
@@ -65,6 +73,13 @@ public struct SignInView: View {
                 await session.signIn(serverAddress: serverAddress, token: token)
             }
         }
+    }
+
+    /// The one place UIKit is touched for this: the decision is a pure function, and what is left
+    /// here is the door it names.
+    private func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 
     private var brand: some View {

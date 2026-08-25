@@ -31,6 +31,17 @@ public enum NativeLoginError: Error, Sendable, Equatable {
     case unusableRequest
     /// Anything the API layer classified.
     case api(APIError)
+    /// The exchange could not be delivered at all, named by what the failure WAS.
+    ///
+    /// It carries the classification rather than the error, and that is the point: the error the
+    /// generated client throws for a transport failure describes the request it was making, and
+    /// this request's body is the handoff code and the PKCE verifier. Its text may not be logged,
+    /// shown or stored anywhere, so it never leaves the classifier.
+    case transport(NativeLoginTransportFailure)
+    /// The retry found the code already spent: the first attempt DID reach the server, and only
+    /// its answer was lost. Nothing here can recover it — the code is one-shot — so the honest
+    /// thing is to say so and let the person start a new sign-in.
+    case answerLost
 
     /// What to show. Every case that is a FAILURE has something to say, `cancelled` included:
     /// silence is what the failure this flow was rebuilt around looked like from the phone. The
@@ -48,6 +59,16 @@ public enum NativeLoginError: Error, Sendable, Equatable {
         case .invalidServer: "That does not look like an https server address."
         case .unusableRequest: "This device's name could not be used to sign in."
         case .api(let error): error.errorDescription
+        case .transport(.localNetworkDenied):
+            "This phone is not letting the app reach your home network. Allow Local Network for "
+                + "memosng in Settings, then tap Sign in again."
+        case .transport(.offline):
+            "This phone looks offline. Join your home wifi (or turn on NetBird) and try again."
+        case .transport(.other(let detail)):
+            "The sign-in could not reach the server: \(detail)"
+        case .answerLost:
+            "The sign-in finished on the server but its answer was lost on the way - tap Sign in "
+                + "again."
         }
     }
 }
