@@ -269,11 +269,14 @@ struct MediaViewerPage: View {
     @ViewBuilder
     private func video(in viewport: CGSize) -> some View {
         if let player {
-            // No `accessibilityElement` over this: AVKit vends its own play, pause and scrubber,
-            // and collapsing the player into one labelled element would take every one of them
-            // out of the accessibility tree.
+            // `.contain`, never a collapsing `accessibilityElement()`: AVKit vends its own play,
+            // pause and scrubber, and collapsing the player into one labelled element would take
+            // every one of them out of the tree — while no label at all left the page nameless to
+            // VoiceOver the moment playback started. A labelled CONTAINER keeps both.
             VideoPlayerLayer(player: player)
                 .frame(width: viewport.width, height: viewport.height)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(page.accessibilityLabel)
         } else {
             let fitted = MediaZoom.fittedSize(aspectRatio: page.aspectRatio, in: viewport)
             ZStack {
