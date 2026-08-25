@@ -9,6 +9,13 @@ import Foundation
 ///
 /// `#word` requires no space after `#`, so a real Markdown heading (`# Heading`) is preserved and
 /// an inline tag in prose ("see #curated") is not a tag-only line.
+///
+/// A trailing carriage return is NOT whitespace here, deliberately. The SPA's regex ends in
+/// `[ \t]*$`, and JavaScript's `$` matches at the end of the string only — without `/m` it does
+/// not match before a line terminator — so `#curated\r` is not a tag-only line there either, and
+/// a memo written with CRLF endings shows its tag line as body text in both clients. Accepting
+/// `\r` here would be the tidier reading of the spec and a divergence from the SPA, which is the
+/// one thing this port may not be. (MEMNG-144, pinned in `TagOnlyLinesTests`.)
 public func isTagOnlyLine(_ line: String) -> Bool {
     var index = line.startIndex
     let end = line.endIndex

@@ -82,6 +82,177 @@ struct MemoMarkdownSourceTests {
         #expect(MemoMarkdownSource.prepare(indented) == indented)
     }
 
+    /// A definition markdown-it REFUSES is not a definition at all. Its `reference` rule returns
+    /// false, the paragraph rule takes the line instead, and a link reference definition cannot
+    /// interrupt a paragraph — so the duplicate below it never registers either, and the
+    /// reference image that names the label is literal text in the SPA. Registering it here
+    /// deletes a line the reader was meant to see.
+    ///
+    /// Probed against markdown-it 14 (`html: false`, `linkify: true`, `breaks: true`), which
+    /// renders both definition lines as ONE paragraph and leaves `![alt][pic]` on screen.
+    @Test("a duplicate definition under a refused one never resolves")
+    func aRefusedDefinitionOpensAParagraph() {
+        let source = "[pic]: javascript:alert(1)\n[pic]: https://e.com/red.png\n\n![alt][pic]"
+        #expect(
+            MemoMarkdownSource.prepare(source)
+                == "\\[pic]: javascript:alert(1)\n[pic]: https://e.com/red.png\n\n![alt][pic]"
+        )
+    }
+
+    /// The same rule read from the other end: a definition cannot interrupt a paragraph, so a
+    /// definition-shaped line that follows prose registers nothing — and neither does the one
+    /// after THAT, which is where a scanner that keeps its block-start state through a
+    /// definition-shaped line goes wrong.
+    @Test("a definition-shaped line inside a paragraph registers nothing")
+    func definitionsInsideAParagraphRegisterNothing() {
+        let source = "paragraph\n[a]: https://e.com/a\n[pic]: https://e.com/red.png\n\n![alt][pic]"
+        #expect(MemoMarkdownSource.prepare(source) == source)
+    }
+
+    /// The control for both, so the fix cannot be "stop registering anything": with the blank line
+    /// CommonMark needs, the later definition IS registered — markdown-it renders an `<img>`
+    /// there and the sanitiser drops it, so the reference image has to go here too.
+    @Test("a duplicate definition in a block of its own still registers")
+    func aDuplicateInItsOwnBlockStillRegisters() {
+        let source = "[pic]: javascript:alert(1)\n\n[pic]: https://e.com/red.png\n\n![alt][pic]"
+        #expect(
+            MemoMarkdownSource.prepare(source)
+                == "\\[pic]: javascript:alert(1)\n\n[pic]: https://e.com/red.png\n\n"
+        )
+    }
+
+    /// Code is the author's, character for character. markdown-it parses no inline at all inside a
+    /// code block, so neither the escape nor the image deletion may reach one — a backslash would
+    /// be on screen and a deleted line would simply be gone. Only a three-backtick fence used to
+    /// survive here, and only by accident: its backticks toggled the code-span flag.
+    @Test(
+        "code keeps every character, whatever it says",
+        arguments: [
+            ("tilde fence", "[pic]: https://e.com/red.png\n\n~~~\n![alt][pic]\n~~~"),
+            ("four-backtick fence", "[pic]: https://e.com/red.png\n\n````\n![alt][pic]\n````"),
+            ("indented code", "[pic]: https://e.com/red.png\n\n    ![alt][pic]"),
+            ("fence in a list item", "[pic]: https://e.com/red.png\n\n- ~~~\n  ![alt][pic]\n  ~~~"),
+            ("fence in a quote", "[pic]: https://e.com/red.png\n\n> ~~~\n> ![alt][pic]\n> ~~~"),
+            ("tilde fence, unsafe link", "~~~\n[x](javascript:alert(1))\n~~~"),
+            ("quoted fence, unsafe link", "> ~~~\n> [x](javascript:alert(1))\n> ~~~"),
+            ("list fence, unsafe link", "- ~~~\n  [x](javascript:alert(1))\n  ~~~"),
+            ("indented code, unsafe link", "    [x](javascript:alert(1))"),
+            ("indented code after a heading", "# Heading\n    [x](javascript:alert(1))"),
+            // A closing fence cannot carry a container prefix its opener did not have, so a line
+            // that strips to backticks at a DEEPER depth is code, not the closer. Reading it as
+            // one hands the rest of the block to the prose walk, which writes a backslash into
+            // the author's code. (markdown-it renders all three of these as one code block.)
+            ("quoted closer", "```\ncode one\n> ```\n[x](javascript:alert(1))\n```"),
+            ("quoted tilde closer", "~~~\ncode one\n> ~~~\n[x](javascript:alert(1))\n~~~"),
+            ("deeper closer", "> ```\n> code one\n> > ```\n> [x](javascript:alert(1))\n> ```"),
+            // A quote holds a line only while that line carries its marker — a fenced block is
+            // not a paragraph, so it cannot be lazily continued. An unquoted line therefore ENDS
+            // the quote at any indentation, and the fence it opens is a new one whose content is
+            // the author's code. Indentation of 1-3 columns used to make this line look like a
+            // list item's continuation, which closed the quoted fence and escaped inside code.
+            ("one-space unquoted line", "> ```\n> code\n ```\n[x](javascript:alert(1))"),
+            ("three-space unquoted line", "> ```\n> code\n   ```\n[x](javascript:alert(1))"),
+            ("one-space tilde marker", "> ```\n> code\n ~~~\n[x](javascript:alert(1))"),
+        ]
+    )
+    func codeIsNeverRewritten(name: String, source: String) {
+        #expect(MemoMarkdownSource.prepare(source) == source, "\(name)")
+    }
+
+    /// The control for the rule above, so "a fence only closes at its own depth" cannot become
+    /// "a fence never closes": a longer closer at the same depth closes, a quoted closer closes a
+    /// quoted fence, and the continuation line of a list item closes the fence opened in it —
+    /// that line carries no marker of its own, so its depth reads as zero while it is still
+    /// inside the item. All three end the block in markdown-it too.
+    @Test("the closers that are real still close the block")
+    func realClosersStillClose() {
+        // A longer closer at the same depth.
+        #expect(
+            MemoMarkdownSource.prepare("```\ncode one\n`````\n[x](javascript:alert(1))")
+                == "```\ncode one\n`````\n\\[x](javascript:alert(1))"
+        )
+        // A quoted closer for a fence opened in the same quote.
+        #expect(
+            MemoMarkdownSource.prepare("> ```\n> code one\n> ```\n\n[x](javascript:alert(1))")
+                == "> ```\n> code one\n> ```\n\n\\[x](javascript:alert(1))"
+        )
+        // The continuation line of a list item, which carries no marker of its own.
+        #expect(
+            MemoMarkdownSource.prepare("- ~~~\n  code one\n  ~~~\n\n[x](javascript:alert(1))")
+                == "- ~~~\n  code one\n  ~~~\n\n\\[x](javascript:alert(1))"
+        )
+    }
+
+    /// The other side of that boundary, all three probed against markdown-it.
+    ///
+    /// Four columns of indent is not a fence marker at all, so after the quote ends the line is an
+    /// indented code block and the line under it is prose again. At the SAME depth the tolerance
+    /// is the spec's: a closer may be indented 0-3 columns, and at 4 it stops being a closer and
+    /// stays content.
+    @Test("indentation decides what the line after a quoted fence is")
+    func indentationDecidesTheLineAfterAQuotedFence() {
+        // Four columns: the quote still ends, the marker is indented code, the link is prose.
+        #expect(
+            MemoMarkdownSource.prepare("> ```\n> code\n    ```\n[x](javascript:alert(1))")
+                == "> ```\n> code\n    ```\n\\[x](javascript:alert(1))"
+        )
+        // Three columns at the same depth: a closer, so what follows is prose.
+        #expect(
+            MemoMarkdownSource.prepare("```\ncode\n   ```\n[x](javascript:alert(1))")
+                == "```\ncode\n   ```\n\\[x](javascript:alert(1))"
+        )
+        // Four columns at the same depth: not a closer, so the block runs on and holds the link.
+        let unclosed = "```\ncode\n    ```\n[x](javascript:alert(1))"
+        #expect(MemoMarkdownSource.prepare(unclosed) == unclosed)
+    }
+
+    /// The trace a review walked by hand, pinned so it stops being accidental: an unquoted line
+    /// ends the quote AND the fence opened inside it, the lines after it are prose, and the next
+    /// fence is a new one whose content is code. markdown-it renders exactly that — an empty code
+    /// block in the quote, one paragraph, then a code block.
+    @Test("an unquoted line ends the quoted fence, and the next fence starts fresh")
+    func anUnquotedLineEndsAQuotedFence() {
+        #expect(
+            MemoMarkdownSource.prepare(
+                "> ```\n[x](javascript:alert(1))\nplain\n```\n[y](javascript:alert(1))"
+            ) == "> ```\n\\[x](javascript:alert(1))\nplain\n```\n[y](javascript:alert(1))"
+        )
+        let literal = "> ```\ncode\nplain\n```\nmore"
+        #expect(MemoMarkdownSource.prepare(literal) == literal)
+    }
+
+    /// A backtick fence's info string may not contain a backtick — that line is not a fence at
+    /// all, and markdown-it renders it as paragraph text with the line below it as more paragraph
+    /// text. Opening a code region there leaves the prose under it unneutralised: a fidelity
+    /// divergence, not a hole, because `MemoRenderPolicy` refuses the destination at render time
+    /// whatever the parse did. A tilde fence's info may hold anything, backticks included.
+    @Test("a backtick in a backtick fence's info string opens no code")
+    func backtickInAnInfoStringIsNotAFence() {
+        #expect(
+            MemoMarkdownSource.prepare("```foo`bar\n[x](javascript:alert(1))\n```")
+                == "```foo`bar\n\\[x](javascript:alert(1))\n```"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("```a`b\n[x](javascript:alert(1))")
+                == "```a`b\n\\[x](javascript:alert(1))"
+        )
+        let tilde = "~~~foo`bar\n[x](javascript:alert(1))\n~~~"
+        #expect(MemoMarkdownSource.prepare(tilde) == tilde)
+        let plain = "```js\n[x](javascript:alert(1))\n```"
+        #expect(MemoMarkdownSource.prepare(plain) == plain)
+    }
+
+    /// The control for that one: the SAME text one indent level out is prose, where the rule still
+    /// applies. An indented line that merely continues a paragraph is prose too — markdown-it
+    /// renders `paragraph\n    [x](…)` as one paragraph, not as code.
+    @Test("prose that looks indented is still prose")
+    func lazyContinuationsAreNotCode() {
+        #expect(
+            MemoMarkdownSource.prepare("paragraph\n    [x](javascript:alert(1))")
+                == "paragraph\n    \\[x](javascript:alert(1))"
+        )
+    }
+
     @Test("removes a reference image whole, and only when the label resolves")
     func removesReferenceImages() {
         #expect(
