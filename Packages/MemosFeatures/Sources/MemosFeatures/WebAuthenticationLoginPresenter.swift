@@ -25,14 +25,39 @@ public final class WebAuthenticationLoginPresenter: NSObject, NativeLoginPresent
     /// owns exactly one at a time and none between attempts.
     private var presenting: ASWebAuthenticationSession?
 
-    public override init() { super.init() }
+    /// The context provider, for the same reason the session is held: `presentationContextProvider`
+    /// is a WEAK reference, so nothing else keeps it alive between `start()` and the first time
+    /// AuthenticationServices asks it for an anchor.
+    private var context: AnchorProvider?
+
+    /// Where the sheet is put. Injectable so the no-window path is a test rather than a device.
+    private let resolveAnchor: @MainActor () -> ASPresentationAnchor?
+
+    public override init() {
+        self.resolveAnchor = WebAuthenticationLoginPresenter.currentAnchor
+        super.init()
+    }
+
+    init(anchor resolve: @escaping @MainActor () -> ASPresentationAnchor?) {
+        self.resolveAnchor = resolve
+        super.init()
+    }
 
     public func authenticate(
         authorizeURL: URL,
         callbackHost: String,
         callbackPath: String
     ) async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
+        // Resolved BEFORE the session exists, so "there is nowhere to present" is an error the
+        // sign-in screen shows rather than a session started against a window that is attached to
+        // nothing — which presents no sheet and looks exactly like a button that did nothing.
+        guard let anchor = resolveAnchor() else {
+            MemosLog.session.error(
+                "native sign-in: no foreground window scene to present the sign-in sheet on"
+            )
+            throw NativeLoginError.presentationFailed("no window is on screen to open it on")
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: authorizeURL,
                 callback: .https(host: callbackHost, path: callbackPath)
@@ -40,33 +65,53 @@ public final class WebAuthenticationLoginPresenter: NSObject, NativeLoginPresent
                 // Weak, so the presenter owning the session that owns this closure is not a cycle.
                 // The callback arrives on the main thread — it is a UI API — and the hop is
                 // explicit for the same reason it is in `presentationAnchor`.
-                MainActor.assumeIsolated { self?.presenting = nil }
+                MainActor.assumeIsolated { self?.release() }
                 if let callbackURL {
                     continuation.resume(returning: callbackURL)
                     return
                 }
-                continuation.resume(throwing: Self.loginError(from: error))
+                let failure = Self.loginError(from: error)
+                if failure == .cancelled {
+                    MemosLog.session.debug("native sign-in: the person closed the sign-in sheet")
+                } else {
+                    let detail = failure.message ?? "no reason given"
+                    MemosLog.session.error(
+                        "native sign-in ended without a callback: \(detail, privacy: .public)"
+                    )
+                }
+                continuation.resume(throwing: failure)
             }
             session.prefersEphemeralWebBrowserSession = false
-            session.presentationContextProvider = self
+            let provider = AnchorProvider(anchor: anchor)
+            session.presentationContextProvider = provider
+            context = provider
             presenting = session
             // `start() == false` means the sheet never appeared and the completion will not run,
             // so this resume is the only one on that path — and the only place the session has to
-            // be let go of by hand.
+            // be let go of by hand. It is logged as well as thrown: the screen says one sentence,
+            // and the log is what says which sentence it was on a device nobody can attach to.
             if !session.start() {
-                presenting = nil
+                release()
+                MemosLog.session.error(
+                    "native sign-in: ASWebAuthenticationSession.start() returned false"
+                )
                 continuation.resume(
-                    throwing: NativeLoginError.presentationFailed(
-                        "The sign-in sheet could not be presented."
-                    )
+                    throwing: NativeLoginError.presentationFailed("the system refused to open it")
                 )
             }
         }
     }
 
+    /// One attempt's objects, dropped together: the session and the provider that only exists for
+    /// it. Leaving the provider behind would keep a window alive for no reason.
+    private func release() {
+        presenting = nil
+        context = nil
+    }
+
     /// A cancel is a decision, not a failure — it maps to the one case the UI stays quiet about.
     private static func loginError(from error: (any Error)?) -> NativeLoginError {
-        guard let error else { return .presentationFailed("The sign-in ended without a result.") }
+        guard let error else { return .presentationFailed("it ended without a result") }
         if let sessionError = error as? ASWebAuthenticationSessionError,
             sessionError.code == .canceledLogin
         {
@@ -74,47 +119,60 @@ public final class WebAuthenticationLoginPresenter: NSObject, NativeLoginPresent
         }
         return .presentationFailed(error.localizedDescription)
     }
+
+    /// The window the person is looking at, or nothing.
+    ///
+    /// The ordering is not decided here: `connectedScenes` is a set, and which of its members owns
+    /// the screen is the part that is easy to get wrong and impossible to see wrong on a
+    /// single-scene simulator. This maps UIKit into the description `LoginAnchor` decides on and
+    /// maps the answer back — `scenes` keeps its order across both, so the indices agree.
+    private static func currentAnchor() -> ASPresentationAnchor? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let described = scenes.map {
+            LoginAnchor.SceneState(
+                activation: LoginAnchor.Activation($0.activationState),
+                windowIsKey: $0.windows.map(\.isKeyWindow)
+            )
+        }
+        guard case .window(let scene, let window) = LoginAnchor.choice(among: described) else {
+            return nil
+        }
+        return scenes[scene].windows[window]
+    }
 }
 
-extension WebAuthenticationLoginPresenter: ASWebAuthenticationPresentationContextProviding {
-    /// The protocol is not main-actor-bound but anchors are UI objects, so the hop is explicit.
-    nonisolated public func presentationAnchor(
-        for session: ASWebAuthenticationSession
-    ) -> ASPresentationAnchor {
-        MainActor.assumeIsolated {
-            // A freshly constructed window is attached to nothing and AuthenticationServices
-            // refuses to present from it — the anchor must be the window someone is looking at.
-            // `connectedScenes` is a SET: it has no order, so "the first one" is not the one in
-            // front. The foreground-active scenes go first, and only then the rest — otherwise a
-            // background scene's window can be picked to present from on a device with more than
-            // one, and the sheet appears somewhere nobody is looking.
-            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            let ordered =
-                scenes.filter { $0.activationState == .foregroundActive }
-                + scenes.filter { $0.activationState != .foregroundActive }
-            if let window = ordered.flatMap(\.windows).first(where: \.isKeyWindow)
-                ?? ordered.first?.windows.first
-            {
-                return window
-            }
-            // No window in any connected scene yet. A window built ON a scene is at least
-            // attached to something, and it is the only way left to build one: UIWindow's
-            // scene-less initialisers are deprecated as of iOS 26 in favour of this one.
-            if let scene = ordered.first {
-                return ASPresentationAnchor(windowScene: scene)
-            }
-            return Self.detachedAnchor()
+extension LoginAnchor.Activation {
+    init(_ state: UIScene.ActivationState) {
+        switch state {
+        case .foregroundActive: self = .foregroundActive
+        case .foregroundInactive: self = .foregroundInactive
+        case .background: self = .background
+        case .unattached: self = .unattached
+        // A state this build has no name for is one it cannot claim is on screen.
+        @unknown default: self = .unattached
         }
     }
+}
 
-    /// The last resort, and unchanged: with no window scene at all there is nothing to attach a
-    /// window to. AuthenticationServices refuses to present from a detached window, which is the
-    /// existing behaviour on this path — `start()` returns false and the caller reports a
-    /// presentation failure. It sits in a deprecated declaration of its own because that is the
-    /// one place a call to a deprecated initialiser belongs.
-    @available(iOS, deprecated: 26.0, message: "There is no window scene to build a window on.")
-    @MainActor
-    private static func detachedAnchor() -> ASPresentationAnchor {
-        ASPresentationAnchor()
+/// Hands back the one window the sign-in was resolved onto.
+///
+/// It is a separate object rather than a method on the presenter so the anchor can be a `let`:
+/// `presentationAnchor(for:)` may not return nothing, and the alternative to a non-optional stored
+/// anchor is a branch that has to invent one — which is how a deprecated, scene-less `UIWindow()`
+/// gets built and a sheet gets presented on a window that is attached to nothing.
+@MainActor
+private final class AnchorProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private let anchor: ASPresentationAnchor
+
+    init(anchor: ASPresentationAnchor) {
+        self.anchor = anchor
+        super.init()
+    }
+
+    /// The protocol is not main-actor-bound but anchors are UI objects, so the hop is explicit.
+    nonisolated func presentationAnchor(
+        for session: ASWebAuthenticationSession
+    ) -> ASPresentationAnchor {
+        MainActor.assumeIsolated { anchor }
     }
 }

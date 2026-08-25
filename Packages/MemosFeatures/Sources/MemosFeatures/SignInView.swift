@@ -34,11 +34,11 @@ public struct SignInView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    // A failed sign-in has to be READ, not noticed: a red footnote under a
+                    // button is what "the button does nothing" looks like from a device. This is
+                    // the same notice card the timeline uses for everything it cannot do.
                     if let error = session.lastError {
-                        Text(error)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
+                        NoticeCard(text: error, tone: .error)
                     }
                 }
                 Button("Advanced") { showAdvanced = true }
