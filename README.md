@@ -45,7 +45,9 @@ A change set of documentation and repository metadata only — `docs/`, any `.md
 `.gitattributes`, `.editorconfig`, `CODEOWNERS`, `LICENSE`, and none of them a symbolic link —
 takes a fast path: the gate classifies the branch against `origin/main` plus whatever the working
 tree holds, reports `PASS (fast path: docs-only)` naming every changed path, and copies nothing to
-the build host. Everything else meets the full gate. `bin/mac-gate.sh --classify-only` prints that
+the build host. Everything else meets the full gate, and files git ignores are outside the
+classification by design: they never reach main, and a full gate builds whatever is on disk
+anyway. `bin/mac-gate.sh --classify-only` prints that
 classification without needing a build host, and the gate's own test suite for the classifier
 (`tests/gate/fastpath-classify-test.sh`) runs on every gate.
 

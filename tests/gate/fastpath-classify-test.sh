@@ -59,9 +59,14 @@ new_repo() {
 # classification, it would be the gate.
 classify() {
   local work="$1"
-  OUT="$(cd "$work" && env -u MAC_GATE_HOST -u MAC_GATE_BRANCH "$GATE" --classify-only 2>&1)"
+  local -a env_args=(-u MAC_GATE_HOST -u MAC_GATE_BRANCH)
+  # A case that needs a git which fails puts a stub ahead of the real one; everything else runs
+  # with the PATH this suite was started with.
+  [ -z "$CLASSIFY_STUB_PATH" ] || env_args+=("PATH=$CLASSIFY_STUB_PATH:$PATH")
+  OUT="$(cd "$work" && env "${env_args[@]}" "$GATE" --classify-only 2>&1)"
   RC=$?
 }
+CLASSIFY_STUB_PATH=""
 
 # 0 = fast path, 10 = full gate. The exit code and the printed verdict have to agree: the gate
 # reads the code, a human reads the line, and a disagreement between them is how a fast path
@@ -155,6 +160,51 @@ check "the branch is main" full "$w"
 w="$(new_repo empty-diff)" || exit 1
 git -C "$w" checkout --quiet -b fix/empty
 check "no change against origin/main" full "$w"
+
+# An enumeration that FAILS must not read as an enumeration that found nothing. Here the branch
+# carries a Swift file and the working tree an untracked markdown file, and `git diff` refuses: a
+# classifier that ignores the failure sees only the markdown and calls it documentation.
+w="$(new_repo enumeration-fails)" || exit 1
+git -C "$w" checkout --quiet -b fix/enumeration
+printf 'let five = 5\n' >> "$w/Sources/App.swift"
+git -C "$w" commit --quiet -am "a source change the stub will hide"
+printf 'notes\n' > "$w/NOTES.md"
+stub="$tmp/stub-bin"
+mkdir -p "$stub"
+real_git="$(command -v git)"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'for a in "$@"; do\n'
+  printf '  [ "$a" = diff ] || continue\n'
+  printf '  echo "stub git: refusing to enumerate" >&2\n'
+  printf '  exit 1\n'
+  printf 'done\n'
+  printf 'exec %s "$@"\n' "$real_git"
+} > "$stub/git"
+chmod +x "$stub/git"
+CLASSIFY_STUB_PATH="$stub"
+check "an enumeration command that fails" full "$w"
+CLASSIFY_STUB_PATH=""
+
+# A gitlink wears a name like any other. `.gitmodules` would meet the full gate on its own, but a
+# submodule pointer added straight to the index does not go through one.
+w="$(new_repo gitlink)" || exit 1
+git -C "$w" checkout --quiet -b fix/gitlink
+gitlink_sha="$(git -C "$w" rev-parse HEAD)"
+git -C "$w" update-index --add --cacheinfo "160000,$gitlink_sha,Sources/X.md"
+git -C "$w" commit --quiet -m "a submodule pointer that reads as documentation"
+check "a gitlink named Sources/X.md" full "$w"
+
+# skip-worktree and assume-unchanged tell git to stop looking at a file. What the gate copies to
+# the build host is the file on disk, so a change git has been told to ignore is a change that
+# would be built and never classified.
+w="$(new_repo skip-worktree)" || exit 1
+git -C "$w" checkout --quiet -b fix/skipped
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs"
+git -C "$w" update-index --skip-worktree Sources/App.swift
+printf 'let six = 6\n' >> "$w/Sources/App.swift"
+check "an index entry marked skip-worktree" full "$w"
 
 # --- verdict --------------------------------------------------------------------------------------
 # The positive control on the suite: a run where every case came back `full` would pass a

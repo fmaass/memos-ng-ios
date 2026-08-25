@@ -25,7 +25,8 @@
 # which runs on EVERY gate) and the release-version authority check. The remote steps are skipped
 # whole, `pins` included: it needs a generated project and a package resolution on the build host,
 # which is the copy the fast path exists to avoid, and it reads Package.resolved — a file no
-# docs-only change set can contain.
+# docs-only change set can contain. Files git IGNORES are outside this classification by design:
+# they never reach main, and the full gate builds whatever is on disk regardless.
 #
 # Git is the only medium of exchange between the two machines. The gate directory is a mirror,
 # never a checkout: it is rsync'd with --delete, it is never opened in Xcode, and a developer's
@@ -211,21 +212,45 @@ gate_classify() {
   # Three sources, because three different things end up on the build host: what the branch
   # committed (--no-renames, so a rename is BOTH names and the source file that left is judged
   # too), what is staged or edited in the working tree, and what is untracked but not ignored.
+  #
+  # Each one is checked, because a git that FAILS prints nothing and nothing reads exactly like "no
+  # source file changed" — which is how a broken enumeration becomes a fast path. `local` is
+  # declared apart from every assignment below on purpose: `local x="$(cmd)"` returns local's own
+  # status, not the command's, and would swallow the very failure this guards against.
+  local branch_paths tree_paths untracked_paths index_tags
+  branch_paths="$(git diff --name-only --no-renames "$base...HEAD" 2>/dev/null)" || {
+    CLASSIFY_REASON="the commits on this branch could not be enumerated (git diff $base...HEAD failed)"
+    return 0
+  }
+  tree_paths="$(git diff --name-only --no-renames HEAD 2>/dev/null)" || {
+    CLASSIFY_REASON="the working tree could not be enumerated (git diff HEAD failed)"
+    return 0
+  }
+  untracked_paths="$(git ls-files --others --exclude-standard 2>/dev/null)" || {
+    CLASSIFY_REASON="the untracked files could not be enumerated (git ls-files --others failed)"
+    return 0
+  }
+  # An entry git has been told to stop looking at — assume-unchanged (a lowercase tag) or
+  # skip-worktree (S) — is a file neither diff above will mention and rsync will copy regardless.
+  index_tags="$(git ls-files -v 2>/dev/null)" || {
+    CLASSIFY_REASON="the index could not be read (git ls-files -v failed)"
+    return 0
+  }
+  if printf '%s\n' "$index_tags" | grep -qE '^[a-zS] '; then
+    CLASSIFY_REASON="the index carries assume-unchanged or skip-worktree entries, so a change to one of them would be built without ever being classified"
+    return 0
+  fi
+
   local paths
-  paths="$(
-    {
-      git diff --name-only --no-renames "$base...HEAD"
-      git diff --name-only --no-renames HEAD
-      git ls-files --others --exclude-standard
-    } 2>/dev/null | sed '/^$/d' | sort -u
-  )"
+  paths="$(printf '%s\n%s\n%s\n' "$branch_paths" "$tree_paths" "$untracked_paths" \
+    | sed '/^$/d' | sort -u)"
   if [ -z "$paths" ]; then
     CLASSIFY_REASON="nothing changed against origin/main${fetch_note}"
     return 0
   fi
   CLASSIFY_PATHS="$paths"
 
-  local path mode
+  local path entry mode
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     # A path git had to quote carries a character this loop reads one way and the shell another;
@@ -239,17 +264,31 @@ gate_classify() {
       CLASSIFY_REASON="$path is neither documentation nor repository metadata"
       return 0
     fi
-    # A name is not a file: README.md can be a symbolic link onto a source file, and then the
-    # allowlist has read the name of one thing and passed another. Mode 120000 is the answer in
-    # the index, in HEAD, and on disk — all three, because the change set spans all three.
-    mode="$(git ls-files -s -- "$path" 2>/dev/null | awk 'NR==1 {print $1}')"
-    if [ "$mode" = "120000" ] || [ -L "$path" ]; then
-      CLASSIFY_REASON="$path is a symbolic link, so its name says nothing about what would be built"
+    # A name is not a file. Only an ORDINARY file may be passed unbuilt: 120000 is a symbolic link
+    # whose name says nothing about what it points at, 160000 is a submodule pointer that carries
+    # a whole tree behind a documentation-shaped name, and any other mode is something this gate
+    # has never been shown. Read in the index, in HEAD and on disk, because the change set spans
+    # all three, and a read that fails is not a read that found an ordinary file.
+    entry="$(git ls-files -s -- "$path" 2>/dev/null)" || {
+      CLASSIFY_REASON="the index entry for $path could not be read"
+      return 0
+    }
+    mode="$(printf '%s\n' "$entry" | awk 'NR==1 {print $1}')"
+    if [ -n "$mode" ] && [ "$mode" != 100644 ] && [ "$mode" != 100755 ]; then
+      CLASSIFY_REASON="$path is not an ordinary file in the index (mode $mode)"
       return 0
     fi
-    mode="$(git ls-tree -r --full-tree HEAD -- "$path" 2>/dev/null | awk 'NR==1 {print $1}')"
-    if [ "$mode" = "120000" ]; then
-      CLASSIFY_REASON="$path is a symbolic link in HEAD, so its name says nothing about what would be built"
+    entry="$(git ls-tree -r --full-tree HEAD -- "$path" 2>/dev/null)" || {
+      CLASSIFY_REASON="the HEAD entry for $path could not be read"
+      return 0
+    }
+    mode="$(printf '%s\n' "$entry" | awk 'NR==1 {print $1}')"
+    if [ -n "$mode" ] && [ "$mode" != 100644 ] && [ "$mode" != 100755 ]; then
+      CLASSIFY_REASON="$path is not an ordinary file in HEAD (mode $mode)"
+      return 0
+    fi
+    if [ -L "$path" ]; then
+      CLASSIFY_REASON="$path is a symbolic link on disk, so its name says nothing about what would be built"
       return 0
     fi
   done <<< "$paths"
@@ -1509,18 +1548,29 @@ s_warnings() {
       -Xswiftc -warnings-as-errors || rc=$?
   done
 
-  # The manifest setting IS the mechanism for this one, so it is read before its build is believed:
-  # a green build of a target that quietly stopped treating warnings as errors proves nothing.
   echo "--- Packages/MemosFeatures with warnings as errors (xcodebuild, iOS simulator, Debug)"
+  # A one-line pre-check, so a manifest that simply lost the declaration says so plainly instead of
+  # through a build log.
   if grep -q 'treatAllWarnings(as: .error' Packages/MemosFeatures/Package.swift; then
-    echo "ok: MemosFeatures declares .treatAllWarnings(as: .error)"
+    echo "ok (pre-check): MemosFeatures declares .treatAllWarnings(as: .error)"
   else
     echo "WARNAERR FAIL: Packages/MemosFeatures/Package.swift no longer declares" \
-         ".treatAllWarnings(as: .error) — building it would prove nothing about its warnings"
+         ".treatAllWarnings(as: .error)"
     rc=1
   fi
-  # Debug because that is the configuration the manifest setting is declared for, named here so
-  # the two cannot drift apart silently.
+
+  # That text is NOT the proof. A declaration can be commented out, moved onto the test target or
+  # conditioned away, and the build then SUCCEEDS with warnings merely printed — measured on this
+  # host 2026-08-25: with the line commented out the build still exited 0, and the only difference
+  # anywhere was that no compiler invocation carried the flag. So the proof is read out of the
+  # build itself: the target's own sources are touched first (an unchanged tree compiles nothing,
+  # and a log with nothing in it would pass any check by silence), and the log must then show a
+  # swift invocation for the MemosFeatures target carrying -warnings-as-errors. The count of that
+  # target's build tasks is the control on the read: zero tasks means the log is silent, which is
+  # not the same as a build without the flag, and both fail here.
+  local warn_log="$GATE_WORK/warnings/MemosFeatures-build.log"
+  mkdir -p "$GATE_WORK/warnings"
+  find Packages/MemosFeatures/Sources -name '*.swift' -exec touch {} +
   ( cd Packages/MemosFeatures \
     && xcodebuild build \
          -scheme MemosFeatures \
@@ -1528,7 +1578,47 @@ s_warnings() {
          -destination 'generic/platform=iOS Simulator' \
          -derivedDataPath "$GATE_WORK/warnings/MemosFeatures" \
          -clonedSourcePackagesDirPath "$GATE_WORK/warnings/spm" \
-         -skipPackagePluginValidation ) || rc=$?
+         -skipPackagePluginValidation ) > "$warn_log" 2>&1 || rc=$?
+  # The whole log is evidence and comes back with the artefacts; what is worth reading on the way
+  # past is the diagnostics and the verdict line.
+  grep -E 'error:|warning:|\*\* BUILD' "$warn_log" | tail -25
+  cp "$warn_log" .gate-artifacts/MemosFeatures-warnings-build.log
+  /usr/bin/python3 - "$warn_log" <<'PY' || rc=1
+import sys
+
+log = sys.argv[1]
+target = "in target 'MemosFeatures' from project 'MemosFeatures'"
+try:
+    lines = open(log, encoding="utf-8", errors="replace").read().splitlines()
+except OSError as error:
+    print("WARNAERR FAIL: cannot read the build log %s: %s" % (log, error))
+    sys.exit(1)
+
+# A task's header names its target; the lines under it are that task's command. So the flag is
+# only ever credited to the target whose header it appeared beneath.
+tasks = flagged = 0
+mine = False
+for line in lines:
+    if "in target '" in line:
+        mine = target in line
+        if mine:
+            tasks += 1
+    if mine and "-warnings-as-errors" in line:
+        flagged += 1
+
+print("MemosFeatures build tasks in the log: %d" % tasks)
+print("of them carrying -warnings-as-errors: %d" % flagged)
+if tasks < 1:
+    print("WARNAERR FAIL: the build log holds no task for the MemosFeatures target, so it says "
+          "nothing about how that target was compiled")
+    sys.exit(1)
+if flagged < 1:
+    print("WARNAERR FAIL: no swift invocation for the MemosFeatures target carried "
+          "-warnings-as-errors, so its warnings were not fatal in this build")
+    sys.exit(1)
+print("ok: the MemosFeatures target was compiled with -warnings-as-errors")
+sys.exit(0)
+PY
   return $rc
 }
 

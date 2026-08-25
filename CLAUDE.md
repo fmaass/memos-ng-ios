@@ -75,8 +75,11 @@ Every package builds with its warnings fatal; a warning is a defect. Four of the
 `-warnings-as-errors` from the gate's command line. MemosFeatures cannot: SwiftPM has no iOS
 destination for it, and every way of asking `xcodebuild` for that setting also reaches the
 dependencies, so a warning in MarkdownUI or OpenAPIKit would fail the gate. It declares
-`.treatAllWarnings(as: .error)` on its own target instead — dropping that line disarms the check,
-which is why the gate reads it before it believes the build.
+`.treatAllWarnings(as: .error)` on its own target instead. Dropping that line does not fail
+anything — the build still succeeds, the warnings simply stop being fatal — so the gate touches
+that target's sources, builds, and reads the log back: a compiler invocation for the MemosFeatures
+target carrying `-warnings-as-errors`, with the count of that target's build tasks as the control
+on the read. The build log comes back as `.gate-artifacts/MemosFeatures-warnings-build.log`.
 
 ## Tests
 
