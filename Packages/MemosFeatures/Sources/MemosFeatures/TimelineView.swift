@@ -23,8 +23,13 @@ public struct TimelineView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var timeline: TimelineStore?
     @State private var composing: ComposeView.Mode?
-    @State private var signOutStage = SignOutFlow.Stage.idle
-    @State private var path: [MemoRoute] = []
+    /// One conversation for the whole screen, shared with the Settings screen pushed from it —
+    /// two stages would be two machines and, between them, two revokes.
+    @State private var signOut = SignOutConversation()
+    /// The account's picture, decoded once here and handed to both the toolbar and Settings.
+    @State private var avatar: Image?
+    /// Type-erased because the stack now leads to two different places: a memo, and Settings.
+    @State private var path = NavigationPath()
     @State private var feedback = MemoFeedbackTrigger()
     /// The media a tile tap opened, full screen. A tapped video opens it too — on the video's
     /// own page, already playing — so the rest of the memo stays one swipe away.
@@ -51,12 +56,23 @@ public struct TimelineView: View {
             // what they already looked like they were.
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: SettingsRoute.self) { _ in
+                SettingsView(signOut: signOut, avatar: avatar)
+            }
             .navigationDestination(for: MemoRoute.self) { route in
                 if let timeline, let memo = memo(route.uid, in: timeline) {
                     MemoDetailView(uid: route.uid, initial: memo, timeline: timeline)
                 }
             }
+            // Top-LEFT is deliberately empty. The ellipsis that used to sit there is retired:
+            // everything behind it now hangs off the account's own face on the right, where the
+            // web app has put it for years, and a lone overflow button opposite it was a second
+            // place to look for the same three things. The space is reserved for the date-jump /
+            // search affordance (MEMNG-120) rather than refilled with something else.
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    accountMenu
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         composing = .create
@@ -65,34 +81,6 @@ public struct TimelineView: View {
                             .symbolEffect(.bounce, value: feedback.count)
                     }
                     .accessibilityLabel("New memo")
-                }
-                ToolbarItem(placement: .topBarLeading) {
-                    // Signing out is a rare, deliberate act on a personal device — it lives
-                    // behind the overflow, not beside the compose button someone taps daily.
-                    //
-                    // The heading is not decoration. A menu opens with its first ROW under the
-                    // anchor that opened it, and when that row was the destructive one a second
-                    // tap on the ellipsis revoked a live credential. The heading takes that
-                    // position, and the tap itself only ever asks (see SignOutFlow).
-                    Menu {
-                        Section(SignOutFlow.accountHeading(name: session.state.user?.name)) {
-                            Button(role: .destructive) {
-                                advanceSignOut(.menuTapped)
-                            } label: {
-                                Label(
-                                    "Sign out",
-                                    systemImage: "rectangle.portrait.and.arrow.right"
-                                )
-                            }
-                            // The destructive role reddens the WORDS; the glyph beside them is
-                            // drawn in the inherited tint, which is the app's green — so the one
-                            // row that should read as dangerous had a friendly icon on it.
-                            .tint(.red)
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .accessibilityLabel("More")
                 }
             }
         }
@@ -112,45 +100,10 @@ public struct TimelineView: View {
                 }
             }
         }
-        // The question the menu tap asks. It is not drawn under the anchor, so no repeat of the
-        // tap that opened the menu can land on it.
-        //
-        // An ALERT rather than a confirmation dialog: the dialog rendered as a glass card that
-        // dimmed nothing, left the timeline legible underneath, and — the part that matters —
-        // put its Cancel button neither on screen nor in the accessibility tree, so the only
-        // visible answer to "Sign out?" was "Sign out". An alert dims, shows both answers, and
-        // hands both to VoiceOver.
-        .alert(
-            "Sign out?",
-            isPresented: .init(
-                get: { signOutStage == .asking },
-                set: { if !$0 { advanceSignOut(.cancelled) } }
-            )
-        ) {
-            Button("Sign out", role: .destructive) { advanceSignOut(.confirmed) }
-            Button("Cancel", role: .cancel) { advanceSignOut(.cancelled) }
-        } message: {
-            Text("This device's access is revoked. Anything still queued stays on the phone.")
-        }
-        .alert(
-            "Could not sign out",
-            isPresented: .init(
-                get: { signOutExplanation != nil },
-                set: { if !$0 { advanceSignOut(.cancelled) } }
-            ),
-            presenting: signOutExplanation
-        ) { decision in
-            Button("Try again") { advanceSignOut(.confirmed) }
-            Button(decision.discardTitle, role: .destructive) {
-                Task {
-                    await session.signOutWithoutRevoking()
-                    signOutStage = .idle
-                }
-            }
-            Button("Cancel", role: .cancel) { advanceSignOut(.cancelled) }
-        } message: { decision in
-            Text(decision.message)
-        }
+        .signOutAlerts(signOut, session: session)
+        // Decoded once, here, because the toolbar shows it on every frame of the timeline and the
+        // Settings screen shows it again — one decode, handed to both.
+        .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
         .task {
             if timeline == nil {
                 timeline = TimelineStore(onUnauthorized: { [session] in
@@ -189,6 +142,32 @@ public struct TimelineView: View {
         }
     }
 
+    /// The account's face, and everything that hangs off it.
+    ///
+    /// Driven by `AccountMenu.rows`, which is where the ORDER lives — because the order carries a
+    /// safety property. A menu opens with its first row directly under the anchor that opened it,
+    /// and when that row was the destructive one a second tap on the anchor revoked a live
+    /// credential (MEMNG-119). The heading occupies that position; the destructive row is last;
+    /// and the tap itself only ever asks (`SignOutFlow`). The rows are built by walking that list
+    /// rather than written out here, so the test that holds the order is holding THIS menu.
+    ///
+    /// The rows themselves are `AccountMenuRows`, so the screenshot render and the system popover
+    /// draw the same view tree — a system popover cannot be rendered, and a second hand-written
+    /// copy of its rows would be a picture of something the app does not have.
+    @ViewBuilder
+    private var accountMenu: some View {
+        Menu {
+            AccountMenuRows(
+                rows: AccountMenu.rows(name: session.state.user?.name),
+                openSettings: { path.append(SettingsRoute()) },
+                signOut: { signOut.send(.menuTapped, to: session) }
+            )
+        } label: {
+            AccountAvatarView(image: avatar, name: session.state.user?.name ?? "")
+        }
+        .accessibilityLabel("Account")
+    }
+
     @ViewBuilder
     private func content(_ timeline: TimelineStore) -> some View {
         // The flat position of each memo, so the prefetch trigger still knows how close to the
@@ -208,7 +187,7 @@ public struct TimelineView: View {
                         .cardRow()
                     }
                 } header: {
-                    DayHeader(title: "Pending")
+                    SectionHeading(title: "Pending")
                 }
             }
             // Session-level notices (a credential that could not be saved, a failed revoke)
@@ -284,7 +263,7 @@ public struct TimelineView: View {
                         }
                     }
                 } header: {
-                    DayHeader(title: TimelineGrouping.title(for: section.day))
+                    SectionHeading(title: TimelineGrouping.title(for: section.day))
                 }
             }
             if timeline.isLoadingMore {
@@ -435,23 +414,6 @@ public struct TimelineView: View {
         return posted
     }
 
-    private var signOutExplanation: SignOutFlow.Decision? {
-        guard case .explaining(let decision) = signOutStage else { return nil }
-        return decision
-    }
-
-    /// The single place a sign-out can start. The revoke is fired on the TRANSITION into
-    /// `revoking`, never on an event, so no repeat of any tap can send a second one.
-    private func advanceSignOut(_ event: SignOutFlow.Event) {
-        let previous = signOutStage
-        signOutStage = SignOutFlow.next(previous, on: event)
-        guard SignOutFlow.revokes(signOutStage), !SignOutFlow.revokes(previous) else { return }
-        Task {
-            let outcome = await session.signOut()
-            advanceSignOut(.revokeReturned(outcome))
-        }
-    }
-
     private func load() async {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
         await timeline?.refresh(using: client, baseURL: baseURL)
@@ -459,8 +421,9 @@ public struct TimelineView: View {
 
 }
 
-/// A day, or "Pending". Headline weight, because it is a heading — the old list had none at all.
-struct DayHeader: View {
+/// A section's heading — a day, "Pending", or a group of settings. Headline weight, because it is
+/// a heading; the list it sits over had none at all before.
+struct SectionHeading: View {
     let title: String
 
     var body: some View {

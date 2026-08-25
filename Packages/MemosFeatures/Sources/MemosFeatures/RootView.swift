@@ -4,6 +4,9 @@ import SwiftUI
 /// Chooses between the timeline and sign-in, and restores a stored credential at launch.
 public struct RootView: View {
     @Environment(SessionStore.self) private var session
+    // Optional for the same reason the outbox is on the timeline: a preview or a test host has no
+    // settings store, and a missing environment value must not be a crash on the root view.
+    @Environment(AppSettings.self) private var settings: AppSettings?
 
     public init() {}
 
@@ -19,6 +22,10 @@ public struct RootView: View {
             }
         }
         .tint(DesignTokens.accent)
+        // Applied HERE, above the switch between the timeline and sign-in, because the choice has
+        // to hold on every screen the app can be showing — the ones somebody signed out is looking
+        // at included. What `nil` means is `AppSettings.colorScheme`'s decision, not this line's.
+        .preferredColorScheme(AppSettings.colorScheme(for: settings?.appearance))
         .task {
             guard session.state.user == nil else { return }
             // The stored credential always gets the first word — the debug shortcut must not

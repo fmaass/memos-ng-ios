@@ -43,10 +43,7 @@ public enum AppearancePreference: String, CaseIterable, Sendable, Equatable {
 /// `UserDefaults` rather than the app group: the share extension is presented by whichever app the
 /// person is sharing from and takes its appearance from the system, so publishing this where the
 /// extension could read it would buy nothing it could act on.
-///
-/// Nothing reads this yet outside its own tests. The screen that will offer the choice, and where
-/// that screen is reached from, are being drafted before they are built; this is the half that
-/// survives whatever the draft decides, so it is written and held to its tests first.
+
 @MainActor
 @Observable
 public final class AppSettings {
@@ -72,6 +69,15 @@ public final class AppSettings {
     public func select(_ preference: AppearancePreference) {
         appearance = preference
         defaults.set(preference.rawValue, forKey: Self.appearanceKey)
+    }
+
+    /// What the ROOT view applies, which is not quite the same question as what was chosen.
+    ///
+    /// A view with no settings store — a preview, a test host — follows the device rather than
+    /// guessing, and `nil` is how SwiftUI is told that. So the absence of a store and the choice
+    /// of "System" deliberately produce the same answer: neither is an opinion about the screen.
+    public static func colorScheme(for preference: AppearancePreference?) -> ColorScheme? {
+        preference?.colorScheme
     }
 
     /// What a stored string means. Absent, empty, or a name written by a version that knew one

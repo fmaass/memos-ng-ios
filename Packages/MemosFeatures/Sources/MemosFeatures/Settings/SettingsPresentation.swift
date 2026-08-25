@@ -1,12 +1,10 @@
 import Foundation
 import MemosCore
+import SwiftUI
+import UIKit
 
-// The decisions a Settings screen will read, and no screen.
-//
-// The information architecture — what the sections are, where they are reached from, what moves
-// out of the timeline's overflow menu — is being drafted before anything is built, so this slice
-// is deliberately the part that survives whatever that draft decides: pure functions over the
-// account's settings, each one tested directly. Nothing here draws.
+// The decisions the Settings screen and the account menu read. Pure functions over the account's
+// settings, each one tested directly; the screens above them stay thin enough to be obvious.
 
 /// Which default visibilities the Settings screen offers, and what to say about one it does not.
 enum DefaultVisibilityChoice {
@@ -56,6 +54,19 @@ enum AccountAvatar {
         guard let separator = value.range(of: ";base64,") else { return nil }
         let payload = value[separator.upperBound...]
         return Data(base64Encoded: String(payload), options: .ignoreUnknownCharacters)
+    }
+
+    /// The account's picture, decoded off the main actor.
+    ///
+    /// Through the same decoder every photo in the app goes through: an avatar is a data URL of a
+    /// few hundred kilobytes, which is small for a picture and far too much to decode on the frame
+    /// that opens a screen. `nil` means there is nothing to draw and the monogram stands in.
+    static func image(from value: String?) async -> Image? {
+        guard let data = imageData(from: value) else { return nil }
+        let decoded = await Task.detached(priority: .userInitiated) {
+            MediaImageDecoder.decode(data)
+        }.value
+        return decoded.map(Image.init(uiImage:))
     }
 
     /// The monogram shown when there is no picture: one letter, or two when the name has two parts.
@@ -124,4 +135,63 @@ enum MediaCacheClearing {
     ) -> MediaCacheMaintenance.Usage {
         MediaCacheMaintenance.usage(of: cache)
     }
+}
+
+/// What the account menu holds, in order.
+///
+/// A list rather than a view body, because the ORDER carries a safety property that a view body
+/// would only imply. A menu opens with its first row directly under the anchor that opened it, and
+/// when that row was the destructive one a second tap on the anchor — the ordinary human reflex
+/// when a tap seems not to have registered — revoked a live credential (MEMNG-119). The heading
+/// takes that position. It is not decoration: it is what stands between the anchor and the
+/// destructive row, and `AccountMenuTests` holds it there.
+///
+/// There is deliberately no appearance row. Appearance is a setting, it lives on the Settings
+/// screen with the other settings, and a menu that offered a second way to change one of them
+/// would be two answers to the same question.
+enum AccountMenu {
+    enum Row: Equatable, Hashable {
+        /// Who this device is signed in as. Never actionable — see above.
+        case heading(String)
+        case settings
+        case signOut
+
+        /// Whether choosing this row would take something away. Only one row ever can.
+        var isDestructive: Bool {
+            if case .signOut = self { return true }
+            return false
+        }
+    }
+
+    static func rows(name: String?) -> [Row] {
+        [.heading(SignOutFlow.accountHeading(name: name)), .settings, .signOut]
+    }
+}
+
+/// The Settings screen's sections, in the order they are read.
+///
+/// An explicit list rather than whatever the view body happens to contain, so that "these five and
+/// no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
+/// a section rendered as a disabled row or a "coming soon" line is a promise the app has not kept,
+/// and it costs a reader a tap to find that out. They arrive when they work.
+enum SettingsScreen {
+    enum Section: String, CaseIterable, Equatable {
+        case account
+        case defaults
+        case appearance
+        case storage
+        case about
+
+        var title: String {
+            switch self {
+            case .account: "Account"
+            case .defaults: "Defaults"
+            case .appearance: "Appearance"
+            case .storage: "Storage"
+            case .about: "About"
+            }
+        }
+    }
+
+    static let sections: [Section] = Section.allCases
 }
