@@ -122,10 +122,6 @@ public struct MemoDetailView: View {
                 await edit.submit(submission, save: save)
             }
         }
-        .task(id: memo.isAwaitingTiers) {
-            guard memo.isAwaitingTiers else { return }
-            await pollTiers()
-        }
         .onChange(of: edit.memoDeleted) { _, gone in
             // The memo is gone from the server, so the screen it was open on goes with it. Landing
             // back on a detail view of something that no longer exists is the bug here, not the
@@ -142,23 +138,6 @@ public struct MemoDetailView: View {
         let deleted = await timeline.delete(uid: uid, using: client)
         feedback.fire(deleted ? .deleted : .postFailed)
         return deleted
-    }
-
-    /// Ends the WAITING treatment on this screen too.
-    ///
-    /// The timeline row polls its own memo, but a reader who opens a memo the moment they post it
-    /// is looking at THIS screen — and a `.task` belongs to the view that declared it, so the
-    /// row's poll is not something this screen may rely on. It runs its own, on the same schedule
-    /// and through the same store, and stops for the same reasons.
-    ///
-    /// Both surfaces polling one memo is harmless and self-limiting: every round re-reads the
-    /// store first, so whichever poll lands the ready copy ends the other one's next round without
-    /// a request (`TierReadinessPollTests.twoSurfacesPollingOneMemo`).
-    ///
-    /// SEAM (phase 5c): replaced by the `GET /api/events` subscription, like the timeline's.
-    private func pollTiers() async {
-        guard let client = session?.api, let baseURL = session?.serverBaseURL else { return }
-        await TierReadinessPoll.run(uid: uid, in: timeline, using: client, baseURL: baseURL)
     }
 
     /// The same edit the timeline submits, from the screen the memo is already open on.
