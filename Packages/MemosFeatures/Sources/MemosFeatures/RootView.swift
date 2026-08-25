@@ -1,3 +1,4 @@
+import Foundation
 import MemosCore
 import SwiftUI
 
@@ -26,6 +27,25 @@ public struct RootView: View {
         // to hold on every screen the app can be showing — the ones somebody signed out is looking
         // at included. What `nil` means is `AppSettings.colorScheme`'s decision, not this line's.
         .preferredColorScheme(AppSettings.colorScheme(for: settings?.appearance))
+        // Both return trips of the native sign-in land here, and both are handed to the same
+        // inbox: the sign-in waiting for a callback recognises its own, and every other URL the
+        // app is ever opened with is refused there rather than acted on.
+        //
+        // Neither lane waits for the other, and nothing here prefers one: whichever arrives
+        // first is the one that finishes the sign-in. In this deployment that is always the
+        // custom scheme — the server is on internal-only DNS, so Apple's CDN can never fetch the
+        // domain association and the universal link is permanently inert. The https lane is kept
+        // for a future where a public association exists; it needs nothing here to begin working.
+        .onOpenURL { url in
+            NativeLoginCallbackInbox.shared.deliver(url)
+        }
+        // `onOpenURL` covers a universal link on most paths, but a browsing activity is how one
+        // arrives when the system continues it into a launch, and a callback that reached the
+        // app and was dropped on the doorstep is the failure this whole flow is about.
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            guard let url = activity.webpageURL else { return }
+            NativeLoginCallbackInbox.shared.deliver(url)
+        }
         .task {
             guard session.state.user == nil else { return }
             // The stored credential always gets the first word — the debug shortcut must not

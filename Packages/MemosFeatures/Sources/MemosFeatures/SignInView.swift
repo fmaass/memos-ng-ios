@@ -16,6 +16,9 @@ public struct SignInView: View {
     @State private var serverAddress = "memos.discomarder.live"
     @State private var token = ""
     @State private var showAdvanced = false
+    /// One per screen, not one per tap: it holds the flow that a cancelled sign-in has to be
+    /// retried through, and the browser view it owns while that sign-in is on screen.
+    @State private var presenter = SafariLoginPresenter()
 
     public init() {}
 
@@ -30,6 +33,9 @@ public struct SignInView: View {
                 Spacer(minLength: 0)
                 VStack(spacing: DesignTokens.Space.regular) {
                     primaryButton
+                    // Still true, and true for a different reason than it used to be: the
+                    // browser view is Safari's, out of process. The app cannot read the page it
+                    // shows or reach into its fields.
                     Text("Opens the family sign-on. This app never sees the password.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -76,11 +82,14 @@ public struct SignInView: View {
     private var primaryButton: some View {
         Button {
             Task {
-                await session.signInNatively(
+                let signedIn = await session.signInNatively(
                     serverAddress: serverAddress,
                     deviceName: UIDevice.current.name,
-                    presenter: WebAuthenticationLoginPresenter()
+                    presenter: presenter
                 )
+                // The exchange belongs to the session store, so this is the only place that can
+                // tell the presenter how the attempt it opened actually ended.
+                presenter.exchangeFinished(succeeded: signedIn)
             }
         } label: {
             Group {

@@ -184,6 +184,13 @@ public final class SessionStore {
             )
             if persistence == .storedNowhere { lastError = Self.storageWarning }
             return true
+        } catch NativeLoginError.alreadySigningIn {
+            // A second tap on a sign-in that is already on screen. The state this method set on
+            // its way in is put back rather than torn down: the FIRST attempt is still running,
+            // still showing its browser view, and `failSignIn` here would sign its screen out
+            // from under it and leave an error notice on a sign-in that then succeeds.
+            abandonSignIn(restoring: previousState)
+            return false
         } catch let error as NativeLoginError {
             failSignIn(error)
             return false

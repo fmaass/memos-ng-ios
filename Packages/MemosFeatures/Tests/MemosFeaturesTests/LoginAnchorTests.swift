@@ -1,15 +1,15 @@
 import Foundation
 import MemosCore
 import Testing
+import UIKit
 
 @testable import MemosFeatures
 
-/// The TestFlight build installed on a phone had a "Sign in" button that did nothing: the
-/// authentication sheet never appeared, and nothing on the screen said why. The live
-/// `ASWebAuthenticationSession` cannot be driven from a test — the tap that proves it is on a
-/// device — so everything AROUND it is made deterministic here: which window the sheet is put on,
-/// and what happens when there is no such window.
-@Suite("Which window the sign-in sheet is put on")
+/// The TestFlight build installed on a phone had a "Sign in" button that did nothing: nothing
+/// appeared, and nothing on the screen said why. A live browser view cannot be driven from a test
+/// — the tap that proves it is on a device — so everything AROUND it is made deterministic here:
+/// which window the sign-in is put on, and what happens when there is no such window.
+@Suite("Which window the sign-in is put on")
 struct LoginAnchorTests {
     private func scene(
         _ activation: LoginAnchor.Activation,
@@ -56,7 +56,7 @@ struct LoginAnchorTests {
     /// The one that matters. A window belonging to a background or unattached scene is not on
     /// screen, and a scene-less `UIWindow()` — deprecated in iOS 26 for this exact reason — is
     /// attached to nothing at all. Presenting on either is what a dead button is made of, so the
-    /// decision refuses rather than inventing an anchor.
+    /// decision refuses rather than inventing a window.
     @Test("nothing on screen is an explicit refusal, never a detached window")
     func offscreenScenesAreNotPresentedOn() {
         let scenes = [
@@ -74,11 +74,16 @@ struct LoginAnchorTests {
 
 /// The other half: the refusal has to become something the person holding the phone can read.
 @Suite("A sign-in that cannot be presented says so")
-struct WebAuthenticationLoginPresenterTests {
-    @Test("with nowhere to present, it fails before starting a session")
-    func noAnchorFailsBeforeStarting() async throws {
-        let presenter = WebAuthenticationLoginPresenter(anchor: { nil })
-        let authorizeURL = try #require(URL(string: "https://memos.example.com/api/auth/login"))
+struct SafariLoginPresenterTests {
+    private let authorizeURL = URL(string: "https://memos.example.com/api/auth/login")!
+
+    private func nowhereToPresent() -> SafariLoginPresenter {
+        SafariLoginPresenter(host: { nil }, inbox: NativeLoginCallbackInbox())
+    }
+
+    @Test("with nowhere to present, it fails before opening a browser view")
+    func noHostFailsBeforeStarting() async {
+        let presenter = nowhereToPresent()
 
         await #expect(throws: NativeLoginError.self) {
             _ = try await presenter.authenticate(
@@ -92,9 +97,8 @@ struct WebAuthenticationLoginPresenterTests {
     /// A thrown error with nothing to say is the dead button in another costume: `SignInView`
     /// renders `SessionStore.lastError`, which is this `message` and nothing else.
     @Test("the failure carries a sentence the sign-in screen can show")
-    func theFailureReachesTheScreen() async throws {
-        let presenter = WebAuthenticationLoginPresenter(anchor: { nil })
-        let authorizeURL = try #require(URL(string: "https://memos.example.com/api/auth/login"))
+    func theFailureReachesTheScreen() async {
+        let presenter = nowhereToPresent()
 
         do {
             _ = try await presenter.authenticate(
@@ -109,7 +113,29 @@ struct WebAuthenticationLoginPresenterTests {
                 return
             }
             #expect(!detail.isEmpty, "a failure with no detail cannot be acted on")
-            #expect(error.message?.isEmpty == false, "cancelled is the only silent outcome")
+            #expect(error.message?.isEmpty == false, "no outcome of a sign-in is silent")
+        } catch {
+            Issue.record("expected a NativeLoginError, got \(error)")
+        }
+    }
+
+    /// The browser view cannot open anything but http(s), and it TRAPS on a URL it cannot browse.
+    /// It should never see one — the authorize URL is built from an https base — but a crash is a
+    /// worse way to learn that than a sentence on the sign-in screen.
+    @Test("an address the browser view could not open is refused rather than crashed on")
+    func refusesAnUnbrowsableAddress() async throws {
+        let presenter = SafariLoginPresenter(
+            host: { UIViewController() },
+            inbox: NativeLoginCallbackInbox()
+        )
+        let unbrowsable = try #require(URL(string: "ftp://memos.example.com/api/auth/login"))
+
+        await #expect(throws: NativeLoginError.self) {
+            _ = try await presenter.authenticate(
+                authorizeURL: unbrowsable,
+                callbackHost: "memos.example.com",
+                callbackPath: "/ios/auth/callback"
+            )
         }
     }
 }

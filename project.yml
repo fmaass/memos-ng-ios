@@ -104,6 +104,21 @@ targets:
       path: MemosNG.entitlements
       properties:
         com.apple.developer.associated-domains:
+          # applinks is what lets the server's own https callback OPEN this app. It is not
+          # implied by webcredentials: the old sign-in used an ASWebAuthenticationSession, whose
+          # .https callback rides on webcredentials, and that hid the omission for as long as it
+          # lasted. The app presents the browser view itself now, so the return trip is an
+          # ordinary universal link and needs the ordinary entitlement. The server's AASA already
+          # declares /ios/auth/callback* for this app id.
+          #
+          # It is not sufficient either, and in this deployment it is not even reachable: the
+          # association is published through Apple's CDN, and this server is on internal-only
+          # DNS, so the CDN can never fetch it. The universal-link lane is permanently inert
+          # here. That is what the custom URL scheme below is for. This entry stays because it
+          # is one line and it is what would make the better lane start working, with nothing to
+          # ship for it, if a publicly fetchable AASA is ever served for the domain.
+          - applinks:memos.discomarder.live
+          - applinks:memos.discomarder.live?mode=developer
           - webcredentials:memos.discomarder.live
           - webcredentials:memos.discomarder.live?mode=developer
         com.apple.security.application-groups:
@@ -127,6 +142,19 @@ targets:
       properties:
         BGTaskSchedulerPermittedIdentifiers:
           - live.discomarder.memosng.outbox-refresh
+        # The sign-in's return lane — the only one that can fire in this deployment, because the
+        # universal link above needs an association Apple's CDN cannot fetch from internal-only
+        # DNS. The callback page the server serves carries a link on exactly this scheme and host
+        # (memosng://auth-callback, with whatever query the page was given), and a tap on it
+        # reaches the app with no domain association involved at all. Any app on the phone could
+        # claim the same scheme, so nothing that crosses it is trusted for being on it — what
+        # crosses it is a one-shot handoff code that is worthless without the PKCE verifier, and
+        # the verifier never leaves this process.
+        CFBundleURLTypes:
+          - CFBundleURLName: live.discomarder.memosng.auth
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - memosng
         UIBackgroundModes:
           - fetch
         # The export-compliance answer, given once here so App Store Connect stops asking it on
