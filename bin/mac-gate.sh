@@ -427,20 +427,28 @@ summary_and_exit() {
 # taken by a classifier nobody checked is a gate that passes what it never read.
 say "--- step: selftest ---"
 selftest_rc=0
-selftest_count=0
+# NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
+# it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
+# directory. These two must be there.
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh; do
+  selftest_script="$repo_root/tests/gate/$selftest_name"
+  if [ -x "$selftest_script" ]; then
+    "$selftest_script" 2>&1 | tee -a "$log"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
+  else
+    say "the gate's own test $selftest_script is missing or not executable"
+    selftest_rc=1
+  fi
+done
+# And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
+  case "${selftest_script##*/}" in
+    fastpath-classify-test.sh|warnings-canary-test.sh) continue ;;
+  esac
   [ -x "$selftest_script" ] || continue
-  selftest_count=$((selftest_count + 1))
   "$selftest_script" 2>&1 | tee -a "$log"
   [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
 done
-# Counted, not just run: a suite that is deleted or loses its execute bit would otherwise take its
-# whole subject with it and the gate would still say selftest=0.
-if [ "$selftest_count" -lt 2 ]; then
-  say "the gate's own tests are missing: $selftest_count executable suite(s) in $repo_root/tests/gate," \
-      "expected at least the classifier and the warnings-flag reader"
-  selftest_rc=1
-fi
 record selftest "$selftest_rc"
 [ "$first_fail" -eq 0 ] || summary_and_exit
 
@@ -895,6 +903,11 @@ esac
 # paths nobody plans for: a failing step, a refusal, the SIGHUP this shell gets when the ssh
 # connection goes away. An undeleted device is disk on a build host that has little to spare.
 GATE_DEVICE_UDID=""
+# The warnings check writes one file into the mirrored tree and takes it away again. It is named
+# here, where the give-back below can reach it: a shell killed between writing it and deleting it
+# would otherwise leave a source file the gate invented sitting in the tree for the next run to
+# lint, build and rsync over.
+GATE_CANARY_FILE=""
 device_cleanup() {
   [ -n "$GATE_DEVICE_UDID" ] || return 0
   local udid="$GATE_DEVICE_UDID" attempt=1
@@ -917,6 +930,8 @@ device_cleanup() {
 # Everything this run took on the build host goes back together: the device, and the note in the
 # lock that says a build is still running here. The note is removed only while it is still ours.
 gate_give_back() {
+  [ -z "${GATE_CANARY_FILE:-}" ] || rm -f "$GATE_CANARY_FILE"
+  GATE_CANARY_FILE=""
   device_cleanup
   local rc=$?
   if [ -n "${GATE_LOCK:-}" ] && [ "$(cat "$GATE_LOCK/remote-pid" 2>/dev/null)" = "$$" ]; then
@@ -1528,6 +1543,18 @@ sys.exit(rc)
 PY
 }
 
+# Both halves of the warnings mutation below build the same way; only the tree differs.
+build_memos_features() { # $1 = where the build log goes; returns xcodebuild's own exit code
+  ( cd Packages/MemosFeatures \
+    && xcodebuild build \
+         -scheme MemosFeatures \
+         -configuration Debug \
+         -destination 'generic/platform=iOS Simulator' \
+         -derivedDataPath "$GATE_WORK/warnings/MemosFeatures" \
+         -clonedSourcePackagesDirPath "$GATE_WORK/warnings/spm" \
+         -skipPackagePluginValidation ) > "$1" 2>&1
+}
+
 s_warnings() {
   # Every package builds clean or not at all — all five, because a warning that no build makes
   # fatal is a warning nobody retires.
@@ -1563,46 +1590,58 @@ s_warnings() {
      | grep -q 'treatAllWarnings(as: \.error'; then
     echo "ok (pre-check): MemosFeatures declares .treatAllWarnings(as: .error)"
   else
-    echo "WARNAERR FAIL: Packages/MemosFeatures/Package.swift no longer declares" \
-         ".treatAllWarnings(as: .error)"
+    echo "WARNAERR FAIL (early hint): Packages/MemosFeatures/Package.swift no longer declares" \
+         ".treatAllWarnings(as: .error) — the canary build below is the authority on that"
     rc=1
   fi
 
-  # That text is NOT the proof. A declaration can be commented out, moved onto the test target or
-  # conditioned away, and the build then SUCCEEDS with warnings merely printed — measured on this
-  # host 2026-08-25: with the line commented out the build still exited 0, and the only difference
-  # anywhere was that no compiler invocation carried the flag. So the proof is read out of the
-  # build itself: the target's own sources are touched first (an unchanged tree compiles nothing,
-  # and a log with nothing in it would pass any check by silence), and the log must then show a
-  # swift invocation for the MemosFeatures target carrying -warnings-as-errors. The count of that
-  # target's build tasks is the control on the read: zero tasks means the log is silent, which is
-  # not the same as a build without the flag, and both fail here.
-  local warn_log="$GATE_WORK/warnings/MemosFeatures-build.log"
+  # That text is a hint, and only a hint. A declaration can be commented out, moved onto the test
+  # target or conditioned away and the build still exits 0 with its warnings merely printed
+  # (measured on this host 2026-08-25). Reading the build LOG for the flag was no better: a source
+  # file can print whatever sentence a reader is looking for, and two rounds of review found two
+  # more ways to write one. So nothing textual is load-bearing here any more.
+  #
+  # The proof is a controlled mutation judged by EXIT CODES. The target is built as it stands, and
+  # then built again with a throwaway file that holds nothing but warnings. If warnings are fatal,
+  # that second build cannot compile — so a canary that SURVIVES is the failure, and no source
+  # file can spoof a compiler's refusal to produce an object.
+  local mf_build_log="$GATE_WORK/warnings/MemosFeatures-build.log"
+  local mf_canary_log="$GATE_WORK/warnings/MemosFeatures-canary.log"
   mkdir -p "$GATE_WORK/warnings"
+  # Every source of the target is made to compile again: an incremental build that compiles nothing
+  # cannot go red for a warning sitting in a file it skipped.
   find Packages/MemosFeatures/Sources -name '*.swift' -exec touch {} +
-  ( cd Packages/MemosFeatures \
-    && xcodebuild build \
-         -scheme MemosFeatures \
-         -configuration Debug \
-         -destination 'generic/platform=iOS Simulator' \
-         -derivedDataPath "$GATE_WORK/warnings/MemosFeatures" \
-         -clonedSourcePackagesDirPath "$GATE_WORK/warnings/spm" \
-         -skipPackagePluginValidation ) > "$warn_log" 2>&1 || rc=$?
-  # The whole log is evidence and comes back with the artefacts; what is worth reading on the way
-  # past is the diagnostics and the verdict line.
-  grep -E 'error:|warning:|\*\* BUILD' "$warn_log" | tail -25
-  cp "$warn_log" .gate-artifacts/MemosFeatures-warnings-build.log
-  # The reader lives in scripts/read-warnings-flag.py, where tests/gate/warnings-flag-test.sh can
-  # feed it a log instead of a ten-minute build — and it needs feeding: a reader that accepts the
-  # flag's TEXT anywhere under this target's task header is satisfied by a source file printing
-  # `#warning("-warnings-as-errors")`, in a build that exits 0 with its warnings not fatal. So the
-  # match is on the compiler INVOCATION for the MemosFeatures module, never on a line the compiler
-  # emitted.
-  local flag_reader="$GATE_TARGET/scripts/read-warnings-flag.py"
-  if [ -f "$flag_reader" ]; then
-    /usr/bin/python3 "$flag_reader" "$warn_log" || rc=1
+  build_memos_features "$mf_build_log"
+  local real_rc=$?
+
+  # Named before it is written, so the give-back can take it away even if this shell is killed in
+  # the middle of the build below.
+  GATE_CANARY_FILE="$GATE_TARGET/Packages/MemosFeatures/Sources/MemosFeatures/GateWarningsCanary.swift"
+  cat > "$GATE_CANARY_FILE" <<'SWIFT'
+// Written by the gate for one build and deleted again: proof that a warning in this target cannot
+// compile. Two warnings that can never be anything but warnings on their own.
+#warning("mac-gate canary: a warning in MemosFeatures must be fatal")
+
+private func gateWarningsCanary() {
+    let gateWarningsCanaryValue = 1
+}
+SWIFT
+  build_memos_features "$mf_canary_log"
+  local canary_rc=$?
+  rm -f "$GATE_CANARY_FILE"
+  GATE_CANARY_FILE=""
+
+  cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
+  cp "$mf_canary_log" .gate-artifacts/MemosFeatures-canary-build.log
+  echo "MemosFeatures build exit $real_rc; canary build exit $canary_rc (logs in .gate-artifacts)"
+  # Diagnostics from the real build, for a human reading a failure. Evidence, not verdict.
+  grep -E 'error:|warning:|\*\* BUILD' "$mf_build_log" | tail -15
+  local canary_verdict="$GATE_TARGET/scripts/warnings-canary-verdict.sh"
+  if [ -x "$canary_verdict" ]; then
+    "$canary_verdict" "$real_rc" "$canary_rc" || rc=1
   else
-    echo "WARNAERR FAIL: $flag_reader is missing, so nothing here can read what the build did"
+    echo "WARNAERR FAIL: $canary_verdict is missing or not executable, so the two exit codes"
+    echo "               cannot be judged and this step proves nothing"
     rc=1
   fi
   return $rc

@@ -48,8 +48,8 @@ tree holds, reports `PASS (fast path: docs-only)` naming every changed path, and
 the build host. Everything else meets the full gate, and files git ignores are outside the
 classification by design: they never reach main, and a full gate builds whatever is on disk
 anyway. `bin/mac-gate.sh --classify-only` prints that
-classification without needing a build host, and the gate's own test suite for the classifier
-(`tests/gate/fastpath-classify-test.sh`) runs on every gate.
+classification without needing a build host, and the gate's own test suites under `tests/gate/`
+run on every gate — the classifier's, and the one that judges the warnings canary.
 
 The gate directory on the build host is a mirror, never a checkout. Git is the only medium between
 the two machines.

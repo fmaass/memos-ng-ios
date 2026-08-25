@@ -76,10 +76,14 @@ Every package builds with its warnings fatal; a warning is a defect. Four of the
 destination for it, and every way of asking `xcodebuild` for that setting also reaches the
 dependencies, so a warning in MarkdownUI or OpenAPIKit would fail the gate. It declares
 `.treatAllWarnings(as: .error)` on its own target instead. Dropping that line does not fail
-anything — the build still succeeds, the warnings simply stop being fatal — so the gate touches
-that target's sources, builds, and reads the log back: a compiler invocation for the MemosFeatures
-target carrying `-warnings-as-errors`, with the count of that target's build tasks as the control
-on the read. The build log comes back as `.gate-artifacts/MemosFeatures-warnings-build.log`.
+anything — the build still succeeds, the warnings simply stop being fatal — and neither the
+manifest text nor the build log can be trusted to say otherwise, because a source file can print
+whatever a reader looks for. So the gate proves it by mutation: it builds the target as it stands,
+then builds it AGAIN with a throwaway file holding nothing but warnings, and requires that second
+build to fail. A canary that survives is the failure. The verdict is two exit codes read by
+`scripts/warnings-canary-verdict.sh` (fed pairs by `tests/gate/warnings-canary-test.sh`); both
+build logs come back as `.gate-artifacts/MemosFeatures-warnings-build.log` and
+`.gate-artifacts/MemosFeatures-canary-build.log`. The manifest grep survives as an early hint.
 
 ## Tests
 
