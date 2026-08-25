@@ -532,6 +532,26 @@ for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
         rm -rf "$stale" && echo "GATE_HYGIENE swept stale tree $stale"
       done
 done
+# Age alone is not enough on a busy day: five concurrent branches at ~3G each filled the host
+# to ENOSPC while every tree was hours old. Under PRESSURE the age rule yields — when free
+# space is below 10G, the oldest-stamped sibling trees go, newest-stamped last, until 15G is
+# free or nothing sweepable remains. The current run's trees and every lock stay untouchable;
+# a still-active sibling loses only an incremental cache it will rebuild, which is the right
+# trade against every gate on the host dying on a full disk.
+free_kb() { df -k / | awk 'NR==2 {print $4}'; }
+if [ "$(free_kb)" -lt 10485760 ]; then
+  echo "GATE_HYGIENE pressure: under 10G free — reaping oldest sibling trees"
+  for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
+    ls -1dtr "$hygiene_root"/*/* 2>/dev/null | while IFS= read -r victim; do
+      [ -d "$victim" ] || continue
+      case "$victim" in
+        "$GATE_TARGET"|"$GATE_WORK"|*.lock*) continue ;;
+      esac
+      [ "$(free_kb)" -ge 15728640 ] && break
+      rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
+    done
+  done
+fi
 disk_free="$(df -h / | awk 'NR==2 {print $4}')"
 echo "GATE_HYGIENE disk free after sweep: $disk_free"
 case "$disk_free" in
