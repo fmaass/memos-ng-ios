@@ -228,9 +228,14 @@ version before `xcodebuild` runs, so that no hand edit is needed at all.
 1. The build appears under **TestFlight** → the `household` group, after processing.
 2. Export compliance is not asked: both bundles answer it already.
 3. Each tester gets an email, installs Apple's **TestFlight** app, accepts, and installs from there.
-4. On first launch the app asks for **Local Network** access — the server resolves to a private
-   address on the household network, and iOS will silently fail every request until that is allowed.
-5. Signing in is the normal sign-in against `https://memos.discomarder.live`.
+4. Signing in is the normal sign-in against `https://memos.discomarder.live` — but the **first**
+   attempt fails. Nothing in the app touches the network before it, so iOS raises the **Local
+   Network** prompt on the sign-in's own exchange call, possibly just as the sign-on sheet closes,
+   and denies that connection whatever the answer is: the error reads *"The Internet connection
+   appears to be offline."*
+5. Allow **Local Network** (if the prompt was missed: Settings → Apps → memosng → Local Network),
+   then tap **Sign in** again. That attempt completes. The permission is needed because the server
+   resolves to a private address on the household network.
 
 ---
 
