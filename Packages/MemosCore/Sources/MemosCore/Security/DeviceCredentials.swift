@@ -16,10 +16,13 @@ import Foundation
 ///    do not contain it, so the extension cannot name it and cannot reach it.
 ///
 /// Nobody is signed out to get from one to the next: whichever namespace still holds the token, a
-/// read migrates it home lazily (see `CredentialVault`). The legacy copy is deleted at the first
-/// SUCCESSFUL migration and not before — an add the home namespace refuses, or a read-back that
-/// throws or answers nil, leaves it exactly where it is, indefinitely, because deleting on an
-/// unproven move can take the only copy on the device with it.
+/// read migrates it home lazily (see `CredentialVault`). Nothing is deleted until the move is
+/// PROVEN — an add the home namespace refuses, or a read-back that throws or answers nil, leaves
+/// the copy exactly where it is, because deleting on an unproven move can take the only copy on
+/// the device. Once it is proven, deleting the legacy copy is ATTEMPTED on every read that
+/// resolves the home value, and a delete the keychain refuses is logged and attempted again on the
+/// next such read. So the copy is gone when a remove SUCCEEDS — normally the first successful
+/// migration, later on a device whose keychain keeps refusing it.
 ///
 /// **What only a signed device build can prove.** The simulator does not enforce keychain access
 /// groups, so no test that runs in it can show that the share extension is refused. What runs

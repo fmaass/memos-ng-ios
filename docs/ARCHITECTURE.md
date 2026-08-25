@@ -162,14 +162,17 @@ Recorded here rather than quietly absorbed, for the review that turns v0 into v1
    build WRITES there, and a device that still has a token there has it moved out lazily
    (`CredentialVault` migrates on read, `restore()` before anything else touches the credential).
 
-   That closes the exposure per device only at the FIRST SUCCESSFUL migration — an `add` the home
-   namespace accepted and a read-back that returned the value; only then is the legacy copy
-   deleted. Every failure state keeps it, indefinitely and on purpose, because deleting on an
-   unproven move can destroy the only copy on the device: an `add` the home namespace refuses, a
-   read-back that throws, and a read-back that answers nil each leave the token where it is and
-   answer with it. Nothing sweeps up later — the next successful read is the only thing that
-   retries. So this is not a bounded window; it is a residual that ends when a migration succeeds
-   and not before.
+   Two things have to go right for the legacy copy to be gone, and the second is not guaranteed
+   by the first. The move must be PROVEN — an `add` the home namespace accepted and a read-back
+   that returned the value. Until it is, nothing is deleted at all, deliberately, because deleting
+   on an unproven move can destroy the only copy on the device: an `add` the home namespace
+   refuses, a read-back that throws, and a read-back that answers nil each leave the token exactly
+   where it is and answer with it. Then the delete must actually succeed. It is ATTEMPTED on every
+   read that resolves the home value, not once — `tidy` is the last thing such a read does — and a
+   delete the keychain refuses is logged and attempted again on the next such read. So the copy
+   disappears when a `remove` succeeds: normally at the first successful migration, later on a
+   device whose keychain keeps refusing, and never on one that stops reading first. This is not a
+   bounded window; it is a residual that ends when a delete lands and not before.
 
    One interval is uncoverable from this side entirely: between the extension being upgraded and
    the host app's first launch, only the app can move the token and the app has not run. A

@@ -7,12 +7,11 @@ import PackageDescription
 // from a generated schema that a re-sync can change under it.
 //
 // That is also what licenses the hand-rolled wire types in `OutboxWire`. A hand-rolled wire type
-// is allowed only where the generated one is UNREACHABLE from the layer that needs it, and both
-// grounds hold here: two of the four calls cannot be generated at all (the chunk PATCH's
-// raw-bytes body and the offset HEAD's `Upload-Offset` response header are unmodelled), and this
-// layer's dependency rule forbids importing the generated client in the first place. Preference
-// is never a ground. The licence is conditional on the contract test that pins the semantics of
-// every operation consumed here against the vendored document.
+// is allowed only where the generated one is UNREACHABLE from the layer that needs it, and here
+// exactly one ground carries it: this dependency rule. Taking no package dependencies means the
+// generated client cannot be imported from this layer at all. The shape of the calls is not a
+// second ground, and preference is never one. The licence is conditional on the vendored-document
+// contract test, which must pin every semantic those mirrors consume.
 let package = Package(
     name: "MemosOutbox",
     // macOS is declared as well as iOS so this layer can be built with SwiftPM directly — that is

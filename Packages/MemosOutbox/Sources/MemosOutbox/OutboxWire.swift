@@ -5,15 +5,15 @@ import Foundation
 /// Hand-rolling a wire type is allowed only where the generated one is UNREACHABLE from the layer
 /// that needs it — generation is impossible, or the layer's dependency rule forbids importing the
 /// generated client — and only behind a contract test that pins the semantics of every operation
-/// consumed. Both grounds hold here. Two of the four calls cannot be driven from the vendored
-/// OpenAPI document at all: the chunk PATCH has no modelled request body (it is raw bytes) and
-/// the offset HEAD's `Upload-Offset` response header is not modelled either. And this package
-/// takes no package dependencies, so the generated client is not importable from it regardless.
+/// consumed. Here exactly ONE ground carries it: the dependency rule. This package takes no
+/// package dependencies, so the generated client cannot be imported from it at all. The shape of
+/// the calls is NOT a second ground — the vendored document does model them — and convenience was
+/// never one.
 ///
-/// The contract test is the condition, not a courtesy: it reads the vendored document out of the
-/// test bundle and asserts these fields against it, so a re-sync that moves the contract fails
-/// here instead of on a device. These types mirror ONLY the fields consumed; anything else the
-/// server sends is ignored rather than mapped.
+/// The condition is the vendored-document contract test in `MemosOutboxTests`: it must pin every
+/// semantic these mirrors consume, so a re-sync that moves the contract fails there instead of on
+/// a device. These types mirror ONLY the fields consumed; anything else the server sends is
+/// ignored rather than mapped.
 public enum OutboxWire {
     /// What starting an upload session sends.
     public struct UploadStart: Encodable, Sendable {
