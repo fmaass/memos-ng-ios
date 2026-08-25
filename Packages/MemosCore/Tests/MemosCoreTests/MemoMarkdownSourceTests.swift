@@ -138,10 +138,62 @@ struct MemoMarkdownSourceTests {
             ("list fence, unsafe link", "- ~~~\n  [x](javascript:alert(1))\n  ~~~"),
             ("indented code, unsafe link", "    [x](javascript:alert(1))"),
             ("indented code after a heading", "# Heading\n    [x](javascript:alert(1))"),
+            // A closing fence cannot carry a container prefix its opener did not have, so a line
+            // that strips to backticks at a DEEPER depth is code, not the closer. Reading it as
+            // one hands the rest of the block to the prose walk, which writes a backslash into
+            // the author's code. (markdown-it renders all three of these as one code block.)
+            ("quoted closer", "```\ncode one\n> ```\n[x](javascript:alert(1))\n```"),
+            ("quoted tilde closer", "~~~\ncode one\n> ~~~\n[x](javascript:alert(1))\n~~~"),
+            ("deeper closer", "> ```\n> code one\n> > ```\n> [x](javascript:alert(1))\n> ```"),
         ]
     )
     func codeIsNeverRewritten(name: String, source: String) {
         #expect(MemoMarkdownSource.prepare(source) == source, "\(name)")
+    }
+
+    /// The control for the rule above, so "a fence only closes at its own depth" cannot become
+    /// "a fence never closes": a longer closer at the same depth closes, a quoted closer closes a
+    /// quoted fence, and the continuation line of a list item closes the fence opened in it —
+    /// that line carries no marker of its own, so its depth reads as zero while it is still
+    /// inside the item. All three end the block in markdown-it too.
+    @Test("the closers that are real still close the block")
+    func realClosersStillClose() {
+        // A longer closer at the same depth.
+        #expect(
+            MemoMarkdownSource.prepare("```\ncode one\n`````\n[x](javascript:alert(1))")
+                == "```\ncode one\n`````\n\\[x](javascript:alert(1))"
+        )
+        // A quoted closer for a fence opened in the same quote.
+        #expect(
+            MemoMarkdownSource.prepare("> ```\n> code one\n> ```\n\n[x](javascript:alert(1))")
+                == "> ```\n> code one\n> ```\n\n\\[x](javascript:alert(1))"
+        )
+        // The continuation line of a list item, which carries no marker of its own.
+        #expect(
+            MemoMarkdownSource.prepare("- ~~~\n  code one\n  ~~~\n\n[x](javascript:alert(1))")
+                == "- ~~~\n  code one\n  ~~~\n\n\\[x](javascript:alert(1))"
+        )
+    }
+
+    /// A backtick fence's info string may not contain a backtick — that line is not a fence at
+    /// all, and markdown-it renders it as paragraph text with the line below it as more paragraph
+    /// text. Opening a code region there leaves the prose under it unneutralised: a fidelity
+    /// divergence, not a hole, because `MemoRenderPolicy` refuses the destination at render time
+    /// whatever the parse did. A tilde fence's info may hold anything, backticks included.
+    @Test("a backtick in a backtick fence's info string opens no code")
+    func backtickInAnInfoStringIsNotAFence() {
+        #expect(
+            MemoMarkdownSource.prepare("```foo`bar\n[x](javascript:alert(1))\n```")
+                == "```foo`bar\n\\[x](javascript:alert(1))\n```"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("```a`b\n[x](javascript:alert(1))")
+                == "```a`b\n\\[x](javascript:alert(1))"
+        )
+        let tilde = "~~~foo`bar\n[x](javascript:alert(1))\n~~~"
+        #expect(MemoMarkdownSource.prepare(tilde) == tilde)
+        let plain = "```js\n[x](javascript:alert(1))\n```"
+        #expect(MemoMarkdownSource.prepare(plain) == plain)
     }
 
     /// The control for that one: the SAME text one indent level out is prose, where the rule still

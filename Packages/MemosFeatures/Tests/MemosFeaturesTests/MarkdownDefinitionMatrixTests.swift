@@ -266,6 +266,46 @@ struct MarkdownLiteralContentTests {
         #expect(openable.isEmpty, "\(name): the app would open \(openable)")
     }
 
+    /// A closing fence cannot carry a container prefix its opener did not have. A line that
+    /// strips to backticks at a DEEPER depth is code — markdown-it keeps `> ```` inside a
+    /// top-level fence as content and never ends the block — and reading it as the closer hands
+    /// the rest of the code region to the prose walk, which writes a backslash into the author's
+    /// code. That is the byte-for-byte invariant, broken from the inside. (MEMNG-144)
+    @Test(
+        "a fence is not closed by a marker at another container depth",
+        arguments: [
+            ("quoted closer", "```\ncode one\n> ```\n[x](javascript:alert(1))\n```"),
+            ("quoted tilde closer", "~~~\ncode one\n> ~~~\n[x](javascript:alert(1))\n~~~"),
+            ("deeper closer", "> ```\n> code one\n> > ```\n> [x](javascript:alert(1))\n> ```"),
+        ]
+    )
+    func fencesCloseOnlyAtTheirOwnDepth(name: String, markdown: String) {
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(
+            html.contains("[x](javascript:alert(1))\n</code></pre>"),
+            "\(name): the code was rewritten:\n\(html)"
+        )
+        #expect(!html.contains("\\["), "\(name): a backslash leaked:\n\(html)")
+    }
+
+    /// The other side of the same classifier: a backtick fence whose info string contains a
+    /// backtick is not a fence, and markdown-it renders both lines as one paragraph. Treating it
+    /// as one leaves the prose under it unneutralised, so the renderer resolves a link the SPA
+    /// shows as text. Parity, not safety — `MemoRenderPolicy` refuses that destination at render
+    /// time either way, which the last assertion states. (MEMNG-144)
+    @Test("a backtick in a backtick fence's info string opens no code")
+    func backtickInAnInfoStringIsNotAFence() {
+        let markdown = "```foo`bar\n[x](javascript:alert(1))\n```"
+        let shown = texts(markdown)
+        #expect(
+            shown.contains { $0.contains("[x](javascript:alert(1))") },
+            "the prose was treated as code and the renderer made a link of it: \(shown)"
+        )
+        let openable = ProductionMarkdownProjection.destinations(in: markdown)
+            .filter { MemoRenderPolicy.mayOpen(destination: $0) }
+        #expect(openable.isEmpty, "the app would open \(openable)")
+    }
+
     /// The control for the code barrier: one indent level out, the same characters are prose, and
     /// prose is where the rule applies. An indented line that merely continues a paragraph is
     /// prose too — markdown-it renders `paragraph\n    [x](…)` as one paragraph, not as code.

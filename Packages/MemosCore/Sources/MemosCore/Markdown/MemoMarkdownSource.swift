@@ -370,8 +370,17 @@ extension MemoMarkdownSource {
                     atBlockStart = true
                 } else {
                     scans[index].isCode = true
+                    // A closing fence cannot carry a container prefix its opener did not have, so
+                    // a line that strips to a marker at a DEEPER depth is content: markdown-it
+                    // keeps `> ```` inside a top-level fence as code and never ends the block.
+                    // Reading it as the closer hands the rest of the code region to the inline
+                    // walk, which writes a backslash into the author's code — the one thing this
+                    // layer promises never to do. A LOWER depth is a different matter: the
+                    // continuation line of a list item carries no marker of its own, so its depth
+                    // reads as zero while it is still inside the item, and it does close.
                     if let closing = fenceMarker(line), closing.character == open.character,
-                        closing.length >= open.length, closing.info.isEmpty
+                        closing.length >= open.length, closing.info.isEmpty,
+                        line.depth <= open.depth
                     {
                         fence = nil
                     }
@@ -380,7 +389,14 @@ extension MemoMarkdownSource {
                     continue
                 }
             }
-            if let opening = fenceMarker(line) {
+            // A BACKTICK fence's info string may not contain a backtick — the line is then not a
+            // fence at all, and markdown-it renders it and what follows as paragraph text.
+            // Opening a code region there would leave that prose unneutralised, which costs
+            // parity, not safety: `MemoRenderPolicy` refuses an unsafe destination at render time
+            // however it was parsed. A tilde fence's info may hold anything.
+            if let opening = fenceMarker(line),
+                opening.character == "~" || !opening.info.contains("`")
+            {
                 fence = (opening.character, opening.length, line.depth)
                 scans[index].isCode = true
                 inIndentedCode = false
