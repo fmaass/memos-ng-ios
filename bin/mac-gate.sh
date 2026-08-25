@@ -450,6 +450,29 @@ summary_and_exit() {
 }
 
 # --- (3) mirror the worktree ------------------------------------------------------------------
+# --- load gate ----------------------------------------------------------------------------------
+# The branch lock orders runs of ONE branch; nothing ordered runs of five. Five concurrent
+# xcodebuilds drove the host's one-minute load past nine hundred, at which point the network
+# stack starved and a live gate died mid-run on "no route to host". So a run holds its branch
+# lock but does not START while the host is drowning: above roughly three times the core count
+# it waits, out loud, and takes its turn when the load drains. A pure read — no slot state to
+# leak, no stale slot to reap.
+LOAD_LIMIT="${MAC_GATE_LOAD_LIMIT:-24}"
+load_waited=0
+while : ; do
+  host_load="$(timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+    'sysctl -n vm.loadavg' 2>/dev/null | awk '{printf "%d", $2}')"
+  [ -n "$host_load" ] || { say "load gate   : host unreadable, proceeding"; break; }
+  if [ "$host_load" -le "$LOAD_LIMIT" ]; then
+    [ "$load_waited" -eq 0 ] || say "load gate   : load $host_load, proceeding after ${load_waited}m"
+    break
+  fi
+  load_waited=$((load_waited + 1))
+  [ "$load_waited" -le 45 ] || { say "load gate   : still $host_load after 45m — proceeding anyway"; break; }
+  [ $((load_waited % 5)) -ne 1 ] || say "load gate   : host load $host_load > $LOAD_LIMIT, waiting"
+  sleep 60
+done
+
 say "--- step: rsync ---"
 rsync -a --delete \
   --exclude '.git' --exclude 'signing.local.yml' \
