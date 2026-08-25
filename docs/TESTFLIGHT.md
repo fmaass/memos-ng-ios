@@ -2,7 +2,12 @@
 
 Everything the repository can decide has been decided. What is left is the half that only a
 signed-in human can do: agreements, an app record, an internal tester group, and one Xcode Cloud
-workflow. That is roughly ten minutes of clicking, once.
+workflow — the first three of those are done.
+
+As observed in App Store Connect on 2026-08-25, the record holds version `0.1.0` builds 1, 2, 3 and
+4, and build 4 is distributed to the `household` group with two invites. All four were archived in
+Xcode on the build Mac and uploaded by hand. Part 2 is the part that has never been exercised: no
+Xcode Cloud workflow exists yet.
 
 Steps marked **[me only]** cannot be automated from here — they need a browser session in App
 Store Connect or a signed-in Xcode. Everything else is already committed.
@@ -23,8 +28,8 @@ the answers on the website and the answers inside the bundle say the same thing.
 | Share-extension bundle identifier | `live.discomarder.memosng.share` |
 | App group | `group.live.discomarder.memosng` |
 | Associated domain | `memos.discomarder.live` (webcredentials) |
-| Version (`CFBundleShortVersionString`) | `0.1.0` |
-| Build number (`CFBundleVersion`) | `2` in the repo — an Xcode Cloud build numbers its own |
+| Version (`CFBundleShortVersionString`) | `MARKETING_VERSION` in `project.yml`, per [`RELEASING.md`](RELEASING.md) |
+| Build number (`CFBundleVersion`) | `CURRENT_PROJECT_VERSION` in `project.yml` — an Xcode Cloud build numbers its own |
 | Export compliance | `ITSAppUsesNonExemptEncryption = false`, already in both bundles |
 | Data collected | none |
 | Tracking | none, and no tracking domains |
@@ -137,6 +142,12 @@ needs TestFlight still gets at least the Marketing role under Users and Access.
 
 ### 7. Create the workflow **[me only]**
 
+All of this happens **in Xcode on the build Mac**; there is no web path into it. Until a workflow
+exists, App Store Connect's **Xcode Cloud** tab — both on the app and under **Users and Access** —
+is a marketing page reading *"Create a workflow in Xcode to get started."* beside an **Open Xcode**
+link, and `/ci/workflows/new` and `/ci/settings` fall back to that same page (observed 2026-08-25).
+The promise of editing workflows and launching builds from the web holds only after onboarding.
+
 In Xcode, with the project open (generate it first with `bin/generate.sh` — the `.xcodeproj` is not
 committed):
 
@@ -149,15 +160,16 @@ moved — re-record them from the project
 run the gate, and archive only once it is green. Never archive straight from an updated project.
 
 1. **Report navigator** → the **Cloud** button → **Get Started**.
-2. **Select a Product**: `MemosNG`. If I am on more than one Apple Developer Program team, pick the
-   team the app is going to be distributed from.
+2. **Select a Product**: `MemosNG` → **Next**. If I am on more than one Apple Developer Program
+   team, pick the team the app is going to be distributed from.
 3. Xcode proposes a first workflow: build on every change to the default branch and on pull requests
    against it, latest macOS and Xcode, **archive** action, email on completion. Click **Edit
-   Workflow** and narrow the start condition to the default branch — a build per pull request is
-   noise for a one-person repository.
-4. **Grant Access to Your Source Code** → **Grant Access**, then follow the Git host's
-   authorisation, **Next**, **Complete**.
-5. Pick the branch and **Start Build**.
+   Workflow** → **Start Conditions**, keep **Branch Changes** on `main` and delete **Pull Request
+   Changes** — a build per pull request is noise for a one-person repository.
+4. **Grant Access to Your Source Code** → **Grant Access**, then the GitHub authorisation. This
+   authorises the Xcode Cloud GitHub App for the repository, which is an account-level action.
+   Then **Next**, **Complete**.
+5. Branch `main` → **Start Build**.
 
 The first run is where the permissions land: authorising Xcode Cloud against the Git host, and
 letting it use the Apple Developer team for signing. Both are one-time.
@@ -178,11 +190,20 @@ of it.
 A local archive needs the number bumped by hand; an Xcode Cloud build does not. Both halves are
 written down because this is the thing most likely to look wrong.
 
+Which numbers to set, when they move and what the gate enforces is [`RELEASING.md`](RELEASING.md)'s
+job — the semver scheme, the build counter, the annotated tag. Read the numbers there and in
+`project.yml`, never off this page. What is left here is how App Store Connect and Xcode Cloud
+consume the number: a local archive is uploaded under exactly the value in `project.yml`, and App
+Store Connect refuses a number it already holds — an upload spends its number whether or not the
+build is ever distributed.
+
 Verified from Apple's documentation:
 
 - Xcode Cloud assigns each build its own build number, starting at `1` and increasing by one per
   build, and the next value can be changed in App Store Connect → the app → **Xcode Cloud** tab →
-  **Settings** → **Build Number** (Admin or App Manager only).
+  **Settings** → **Build Number** (Admin or App Manager only). That pane does not exist before the
+  product is onboarded from Xcode: until then the tab is the marketing page described in step 7
+  (observed 2026-08-25).
 - That number is exposed to custom build scripts as `CI_BUILD_NUMBER` — "The number of the current
   build, for example, `42`" — alongside the rest of the `CI_*` environment.
 - Custom build scripts live in a `ci_scripts` directory beside the project, named
@@ -194,30 +215,27 @@ case is strong — the "next build number" setting exists to avoid *version coll
 occur if the number reaches App Store Connect — and that is the behaviour developers report. But I
 have not confirmed it against a document or a build.
 
-So `CURRENT_PROJECT_VERSION` is only load-bearing for an archive made **locally**, in Xcode — that
-one is uploaded under exactly the number in `project.yml`, and App Store Connect refuses a number
-it already holds. Build `1` was handed to the household on 2026-08-25 and is spoken for, so the
-value moved to `2` for the build that replaces it; it moves again for the next one. Move it on BOTH
-targets together.
-
-Under Xcode Cloud the value is expected to be ignored in favour of the assigned build number, which
-is why nothing here depends on it being right. The durable fix, if a duplicate build number is ever
+So `CURRENT_PROJECT_VERSION` is only load-bearing for an archive made **locally**, in Xcode. Under
+Xcode Cloud the value is expected to be ignored in favour of the assigned build number, which is
+why nothing here depends on it being right. The durable fix, if a duplicate build number is ever
 rejected there, is still a `ci_scripts/ci_pre_xcodebuild.sh` that writes `$CI_BUILD_NUMBER` into the
 version before `xcodebuild` runs, so that no hand edit is needed at all.
 
-`MARKETING_VERSION` is `0.1.0` on both targets and is bumped deliberately, by hand, when there is
-something to call a new version.
-
 ---
 
-## Part 4 — what the first tester sees
+## Part 4 — what a tester sees
 
 1. The build appears under **TestFlight** → the `household` group, after processing.
 2. Export compliance is not asked: both bundles answer it already.
 3. Each tester gets an email, installs Apple's **TestFlight** app, accepts, and installs from there.
-4. On first launch the app asks for **Local Network** access — the server resolves to a private
-   address on the household network, and iOS will silently fail every request until that is allowed.
-5. Signing in is the normal sign-in against `https://memos.discomarder.live`.
+4. Signing in is the normal sign-in against `https://memos.discomarder.live` — but the **first**
+   attempt fails. Nothing in the app touches the network before it, so iOS raises the **Local
+   Network** prompt on the sign-in's own exchange call, possibly just as the sign-on sheet closes,
+   and denies that connection whatever the answer is: the error reads *"The Internet connection
+   appears to be offline."*
+5. Allow **Local Network** (if the prompt was missed: Settings → Apps → memosng → Local Network),
+   then tap **Sign in** again. That attempt completes. The permission is needed because the server
+   resolves to a private address on the household network.
 
 ---
 
