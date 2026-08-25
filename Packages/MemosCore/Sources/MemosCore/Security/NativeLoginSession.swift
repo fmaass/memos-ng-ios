@@ -14,6 +14,11 @@ public enum NativeLoginError: Error, Sendable, Equatable {
     case cancelled
     /// The authentication session could not be put on screen at all.
     case presentationFailed(String)
+    /// A second tap arrived while a sign-in was already on screen. The ONE outcome that is still
+    /// silent, and for the opposite reason a cancel stopped being: nothing went wrong, nothing
+    /// changed, and the browser view the person is looking at is the feedback. A notice here
+    /// would paint a failure over a sign-in that is working.
+    case alreadySigningIn
     /// The identity provider refused, carrying the reason it redirected back with.
     case refused(reason: String)
     /// The callback arrived with neither a code nor a reason.
@@ -27,10 +32,12 @@ public enum NativeLoginError: Error, Sendable, Equatable {
     /// Anything the API layer classified.
     case api(APIError)
 
-    /// What to show. Every case has something to say, `cancelled` included: silence is what the
-    /// failure this flow was rebuilt around looked like from the phone.
+    /// What to show. Every case that is a FAILURE has something to say, `cancelled` included:
+    /// silence is what the failure this flow was rebuilt around looked like from the phone. The
+    /// one silent case is not a failure at all.
     public var message: String? {
         switch self {
+        case .alreadySigningIn: nil
         case .cancelled:
             "The sign-in was closed before it came back. Nothing was signed in - tap Sign in to "
                 + "try again."

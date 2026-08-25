@@ -1,36 +1,33 @@
 import Foundation
 import MemosCore
-import SafariServices
 import SwiftUI
 import UIKit
 
-/// The UI half of the native login: puts the household sign-on in an `SFSafariViewController` the
-/// app presents ITSELF, and hands the callback URL back to the session store.
+/// The UI half of the native login: puts the household sign-on in a browser view the app presents
+/// ITSELF, and hands the callback URL back to the session store.
 ///
 /// It used to be an `ASWebAuthenticationSession`, and that is the whole reason this exists. On one
 /// household iPhone that session presented nothing at all: no sheet, no error, no request reaching
 /// the server, `start()` returning true, and every piece of instrumentation put around it agreeing
-/// that a sign-in had begun. The same build presented fine on another phone, and the "Advanced"
-/// sheet presented fine on the failing one — so ordinary view-controller presentation worked and
-/// only the system's own opaque presentation did not. There is nothing left to instrument inside
-/// it, so it is gone: the browser view is presented by this code, through the same mechanism the
-/// sheet that works uses, and every step of it can be seen.
+/// that a sign-in had begun. A device capture found the cause — that phone holds no domain
+/// association for the server's host, and the session reports that refusal with the same code it
+/// uses for a person closing the sheet. There is nothing left to instrument inside it.
 ///
-/// The password is still never visible to the app. `SFSafariViewController` runs out of process:
-/// its content, its cookies and its form fields belong to Safari, and the app can neither read the
-/// page nor inject into it. That is also what keeps the standing household sign-on usable — the
-/// session is shared with Safari, so a person who is already signed in is not asked again.
+/// The password is still never visible to the app: the browser view runs out of process, and its
+/// content, cookies and form fields belong to Safari.
+///
+/// Every signal this class receives is fenced to the ATTEMPT it was created for. A browser view
+/// closing, a watchdog firing and a URL arriving from outside the process can all reach here after
+/// the attempt that produced them has ended and another has begun; without the fence each of them
+/// cancels or fails a sign-in it has nothing to do with. The fence is `NativeLoginFlow.Attempt`,
+/// checked by the machine, and it is the same generation fence the rest of the app uses.
 @MainActor
 public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
     /// One attempt's objects, which exist only while it is on screen.
-    ///
-    /// The browser view is held STRONGLY, for the reason the authentication session had to be:
-    /// as a local it belongs to a scope that ends the moment the continuation is handed over. It
-    /// is also what a callback has to be able to take down, and the watchdog's evidence that the
-    /// presentation happened at all.
-    private struct Attempt {
+    private struct Live {
+        let attempt: NativeLoginFlow.Attempt
         let continuation: CheckedContinuation<URL, any Error>
-        let browser: SFSafariViewController
+        let browser: any LoginBrowser
         /// Carried per attempt because they name the server that was typed into this one.
         let callbackHost: String
         let callbackPath: String
@@ -39,14 +36,18 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
     /// The view controller the browser view is presented from. Injectable so "there is nowhere to
     /// present" is a test rather than a device.
     private let resolveHost: @MainActor () -> UIViewController?
+    /// How a browser view is made. Injectable for the same reason: the interleavings that broke
+    /// this flow cannot be produced through a real one.
+    private let makeBrowser: @MainActor (URL) -> any LoginBrowser
     private let inbox: NativeLoginCallbackInbox
     /// How long after presenting the view has to be on screen before the app stops believing it.
     private let watchdog: Duration
     private var flow = NativeLoginFlow()
-    private var attempt: Attempt?
+    private var live: Live?
 
     public override init() {
         self.resolveHost = SafariLoginPresenter.currentHost
+        self.makeBrowser = { SafariLoginBrowser(url: $0) }
         self.inbox = .shared
         self.watchdog = .seconds(3)
         super.init()
@@ -55,9 +56,13 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
     init(
         host resolve: @escaping @MainActor () -> UIViewController?,
         inbox: NativeLoginCallbackInbox,
-        watchdog: Duration = .seconds(3)
+        watchdog: Duration = .seconds(3),
+        makeBrowser: @escaping @MainActor (URL) -> any LoginBrowser = {
+            SafariLoginBrowser(url: $0)
+        }
     ) {
         self.resolveHost = resolve
+        self.makeBrowser = makeBrowser
         self.inbox = inbox
         self.watchdog = watchdog
         super.init()
@@ -77,43 +82,63 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
             )
             throw NativeLoginError.presentationFailed("no window is on screen to open it on")
         }
-        // `SFSafariViewController` traps on a URL it cannot browse. It cannot happen —
-        // `ServerConfiguration` only makes https base URLs — but a trap is a worse way to find out.
+        // The browser view cannot open anything but http(s) and TRAPS on a URL it cannot browse.
+        // It cannot happen — `ServerConfiguration` only makes https base URLs — but a trap is a
+        // worse way to find that out than a sentence on the screen.
         guard let scheme = authorizeURL.scheme?.lowercased(), scheme == "https" else {
             MemosLog.session.error("native sign-in: the authorize URL is not an https URL")
             throw NativeLoginError.presentationFailed("the sign-in address cannot be opened")
         }
-        guard attempt == nil else {
-            MemosLog.session.error("native sign-in: a sign-in view is already open")
-            throw NativeLoginError.presentationFailed("a sign-in is already open")
+        // The machine decides whether this tap opens anything. A tap arriving while a sign-in is
+        // already on screen is ignored there, and this is the shape that refusal takes out here:
+        // it is not an error to report, because nothing went wrong and the sign-in the person is
+        // looking at is still running. Reporting it would paint a failure over a working sign-in
+        // AND end the live attempt's `signingIn` state, which is what used to happen.
+        guard case .present(let attempt) = flow.receive(.presented) else {
+            MemosLog.session.debug("native sign-in: a tap arrived while one is already on screen")
+            throw NativeLoginError.alreadySigningIn
         }
         return try await withCheckedThrowingContinuation { continuation in
-            let browser = SFSafariViewController(url: authorizeURL)
-            browser.delegate = self
-            browser.dismissButtonStyle = .cancel
-            attempt = Attempt(
+            let browser = makeBrowser(authorizeURL)
+            live = Live(
+                attempt: attempt,
                 continuation: continuation,
                 browser: browser,
                 callbackHost: callbackHost,
                 callbackPath: callbackPath
             )
+            // Each of these captures the attempt it belongs to rather than reading whatever is
+            // live when it fires. That is the fence: a browser view that closes after its attempt
+            // ended names THAT attempt, and the machine drops it.
+            browser.onClose = { [weak self] in
+                self?.receive(.dismissed(attempt))
+            }
+            browser.onRedirect = { [weak self] url in
+                self?.browserRedirected(to: url, during: attempt)
+            }
+            browser.onInitialLoad = { loaded in
+                MemosLog.session.info(
+                    "native sign-in: the sign-on page loaded: \(loaded, privacy: .public)"
+                )
+            }
             // Registered BEFORE the view is on screen: a return trip cannot be faster than the
             // presentation animation, but a wait that starts after it is a race for no reason.
-            inbox.waitForCallback { [weak self] url in
-                guard let self, let attempt = self.attempt,
+            inbox.waitForCallback(for: attempt) { [weak self] url in
+                guard let self, let live = self.live, live.attempt == attempt,
                     let lane = NativeLoginReturn.lane(
                         of: url,
-                        callbackHost: attempt.callbackHost,
-                        callbackPath: attempt.callbackPath
+                        callbackHost: live.callbackHost,
+                        callbackPath: live.callbackPath
                     )
                 else { return false }
-                self.apply(self.flow.receive(.callback(url, lane)))
+                self.receive(.callback(url, lane, attempt))
                 return true
             }
-            _ = flow.receive(.presented)
-            MemosLog.session.info("native sign-in: presenting the sign-in view")
-            host.present(browser, animated: true)
-            watchPresentation()
+            MemosLog.session.info(
+                "native sign-in: presenting the sign-in view for attempt \(attempt.generation)"
+            )
+            browser.present(from: host)
+            watchPresentation(of: attempt)
         }
     }
 
@@ -122,7 +147,8 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
     /// line in the log of a sign-in, which on a device nobody can attach to is the difference
     /// between "it failed" and "it never got that far".
     public func exchangeFinished(succeeded: Bool) {
-        apply(flow.receive(.exchangeFinished(succeeded: succeeded)))
+        guard case .exchanging(let attempt) = flow.state else { return }
+        receive(.exchangeFinished(succeeded: succeeded, attempt))
     }
 
     /// Did the view actually come up?
@@ -135,61 +161,102 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
     /// this never fires again, whatever happens in it — and it must not, because the return trip
     /// ends with a person reading a page and tapping "Return to memosng" on it. A timer that gave
     /// up while somebody was looking at that button would be this bug with a new face.
-    private func watchPresentation() {
+    ///
+    /// It is fenced to its own attempt, because a timer is the signal most likely to outlive one:
+    /// cancel a sign-in and start another inside three seconds and the first one's watchdog is
+    /// still coming.
+    private func watchPresentation(of attempt: NativeLoginFlow.Attempt) {
         let delay = watchdog
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
-            guard let self, let attempt = self.attempt, self.flow.state == .presenting else {
-                return
-            }
-            if attempt.browser.viewIfLoaded?.window == nil {
+            guard let self, let live = self.live, live.attempt == attempt else { return }
+            if live.browser.isOnScreen {
+                MemosLog.session.info("native sign-in: the sign-in view is on screen")
+            } else {
                 MemosLog.session.error(
                     "native sign-in: the sign-in view is not on screen after presenting it"
                 )
-                self.apply(self.flow.receive(.timedOut))
-            } else {
-                MemosLog.session.info("native sign-in: the sign-in view is on screen")
+                self.receive(.timedOut(attempt))
             }
         }
+    }
+
+    /// The browser followed a redirect while loading. Two things at once.
+    ///
+    /// It is the log line that says how far a sign-in got, which is what was missing when the old
+    /// session failed — and only the scheme, host and path of it, never the query, because the
+    /// callback's query carries the one-shot handoff code.
+    ///
+    /// It is also a third way for the callback to be noticed. A universal link opens the app when
+    /// somebody TAPS it; a server redirect to the same address inside a browser view often just
+    /// loads it. Seeing it here needs neither an association Apple has published nor a link
+    /// anybody tapped, and it hands the URL to the same machine, in the same lane, as the rest.
+    private func browserRedirected(to url: URL, during attempt: NativeLoginFlow.Attempt) {
+        let destination = "\(url.scheme ?? "?")://\(url.host() ?? "?")\(url.path())"
+        MemosLog.session.info(
+            "native sign-in: the browser went to \(destination, privacy: .public)"
+        )
+        guard let live, live.attempt == attempt,
+            let lane = NativeLoginReturn.lane(
+                of: url,
+                callbackHost: live.callbackHost,
+                callbackPath: live.callbackPath
+            )
+        else { return }
+        receive(.callback(url, lane, attempt))
+    }
+
+    /// Every signal goes through the machine, and only the machine's answer is acted on.
+    private func receive(_ event: NativeLoginFlow.Event) {
+        apply(flow.receive(event))
     }
 
     /// Does what the machine decided, and nothing the machine did not.
     private func apply(_ effect: NativeLoginFlow.Effect) {
         switch effect {
-        case .nothing:
+        case .nothing, .present:
+            // `.present` is carried out by `authenticate`, which is the only place that has a
+            // continuation to hold; there is nothing left for it here.
             break
-        case .deliver(let url, let lane):
+        case .deliver(let url, let lane, let attempt):
             MemosLog.session.info(
                 "native sign-in: the callback arrived on the \(lane.description, privacy: .public)"
             )
-            endPresentation()?.continuation.resume(returning: url)
-        case .abandon(let error):
+            end(attempt)?.continuation.resume(returning: url)
+        case .abandon(let error, let attempt):
             let detail = error.message ?? "no reason given"
             MemosLog.session.error(
                 "native sign-in ended without a callback: \(detail, privacy: .public)"
             )
-            endPresentation()?.continuation.resume(throwing: error)
-        case .settle:
+            end(attempt)?.continuation.resume(throwing: error)
+        case .settle(let attempt):
             let outcome = String(describing: flow.state)
             MemosLog.session.info(
                 "native sign-in: the attempt ended \(outcome, privacy: .public)"
             )
+            // Belt and braces: the browser view came down when the callback was delivered, and
+            // this is what makes "no attempt ever ends with its view up" true of every terminal
+            // effect rather than of most of them.
+            _ = end(attempt)
         }
     }
 
-    /// Takes the attempt down and hands it back to be resumed.
+    /// Takes one attempt down and hands it back to be resumed — but only if it is still the live
+    /// one, so a late signal can never end a sign-in that is not its own.
     ///
     /// The attempt is cleared BEFORE the caller resumes anything: that, and not the machine's
     /// state, is what makes it impossible to resume one continuation twice when both return lanes
-    /// deliver the same callback. Returns `nil` when there is nothing left to end.
-    private func endPresentation() -> Attempt? {
-        guard let attempt else { return nil }
-        self.attempt = nil
-        inbox.stopWaiting()
-        // Dismissed by the app, so the delegate's "the person closed it" does not fire — and if a
-        // future iOS decides it should, the machine has already left `presenting` and ignores it.
-        attempt.browser.presentingViewController?.dismiss(animated: true)
-        return attempt
+    /// deliver the same callback.
+    private func end(_ attempt: NativeLoginFlow.Attempt) -> Live? {
+        guard let live, live.attempt == attempt else { return nil }
+        self.live = nil
+        inbox.stopWaiting(for: attempt)
+        // Dismissed by the app, so the browser's "the person closed it" does not fire — and if a
+        // future iOS decides it should, the machine has already left this attempt and drops it.
+        live.browser.onClose = nil
+        live.browser.onRedirect = nil
+        live.browser.dismiss()
+        return live
     }
 
     /// The view controller the browser view is put on top of.
@@ -215,63 +282,6 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
             top = above
         }
         return top
-    }
-}
-
-extension SafariLoginPresenter: SFSafariViewControllerDelegate {
-    /// The person closed the browser view. It is the only cancel signal there is, and it cannot
-    /// tell a deliberate close apart from a finished login whose callback never came back — so it
-    /// is reported either way, and never silently.
-    public nonisolated func safariViewControllerDidFinish(_ controller: SFSafariViewController) {
-        MainActor.assumeIsolated {
-            apply(flow.receive(.dismissed))
-        }
-    }
-
-    /// Instrumentation only. A first load that failed is a sign-in that could never have worked,
-    /// and it is otherwise indistinguishable from a person who did not try.
-    public nonisolated func safariViewController(
-        _ controller: SFSafariViewController,
-        didCompleteInitialLoad didLoadSuccessfully: Bool
-    ) {
-        MainActor.assumeIsolated {
-            MemosLog.session.info(
-                "native sign-in: the sign-on page loaded: \(didLoadSuccessfully, privacy: .public)"
-            )
-        }
-    }
-
-    /// The browser followed a redirect. Two things at once.
-    ///
-    /// It is the log line that says how far a sign-in got, which is what was missing when the old
-    /// session failed — and only the scheme, host and path of it, never the query, because the
-    /// callback's query carries the one-shot handoff code.
-    ///
-    /// It is also a third way for the callback to be noticed. A universal link opens the app when
-    /// somebody TAPS it; a server redirect to the same address inside a browser view often just
-    /// loads it. Seeing it here needs neither an association Apple has published nor a link
-    /// anybody tapped, and it hands the URL to the same machine, in the same lane, as the other
-    /// two.
-    public nonisolated func safariViewController(
-        _ controller: SFSafariViewController,
-        initialLoadDidRedirectTo url: URL
-    ) {
-        MainActor.assumeIsolated {
-            // Only the scheme, host and path of it: a callback's query carries the one-shot
-            // handoff code, and no log line is worth putting a credential in one for.
-            let destination = "\(url.scheme ?? "?")://\(url.host() ?? "?")\(url.path())"
-            MemosLog.session.info(
-                "native sign-in: the browser went to \(destination, privacy: .public)"
-            )
-            guard let attempt,
-                let lane = NativeLoginReturn.lane(
-                    of: url,
-                    callbackHost: attempt.callbackHost,
-                    callbackPath: attempt.callbackPath
-                )
-            else { return }
-            apply(flow.receive(.callback(url, lane)))
-        }
     }
 }
 

@@ -4,207 +4,198 @@ import Testing
 
 @testable import MemosFeatures
 
-/// The sign-in's outcomes, all of them, without a device.
+/// The machine on its own: which transition each pair of state and event produces.
 ///
-/// A live `SFSafariViewController` cannot be driven from a test — the tap that proves it is on a
-/// phone. What CAN be made deterministic is everything the presenter decides around it, and that
-/// is where the failures live: a browser view that never came up, a callback that arrived on both
-/// lanes at once, a person who closed the view, a cancel that has to leave the screen ready to try
-/// again. Each of those was, at some point, a button that appeared to do nothing.
+/// The interleavings that these transitions exist to prevent are exercised through the real object
+/// graph in `NativeLoginLifecycleTests`. This suite is the other half — the exhaustive one, where
+/// every pair is cheap to state, including the ones no sequence of taps produces today.
 @Suite("The native sign-in as a machine")
 struct NativeLoginFlowTests {
     private let callback = URL(string: "https://memos.example.invalid/ios/auth/callback?code=abc")!
     private let tapped = URL(string: "memosng://auth-callback?code=abc")!
 
-    private func presenting() -> NativeLoginFlow {
+    /// Starts an attempt and hands back the machine and the attempt it minted.
+    private func presenting() -> (flow: NativeLoginFlow, attempt: NativeLoginFlow.Attempt) {
         var flow = NativeLoginFlow()
-        #expect(flow.receive(.presented) == .nothing)
-        #expect(flow.state == .presenting)
-        return flow
+        guard case .present(let attempt) = flow.receive(.presented) else {
+            Issue.record("a tap on an idle sign-in did not open one")
+            return (flow, NativeLoginFlow.Attempt(generation: 0))
+        }
+        #expect(flow.state == .presenting(attempt))
+        return (flow, attempt)
     }
 
     @Test("a callback hands the URL over and moves on to the exchange")
     func callbackIsDelivered() {
-        var flow = presenting()
-        let effect = flow.receive(.callback(callback, .universalLink))
-        #expect(effect == .deliver(callback, .universalLink))
-        #expect(flow.state == .exchanging)
+        var (flow, attempt) = presenting()
+        let effect = flow.receive(.callback(callback, .universalLink, attempt))
+        #expect(effect == .deliver(callback, .universalLink, attempt))
+        #expect(flow.state == .exchanging(attempt))
     }
 
-    /// Both lanes can fire for one sign-in: the page redirects to the https callback AND offers
-    /// the tap-to-return link, and a person who taps after the redirect landed sends the same
-    /// login back twice. The second one must do nothing at all — the continuation behind it has
-    /// already been resumed, and resuming one twice is a crash.
     @Test("the second lane's copy of the same callback is ignored")
     func doubleCallbackIsIgnored() {
-        var flow = presenting()
-        _ = flow.receive(.callback(callback, .universalLink))
-        #expect(flow.receive(.callback(tapped, .customScheme)) == .nothing)
-        #expect(flow.state == .exchanging)
+        var (flow, attempt) = presenting()
+        _ = flow.receive(.callback(callback, .universalLink, attempt))
+        #expect(flow.receive(.callback(tapped, .customScheme, attempt)) == .nothing)
+        #expect(flow.state == .exchanging(attempt))
     }
 
     /// The failure this rebuild is about. The app cannot tell a deliberate close apart from a
     /// finished login whose callback never arrived — on the phones this was built for, the second
-    /// one is the likely case — so both get a sentence, and neither gets silence.
+    /// is the likely case — so both get a sentence, and neither gets silence.
     @Test("closing the view without a callback is reported, never swallowed")
     func dismissWithoutCallbackIsVisible() {
-        var flow = presenting()
-        #expect(flow.receive(.dismissed) == .abandon(.cancelled))
+        var (flow, attempt) = presenting()
+        #expect(flow.receive(.dismissed(attempt)) == .abandon(.cancelled, attempt))
         #expect(flow.state == .failed)
         #expect(NativeLoginError.cancelled.message?.isEmpty == false)
     }
 
     @Test("a browser view that never came up fails with something readable")
     func viewThatNeverAppeared() {
-        var flow = presenting()
-        let effect = flow.receive(.timedOut)
-        #expect(effect == .abandon(.presentationFailed(NativeLoginFlow.neverAppeared)))
+        var (flow, attempt) = presenting()
+        let effect = flow.receive(.timedOut(attempt))
+        #expect(effect == .abandon(.presentationFailed(NativeLoginFlow.neverAppeared), attempt))
         #expect(flow.state == .failed)
-        guard case .abandon(let error) = effect else {
+        guard case .abandon(let error, _) = effect else {
             Issue.record("a view that never appeared did not abandon the attempt")
             return
         }
         #expect(error.message?.isEmpty == false)
     }
 
-    /// The app takes the browser view down itself once a callback arrives. If the delegate reports
-    /// that as a close — it does not today, and a future iOS may — it must not be read as a person
-    /// cancelling a sign-in that in fact succeeded.
     @Test("the app's own dismissal after a callback is not a cancel")
     func dismissAfterTheCallbackIsNotACancel() {
-        var flow = presenting()
-        _ = flow.receive(.callback(callback, .universalLink))
-        #expect(flow.receive(.dismissed) == .nothing)
-        #expect(flow.state == .exchanging)
+        var (flow, attempt) = presenting()
+        _ = flow.receive(.callback(callback, .universalLink, attempt))
+        #expect(flow.receive(.dismissed(attempt)) == .nothing)
+        #expect(flow.state == .exchanging(attempt))
     }
 
     @Test("a watchdog that fires after the answer arrived changes nothing")
     func lateWatchdog() {
-        var flow = presenting()
-        _ = flow.receive(.callback(tapped, .customScheme))
-        #expect(flow.receive(.timedOut) == .nothing)
-        #expect(flow.state == .exchanging)
+        var (flow, attempt) = presenting()
+        _ = flow.receive(.callback(tapped, .customScheme, attempt))
+        #expect(flow.receive(.timedOut(attempt)) == .nothing)
+        #expect(flow.state == .exchanging(attempt))
+    }
+
+    /// Every signal an ended attempt can still produce, aimed at the machine while a LATER attempt
+    /// is on screen. All of them must do nothing: each one otherwise cancels or fails a sign-in
+    /// that has nothing to do with it.
+    @Test("no signal from a finished attempt touches the one that replaced it")
+    func staleSignalsAreDropped() {
+        var (flow, first) = presenting()
+        _ = flow.receive(.dismissed(first))
+        guard case .present(let second) = flow.receive(.presented) else {
+            Issue.record("a retry after a cancel did not open a sign-in")
+            return
+        }
+
+        #expect(flow.receive(.dismissed(first)) == .nothing)
+        #expect(flow.receive(.timedOut(first)) == .nothing)
+        #expect(flow.receive(.callback(callback, .universalLink, first)) == .nothing)
+        #expect(flow.receive(.exchangeFinished(succeeded: true, first)) == .nothing)
+        #expect(flow.state == .presenting(second), "a stale signal moved the live attempt")
+
+        // And the live one still works.
+        #expect(
+            flow.receive(.callback(tapped, .customScheme, second))
+                == .deliver(tapped, .customScheme, second)
+        )
+    }
+
+    @Test("an attempt id is never reused, so a late signal can never look current")
+    func attemptsAreNeverReused() {
+        var flow = NativeLoginFlow()
+        var seen: Set<NativeLoginFlow.Attempt> = []
+        for _ in 0..<5 {
+            guard case .present(let attempt) = flow.receive(.presented) else {
+                Issue.record("a tap on a finished sign-in did not open one")
+                return
+            }
+            #expect(seen.insert(attempt).inserted, "an attempt id came back a second time")
+            _ = flow.receive(.dismissed(attempt))
+        }
+    }
+
+    /// A visible browser view IS the affordance: there is nothing a second tap could add, and both
+    /// alternatives are worse — two live attempts, or a failure notice over a working sign-in.
+    @Test("a tap while a sign-in is on screen opens nothing")
+    func aSecondTapOpensNothing() {
+        var (flow, attempt) = presenting()
+        #expect(flow.receive(.presented) == .nothing)
+        #expect(flow.state == .presenting(attempt), "a second tap replaced the live attempt")
+
+        _ = flow.receive(.callback(callback, .universalLink, attempt))
+        #expect(flow.receive(.presented) == .nothing)
+        #expect(flow.state == .exchanging(attempt), "a tap mid-exchange replaced the attempt")
     }
 
     @Test("a cancelled sign-in can be tried again from the same screen")
     func cancelThenRetry() {
-        var flow = presenting()
-        _ = flow.receive(.dismissed)
+        var (flow, first) = presenting()
+        _ = flow.receive(.dismissed(first))
         #expect(flow.state == .failed)
 
-        #expect(flow.receive(.presented) == .nothing)
-        #expect(flow.state == .presenting)
-        #expect(flow.receive(.callback(tapped, .customScheme)) == .deliver(tapped, .customScheme))
-    }
-
-    /// The machine may never be the reason a tap does nothing, whatever it thinks is happening —
-    /// an exchange whose outcome never came back would otherwise wedge the screen for good, which
-    /// is the exact symptom this replaced.
-    @Test(
-        "a tap is honoured from every state there is",
-        arguments: [
-            NativeLoginFlow.State.idle, .presenting, .exchanging, .done, .failed,
-        ]
-    )
-    func aTapIsNeverIgnored(_ start: NativeLoginFlow.State) {
-        var flow = NativeLoginFlow()
-        switch start {
-        case .idle:
-            break
-        case .presenting:
-            _ = flow.receive(.presented)
-        case .exchanging:
-            _ = flow.receive(.presented)
-            _ = flow.receive(.callback(callback, .universalLink))
-        case .done:
-            _ = flow.receive(.presented)
-            _ = flow.receive(.callback(callback, .universalLink))
-            _ = flow.receive(.exchangeFinished(succeeded: true))
-        case .failed:
-            _ = flow.receive(.presented)
-            _ = flow.receive(.dismissed)
+        guard case .present(let second) = flow.receive(.presented) else {
+            Issue.record("a cancelled sign-in could not be tried again")
+            return
         }
-        #expect(flow.state == start)
-
-        #expect(flow.receive(.presented) == .nothing)
-        #expect(flow.state == .presenting)
+        #expect(second != first)
+        #expect(flow.state == .presenting(second))
     }
 
     @Test("the exchange's outcome is what ends the attempt", arguments: [true, false])
     func exchangeOutcomeEndsIt(_ succeeded: Bool) {
-        var flow = presenting()
-        _ = flow.receive(.callback(callback, .universalLink))
-        #expect(flow.receive(.exchangeFinished(succeeded: succeeded)) == .settle)
+        var (flow, attempt) = presenting()
+        _ = flow.receive(.callback(callback, .universalLink, attempt))
+        #expect(flow.receive(.exchangeFinished(succeeded: succeeded, attempt)) == .settle(attempt))
         #expect(flow.state == (succeeded ? .done : .failed))
     }
 
     @Test("an outcome reported for an attempt that never started does nothing")
     func outcomeWithoutAnAttempt() {
         var flow = NativeLoginFlow()
-        #expect(flow.receive(.exchangeFinished(succeeded: true)) == .nothing)
-        #expect(flow.receive(.dismissed) == .nothing)
-        #expect(flow.receive(.timedOut) == .nothing)
+        let ghost = NativeLoginFlow.Attempt(generation: 99)
+        #expect(flow.receive(.exchangeFinished(succeeded: true, ghost)) == .nothing)
+        #expect(flow.receive(.dismissed(ghost)) == .nothing)
+        #expect(flow.receive(.timedOut(ghost)) == .nothing)
         #expect(flow.state == .idle)
     }
-}
 
-/// The seam between a URL the app was opened with and the sign-in waiting for one.
-@Suite("The sign-in's callback inbox")
-struct NativeLoginCallbackInboxTests {
-    private let callback = URL(string: "memosng://auth-callback?code=abc")!
-    private let unrelated = URL(string: "https://memos.example.invalid/m/abc123")!
-
-    @Test("a waiting sign-in is offered the URL and takes its own")
-    func theWaiterClaimsItsCallback() {
-        let inbox = NativeLoginCallbackInbox()
-        let seen = Recorder()
-        inbox.waitForCallback { url in
-            seen.record(url)
-            return url.scheme == "memosng"
+    /// The invariant, checked by walking every event out of every state rather than by trusting
+    /// the presenter to remember it: an attempt that stops being on screen is always told to take
+    /// its browser view down. A terminal state that left one up is a sign-in nobody can escape.
+    @Test("no attempt ever stops presenting without its browser view being taken down")
+    func everyTerminalTransitionTakesTheViewDown() {
+        for event in everyEvent {
+            var (flow, attempt) = presenting()
+            let effect = flow.receive(event(attempt))
+            guard flow.state.liveAttempt != attempt else {
+                #expect(
+                    !effect.takesTheBrowserDown,
+                    "a still-presenting attempt was told to take its view down: \(effect)"
+                )
+                continue
+            }
+            #expect(
+                effect.takesTheBrowserDown,
+                "the attempt stopped presenting with its view still up: \(effect)"
+            )
+            #expect(effect.attempt == attempt, "the effect named a different attempt: \(effect)")
         }
-
-        #expect(inbox.deliver(callback))
-        #expect(seen.urls == [callback])
     }
 
-    /// Every URL the app opens for any reason passes through here. One of them resolving a sign-in
-    /// that is waiting for a credential would be a sign-in finished by something that is not one.
-    @Test("a URL the sign-in does not recognise is refused, not acted on")
-    func anUnrelatedURLIsRefused() {
-        let inbox = NativeLoginCallbackInbox()
-        inbox.waitForCallback { $0.scheme == "memosng" }
-
-        #expect(!inbox.deliver(unrelated))
-    }
-
-    @Test("with nothing waiting, nothing claims anything")
-    func nobodyWaiting() {
-        let inbox = NativeLoginCallbackInbox()
-        #expect(!inbox.deliver(callback))
-    }
-
-    @Test("a sign-in that is over stops being offered URLs")
-    func stopWaiting() {
-        let inbox = NativeLoginCallbackInbox()
-        let seen = Recorder()
-        inbox.waitForCallback { url in
-            seen.record(url)
-            return true
-        }
-        #expect(inbox.deliver(callback))
-        inbox.stopWaiting()
-
-        #expect(!inbox.deliver(callback))
-        #expect(seen.urls.count == 1, "a finished sign-in was still being offered callbacks")
-    }
-}
-
-/// What the inbox handed over, in order.
-@MainActor
-private final class Recorder {
-    private(set) var urls: [URL] = []
-
-    func record(_ url: URL) {
-        urls.append(url)
+    private var everyEvent: [(NativeLoginFlow.Attempt) -> NativeLoginFlow.Event] {
+        [
+            { _ in .presented },
+            { .callback(URL(string: "memosng://auth-callback?code=abc")!, .customScheme, $0) },
+            { .dismissed($0) },
+            { .timedOut($0) },
+            { .exchangeFinished(succeeded: true, $0) },
+            { .exchangeFinished(succeeded: false, $0) },
+        ]
     }
 }
