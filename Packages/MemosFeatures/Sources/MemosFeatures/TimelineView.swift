@@ -20,6 +20,7 @@ public struct TimelineView: View {
     // Optional: a preview or a test host has no outbox, and a missing environment value must not
     // be a crash on the app's main screen.
     @Environment(Outbox.self) private var outbox: Outbox?
+    @Environment(\.scenePhase) private var scenePhase
     @State private var timeline: TimelineStore?
     @State private var composing: ComposeView.Mode?
     @State private var signOutStage = SignOutFlow.Stage.idle
@@ -164,6 +165,23 @@ public struct TimelineView: View {
             // Adopt whatever the last run left in flight before anything new is scheduled.
             await outbox?.start()
         }
+        // The live media channel, and its single owner.
+        //
+        // One channel for the whole signed-in app: this view is what `RootView` shows exactly
+        // while there is a session, and it holds the store every event is applied to — so a memo's
+        // own screen, pushed over this one, needs no channel of its own the way it once needed a
+        // poll of its own.
+        //
+        // Attached to the NAVIGATION STACK, not to the timeline inside it. A view inside the stack
+        // is the thing a push covers, and whether covering it cancels its `.task` is a detail of
+        // SwiftUI's version rather than of this app. Out here the question does not arise: nothing
+        // a push does to the root's content reaches this modifier, so the channel's lifetime is
+        // the screen's, which is what it is supposed to be.
+        //
+        // Keyed on the DECISION, so SwiftUI's own cancellation is the mechanism: the decision
+        // going false IS the teardown, and its going true again — foregrounded, signed in, and the
+        // store now built by the task above — IS the restart.
+        .task(id: mediaChannelRuns) { await runMediaChannel() }
         // A capture that leaves the queue has become a memo on the server; the list it belongs in
         // is reloaded so it does not appear to have vanished.
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
@@ -264,14 +282,6 @@ public struct TimelineView: View {
                             else { return }
                             await timeline.loadMore(using: client, baseURL: baseURL)
                         }
-                        // Ends the WAITING treatment without anybody pulling the timeline down.
-                        // Keyed on whether this memo is still waiting, so the loop is started when
-                        // it becomes true and torn down when it stops being true — and cancelled
-                        // by SwiftUI when the row itself goes away.
-                        .task(id: memo.isAwaitingTiers) {
-                            guard memo.isAwaitingTiers else { return }
-                            await pollTiers(memo.uid, in: timeline)
-                        }
                     }
                 } header: {
                     DayHeader(title: TimelineGrouping.title(for: section.day))
@@ -342,16 +352,35 @@ public struct TimelineView: View {
         }
     }
 
-    /// Re-reads a memo whose attachments the server has not finished deriving, on a capped
-    /// backoff, until it has.
+    /// Whether the live media channel belongs open right now. The rule itself is
+    /// `MediaChannel.shouldRun`, where it can be asserted for every phase rather than observed on
+    /// a device.
+    private var mediaChannelRuns: Bool {
+        MediaChannel.shouldRun(
+            phase: MediaChannelPhase(scenePhase),
+            signedIn: session.state.user != nil,
+            hasTimeline: timeline != nil
+        )
+    }
+
+    /// Ends the WAITING treatment without anybody pulling the timeline down: the server pushes an
+    /// event as each attachment is derived, and the tile it belongs to flips where it sits.
     ///
-    /// SEAM (phase 5c): this is the INTERIM. `GET /api/events` (SSE) already pushes media-ready
-    /// events to the web app; when this client subscribes to that stream, this call and
-    /// `TierReadinessPoll` behind it go, and `TimelineStore.refreshMemo` becomes the handler for
-    /// one event.
-    private func pollTiers(_ uid: String, in timeline: TimelineStore) async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        await TierReadinessPoll.run(uid: uid, in: timeline, using: client, baseURL: baseURL)
+    /// The reconciling read belongs to the CONNECTION, not to this call, so `consume` owns it and
+    /// runs it at every open — see `MediaChannel.uidsToReconcile` for what a per-channel pass
+    /// would miss. Everything this function does is hand over what a connection needs.
+    private func runMediaChannel() async {
+        guard mediaChannelRuns,
+            let timeline,
+            let client = session.api,
+            let baseURL = session.serverBaseURL
+        else { return }
+        await MediaChannel.consume(
+            MediaEventClient.device().stream(),
+            into: timeline,
+            using: client,
+            baseURL: baseURL
+        )
     }
 
     private func delete(_ memo: Memo, in timeline: TimelineStore) async {

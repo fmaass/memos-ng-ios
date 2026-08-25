@@ -249,19 +249,17 @@ public final class TimelineStore {
 
     /// Re-reads ONE memo from the server and applies it to the loaded list.
     ///
-    /// This is the read half of the tier-ready refresh: a memo posted a moment ago carries
-    /// attachments the media worker has not derived yet, and nothing on the client can produce
-    /// those tiers — only asking again can. It goes through the same `apply` an edit does, so a
-    /// re-read lands in the card that is already on screen instead of appearing as a new row.
-    ///
-    /// SEAM (phase 5c): this whole polling arrangement is the INTERIM. `GET /api/events` (SSE)
-    /// already pushes media-ready events to the SPA; when the app subscribes to it, the poll in
-    /// `TierReadinessPoll` goes and this method becomes the handler for one event.
+    /// The live media channel is what ends the waiting now, so this is no longer a poll. It is the
+    /// single reconciling read `MediaChannel.reconcile` makes when the channel starts, for the one
+    /// case the stream cannot report: an attachment that finished while no connection was open is
+    /// in no snapshot the server compares against, so nothing on the stream will ever mention it.
+    /// It goes through the same `apply` an edit does, so the answer lands in the card that is
+    /// already on screen instead of appearing as a new row.
     ///
     /// A failure is deliberately NOT reported into `lastError`: this runs in the background,
-    /// behind a screen nobody asked to refresh, and a blip on a poll must not paint an error
-    /// banner over a timeline that is working. A 401 is different — it ends the session wherever
-    /// it happens — so that one is still handed on.
+    /// behind a screen nobody asked to refresh, and a blip on it must not paint an error banner
+    /// over a timeline that is working. A 401 is different — it ends the session wherever it
+    /// happens — so that one is still handed on.
     @discardableResult
     public func refreshMemo(
         uid: String,
@@ -285,6 +283,23 @@ public final class TimelineStore {
             if apiError == .unauthorized { await onUnauthorized() }
             return false
         }
+    }
+
+    /// Applies one live media event to the loaded timeline.
+    ///
+    /// The transform itself is `applyMediaEvent`, which is pure and shared in spirit with the SPA's
+    /// version of the same name; this is only where it meets the observable list.
+    ///
+    /// It writes back ONLY when something actually moved. A transcode emits an event roughly every
+    /// one and a half seconds as its percentage climbs (memos-ng `app/routers/assets.py:766`), and
+    /// this app shows no percentage — so most of those events change nothing a reader can see.
+    /// Assigning the array anyway would re-render the whole timeline once per event for a value
+    /// nothing on screen reads, which is the shape of the reconnect churn this channel is supposed
+    /// not to have.
+    public func apply(_ event: MediaEvent) {
+        let next = applyMediaEvent(event, to: memos)
+        guard next != memos else { return }
+        memos = next
     }
 
     /// Ticks or unticks the Nth rendered checkbox of a memo.
