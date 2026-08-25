@@ -59,6 +59,12 @@ public final class SessionStore {
     /// default says less rather than something invented: an app that tells someone their memo
     /// will be Private when the account says Public is worse than one that stays vague.
     public private(set) var defaultVisibility: MemoVisibility?
+    /// The account's picture, exactly as the server stores it: a `data:image/…` URL, or `nil`.
+    ///
+    /// Kept as the STRING rather than as decoded bytes, because decoding it is a screen's problem
+    /// and most screens never ask. It arrives on the same `/api/settings` read as the default
+    /// above and has the same lifetime — it belongs to the account, not to the app.
+    public private(set) var avatar: String?
 
     private let credentials: any CredentialStore
     private let makeClient:
@@ -365,6 +371,7 @@ public final class SessionStore {
         // the way the published binding is, so it is reset where that is published and cleared
         // where that is revoked, and never anywhere else.
         defaultVisibility = nil
+        avatar = nil
         sessionGeneration += 1
         // Same lifecycle, one layer over: whatever the previous account's photos were, they are
         // not this one's, and a uid is only unique within one server.
@@ -494,6 +501,7 @@ public final class SessionStore {
         // have the compose sheet promise someone else's setting. Cleared here, alongside the
         // licence this method revokes, because they scope to the identity together.
         defaultVisibility = nil
+        avatar = nil
         sessionGeneration += 1
         identity.rotate()
         state = .signedOut
@@ -596,12 +604,12 @@ public final class SessionStore {
         guard let client else { return }
         let generation = sessionGeneration
         do {
-            let visibility = try await Self.settings(client)
+            let settings = try await Self.settings(client)
             guard generation == sessionGeneration else {
                 MemosLog.session.info("GET /api/settings answered for a session that has ended")
                 return
             }
-            defaultVisibility = visibility
+            apply(settings)
         } catch let error as APIError where error == .unauthorized {
             guard generation == sessionGeneration else { return }
             await handle(.unauthorized)
@@ -610,12 +618,89 @@ public final class SessionStore {
         }
     }
 
-    static func settings(_ client: any APIProtocol) async throws -> MemoVisibility {
+    /// Changes who sees a memo when nobody says otherwise, on the SERVER.
+    ///
+    /// The account already owns this setting — the compose sheet's unmarked "Default" resolves
+    /// through `defaultVisibility`, which `loadSettings` reads from `/api/settings`, and the web
+    /// app edits the same field. So a Settings screen that kept a second answer on the phone would
+    /// give one account two defaults that disagree, and the compose pill would name whichever of
+    /// them was consulted last. There is one setting, it lives where it already lived, and this is
+    /// how it is written.
+    ///
+    /// Nothing is moved optimistically. What is displayed afterwards is the SERVER's copy out of
+    /// the PATCH response, so a change that did not take cannot leave the screen claiming it did.
+    /// The generation guard is the one `loadSettings` carries and is there for the same reason: a
+    /// reply can outlive the session that asked.
+    @discardableResult
+    public func setDefaultVisibility(_ visibility: MemoVisibility) async -> Bool {
+        guard let client else { return false }
+        let generation = sessionGeneration
+        do {
+            let settings = try await Self.updateSettings(client, defaultVisibility: visibility)
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("PATCH /api/settings answered for a session that has ended")
+                return false
+            }
+            apply(settings)
+            return true
+        } catch let error as APIError where error == .unauthorized {
+            guard generation == sessionGeneration else { return false }
+            await handle(.unauthorized)
+            return false
+        } catch {
+            MemosLog.session.info("PATCH /api/settings was refused; the default is unchanged")
+            return false
+        }
+    }
+
+    private func apply(_ settings: AccountSettings) {
+        defaultVisibility = settings.defaultVisibility
+        avatar = settings.avatar
+    }
+
+    /// What `/api/settings` says about the account, in the app's own vocabulary. The server also
+    /// carries a `theme` string; it is the web app's, and the native app deliberately does not
+    /// read or write it (see `AppSettings`).
+    struct AccountSettings: Sendable, Equatable {
+        let defaultVisibility: MemoVisibility
+        let avatar: String?
+    }
+
+    static func settings(_ client: any APIProtocol) async throws -> AccountSettings {
         let response = try await client.getSettingsApiSettingsGet(.init())
         switch response {
         case .ok(let ok):
             MemosLog.session.info("GET /api/settings -> 200")
-            return MemoVisibility(try ok.body.json.defaultVisibility)
+            let json = try ok.body.json
+            return AccountSettings(
+                defaultVisibility: MemoVisibility(json.defaultVisibility),
+                avatar: json.avatar
+            )
+        case .undocumented(let statusCode, _):
+            throw APIError.fromStatus(statusCode)
+        }
+    }
+
+    /// Sends exactly the field being changed. Every property of the patch is optional and the
+    /// server applies only the ones present, so naming the others — even with what it just said
+    /// they were — would turn a change of one setting into a write of all of them.
+    static func updateSettings(
+        _ client: any APIProtocol,
+        defaultVisibility: MemoVisibility
+    ) async throws -> AccountSettings {
+        let response = try await client.updateSettingsApiSettingsPatch(
+            .init(body: .json(.init(defaultVisibility: defaultVisibility.generated)))
+        )
+        switch response {
+        case .ok(let ok):
+            MemosLog.session.info("PATCH /api/settings -> 200")
+            let json = try ok.body.json
+            return AccountSettings(
+                defaultVisibility: MemoVisibility(json.defaultVisibility),
+                avatar: json.avatar
+            )
+        case .unprocessableContent:
+            throw APIError.server(status: 422)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
