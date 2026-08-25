@@ -127,13 +127,20 @@ public enum MediaChannel {
     /// The reconcile is awaited in line. Events that arrive during it are not lost — the channel
     /// buffers without bound — and one that lands after it cannot undo it, because an in-flight
     /// event never applies to an attachment the re-read already found finished.
+    ///
+    /// What an event MEANS is `mediaEventOutcome`, decided here rather than inside the store for
+    /// the same reason everything else in this file is a function over values: the answer includes
+    /// "this one cannot be applied in place", and the read that replaces it needs the client and
+    /// the base URL that only a connection has. `now` is injected for the same reason it is a
+    /// parameter there — the rule is a boundary in time.
     @MainActor
     public static func consume(
         _ stream: AsyncStream<MediaEventStreamItem>,
         into store: TimelineStore,
         using client: any APIProtocol,
         baseURL: URL,
-        identity: MediaIdentity = .shared
+        identity: MediaIdentity = .shared,
+        now: @Sendable () -> Date = { Date() }
     ) async {
         for await item in stream {
             switch item {
@@ -148,7 +155,20 @@ public enum MediaChannel {
                 }
             case .event(let envelope):
                 guard let event = envelope.eventIfCurrent(for: identity) else { continue }
-                store.apply(event)
+                // Read on this actor, at the moment the answer is used — the list cannot move
+                // between the decision and what it decides, because neither awaits.
+                switch mediaEventOutcome(event, for: store.memos, at: now()) {
+                case .unchanged:
+                    break
+                case .applied:
+                    store.apply(event)
+                case .refresh(let uid):
+                    // The tile is about to be flipped onto a URL that has outlived its
+                    // signature, so it is the MEMO that is re-read: the answer carries freshly
+                    // minted URLs, and the same in-place `apply` the reconcile uses puts it into
+                    // the card already on screen.
+                    await store.refreshMemo(uid: uid, using: client, baseURL: baseURL)
+                }
             }
         }
     }

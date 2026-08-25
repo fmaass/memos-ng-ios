@@ -60,6 +60,17 @@ final class MediaImageStore {
         return true
     }
 
+    /// Drops ONE entry — the decoded half of what `MediaCache.evictExpired` does to the response
+    /// cache, and never called on its own: `MediaImageLoader.evictLapsedSignature` is the pair.
+    ///
+    /// It syncs to the identity clock first for the same reason every other access does. A store
+    /// still holding the previous account's images would otherwise remove one key out of them and
+    /// leave the rest, which is a cache half-emptied for the wrong reason.
+    func remove(forKey key: MediaImageKey) {
+        syncToIdentity()
+        cache.removeObject(forKey: key.storageKey as NSString)
+    }
+
     func purge() {
         cache.removeAllObjects()
     }
@@ -131,6 +142,33 @@ public enum MediaImageLoader {
 
     public static func key(for attachment: MemoAttachment, tier: MediaTier) -> MediaImageKey {
         MediaImageKey(uid: attachment.uid, tier: tier.rawValue)
+    }
+
+    /// Everything held for a key whose signed URL has lapsed, dropped as ONE rule: the response
+    /// bytes AND the decoded picture.
+    ///
+    /// The two layers are cleansed together because they are equally able to paint a stale frame,
+    /// and only one of them was being cleansed. `URLCache` is the transport's, and evicting from
+    /// it is what stops a lapsed signature being re-served from disk — but this layer keeps the
+    /// DECODED image under `(uid, tier)` precisely so that it survives the server re-signing, and
+    /// `cached(for:)` is read synchronously in `body`. A tile mounting after the eviction would
+    /// therefore paint the old picture instantly, out of memory, with no request to notice — the
+    /// entry the eviction was for, one layer up.
+    ///
+    /// Keyed by `(uid, tier)` and not by the URL, so the entry dropped is the one the lapsed URL
+    /// addresses whichever signature it was fetched under.
+    ///
+    /// Returns whether anything lapsed, so a caller can assert the rule rather than assume it.
+    @discardableResult
+    static func evictLapsedSignature(
+        url: URL,
+        key: MediaImageKey,
+        at now: Date = Date(),
+        cache: URLCache = MediaSession.shared.cache
+    ) -> Bool {
+        guard MediaCache.evictExpired(url, at: now, cache: cache) else { return false }
+        store.remove(forKey: key)
+        return true
     }
 
     /// What has already been decoded, if anything — the common case once a tile has been seen, and

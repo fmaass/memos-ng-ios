@@ -379,6 +379,96 @@ struct MediaImageLoaderTests {
         #expect(SignedMediaURL(url: live).cachePolicy(at: Date()) == .useProtocolCachePolicy)
         #expect(SignedMediaURL(url: dead).cachePolicy(at: Date()) == .reloadIgnoringLocalCacheData)
     }
+
+    // MARK: - one freshness rule across both layers
+
+    /// Evicting a lapsed signature used to cleanse one of the two things that can paint it.
+    ///
+    /// `URLCache` holds the bytes and is what a fetch is answered from; this layer holds the
+    /// DECODED picture under `(uid, tier)` precisely so that it survives the server re-signing,
+    /// and `cached(for:)` is read synchronously in a view body. So a tile mounting after the
+    /// eviction painted the picture instantly, out of memory, with no request to notice — the
+    /// entry the eviction was for, one layer up. Both go, or neither means anything.
+    ///
+    /// This is also what the viewer's appearance test now proves the WIRING of: that test drives
+    /// a real page and asserts the response entry is dropped, and this function is the only path
+    /// left to `MediaCache.evictExpired` in this package.
+    @Test("a lapsed signature drops the decoded picture as well as the cached response")
+    func aLapsedSignatureDropsBothLayers() throws {
+        let key = MediaImageKey(uid: "lapsed-both", tier: "thumb")
+        let neighbour = MediaImageKey(uid: "lapsed-neighbour", tier: "thumb")
+        // Long past whatever clock the simulator runs on.
+        let dead = MediaFixture.signed(uid: "lapsed-both", exp: 1)
+        let cache = try seeded(dead)
+        let request = URLRequest(url: dead)
+
+        let picture = try #require(UIImage(data: MediaFixture.png(.red)))
+        let other = try #require(UIImage(data: MediaFixture.png(.blue)))
+        let generation = MediaImageLoader.store.generation
+        MediaImageLoader.store.store(picture, forKey: key, generation: generation)
+        MediaImageLoader.store.store(other, forKey: neighbour, generation: generation)
+        // Both really are there beforehand — otherwise the assertions below say nothing.
+        #expect(MediaImageLoader.cachedUIImage(for: key) === picture)
+        #expect(MediaImageLoader.cachedUIImage(for: neighbour) === other)
+
+        let dropped = MediaImageLoader.evictLapsedSignature(url: dead, key: key, cache: cache)
+
+        #expect(dropped)
+        #expect(cache.cachedResponse(for: request) == nil, "the response bytes survived")
+        #expect(
+            MediaImageLoader.cachedUIImage(for: key) == nil,
+            "a lapsed signature left a decoded picture that still paints"
+        )
+        // The eviction is one key, not a purge: a timeline scrolls past dozens of tiles whose
+        // signatures are fine, and emptying the store for one of them would re-fetch all of them.
+        #expect(
+            MediaImageLoader.cachedUIImage(for: neighbour) === other,
+            "an unrelated attachment was dropped with it"
+        )
+    }
+
+    /// The control: nothing lapsed, nothing dropped. Without it the test above would pass just as
+    /// well against an eviction that emptied everything unconditionally.
+    @Test("a signature still inside its life drops neither layer")
+    func aLiveSignatureDropsNothing() throws {
+        let key = MediaImageKey(uid: "live-both", tier: "thumb")
+        let live = MediaFixture.signed(uid: "live-both")
+        let cache = try seeded(live)
+        let request = URLRequest(url: live)
+
+        let picture = try #require(UIImage(data: MediaFixture.png(.green)))
+        MediaImageLoader.store.store(
+            picture, forKey: key, generation: MediaImageLoader.store.generation
+        )
+
+        let dropped = MediaImageLoader.evictLapsedSignature(url: live, key: key, cache: cache)
+
+        #expect(!dropped)
+        #expect(cache.cachedResponse(for: request) != nil, "a live signature lost its bytes")
+        #expect(MediaImageLoader.cachedUIImage(for: key) === picture)
+    }
+
+    /// A cache of this test's OWN, memory-only, holding one response for `url`.
+    ///
+    /// Not the media session's: that one is a process-wide singleton and disk-backed, so a
+    /// seed-then-read against it is a timing test wearing a correctness test's clothes.
+    private func seeded(_ url: URL) throws -> URLCache {
+        let cache = URLCache(memoryCapacity: 4 * 1024 * 1024, diskCapacity: 0, directory: nil)
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "image/png"]
+            )
+        )
+        cache.storeCachedResponse(
+            CachedURLResponse(response: response, data: MediaFixture.png(.red)),
+            for: URLRequest(url: url)
+        )
+        #expect(cache.cachedResponse(for: URLRequest(url: url)) != nil, "the seed did not land")
+        return cache
+    }
 }
 
 @MainActor

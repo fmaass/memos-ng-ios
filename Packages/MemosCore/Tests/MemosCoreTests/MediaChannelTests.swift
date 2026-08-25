@@ -24,10 +24,15 @@ struct MediaChannelTests {
 
     private nonisolated static func memo(
         _ status: String,
+        exp: Int? = nil,
+        sig: String = "aaaa",
         uid: String = MediaChannelTests.uid,
         attachment: String = MediaChannelTests.attachment
     ) -> String {
-        Stub.memo(uid: uid, attachments: [Stub.attachment(uid: attachment, status: status)])
+        Stub.memo(
+            uid: uid,
+            attachments: [Stub.attachment(uid: attachment, status: status, exp: exp, sig: sig)]
+        )
     }
 
     /// A store holding one memo whose single attachment is at the given stage, loaded the way the
@@ -336,6 +341,192 @@ struct MediaChannelTests {
         #expect(AttachmentStatus(MediaAttachmentStatus.ready) == .ready)
         #expect(AttachmentStatus(MediaAttachmentStatus.failed) == .failed)
         #expect(MediaAttachmentStatus.allCases.count == 5)
+    }
+
+    // MARK: - the signed-URL horizon
+
+    /// The moment this whole rule is for.
+    ///
+    /// The derived-tier URLs on a loaded memo were signed when the memo was READ. An attachment
+    /// that stays pending for longer than that signature lives — a long transcode, a queue behind
+    /// it — and only then goes ready would be flipped onto a URL the server will refuse, and the
+    /// tile would show a broken picture until somebody pulled the timeline down. So the memo is
+    /// re-read instead: that is the only place a freshly minted URL comes from.
+    ///
+    /// Nothing here waits for an hour to pass. The clock is handed to `consume` and the `exp` on
+    /// the loaded URLs is written relative to it, so the test says which side of the boundary it
+    /// is on.
+    @Test("a ready event past the URL horizon re-reads the memo instead of reusing its URLs")
+    func aReadyEventPastTheURLHorizonRefreshes() async {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let lapsed = Int(now.timeIntervalSince1970) - 60
+        let fresh = Int(now.timeIntervalSince1970) + 7200
+        let gets = Counter()
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Self.memo("pending", exp: lapsed)]))
+            case "get_memo_api_memos__uid__get":
+                gets.increment()
+                // A signature of its own, so the URL the tile ends on can only have come from
+                // here and not from the copy the timeline was loaded with.
+                return Stub.json(Self.memo("ready", exp: fresh, sig: "bbbb"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.memos.first?.attachments.first?.readiness == .waiting)
+
+        // No `.open` in the stream: every read this test counts is the event's own.
+        await MediaChannel.consume(
+            channel([.event(envelope(Self.readyEvent))]),
+            into: store,
+            using: client,
+            baseURL: Stub.baseURL,
+            identity: MediaIdentity(),
+            now: { now }
+        )
+
+        #expect(gets.count == 1, "the event was reused in place onto a URL that had lapsed")
+        let patched = store.memos.first?.attachments.first
+        #expect(patched?.readiness == .ready)
+        let thumbnail = patched?.thumbnailURL?.absoluteString ?? ""
+        #expect(thumbnail.contains("exp=\(fresh)"), "the tile kept the URL it was read with")
+        #expect(thumbnail.contains("sig=bbbb"))
+    }
+
+    /// The control, and the ordinary case: a signature with hours left is reused where it sits.
+    /// An event that cost a round trip every time would undo the point of the stream.
+    @Test("a ready event inside the URL horizon is applied in place, with no read at all")
+    func aReadyEventInsideTheURLHorizonIsAppliedInPlace() async {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let live = Int(now.timeIntervalSince1970) + 7200
+        let gets = Counter()
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Self.memo("pending", exp: live)]))
+            case "get_memo_api_memos__uid__get":
+                gets.increment()
+                return Stub.json(Self.memo("ready", exp: live, sig: "bbbb"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        await MediaChannel.consume(
+            channel([.event(envelope(Self.readyEvent))]),
+            into: store,
+            using: client,
+            baseURL: Stub.baseURL,
+            identity: MediaIdentity(),
+            now: { now }
+        )
+
+        #expect(gets.count == 0, "a live signature cost a round trip")
+        let patched = store.memos.first?.attachments.first
+        #expect(patched?.readiness == .ready)
+        // The event's own metadata landed, which is what an in-place apply is: the re-read would
+        // have answered 1000x1000 and a different signature.
+        #expect(patched?.width == 4032)
+        #expect(patched?.thumbnailURL?.absoluteString.contains("sig=aaaa") == true)
+    }
+
+    /// Which events the horizon speaks for, one case per category — and the margin.
+    ///
+    /// `exp` is a deadline, not a promise about the request that reads it: a signature with half a
+    /// minute left is refused halfway through the fetch it authorises. Only a `ready` event asks
+    /// for a URL at all, so nothing else is worth a read: an in-flight stage keeps the waiting
+    /// treatment and `failed` paints a glyph.
+    @Test("only a ready event is held to the horizon, and the margin is part of it")
+    func onlyAReadyEventIsHeldToTheHorizon() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let stamp = Int(now.timeIntervalSince1970)
+
+        func outcome(_ event: MediaEvent, exp: Int?) -> MediaEventOutcome {
+            mediaEventOutcome(event, for: Self.waiting(exp: exp), at: now)
+        }
+
+        // Lapsed, and about to lapse: a fetch starting now finishes on the wrong side of both.
+        #expect(refreshed(outcome(Self.readyEvent, exp: stamp - 60)) == Self.uid)
+        #expect(refreshed(outcome(Self.readyEvent, exp: stamp + 30)) == Self.uid)
+        // Just inside the margin, and comfortably inside it.
+        #expect(applied(outcome(Self.readyEvent, exp: stamp + 61)) == .ready)
+        #expect(applied(outcome(Self.readyEvent, exp: stamp + 7200)) == .ready)
+        // No signature at all is not an expired one: an unsigned URL is bounded by the server's
+        // own cache headers, and there is nothing here that can lapse.
+        #expect(applied(outcome(Self.readyEvent, exp: nil)) == .ready)
+
+        // The other categories, all past the horizon, none of them worth a read.
+        let lapsed = stamp - 60
+        #expect(applied(outcome(Self.processingEvent, exp: lapsed)) == .waiting)
+        #expect(
+            applied(outcome(MediaEvent(uid: Self.attachment, status: .failed), exp: lapsed))
+                == .failed
+        )
+        #expect(
+            applied(outcome(MediaEvent(uid: Self.attachment, status: .uploading), exp: lapsed))
+                == .waiting
+        )
+        // And an event nobody has loaded is still nothing at all, whatever the clock says.
+        #expect(
+            outcome(MediaEvent(uid: "not-loaded", status: .ready), exp: lapsed) == .unchanged
+        )
+    }
+
+    /// The loaded timeline these cases run against: one memo, one attachment still pending, its
+    /// tier URLs signed with `exp` — or carrying no signature when `exp` is nil.
+    private nonisolated static func waiting(exp: Int?) -> [Memo] {
+        let query = exp.map { "?exp=\($0)&scope=1&sig=aaaa" } ?? ""
+        let url = { (tier: String) in
+            URL(
+                string: "\(Stub.baseURL.absoluteString)/api/attachments/"
+                    + "\(attachment)/\(tier)\(query)"
+            )
+        }
+        return [
+            Memo(
+                uid: uid,
+                owner: "fabian",
+                mine: true,
+                content: "hello",
+                visibility: .private,
+                pinned: false,
+                createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_750_000_000),
+                attachments: [
+                    MemoAttachment(
+                        uid: attachment,
+                        mime: "image/jpeg",
+                        status: .pending,
+                        width: 1000,
+                        height: 1000,
+                        thumbnailURL: url("thumb"),
+                        previewURL: url("mobile"),
+                        webURL: url("web"),
+                        posterURL: url("poster")
+                    )
+                ]
+            )
+        ]
+    }
+
+    /// The uid an outcome says to re-read, or nil if it says something else.
+    private func refreshed(_ outcome: MediaEventOutcome) -> String? {
+        guard case .refresh(let uid) = outcome else { return nil }
+        return uid
+    }
+
+    /// What an outcome applied in place leaves the attachment saying, or nil if it applied
+    /// nothing. Distinguishing the two matters: `.unchanged` is also "no read", and a rule that
+    /// answered it everywhere would pass an assertion that only checked for the absence of one.
+    private func applied(_ outcome: MediaEventOutcome) -> AttachmentReadiness? {
+        guard case .applied(let memos) = outcome else { return nil }
+        return memos.first?.attachments.first?.readiness
     }
 
     // MARK: - when the channel runs
