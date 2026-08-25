@@ -153,7 +153,17 @@ public enum MediaImageLoader {
         return Image(uiImage: uiImage)
     }
 
-    static func uiImage(for key: MediaImageKey, url: URL) async -> UIImage? {
+    /// `transport` is defaulted from the installed one and the default is evaluated at the CALL
+    /// SITE — before anything here is awaited — so an ordinary caller still fetches through
+    /// whatever was in force when it asked. A caller that OWNS the cache it evicts lapsed
+    /// signatures out of passes its own instead: that is what lets the full-screen viewer assert
+    /// that the session its picture arrives through holds the very `URLCache` it evicts from,
+    /// rather than hoping two singletons happen to agree.
+    static func uiImage(
+        for key: MediaImageKey,
+        url: URL,
+        transport: any MediaTransport = MediaImageLoader.transport
+    ) async -> UIImage? {
         // Before anything is awaited. A hit here is what makes a remount free, and it is also what
         // keeps a second view of the same photo off the wire entirely.
         if let hit = store.image(forKey: key) { return hit }
@@ -168,10 +178,7 @@ public enum MediaImageLoader {
         // entry can only be stale, and the request is going to be refused anyway.
         request.cachePolicy = SignedMediaURL(url: url).cachePolicy(at: Date())
 
-        // Read once, before the suspension: what answers this request is the transport that was
-        // installed when it was made.
-        let active = Self.transport
-        guard let answer = try? await active.fetch(request) else { return nil }
+        guard let answer = try? await transport.fetch(request) else { return nil }
         let (data, response) = answer
         guard isUsable(response) else { return nil }
         let decoded = await Task.detached(priority: .userInitiated) {

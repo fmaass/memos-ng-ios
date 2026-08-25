@@ -809,28 +809,99 @@ struct MediaViewerLoadingTests {
         #expect(dropped, "the page never dropped the entry whose signature had lapsed")
     }
 
-    /// What the test above deliberately steps around: the cache the page reaches for when nobody
+    /// What the test above deliberately steps around: the cache a page reaches for when nobody
     /// hands it one, and whether evicting from it means anything.
+    ///
+    /// This is the defect MEMNG-147 closed, stated as the property that closes it. The still used
+    /// to be an `AsyncImage`, which fetches through `URLSession.shared` — a session that binds
+    /// whatever `URLCache.shared` was the first time anything in the process touched it. So the
+    /// cache being evicted from and the cache being read were one object only on a launch the
+    /// composition root happened to win, and on any other one a lapsed signature went on being
+    /// served out of a cache nothing had evicted from.
     ///
     /// Asserted by IDENTITY rather than by storing and looking. The media session's cache is
     /// disk-backed, and `storeCachedResponse` on a disk-backed `URLCache` lands asynchronously —
     /// a seed-then-read test of it is a timing test wearing a correctness test's clothes, which
     /// is the thing this whole rework is removing. Identity has no timing.
-    @Test("the page's default cache is the one the media session fetches through")
-    func evictionDefaultsToTheMediaSessionCache() throws {
+    @Test("the cache a page evicts from is the cache its still is fetched through")
+    func stillFetchAndEvictionNameOneCache() throws {
         var attachment = MediaViewerPageTests.image("evict-default")
         attachment.previewURL = MediaViewerPageTests.url("evict-default", "mobile")
         let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
 
-        // The default the memberwise initialiser applies — production passes no cache at all.
+        // The defaults the memberwise initialiser applies — production passes neither.
         let unconfigured = MediaViewerPage(
             page: page, onZoomChange: { _ in }, player: nil, play: {}
         )
-        #expect(unconfigured.cache === MediaSession.shared.cache)
+        let media = try #require(
+            unconfigured.transport as? MediaSession,
+            "the still must be fetched through a session this app built, not URLSession.shared"
+        )
 
-        // And the half that makes evicting from it worth doing: the session the images are
-        // actually fetched through holds that very object. Evicting out of any other cache is a
-        // no-op that reads exactly like an eviction.
-        #expect(MediaSession.shared.session.configuration.urlCache === MediaSession.shared.cache)
+        // The one assertion the whole ticket is: the object the fetch reads is the object the
+        // eviction writes to. Not two caches that resemble each other, and not two singletons
+        // that ought to agree — one `URLCache`.
+        #expect(media.session.configuration.urlCache === unconfigured.cache)
+        #expect(unconfigured.cache === MediaSession.shared.cache)
+    }
+
+    /// And that the page really does fetch through that seam.
+    ///
+    /// The test above pins two defaults to one object; this one pins the CODE to those defaults.
+    /// A page handed a transport of its own is watched being asked for exactly the still's URL —
+    /// which is what `AsyncImage` never did and could not be made to do, and is therefore the
+    /// assertion that goes red if the still is ever routed back through `URLSession.shared`.
+    @Test("a page asks its own transport for the still, and asks it for the still's URL")
+    func theStillGoesThroughThePagesTransport() async throws {
+        let attachment = MediaViewerPageTests.image("still-route")
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+        let url = try #require(page.stillURL)
+        // A hit in the decoded-image store would be answered without a fetch, and this test would
+        // then be asserting nothing. Nothing else in the bundle uses this uid.
+        #expect(
+            MediaImageLoader.cachedUIImage(for: page.stillKey) == nil,
+            "something warmed this key — the fetch below would not happen"
+        )
+
+        let recorder = RecordingTransport()
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(
+            rootView: MediaViewerPage(
+                page: page,
+                onZoomChange: { _ in },
+                player: nil,
+                play: {},
+                cache: URLCache(memoryCapacity: 4 * 1024 * 1024, diskCapacity: 0, directory: nil),
+                transport: recorder
+            )
+        )
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+
+        var asked: [URL] = []
+        for _ in 0..<60 where asked.isEmpty {
+            try await Task.sleep(for: .milliseconds(50))
+            asked = await recorder.requested
+        }
+        window.isHidden = true
+        #expect(
+            asked.first == url,
+            "the page did not fetch its still through the transport it was handed: \(asked)"
+        )
+    }
+}
+
+/// A transport that answers nothing and remembers what it was asked for.
+///
+/// `RefusingTransport` next door counts calls; what is load-bearing here is WHICH url was asked
+/// for, because that is what distinguishes the still's own fetch from anything else a hosted page
+/// might do. Refusing rather than answering keeps the test to one fact: a picture that decoded
+/// would drag the decode, the store and the identity clock into an assertion about routing.
+actor RecordingTransport: MediaTransport {
+    private(set) var requested: [URL] = []
+
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        if let url = request.url { requested.append(url) }
+        throw URLError(.notConnectedToInternet)
     }
 }
