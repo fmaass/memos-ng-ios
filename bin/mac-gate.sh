@@ -465,7 +465,12 @@ summary_and_exit() {
 # bump is caught before a wasted archive; a spent build number cannot ship twice. No v* tag yet
 # is the bootstrap case and passes with a named line. Ritual: docs/RELEASING.md.
 version_at_least() { # $1 >= $2, dotted numerics
-  local IFS=. a=($1) b=($2) i
+  # Split on OWN lines: an IFS set in the same `local` statement does not govern that
+  # statement's word-splitting, and the perturbation run caught the strings comparing whole.
+  local IFS=. i
+  local -a a b
+  read -r -a a <<< "$1"
+  read -r -a b <<< "$2"
   for i in 0 1 2; do
     [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
     [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
