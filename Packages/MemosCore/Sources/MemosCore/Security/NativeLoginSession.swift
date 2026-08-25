@@ -86,10 +86,11 @@ public protocol NativeLoginPresenter: Sendable {
 /// on this lane is a link on the callback page the person taps.
 ///
 /// Any app on the phone could claim `memosng://`, so this lane carries no proof of who is
-/// listening. It does not have to: what crosses it is a one-shot handoff code that is worthless
-/// without the PKCE verifier, and the verifier never leaves this process. An intercepted code buys
-/// an eavesdropper nothing — which is the whole point of PKCE and the reason the weaker lane is
-/// safe to depend on.
+/// listening. What crosses it is a one-shot handoff code worthless without the PKCE verifier, and
+/// the verifier never leaves this process, so INTERCEPTING the callback buys nothing. PKCE stops
+/// there: a hostile claimant of the scheme can still run a flow of its OWN against a live SSO
+/// session and hold the verifier for it. That residual is an owner-level risk acceptance recorded
+/// in the doctrine — household-device installation, LAN-only reachability, revocation.
 ///
 /// The HTTPS form is kept for the estates and the futures where the association IS publicly
 /// fetchable: there it is the better lane, because only an app entitled to the server's host can

@@ -11,10 +11,14 @@ public enum NativeLogin {
     /// The `client` value that switches the BFF's `/api/auth/login` into device-handoff mode.
     public static let client = "ios"
 
-    /// Path of the HTTPS callback the authentication session waits for. It belongs to the app,
-    /// not to a browser: only the app holding the associated-domains entitlement for the server's
-    /// host receives it, which is what makes a custom URL scheme unnecessary and unsafe here
-    /// (Decision 2).
+    /// Path of the HTTPS return lane. It belongs to the app, not to a browser: only an app
+    /// holding the associated-domains entitlement for the server's host can be opened by it.
+    ///
+    /// On THIS estate that lane can never fire. The server is on internal-only DNS, so Apple's
+    /// CDN cannot fetch the domain association at all and a universal link that is never
+    /// associated never opens an app. The custom scheme (`memosng://auth-callback`) is the
+    /// permanent primary lane here; this path is kept as a self-activating enhancement, for the
+    /// estates that already have a public AASA and for the day a split-horizon stub is served.
     public static let callbackPath = "/ios/auth/callback"
 
     /// `native_auth.DEVICE_NAME_MAX` on the server, which answers 422 to anything longer.
