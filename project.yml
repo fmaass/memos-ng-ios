@@ -146,7 +146,13 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: memosng
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        # All four, though the family is iPhone-only: App Store validation under the iOS 26 SDK
+        # rejects an upload that declares less (error 90474 — the deprecated full-screen opt-out
+        # is no longer a way around it; upload-rejected 2026-08-25 with portrait alone). Landscape
+        # is also simply right for the media viewer, and SwiftUI lays the rest out.
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: >-
+          UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown
+          UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         # The app declared no version at all until it had an extension. It has to now: an
         # extension's CFBundleVersion must match its containing app's, and these two settings are
         # where GENERATE_INFOPLIST_FILE reads both version keys from. Move them together with the
