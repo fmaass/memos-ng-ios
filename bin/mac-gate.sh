@@ -457,6 +457,41 @@ summary_and_exit() {
 # lock but does not START while the host is drowning: above roughly three times the core count
 # it waits, out loud, and takes its turn when the load drains. A pure read — no slot state to
 # leak, no stale slot to reap.
+# --- release-version authority ------------------------------------------------------------------
+# Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
+# the build host carries no .git. The latest v* tag records what shipped (its annotation names
+# the build: "X.Y.Z (build N): ..."); the numbers in project.yml must ADVANCE past it — the
+# marketing version never below the tagged one, the build strictly greater always. A forgotten
+# bump is caught before a wasted archive; a spent build number cannot ship twice. No v* tag yet
+# is the bootstrap case and passes with a named line. Ritual: docs/RELEASING.md.
+version_at_least() { # $1 >= $2, dotted numerics
+  local IFS=. a=($1) b=($2) i
+  for i in 0 1 2; do
+    [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
+    [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
+  done
+  return 0
+}
+release_tag="$(git -C "$repo_root" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+if [ -n "$release_tag" ]; then
+  tagged_version="${release_tag#v}"
+  tagged_build="$(git -C "$repo_root" tag -l "$release_tag" --format='%(contents:subject)' \
+    | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
+  yml_version="$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
+  yml_build="$(sed -n 's/^ *CURRENT_PROJECT_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
+  [ -n "$yml_version" ] && [ -n "$yml_build" ] \
+    || die_refuse "release check: could not read version keys from project.yml"
+  if ! version_at_least "$yml_version" "$tagged_version"; then
+    die_refuse "release check: MARKETING_VERSION $yml_version is below the shipped tag $release_tag"
+  fi
+  if [ -n "$tagged_build" ] && [ "$yml_build" -le "$tagged_build" ]; then
+    die_refuse "release check: build $yml_build does not advance past the shipped build $tagged_build ($release_tag)"
+  fi
+  say "release     : $yml_version (build $yml_build) advances past $release_tag (build ${tagged_build:-?})"
+else
+  say "release     : no v* tag yet — bootstrap, nothing to advance past"
+fi
+
 LOAD_LIMIT="${MAC_GATE_LOAD_LIMIT:-24}"
 load_waited=0
 while : ; do
