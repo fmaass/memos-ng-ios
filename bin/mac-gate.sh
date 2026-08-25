@@ -450,6 +450,29 @@ summary_and_exit() {
 }
 
 # --- (3) mirror the worktree ------------------------------------------------------------------
+# --- load gate ----------------------------------------------------------------------------------
+# The branch lock orders runs of ONE branch; nothing ordered runs of five. Five concurrent
+# xcodebuilds drove the host's one-minute load past nine hundred, at which point the network
+# stack starved and a live gate died mid-run on "no route to host". So a run holds its branch
+# lock but does not START while the host is drowning: above roughly three times the core count
+# it waits, out loud, and takes its turn when the load drains. A pure read — no slot state to
+# leak, no stale slot to reap.
+LOAD_LIMIT="${MAC_GATE_LOAD_LIMIT:-24}"
+load_waited=0
+while : ; do
+  host_load="$(timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+    'sysctl -n vm.loadavg' 2>/dev/null | awk '{printf "%d", $2}')"
+  [ -n "$host_load" ] || { say "load gate   : host unreadable, proceeding"; break; }
+  if [ "$host_load" -le "$LOAD_LIMIT" ]; then
+    [ "$load_waited" -eq 0 ] || say "load gate   : load $host_load, proceeding after ${load_waited}m"
+    break
+  fi
+  load_waited=$((load_waited + 1))
+  [ "$load_waited" -le 45 ] || { say "load gate   : still $host_load after 45m — proceeding anyway"; break; }
+  [ $((load_waited % 5)) -ne 1 ] || say "load gate   : host load $host_load > $LOAD_LIMIT, waiting"
+  sleep 60
+done
+
 say "--- step: rsync ---"
 rsync -a --delete \
   --exclude '.git' --exclude 'signing.local.yml' \
@@ -532,6 +555,26 @@ for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
         rm -rf "$stale" && echo "GATE_HYGIENE swept stale tree $stale"
       done
 done
+# Age alone is not enough on a busy day: five concurrent branches at ~3G each filled the host
+# to ENOSPC while every tree was hours old. Under PRESSURE the age rule yields — when free
+# space is below 10G, the oldest-stamped sibling trees go, newest-stamped last, until 15G is
+# free or nothing sweepable remains. The current run's trees and every lock stay untouchable;
+# a still-active sibling loses only an incremental cache it will rebuild, which is the right
+# trade against every gate on the host dying on a full disk.
+free_kb() { df -k / | awk 'NR==2 {print $4}'; }
+if [ "$(free_kb)" -lt 10485760 ]; then
+  echo "GATE_HYGIENE pressure: under 10G free — reaping oldest sibling trees"
+  for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
+    ls -1dtr "$hygiene_root"/*/* 2>/dev/null | while IFS= read -r victim; do
+      [ -d "$victim" ] || continue
+      case "$victim" in
+        "$GATE_TARGET"|"$GATE_WORK"|*.lock*) continue ;;
+      esac
+      [ "$(free_kb)" -ge 15728640 ] && break
+      rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
+    done
+  done
+fi
 disk_free="$(df -h / | awk 'NR==2 {print $4}')"
 echo "GATE_HYGIENE disk free after sweep: $disk_free"
 case "$disk_free" in
