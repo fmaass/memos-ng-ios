@@ -97,12 +97,10 @@ public struct ComposeView: View {
     /// the memo's own date, so on that path it is never nil).
     @State private var date: Date?
     @State private var picked: [PhotosPickerItem] = []
-    @State private var attachments: [PickedMedia] = []
-    @State private var failedImports = 0
-    /// Which pick the loading in flight belongs to. Choosing again before the first load has
-    /// finished is ordinary behaviour, and the older, slower result must not overwrite the newer.
-    @State private var importGeneration = 0
-    @State private var isImporting = false
+    /// What the picker has produced, and which pick it belongs to. Choosing again before the
+    /// first load has finished is ordinary behaviour, and the older, slower result must not
+    /// overwrite the newer — see `ComposeImports`.
+    @State private var imports = ComposeImports()
     @State private var isSaving = false
     @State private var detent: PresentationDetent = .medium
     @FocusState private var editorFocused: Bool
@@ -137,9 +135,9 @@ public struct ComposeView: View {
     private var canSave: Bool {
         ComposeAttachments.canPost(
             text: content,
-            imported: attachments.count,
-            failed: failedImports,
-            isBusy: isSaving || isImporting
+            imported: imports.attachments.count,
+            failed: imports.failed,
+            isBusy: isSaving || imports.isImporting
         )
     }
 
@@ -164,7 +162,7 @@ public struct ComposeView: View {
                             let submission = ComposeSubmission(
                                 content: content,
                                 visibility: visibility,
-                                attachments: attachments,
+                                attachments: imports.attachments,
                                 createdAt: date
                             )
                             if await submit(submission) { dismiss() }
@@ -217,12 +215,12 @@ public struct ComposeView: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
             if !isEdit {
-                if !attachments.isEmpty {
-                    PickedThumbnailRow(attachments: attachments)
+                if !imports.attachments.isEmpty {
+                    PickedThumbnailRow(attachments: imports.attachments)
                 }
-                if failedImports > 0,
+                if imports.failed > 0,
                     let summary = ComposeAttachments.summary(
-                        imported: attachments.count, failed: failedImports
+                        imported: imports.attachments.count, failed: imports.failed
                     )
                 {
                     HStack(spacing: DesignTokens.Space.snug) {
@@ -244,9 +242,16 @@ public struct ComposeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DesignTokens.Space.regular)
         .onChange(of: picked) { _, items in
-            Task { await importPicked(items) }
+            // Stamped HERE, synchronously, as the selection lands — not inside the task, where
+            // the number would order the loads' start times instead. See `ComposeImports`.
+            let stamp = imports.selected()
+            Task {
+                await imports.load(items, stamp: stamp) {
+                    try? await $0.loadTransferable(type: PickedMedia.self)
+                }
+            }
         }
-        .onChange(of: attachments.isEmpty) { _, isEmpty in
+        .onChange(of: imports.attachments.isEmpty) { _, isEmpty in
             // Photos are the reason to want the room; the sheet takes it rather than making
             // someone drag it open to see what they just attached.
             if !isEmpty { detent = .large }
@@ -322,43 +327,20 @@ public struct ComposeView: View {
         ComposeMetaPills(
             verbosity: verbosity,
             picked: $picked,
-            attachmentCount: attachments.count,
-            isImporting: isImporting,
+            attachmentCount: imports.attachments.count,
+            isImporting: imports.isImporting,
             date: $date,
             visibility: $visibility,
             accountDefault: session?.defaultVisibility
         )
     }
 
-    /// The picker hands back its own temporary export; each one is copied here, in order, and the
-    /// copies are what the outbox takes over.
-    private func importPicked(_ items: [PhotosPickerItem]) async {
-        importGeneration += 1
-        let generation = importGeneration
-        isImporting = true
-        var imported: [PickedMedia] = []
-        var failed = 0
-        for item in items {
-            guard let media = try? await item.loadTransferable(type: PickedMedia.self) else {
-                // Counted, not skipped: see ComposeAttachments.
-                failed += 1
-                continue
-            }
-            imported.append(media)
-        }
-        // A newer pick started while this one was loading; that one owns the outcome.
-        guard generation == importGeneration else { return }
-        attachments = imported
-        failedImports = failed
-        isImporting = false
-    }
-
+    /// Emptying the picker fences whatever it is still loading first: the selection this clears
+    /// sets off its own import (of nothing), and a pick already on its way must not land between
+    /// the two.
     private func clearPicked() {
-        importGeneration += 1
+        imports.clear()
         picked = []
-        attachments = []
-        failedImports = 0
-        isImporting = false
     }
 }
 
