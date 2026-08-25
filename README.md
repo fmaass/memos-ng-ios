@@ -17,7 +17,7 @@ The Xcode project is generated, not committed:
     bin/generate.sh
     open MemosNG.xcodeproj
 
-Requires Xcode 26.6 and the iOS 26 simulator runtime. The three local packages under `Packages/`
+Requires Xcode 26.6 and the iOS 26 simulator runtime. The five local packages under `Packages/`
 resolve on first build; `MemosAPI` generates its client from the vendored `openapi.json` as part of
 that build, so the first one takes a while.
 
@@ -36,10 +36,18 @@ Every build, test and lint runs on a Mac build host, driven from wherever you ar
 It mirrors the working tree to a disposable directory on that host and runs, in order and
 fail-fast: `bin/generate.sh` (xcodegen), `swift format lint --strict --recursive .`, the
 dependency-pin check (the committed `Package.resolved` against what SwiftPM actually resolves),
-`xcodebuild test` (three test bundles), `swift build -warnings-as-errors` for `MemosAPI` and
-`MemosCore`, the dependency-rule check, and a per-bundle test-count check. It prints one summary
-line of every step's exit code and returns the first non-zero one; the result bundle and any
-screenshots are copied back to `.gate-artifacts/`.
+`xcodebuild test` (five test bundles), a rebuild of every package with its warnings fatal, the
+dependency-rule check, and a per-bundle test-count check. It prints one summary line of every
+step's exit code and returns the first non-zero one; the result bundle and any screenshots are
+copied back to `.gate-artifacts/`.
+
+A change set of documentation and repository metadata only — `docs/`, any `.md`, `.gitignore`,
+`.gitattributes`, `.editorconfig`, `CODEOWNERS`, `LICENSE`, and none of them a symbolic link —
+takes a fast path: the gate classifies the branch against `origin/main` plus whatever the working
+tree holds, reports `PASS (fast path: docs-only)` naming every changed path, and copies nothing to
+the build host. Everything else meets the full gate. `bin/mac-gate.sh --classify-only` prints that
+classification without needing a build host, and the gate's own test suite for the classifier
+(`tests/gate/fastpath-classify-test.sh`) runs on every gate.
 
 The gate directory on the build host is a mirror, never a checkout. Git is the only medium between
 the two machines.

@@ -8,9 +8,24 @@
 # ordered checks, streams their output, copies the result bundle back, and returns the remote
 # exit code unmasked.
 #
-# The ordered checks are: generate the project, lint, test, rebuild the two lower layers with
-# warnings as errors, check the dependency rule, read the SHIPPING bundles back, and count the
-# tests that actually ran.
+# The ordered checks are: the gate's own classifier test, generate the project, lint, test, rebuild
+# every package with warnings as errors, check the dependency rule, read the SHIPPING bundles back,
+# and count the tests that actually ran.
+#
+# A change set of documentation and repository metadata only takes a FAST PATH. What the branch
+# changed against origin/main (merge-base, renames not followed, so a rename is judged by both of
+# its names) plus everything staged, edited or untracked in the working tree is classified against
+# the allowlist in gate_path_is_metadata() below: docs/, any .md, .gitignore, .gitattributes,
+# .editorconfig, CODEOWNERS, LICENSE. When every changed path is on it and none of them is a
+# symbolic link, the gate reports "PASS (fast path: docs-only)" naming each path and the base it
+# measured from, and copies nothing to the build host. Everything else — project.yml, any manifest,
+# any source file, this script, the tests — meets the full gate, so a version bump can never skip
+# the release-number check. What still runs on the fast path is what is local and cheap: the
+# classifier's own test suite (tests/gate/fastpath-classify-test.sh, the gate's integrity check,
+# which runs on EVERY gate) and the release-version authority check. The remote steps are skipped
+# whole, `pins` included: it needs a generated project and a package resolution on the build host,
+# which is the copy the fast path exists to avoid, and it reads Package.resolved — a file no
+# docs-only change set can contain.
 #
 # Git is the only medium of exchange between the two machines. The gate directory is a mirror,
 # never a checkout: it is rsync'd with --delete, it is never opened in Xcode, and a developer's
@@ -18,6 +33,10 @@
 #
 # Usage:
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
+#   bin/mac-gate.sh --classify-only   print how this branch's change set classifies, and stop.
+#                                     Needs no build host. Exit 0 = the docs-only fast path
+#                                     applies, 10 = the full gate is owed.
+#   bin/mac-gate.sh --help            print this usage.
 #
 # Two gates for two branches can run at the same time. They must not share a simulator: the
 # device holds ONE installation per bundle id, so a second branch installing over the first
@@ -53,6 +72,8 @@
 #             3 = another run of this branch holds the gate lock (nothing was copied or run);
 #             4 = the lock this run held was reaped while the run was starting, and the build host
 #                 half stopped before touching anything;
+#            10 = --classify-only only: this change set owes the full gate (0 there means the
+#                 fast path applies);
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -76,13 +97,30 @@ die_refuse() {
   exit 2
 }
 
+usage() {
+  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# --classify-only answers one question — does this change set owe a build — and it has to be
+# answerable without a Mac: it is what the gate's own test suite drives, and a classification that
+# needed the build host would be the gate rather than a decision about it.
+CLASSIFY_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --classify-only) CLASSIFY_ONLY=1 ;;
+    --help|-h) usage; exit 0 ;;
+    *) die_refuse "unknown argument: $(printf '%q' "$arg") (see --help)" ;;
+  esac
+done
+
 # Single-quote escaping for values interpolated into a script sent to the build host, so a branch
 # name can never become remote shell syntax.
 esc() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
 
 # --- inputs -----------------------------------------------------------------------------------
 host="${MAC_GATE_HOST:-}"
-[ -n "$host" ] || die_refuse "MAC_GATE_HOST is not set (ssh alias of the Mac build host)"
+[ -n "$host" ] || [ "$CLASSIFY_ONLY" -eq 1 ] \
+  || die_refuse "MAC_GATE_HOST is not set (ssh alias of the Mac build host)"
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
   || die_refuse "not inside a git working tree"
@@ -111,6 +149,127 @@ esac
 case "$branch" in
   /*) die_refuse "branch name may not be absolute: $branch" ;;
 esac
+
+
+# --- what a change set is, and whether it owes a build ------------------------------------------
+# The one verdict this gate reaches without building anything. It is a decision about what reaches
+# the build host, so it is taken from what WOULD reach it: the commits this branch adds to
+# origin/main and everything the working tree holds on top of them — rsync copies the tree, not
+# the history.
+CLASSIFY_VERDICT=""
+CLASSIFY_BASE="-"
+CLASSIFY_REASON=""
+CLASSIFY_PATHS=""
+
+# The allowlist, by NAME. Conservative on purpose: it names what cannot change a build, and
+# everything it does not name meets the full gate — project.yml (where the release numbers live),
+# every Package.swift and Package.resolved, xcconfig, entitlements and plist files, this script,
+# the tests, and anything under Packages/, Sources/ or an App directory. LICENSE is spelled out
+# rather than globbed, because a LICENSE* glob would also read LICENSEChecker.swift as metadata.
+gate_path_is_metadata() {
+  local path="$1" base="${1##*/}"
+  case "$path" in
+    docs/*) return 0 ;;
+    *.md) return 0 ;;
+  esac
+  case "$base" in
+    .gitignore|.gitattributes|.editorconfig|CODEOWNERS) return 0 ;;
+    LICENSE|LICENCE|LICENSE.txt|LICENCE.txt|LICENSE.md|LICENCE.md) return 0 ;;
+  esac
+  return 1
+}
+
+gate_classify() {
+  CLASSIFY_VERDICT=full
+  CLASSIFY_BASE="-"
+  CLASSIFY_REASON=""
+  CLASSIFY_PATHS=""
+
+  # main is not a branch measured against origin/main, and it is where a release is cut from.
+  case "$branch" in
+    main|master)
+      CLASSIFY_REASON="the branch is $branch, which is not a change set measured against origin/main"
+      return 0 ;;
+  esac
+
+  # Fetched first: the base is only as honest as the ref it is read from, and a stale origin/main
+  # would make an old change set look small. A fetch that cannot reach the remote is not fatal —
+  # it falls back to the ref on disk and says so — but a base that cannot be resolved at all owes
+  # the full gate, because then nothing is known about what changed.
+  local fetch_note=""
+  if ! git fetch --quiet origin 2>/dev/null; then
+    fetch_note=" (origin could not be fetched — the origin/main already on disk was used)"
+  fi
+  local base
+  base="$(git merge-base origin/main HEAD 2>/dev/null)" || base=""
+  if [ -z "$base" ]; then
+    CLASSIFY_REASON="the merge-base with origin/main cannot be resolved${fetch_note}"
+    return 0
+  fi
+  CLASSIFY_BASE="$base"
+
+  # Three sources, because three different things end up on the build host: what the branch
+  # committed (--no-renames, so a rename is BOTH names and the source file that left is judged
+  # too), what is staged or edited in the working tree, and what is untracked but not ignored.
+  local paths
+  paths="$(
+    {
+      git diff --name-only --no-renames "$base...HEAD"
+      git diff --name-only --no-renames HEAD
+      git ls-files --others --exclude-standard
+    } 2>/dev/null | sed '/^$/d' | sort -u
+  )"
+  if [ -z "$paths" ]; then
+    CLASSIFY_REASON="nothing changed against origin/main${fetch_note}"
+    return 0
+  fi
+  CLASSIFY_PATHS="$paths"
+
+  local path mode
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    # A path git had to quote carries a character this loop reads one way and the shell another;
+    # it is never allowlisted, whatever its name looks like.
+    case "$path" in
+      '"'*)
+        CLASSIFY_REASON="the change set holds a path git could not print literally ($path)"
+        return 0 ;;
+    esac
+    if ! gate_path_is_metadata "$path"; then
+      CLASSIFY_REASON="$path is neither documentation nor repository metadata"
+      return 0
+    fi
+    # A name is not a file: README.md can be a symbolic link onto a source file, and then the
+    # allowlist has read the name of one thing and passed another. Mode 120000 is the answer in
+    # the index, in HEAD, and on disk — all three, because the change set spans all three.
+    mode="$(git ls-files -s -- "$path" 2>/dev/null | awk 'NR==1 {print $1}')"
+    if [ "$mode" = "120000" ] || [ -L "$path" ]; then
+      CLASSIFY_REASON="$path is a symbolic link, so its name says nothing about what would be built"
+      return 0
+    fi
+    mode="$(git ls-tree -r --full-tree HEAD -- "$path" 2>/dev/null | awk 'NR==1 {print $1}')"
+    if [ "$mode" = "120000" ]; then
+      CLASSIFY_REASON="$path is a symbolic link in HEAD, so its name says nothing about what would be built"
+      return 0
+    fi
+  done <<< "$paths"
+
+  CLASSIFY_VERDICT=fastpath
+  CLASSIFY_REASON="every changed path is documentation or repository metadata${fetch_note}"
+  return 0
+}
+
+if [ "$CLASSIFY_ONLY" -eq 1 ]; then
+  gate_classify
+  printf 'CLASSIFY verdict=%s\n' "$CLASSIFY_VERDICT"
+  printf 'CLASSIFY base=%s\n' "$CLASSIFY_BASE"
+  printf 'CLASSIFY reason=%s\n' "$CLASSIFY_REASON"
+  if [ -n "$CLASSIFY_PATHS" ]; then
+    printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/CLASSIFY path /'
+  fi
+  [ "$CLASSIFY_VERDICT" = fastpath ] && exit 0
+  exit 10
+fi
 
 # The private device is named here, where the branch and this process are known: the branch so a
 # stray device says which run left it behind, the pid so two runs of the SAME branch (a re-run
@@ -207,6 +366,118 @@ trap 'remove_gate_device; release_gate_lock; exit 129' HUP
   git diff --stat HEAD
   printf -- '--- end provenance ---\n'
 } 2>&1 | tee -a "$log"
+
+# --- step bookkeeping -------------------------------------------------------------------------
+declare -a STEP_NAMES=() STEP_RCS=()
+first_fail=0
+record() {
+  STEP_NAMES+=("$1"); STEP_RCS+=("$2")
+  if [ "$2" -ne 0 ] && [ "$first_fail" -eq 0 ]; then first_fail="$2"; fi
+}
+summary_and_exit() {
+  local line="mac-gate SUMMARY:" i
+  for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
+  line="$line | exit=$first_fail"
+  say "$line"
+  exit "$first_fail"
+}
+
+# --- the gate's own integrity check --------------------------------------------------------------
+# The classifier decides whether anything gets built at all, which makes it the one part of this
+# gate that no build can check. Its suite runs HERE, on every run, fast path or not: a fast path
+# taken by a classifier nobody checked is a gate that passes what it never read.
+say "--- step: selftest ---"
+selftest_script="$repo_root/tests/gate/fastpath-classify-test.sh"
+if [ -x "$selftest_script" ]; then
+  "$selftest_script" 2>&1 | tee -a "$log"
+  record selftest "${PIPESTATUS[0]}"
+else
+  say "the gate's classifier test $selftest_script is missing or not executable"
+  record selftest 1
+fi
+[ "$first_fail" -eq 0 ] || summary_and_exit
+
+# --- release-version authority ------------------------------------------------------------------
+# Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
+# the build host carries no .git. The latest v* tag records what shipped (its annotation names
+# the build: "X.Y.Z (build N): ..."); the numbers in project.yml must ADVANCE past it — the
+# marketing version never below the tagged one, the build strictly greater always. A forgotten
+# bump is caught before a wasted archive; a spent build number cannot ship twice. No v* tag yet
+# is the bootstrap case and passes with a named line. Ritual: docs/RELEASING.md.
+version_at_least() { # $1 >= $2, dotted numerics
+  # Split on OWN lines: an IFS set in the same `local` statement does not govern that
+  # statement's word-splitting, and the perturbation run caught the strings comparing whole.
+  local IFS=. i
+  local -a a b
+  read -r -a a <<< "$1"
+  read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
+    [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
+  done
+  return 0
+}
+release_tag="$(git -C "$repo_root" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+if [ -n "$release_tag" ]; then
+  tagged_version="${release_tag#v}"
+  tagged_build="$(git -C "$repo_root" tag -l "$release_tag" --format='%(contents:subject)' \
+    | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
+  yml_version="$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
+  yml_build="$(sed -n 's/^ *CURRENT_PROJECT_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
+  [ -n "$yml_version" ] && [ -n "$yml_build" ] \
+    || die_refuse "release check: could not read version keys from project.yml"
+  if ! version_at_least "$yml_version" "$tagged_version"; then
+    die_refuse "release check: MARKETING_VERSION $yml_version is below the shipped tag $release_tag"
+  fi
+  if [ -n "$tagged_build" ] && [ "$yml_build" -le "$tagged_build" ]; then
+    die_refuse "release check: build $yml_build does not advance past the shipped build $tagged_build ($release_tag)"
+  fi
+  say "release     : $yml_version (build $yml_build) advances past $release_tag (build ${tagged_build:-?})"
+else
+  say "release     : no v* tag yet — bootstrap, nothing to advance past"
+fi
+
+# --- the change set, and the fast path -----------------------------------------------------------
+# Classified on every run, fast path or not, and written into the artifacts next to the log: the
+# evidence has to say what the gate decided to look at, or a PASS cannot be read afterwards.
+say "--- step: classify ---"
+gate_classify
+{
+  printf 'gate classification %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'branch  : %s\n' "$branch"
+  printf 'HEAD    : %s\n' "$head_sha"
+  printf 'base    : %s (merge-base with origin/main)\n' "$CLASSIFY_BASE"
+  printf 'verdict : %s\n' "$CLASSIFY_VERDICT"
+  printf 'reason  : %s\n' "$CLASSIFY_REASON"
+  printf 'changed paths:\n'
+  if [ -n "$CLASSIFY_PATHS" ]; then
+    printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/  /'
+  else
+    printf '  (none)\n'
+  fi
+} > "$artifacts/classification.txt"
+say "classify    : $CLASSIFY_VERDICT — $CLASSIFY_REASON"
+say "classify    : base $CLASSIFY_BASE (merge-base with origin/main)"
+if [ -n "$CLASSIFY_PATHS" ]; then
+  while IFS= read -r classified_path; do
+    say "classify    : changed $classified_path"
+  done <<< "$CLASSIFY_PATHS"
+else
+  say "classify    : changed nothing"
+fi
+say "classify    : written to $artifacts/classification.txt"
+record classify 0
+
+if [ "$CLASSIFY_VERDICT" = fastpath ]; then
+  # No device was ever created and no lock was ever taken, so nothing is owed back to the build
+  # host; cleared here so the exit trap does not ssh over there to delete a device that was
+  # only ever a name.
+  DEVICE_NAME=""
+  say "mac-gate PASS (fast path: docs-only) — base $CLASSIFY_BASE — changed: $(printf '%s' "$CLASSIFY_PATHS" | tr '\n' ' ')"
+  say "fast path   : nothing was copied to a build host — $CLASSIFY_REASON"
+  printf 'verdict : PASS (fast path: docs-only)\n' >> "$artifacts/classification.txt"
+  summary_and_exit
+fi
 
 # --- (2) resolve the remote target and refuse anything outside the gate root -------------------
 # Resolved on the build host, where the path actually exists: lexically (so a `..` in the branch
@@ -434,20 +705,6 @@ TAKE_EOF
   esac
 fi
 
-# --- step bookkeeping -------------------------------------------------------------------------
-declare -a STEP_NAMES=() STEP_RCS=()
-first_fail=0
-record() {
-  STEP_NAMES+=("$1"); STEP_RCS+=("$2")
-  if [ "$2" -ne 0 ] && [ "$first_fail" -eq 0 ]; then first_fail="$2"; fi
-}
-summary_and_exit() {
-  local line="mac-gate SUMMARY:" i
-  for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
-  line="$line | exit=$first_fail"
-  say "$line"
-  exit "$first_fail"
-}
 
 # --- (3) mirror the worktree ------------------------------------------------------------------
 # --- load gate ----------------------------------------------------------------------------------
@@ -457,45 +714,6 @@ summary_and_exit() {
 # lock but does not START while the host is drowning: above roughly three times the core count
 # it waits, out loud, and takes its turn when the load drains. A pure read — no slot state to
 # leak, no stale slot to reap.
-# --- release-version authority ------------------------------------------------------------------
-# Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
-# the build host carries no .git. The latest v* tag records what shipped (its annotation names
-# the build: "X.Y.Z (build N): ..."); the numbers in project.yml must ADVANCE past it — the
-# marketing version never below the tagged one, the build strictly greater always. A forgotten
-# bump is caught before a wasted archive; a spent build number cannot ship twice. No v* tag yet
-# is the bootstrap case and passes with a named line. Ritual: docs/RELEASING.md.
-version_at_least() { # $1 >= $2, dotted numerics
-  # Split on OWN lines: an IFS set in the same `local` statement does not govern that
-  # statement's word-splitting, and the perturbation run caught the strings comparing whole.
-  local IFS=. i
-  local -a a b
-  read -r -a a <<< "$1"
-  read -r -a b <<< "$2"
-  for i in 0 1 2; do
-    [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
-    [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
-  done
-  return 0
-}
-release_tag="$(git -C "$repo_root" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
-if [ -n "$release_tag" ]; then
-  tagged_version="${release_tag#v}"
-  tagged_build="$(git -C "$repo_root" tag -l "$release_tag" --format='%(contents:subject)' \
-    | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
-  yml_version="$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
-  yml_build="$(sed -n 's/^ *CURRENT_PROJECT_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
-  [ -n "$yml_version" ] && [ -n "$yml_build" ] \
-    || die_refuse "release check: could not read version keys from project.yml"
-  if ! version_at_least "$yml_version" "$tagged_version"; then
-    die_refuse "release check: MARKETING_VERSION $yml_version is below the shipped tag $release_tag"
-  fi
-  if [ -n "$tagged_build" ] && [ "$yml_build" -le "$tagged_build" ]; then
-    die_refuse "release check: build $yml_build does not advance past the shipped build $tagged_build ($release_tag)"
-  fi
-  say "release     : $yml_version (build $yml_build) advances past $release_tag (build ${tagged_build:-?})"
-else
-  say "release     : no v* tag yet — bootstrap, nothing to advance past"
-fi
 
 LOAD_LIMIT="${MAC_GATE_LOAD_LIMIT:-24}"
 load_waited=0
@@ -1264,16 +1482,53 @@ PY
 }
 
 s_warnings() {
-  # The layers below the UI build clean or not at all. xcodebuild cannot be told to treat warnings
-  # as errors for two package targets only, so they are built again through SwiftPM — which is why
-  # both declare macOS as well as iOS.
+  # Every package builds clean or not at all — all five, because a warning that no build makes
+  # fatal is a warning nobody retires.
+  #
+  # Four of them declare macOS as well as iOS, so SwiftPM builds them here on the build host and
+  # -warnings-as-errors on the command line is the whole mechanism.
+  #
+  # MemosFeatures cannot be reached that way. Its screens are UIKit and SwiftUI-on-iOS and SwiftPM
+  # has no iOS destination: measured on this host 2026-08-25, `swift build` refuses the package at
+  # the manifest platform check, and forcing the compiler across with -Xswiftc -sdk/-target ends in
+  # "using sysroot for 'MacOSX' but targeting 'iPhone'". So it is built by xcodebuild for the
+  # simulator, and the fatality for that build comes from the target's OWN manifest
+  # (.treatAllWarnings(as: .error) in Packages/MemosFeatures/Package.swift) rather than from a flag
+  # here. Every setting xcodebuild takes from a command line or an xcconfig reaches the
+  # dependencies as well, and each way of asking it for warnings-as-errors fails on somebody
+  # else's code: SWIFT_TREAT_WARNINGS_AS_ERRORS=YES alone collides with the -suppress-warnings
+  # Xcode gives package dependencies; adding SWIFT_SUPPRESS_WARNINGS=NO makes OpenAPIKit's
+  # forced-cast warning this gate's failure; scoping both to the simulator SDK only moves it to
+  # MarkdownUI's @_implementationOnly warning. A gate that goes red for a warning nobody here can
+  # fix is a gate that gets ignored.
   local rc=0 pkg
-  for pkg in Packages/MemosAPI Packages/MemosCore; do
-    echo "--- $pkg with -warnings-as-errors"
+  for pkg in Packages/MemosAPI Packages/MemosCore Packages/MemosOutbox Packages/MemosShareKit; do
+    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host)"
     swift build --package-path "$pkg" \
       --scratch-path "$GATE_WORK/warnings/$(basename "$pkg")" \
       -Xswiftc -warnings-as-errors || rc=$?
   done
+
+  # The manifest setting IS the mechanism for this one, so it is read before its build is believed:
+  # a green build of a target that quietly stopped treating warnings as errors proves nothing.
+  echo "--- Packages/MemosFeatures with warnings as errors (xcodebuild, iOS simulator, Debug)"
+  if grep -q 'treatAllWarnings(as: .error' Packages/MemosFeatures/Package.swift; then
+    echo "ok: MemosFeatures declares .treatAllWarnings(as: .error)"
+  else
+    echo "WARNAERR FAIL: Packages/MemosFeatures/Package.swift no longer declares" \
+         ".treatAllWarnings(as: .error) — building it would prove nothing about its warnings"
+    rc=1
+  fi
+  # Debug because that is the configuration the manifest setting is declared for, named here so
+  # the two cannot drift apart silently.
+  ( cd Packages/MemosFeatures \
+    && xcodebuild build \
+         -scheme MemosFeatures \
+         -configuration Debug \
+         -destination 'generic/platform=iOS Simulator' \
+         -derivedDataPath "$GATE_WORK/warnings/MemosFeatures" \
+         -clonedSourcePackagesDirPath "$GATE_WORK/warnings/spm" \
+         -skipPackagePluginValidation ) || rc=$?
   return $rc
 }
 

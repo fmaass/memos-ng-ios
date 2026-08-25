@@ -19,10 +19,27 @@ second, read by index; the share extension declares no keychain group; both decl
 group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
 check (below) → `xcodebuild test` (all five test bundles) → a read-back of the BUILT app and
 .appex (each one's `PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
-`swift build -warnings-as-errors` for MemosAPI and MemosCore → the dependency-rule greps → a
+a rebuild of every package with its warnings fatal (`swift build -warnings-as-errors` for the four
+that declare macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes
+from its own manifest) → the dependency-rule greps → a
 per-bundle test-count check. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
+
+Two steps run before any of that, on the machine you are working from. The classifier test
+(`tests/gate/fastpath-classify-test.sh`) checks the gate's own docs-only classifier against
+throwaway repositories it builds itself — it is the gate's integrity check and runs on every gate.
+Then the change set is classified: what this branch changed against `origin/main` (merge-base,
+renames not followed, so a rename is judged by both of its names) plus everything staged, edited or
+untracked in the working tree. When every one of those paths is documentation or repository
+metadata — `docs/`, any `.md`, `.gitignore`, `.gitattributes`, `.editorconfig`, `CODEOWNERS`,
+`LICENSE` — and none of them is a symbolic link, the gate reports `PASS (fast path: docs-only)`,
+names every changed path and the base it measured from, and copies nothing to the build host.
+Anything else meets the full gate: `project.yml`, every manifest, xcconfig, entitlement and plist,
+every source file, this script and its own tests. The release-version check runs on both paths, so
+a version bump can never take the fast path. Every run writes what it classified to
+`.gate-artifacts/classification.txt`, fast path or not. `bin/mac-gate.sh --classify-only` prints
+that classification and stops, without needing a build host.
 
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
@@ -54,7 +71,12 @@ MainActor default isolation on the app and the Features layer; the API layer sta
 because its middleware is called off the main actor by the transport. Every type crossing a package
 boundary is `Sendable`. No Combine — Observation and structured concurrency cover it.
 
-MemosAPI and MemosCore build with `-warnings-as-errors`; a warning there is a defect.
+Every package builds with its warnings fatal; a warning is a defect. Four of them take
+`-warnings-as-errors` from the gate's command line. MemosFeatures cannot: SwiftPM has no iOS
+destination for it, and every way of asking `xcodebuild` for that setting also reaches the
+dependencies, so a warning in MarkdownUI or OpenAPIKit would fail the gate. It declares
+`.treatAllWarnings(as: .error)` on its own target instead — dropping that line disarms the check,
+which is why the gate reads it before it believes the build.
 
 ## Tests
 
