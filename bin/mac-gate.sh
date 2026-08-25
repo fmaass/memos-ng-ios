@@ -512,6 +512,33 @@ GATE_WORK="$(printf '%s' "$GATE_TARGET" \
 mkdir -p "$GATE_WORK" || { echo "remote: cannot create $GATE_WORK"; exit 2; }
 DERIVED="$GATE_WORK/DerivedData"
 
+# --- disk hygiene -------------------------------------------------------------------------------
+# Per-branch trees are kept between runs for the incremental build, but a merged branch never
+# gates again and nothing else reaps its ~3.6G — the host filled up five times in one day this
+# way. So every run stamps its OWN trees (a directory's mtime only moves when direct children
+# change, so DerivedData writes deep inside never refresh it — the touch is the bookkeeping),
+# then sweeps sibling trees whose stamp is older than three days: still-active branches re-stamp
+# far more often than that. Locks are NEVER sweep targets — they are owned by the runs that hold
+# them and clean themselves up through the trap; deleting one from the side would strip a live
+# run of its serialization.
+touch "$GATE_TARGET" "$GATE_WORK" 2>/dev/null
+for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
+  find "$hygiene_root" -mindepth 2 -maxdepth 2 -type d -mtime +3 \
+    ! -path "$GATE_TARGET" ! -path "$GATE_WORK" ! -name '*.lock*' 2>/dev/null \
+    | while IFS= read -r stale; do
+        case "$stale" in
+          *.lock*) continue ;;
+        esac
+        rm -rf "$stale" && echo "GATE_HYGIENE swept stale tree $stale"
+      done
+done
+disk_free="$(df -h / | awk 'NR==2 {print $4}')"
+echo "GATE_HYGIENE disk free after sweep: $disk_free"
+case "$disk_free" in
+  *G*) : ;;
+  *) echo "GATE_HYGIENE WARNING: free space is not in the gigabyte range ($disk_free) — a cold build needs ~4G" ;;
+esac
+
 # --- the simulator this run gets ----------------------------------------------------------------
 # A simulator holds ONE installation per bundle id, so two branches building on the same device
 # overwrite each other's app and the loser launches against the winner's frameworks — dyld
