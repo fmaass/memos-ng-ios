@@ -84,13 +84,14 @@ stays — nothing below submits it.
 
 ### 4. Privacy policy URL **[me only]**
 
-App Store Connect → the app → **App Information** → **Privacy Policy URL**:
+App Store Connect → the app → sidebar **App Privacy** → **Privacy Policy URL** (the field moved
+here from App Information — as executed 2026-08-24, App Information no longer carries it):
 
     https://memos.discomarder.live/privacy
 
-That page is being built alongside this. The field is required for an App Store submission and for
-external TestFlight testing; I have not confirmed whether App Store Connect enforces it for an
-internal-only group, so fill it in and the question does not arise.
+The page is live. The field is required for an App Store submission and for external TestFlight
+testing; App Store Connect did not enforce it for the internal-only group, but it is filled so the
+question never arises.
 
 ### 5. App Privacy **[me only]**
 
@@ -121,8 +122,14 @@ Two constraints that decide who can be in it:
 
 Internal testing needs **no Beta App Review**, which is the whole reason for staying internal.
 
-Leave **Enable automatic distribution** off, or at least do not rely on it: builds that come from
-Xcode Cloud must be added to a group by hand regardless of that checkbox.
+**Enable automatic distribution** comes PRE-CHECKED in the create dialog, and the dialog warns the
+choice is permanent — it cannot be changed after the group exists. Untick it BEFORE clicking
+Create (as executed 2026-08-24: `household` was created with it off). With it off, every build is
+added to the group by hand from the group's **Builds** tab — that manual add IS the distribution
+step, and it is the same motion Xcode Cloud builds need regardless of the checkbox.
+
+One role note from practice: **Customer Support has no TestFlight privilege** — a tester who only
+needs TestFlight still gets at least the Marketing role under Users and Access.
 
 ---
 
