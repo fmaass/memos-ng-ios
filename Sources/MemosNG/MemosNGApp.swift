@@ -28,6 +28,9 @@ struct MemosNGApp: App {
             RootView()
                 .environment(appDelegate.session)
                 .environment(appDelegate.outbox)
+                // The device's own settings — read by the root view for the appearance it
+                // applies, and by the Settings screen for the control that chooses it.
+                .environment(AppSettings.shared)
         }
     }
 }
