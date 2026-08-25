@@ -18,6 +18,15 @@ import UIKit
 struct NativeLoginLifecycleTests {
     private let authorizeURL = URL(string: "https://memos.example.invalid/api/auth/login")!
     private let callbackURL = URL(string: "memosng://auth-callback?code=handoff-1")!
+    /// The callback's own address with the query taken off it — what iOS hands the browser view's
+    /// redirect delegate, and what a sign-in must not be resolved by. It is on a lane
+    /// (`NativeLoginReturn.lane` calls it the universal-link one, deliberately: which lane a URL
+    /// is on and what is written on it are separate questions) and it carries no answer at all.
+    private let strippedRedirectURL = URL(
+        string: "https://memos.example.invalid/ios/auth/callback"
+    )!
+    /// The same emptiness on the lane every sign-in in this deployment actually comes back on.
+    private let strippedTapURL = URL(string: "memosng://auth-callback")!
     private let host = "memos.example.invalid"
     private let path = "/ios/auth/callback"
 
@@ -183,6 +192,81 @@ struct NativeLoginLifecycleTests {
         _ = try await attempt.value
         #expect(!harness.inbox.deliver(callbackURL), "a resumed sign-in claimed a second callback")
     }
+
+    /// THE FIELD SEQUENCE. Signing in a SECOND time is not the first time again: the household
+    /// sign-on cookie is still in the browser view's own storage, so nobody types anything and
+    /// nobody taps anything. Login, authorize, the BFF's callback and the page that ends it are
+    /// all redirects of the FIRST load, and iOS reports each of them on the browser view's
+    /// redirect delegate — with the query REMOVED, which is the platform's own rule for that
+    /// delegate and not something an app can opt out of.
+    ///
+    /// What arrives is therefore the callback's address carrying nothing, while the sign-in's
+    /// entire answer is in the query that was taken off it. Acted on, it ends the attempt with a
+    /// callback that has no code in it — `NativeLogin.callback(from:)` reads exactly this shape
+    /// as `.malformed` (`NativeLoginTests.readsMalformed`) — so the person is told the sign-in
+    /// came back incomplete, and the real page, which the server has already rendered with a
+    /// handoff code on it, arrives a moment later with nobody waiting for it.
+    ///
+    /// So the echo must resolve nothing, and the sign-in must still be there to take the real
+    /// callback when it comes.
+    @Test("a query-stripped redirect echo leaves the sign-in waiting for the real callback")
+    func aStrippedRedirectEchoLeavesTheAttemptWaiting() async throws {
+        let harness = harness()
+        let attempt = signIn(harness)
+        await settle()
+        let browser = try #require(harness.browsers.first)
+
+        #expect(
+            URLComponents(url: strippedRedirectURL, resolvingAgainstBaseURL: false)?.queryItems
+                == nil,
+            "the fixture is not the query-stripped address the field failure is about"
+        )
+        browser.redirectedWhileLoading(to: strippedRedirectURL)
+        await settle()
+
+        #expect(
+            harness.inbox.waitingFor != nil,
+            "a query-stripped echo ended the sign-in that was still waiting for its callback"
+        )
+        #expect(browser.dismissCount == 0, "a query-stripped echo took the sign-in's view down")
+
+        // The real callback arrives after it, which is the order the device and the server logs
+        // both show, and it is the one that signs in.
+        #expect(
+            harness.inbox.deliver(callbackURL),
+            "the sign-in could no longer claim the real callback"
+        )
+        #expect(try await attempt.value == callbackURL)
+        #expect(browser.dismissCount == 1, "the browser view was left on screen")
+    }
+
+    /// The same emptiness on the delivery path the app actually signs in on. A URL the app is
+    /// opened with reaches the waiting sign-in through the inbox, and one that is on the lane but
+    /// carries neither a code nor a reason is an echo of the callback page rather than its
+    /// answer: refused, and the sign-in left waiting for the one that has something on it.
+    @Test("a query-less URL delivered to the inbox leaves the sign-in waiting")
+    func aQueryLessURLOnTheInboxLeavesTheAttemptWaiting() async throws {
+        let harness = harness()
+        let attempt = signIn(harness)
+        await settle()
+        let browser = try #require(harness.browsers.first)
+
+        #expect(
+            !harness.inbox.deliver(strippedTapURL),
+            "a URL with no code and no reason on it was claimed as the sign-in's callback"
+        )
+        #expect(
+            harness.inbox.waitingFor != nil,
+            "a query-less URL ended the sign-in that was still waiting for its callback"
+        )
+        #expect(browser.dismissCount == 0, "a query-less URL took the sign-in's view down")
+
+        #expect(
+            harness.inbox.deliver(callbackURL),
+            "the sign-in could no longer claim the real callback"
+        )
+        #expect(try await attempt.value == callbackURL)
+    }
 }
 
 /// The presenter, the inbox and the machine wired the way the app wires them, with the browser
@@ -241,6 +325,13 @@ private final class FakeLoginBrowser: LoginBrowser {
     /// The person swiped it away, or tapped Cancel.
     func closedByPerson() {
         onClose?()
+    }
+
+    /// The browser followed a redirect while loading its first page. On the device this is
+    /// `safariViewController(_:initialLoadDidRedirectTo:)`, and the URL it carries has had its
+    /// query removed by iOS before the app ever sees it.
+    func redirectedWhileLoading(to url: URL) {
+        onRedirect?(url)
     }
 }
 

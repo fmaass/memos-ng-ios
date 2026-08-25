@@ -189,10 +189,11 @@ targets:
         # 0.1.0 because that is what this is: the first version handed to the household over
         # TestFlight, not a 1.0. The version does not move for a fix to that same version.
         #
-        # The build number does. Build 1 is taken — it is the build now installed on a phone, and
-        # App Store Connect refuses a second upload under a number it already holds — so the pair
-        # moves to 2 for the build that replaces it. This value is what a LOCAL archive uploads
-        # under; an Xcode Cloud build is assigned its own auto-incrementing number instead
+        # The build number does. Every number an upload has used is spent — App Store Connect
+        # refuses a second upload under a number it already holds — so the pair moves up by one
+        # for each build that replaces the last: build 3 is spent, and the fix for a sign-in that
+        # comes back incomplete on a retry ships as build 4. This value is what a LOCAL archive
+        # uploads under; an Xcode Cloud build is assigned its own auto-incrementing number instead
         # (developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds),
         # exposed to custom build scripts as CI_BUILD_NUMBER ("The number of the current build,
         # for example, 42" — the environment variable reference). See docs/TESTFLIGHT.md for what
@@ -200,7 +201,7 @@ targets:
         # build number under Xcode Cloud is a ci_scripts/ci_pre_xcodebuild.sh that stamps
         # CURRENT_PROJECT_VERSION from $CI_BUILD_NUMBER, so that no hand edit is needed here.
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "4"
         # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
         # classifies API calls as Local Network access; without this declaration iOS 18+ denies
         # them silently (NSURLError -1009 with a satisfied path).
@@ -266,7 +267,7 @@ targets:
         # placeholder attributes for an app extension placeholder", which is a failure to
         # INSTALL the host app, not a warning about the extension.
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "4"
 
   MemosAPITests:
     type: bundle.unit-test
