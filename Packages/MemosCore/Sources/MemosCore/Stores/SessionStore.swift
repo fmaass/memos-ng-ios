@@ -52,6 +52,12 @@ public enum SignOutOutcome: Sendable, Equatable {
 public final class SessionStore {
     public private(set) var state: SessionState = .signedOut
     public private(set) var lastError: String?
+    /// The same failure as a VALUE, beside the sentence `lastError` carries.
+    ///
+    /// A screen can act on one of these and only one — the Local Network denial, which has a
+    /// switch behind it — and matching on a sentence to find out which failure it is would make
+    /// the wording of an error message load-bearing.
+    public private(set) var lastFailure: NativeLoginError?
     public private(set) var configuration: ServerConfiguration?
     /// Who sees a memo when nobody says otherwise — the account's own setting, not a guess.
     ///
@@ -95,6 +101,9 @@ public final class SessionStore {
     /// would be telling B a fact about A.
     private var sessionGeneration = 0
     private var client: (any APIProtocol)?
+    /// The wait between the exchange's two attempts. Injected so a test can take it away: a
+    /// suite that really slept would pay 1.5 s per retry case for nothing.
+    private let sleeper: @Sendable (Duration) async throws -> Void
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
     // isolation. They are immutable strings, so there is nothing here for the main actor to guard.
@@ -109,11 +118,15 @@ public final class SessionStore {
             ) -> any APIProtocol = { configuration, token in
                 APIClientFactory.make(configuration: configuration, token: token)
             },
+        sleeper: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        },
         account: (any OutboxAccountPublishing)? = nil,
         identity: MediaIdentity = .shared
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
+        self.sleeper = sleeper
         self.account = account
         self.identity = identity
     }
@@ -163,6 +176,7 @@ public final class SessionStore {
         let previousState = state
         state = .signingIn
         lastError = nil
+        lastFailure = nil
         do {
             let callbackURL = try await presenter.authenticate(
                 authorizeURL: authorizeURL,
@@ -173,7 +187,7 @@ public final class SessionStore {
             guard let verifier = pkce.verifier else { throw NativeLoginError.unusableRequest }
             // Anonymous by construction: the exchange is how a device gets its FIRST credential,
             // so presenting one here would be circular.
-            let exchanged = try await Self.exchange(
+            let exchanged = try await exchangeWithRetry(
                 makeClient(configuration) { nil }, code: code, verifier: verifier
             )
             let token = exchanged.token
@@ -200,9 +214,72 @@ public final class SessionStore {
             failSignIn(error)
             return false
         } catch {
-            failSignIn(.api(.unexpected(description: error.localizedDescription)))
+            // Named by domain and code, never by its own description. Anything that reaches here
+            // from the exchange describes the request it was making, and this request's body is
+            // the handoff code and the PKCE verifier.
+            failSignIn(.transport(NativeLoginTransportFailure.classify(error)))
             return false
         }
+    }
+
+    /// How long the second attempt waits. Long enough for someone to answer the permission sheet
+    /// the first attempt raised, short enough that a sign-in still feels like one tap.
+    static let exchangeRetryDelay = Duration.milliseconds(1500)
+
+    /// The exchange, with the ONE retry a Local Network denial earns.
+    ///
+    /// The first connection an app process makes to a private-range host is what raises the Local
+    /// Network permission sheet, and iOS fails THAT connection while the sheet is up. The browser
+    /// leg is another process, so it completes and the app arrives here with a valid handoff code
+    /// and a connect that never happened. Retrying it is safe for one reason only: ENETDOWN at
+    /// connect means nothing was transmitted, so the one-shot code cannot have been consumed and
+    /// the same pair may be sent again. Every other failure — a timeout, a lost connection, a
+    /// -1009 without that stream code — may have been delivered, and sending the code a second
+    /// time would be asking the server to spend it twice.
+    ///
+    /// A refusal the server ANSWERED is never retried either: it is a decision, not a delivery
+    /// failure.
+    private func exchangeWithRetry(
+        _ client: any APIProtocol,
+        code: String,
+        verifier: String
+    ) async throws -> (token: String, user: User) {
+        do {
+            return try await Self.exchange(client, code: code, verifier: verifier)
+        } catch let refusal as NativeLoginError {
+            throw refusal
+        } catch {
+            let failure = NativeLoginTransportFailure.classify(error)
+            log(failure: error)
+            guard failure == .localNetworkDenied else { throw NativeLoginError.transport(failure) }
+        }
+        try await sleeper(Self.exchangeRetryDelay)
+        do {
+            return try await Self.exchange(client, code: code, verifier: verifier)
+        } catch NativeLoginError.exchangeRejected(let refusal) where refusal == .codeConsumed {
+            // Only reachable if the classification above was wrong: a consumed code means the
+            // first attempt DID reach the server. It is still said out loud rather than reported
+            // as a bad code, because from the phone nothing was wrong with the code at all.
+            throw NativeLoginError.answerLost
+        } catch let refusal as NativeLoginError {
+            throw refusal
+        } catch {
+            log(failure: error)
+            // Reported as whatever it WAS, not as another denial. The retry is a second chance for
+            // the connection, not a verdict on what the second failure means: a timeout here is a
+            // timeout, and telling someone to open Local Network for it would be a wrong answer
+            // stated confidently.
+            throw NativeLoginError.transport(NativeLoginTransportFailure.classify(error))
+        }
+    }
+
+    /// Writes down that the exchange did not arrive — the classification, the domain and the
+    /// code, and NOTHING else. The error's own description carries the request body.
+    private func log(failure error: any Error) {
+        let diagnostic = NativeLoginTransportFailure.diagnostic(for: error)
+        MemosLog.session.error(
+            "POST /api/auth/native/exchange did not arrive: \(diagnostic, privacy: .public)"
+        )
     }
 
     /// Validates a pasted token against `GET /api/auth/user` before storing it: a credential that
@@ -221,6 +298,7 @@ public final class SessionStore {
         let previousState = state
         state = .signingIn
         lastError = nil
+        lastFailure = nil
         let client = makeClient(configuration) { trimmed }
         do {
             let user = try await Self.whoami(client)
@@ -401,6 +479,7 @@ public final class SessionStore {
         state = .signedOut
         client = nil
         lastError = error.message
+        lastFailure = error
     }
 
     /// The device credential could not be written where it survives the process. Sign-in still
@@ -481,6 +560,7 @@ public final class SessionStore {
     private func abandonSignIn(restoring previous: SessionState) {
         state = previous
         lastError = Self.licenceBlockedSignIn
+        lastFailure = nil
     }
 
     /// Forgets the credential — and revokes the share extension's licence FIRST.
