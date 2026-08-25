@@ -237,6 +237,81 @@ actor FaultyPersistence: OutboxPersisting {
     }
 }
 
+/// A hold a test opens by hand, so that a test can be INSIDE a drain when something happens.
+///
+/// Without it there is no way to assert what an event arriving DURING a drain does: everything
+/// else in this bundle is fast enough that a drain is over before the next line of the test runs,
+/// which is exactly the moment the drain used to lose an event in.
+actor TestGate {
+    private var isOpen = false
+    private var isParked = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private var watchers: [CheckedContinuation<Void, Never>] = []
+
+    /// Called by the work being held. Returns at once once the gate is open.
+    func pass() async {
+        guard !isOpen else { return }
+        isParked = true
+        for watcher in watchers { watcher.resume() }
+        watchers = []
+        await withCheckedContinuation { held.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        for continuation in held { continuation.resume() }
+        held = []
+    }
+
+    /// Returns when something is actually waiting on the gate — never a sleep, so the test is not
+    /// racing the thing it is trying to interrupt.
+    func waitUntilParked() async {
+        guard !isParked else { return }
+        await withCheckedContinuation { watchers.append($0) }
+    }
+}
+
+/// The real queue with its first write held open, so a test can act while a drain is mid-write.
+actor GatedPersistence: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let gate: TestGate
+    private var held: Int
+
+    init(_ inner: OutboxRepository, gate: TestGate, holding: Int = 1) {
+        self.inner = inner
+        self.gate = gate
+        self.held = holding
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func save(_ job: UploadJob) async throws {
+        if held > 0 {
+            held -= 1
+            await gate.pass()
+        }
+        try await inner.save(job)
+    }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
 /// A clock a test can move, for the parts of the drain that only happen later.
 final class MutableClock: @unchecked Sendable {
     private let lock = NSLock()

@@ -33,6 +33,7 @@ private struct Harness {
         credentials: OutboxCredentials? = Fixture.credentials(),
         binding: AccountBinding = Fixture.binding(),
         refusedSaves: Int = 0,
+        holdingFirstSave: TestGate? = nil,
         network: StubNetworkPath = StubNetworkPath(),
         allowsMobileData: Bool = false
     ) async throws -> Harness {
@@ -60,6 +61,9 @@ private struct Harness {
         var persistence: any OutboxPersisting = repository
         if refusedSaves > 0 {
             persistence = FaultyPersistence(repository, refusals: refusedSaves)
+        }
+        if let holdingFirstSave {
+            persistence = GatedPersistence(repository, gate: holdingFirstSave)
         }
         let engine = OutboxEngine(
             repository: persistence,
@@ -817,5 +821,67 @@ struct NetworkPolicyDrainTests {
         #expect(saved.files[0].isComplete)
         #expect(saved.state == .waiting)
         #expect(saved.waitReason == .homeNetwork)
+    }
+
+    /// The offset HEAD is a request like any other. `handle` reaches it without going through
+    /// `advance` — a 409 or an unreadable answer asks the server where the upload stands — so it
+    /// is the one network-producing step that could still leave the device on a refused network.
+    @Test("asking the server where the upload stands waits for the network too")
+    func theOffsetResyncIsGatedToo() async throws {
+        let network = StubNetworkPath(.wifi)
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400, headOffset: 250),
+            network: network
+        )
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+
+        await network.move(to: .cellular)
+        await harness.engine.handle(
+            ChunkResult(
+                identity: harness.scheduler.uploads[0].identity, statusCode: 409, body: Data()
+            )
+        )
+
+        #expect(harness.http.requests(method: "HEAD").isEmpty, "no HEAD on a refused network")
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].bytesConfirmed == 0, "and nothing is guessed in its place")
+        #expect(saved.state == .waiting)
+        #expect(saved.waitReason == .homeNetwork)
+        #expect(saved.attemptCount == 0, "parked, not backed off: nothing was tried")
+    }
+
+    /// The event that releases a parked capture can arrive while a drain is already running, and
+    /// the drain refuses to run twice at once. Dropping it would leave the capture parked until
+    /// something unrelated happened to start another drain — the wifi came back and nothing moved.
+    @Test("the wifi returning during a drain is not lost")
+    func anEventArrivingDuringADrainIsNotLost() async throws {
+        let gate = TestGate()
+        let network = StubNetworkPath(.cellular)
+        let harness = try await Harness.make(
+            bytes: 400,
+            http: .standard(chunkSize: 400),
+            holdingFirstSave: gate,
+            network: network
+        )
+        defer { harness.cleanUp() }
+        let engine = harness.engine
+        // The wiring `Outbox` makes in production, made by hand here: what this test is about is
+        // what happens to the event, not who delivers it (`UploadTriggerTests` covers that).
+        network.onPathChange { await engine.drain() }
+
+        let draining = Task { await engine.drain() }
+        // Parked mid-write: the refusal is being recorded, so the drain is inside itself — the
+        // only moment an event can be lost in.
+        await gate.waitUntilParked()
+        await network.move(to: .wifi)
+        await gate.open()
+        await draining.value
+
+        #expect(harness.scheduler.uploads.count == 1, "the event was not dropped")
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .uploading)
+        #expect(saved.waitReason == nil)
     }
 }

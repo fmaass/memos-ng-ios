@@ -17,6 +17,11 @@ import UIKit
 /// menu open" can only ever be a capture of its contents; sharing the view is what stops that
 /// capture from being a picture of a second, hand-written copy of rows the app does not have.
 ///
+/// One SECTION of the Settings screen is rendered here as well — the Uploads one, which is the
+/// only control on that screen that decides whether bytes leave the phone. It needs no session,
+/// so it can be drawn; and unless it is drawn, nothing in this bundle can tell whether the screen
+/// has a switch on it at all.
+///
 /// The SETTINGS SCREEN is deliberately not rendered here, and the reason is structural rather
 /// than incidental: `SettingsView` reads `SessionStore` from the environment, and constructing one
 /// inlines `APIClientFactory.make` from the API layer — which this bundle does not link, because
@@ -107,6 +112,37 @@ struct SettingsRenderTests {
         .padding(DesignTokens.Space.roomy)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Color(.systemGroupedBackground))
+    }
+
+    private func uploadsCard(isOn: Bool) -> some View {
+        VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
+            UploadsSection(allowsMobileData: .constant(isOn))
+        }
+        .padding(DesignTokens.Space.regular)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+        .padding(DesignTokens.Space.roomy)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(.systemGroupedBackground))
+    }
+
+    /// That the screen HAS this section is held by `SettingsScreenTests`, and what the store does
+    /// when it changes by `UploadSettingsTests`. Between them sat the thing neither could see:
+    /// whether the section draws a switch, and whether that switch is drawn from the setting
+    /// rather than from nothing. Two renders that differ is the assertion — delete the `Toggle`,
+    /// or pin its `isOn:` to a constant, and the two pictures become the same picture. The
+    /// write direction is the binding in `SettingsView`, which the compiler requires and
+    /// `UploadSettingsTests` follows to the store.
+    @Test("the Uploads section draws a switch, and draws it from the setting")
+    func uploadsSectionDrawsItsSwitch() throws {
+        let size = CGSize(width: 393, height: 200)
+        let off = try #require(render(uploadsCard(isOn: false), size: size))
+        let on = try #require(render(uploadsCard(isOn: true), size: size))
+
+        #expect(isNotBlank(off))
+        #expect(isNotBlank(on))
+        #expect(off.pngData() != on.pngData(), "the switch is drawn from the value it carries")
     }
 
     @Test("the account menu's rows draw, in their order")

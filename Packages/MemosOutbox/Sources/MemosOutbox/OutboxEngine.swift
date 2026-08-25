@@ -25,6 +25,10 @@ public actor OutboxEngine: OutboxChunkHandling {
     private let clock: @Sendable () -> Date
     private let onChange: @Sendable () async -> Void
     private var isDraining = false
+    /// Something asked for a drain while one was already running. It is a flag rather than a queue
+    /// because every request means the same thing — look at the queue again — so one more pass
+    /// answers all of them.
+    private var drainRequested = false
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -71,11 +75,28 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     // MARK: - draining
 
+    /// One pass at a time, and never an event dropped.
+    ///
+    /// A drain refuses to run twice at once, so a request that arrives while one is running is
+    /// remembered rather than discarded, and the running drain takes one more pass before it
+    /// stops. The two events this matters for are exactly the two that release a parked capture:
+    /// the wifi coming back and the toggle going on, both of which can land in the middle of the
+    /// pass that is writing down why the capture is parked. Dropped, they would leave it parked
+    /// until something unrelated happened to start another drain.
     public func drain() async {
-        guard !isDraining else { return }
+        guard !isDraining else {
+            drainRequested = true
+            return
+        }
         isDraining = true
         defer { isDraining = false }
+        repeat {
+            drainRequested = false
+            await drainOnce()
+        } while drainRequested
+    }
 
+    private func drainOnce() async {
         guard let credentials = await credentials.currentCredentials() else { return }
         let plan: ReconciliationPlan
         do {
@@ -383,6 +404,14 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
 
         if let askTheServer {
+            // Only the server can say where this upload stands, and asking is a request like any
+            // other. On a network this capture may not use it is not asked: the capture parks,
+            // with nothing counted against it, because nothing was tried.
+            guard permitsNetwork() else {
+                await save(job.waitingForNetwork())
+                await onChange()
+                return
+            }
             if let credentials,
                 let resynced = await resync(job, fileID: fileID, credentials: credentials)
             {

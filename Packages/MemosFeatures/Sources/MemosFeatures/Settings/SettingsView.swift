@@ -136,13 +136,9 @@ struct SettingsView: View {
         }
     }
 
-    /// The one setting on this screen that decides whether bytes leave the phone. The footer says
-    /// what stays true with it on, because a toggle that reads as "send everything, always" would
-    /// be lying about Low Data Mode.
     @ViewBuilder
     private var uploads: some View {
-        SettingsCaption(UploadSettings.footer)
-        Toggle(UploadSettings.title, isOn: mobileData)
+        UploadsSection(allowsMobileData: mobileData)
     }
 
     @ViewBuilder
@@ -225,6 +221,26 @@ struct SettingsView: View {
         savingVisibility = true
         visibilityFailed = !(await session.setDefaultVisibility(visibility))
         savingVisibility = false
+    }
+}
+
+/// The Uploads section's contents, and the only control on this screen that decides whether bytes
+/// leave the phone.
+///
+/// A view of its own rather than a body inside `SettingsView`, and not for tidiness: the screen
+/// itself cannot be rendered in a test — it reads a `SessionStore`, and constructing one inlines
+/// the API layer the Features test bundle does not link (see `SettingsRenderTests`) — so a switch
+/// held only inside that body would be a control no test could see. This one is drawn by
+/// `SettingsRenderTests`, twice, and the two pictures have to differ.
+///
+/// The footer says what stays true with the switch ON, because a row that read as "send
+/// everything, always" would be lying about Low Data Mode, which the policy refuses either way.
+struct UploadsSection: View {
+    @Binding var allowsMobileData: Bool
+
+    var body: some View {
+        SettingsCaption(UploadSettings.footer)
+        Toggle(UploadSettings.title, isOn: $allowsMobileData)
     }
 }
 
