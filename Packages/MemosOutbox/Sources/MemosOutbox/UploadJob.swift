@@ -51,6 +51,17 @@ public enum HoldReason: String, Codable, Sendable, Equatable, CaseIterable {
     case storageFailed
 }
 
+/// Why a waiting job is waiting on an EVENT rather than on the clock.
+///
+/// A backoff spaces itself out and comes back by itself; this does not. It is nil for every job
+/// that is simply between attempts, which is also how a manifest written before this existed
+/// decodes — the field is optional so that a queue from an older build is read, never quarantined.
+public enum WaitReason: String, Codable, Sendable, Equatable, CaseIterable {
+    /// The phone is on a network this capture may not use: mobile data with the toggle off, or
+    /// Low Data Mode, which waits whatever the toggle says.
+    case homeNetwork
+}
+
 /// One captured file, and how much of it the SERVER says it has.
 ///
 /// `bytesConfirmed` is only ever written from a server answer (the PATCH response body or the
@@ -113,6 +124,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var binding: AccountBinding
     public var state: JobState
     public var holdReason: HoldReason?
+    /// What a waiting job is waiting FOR, when it is waiting for something a person can change.
+    public var waitReason: WaitReason?
     public var attemptCount: Int
     public var nextAttemptAt: Date
     public var lastError: String?
@@ -127,6 +140,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         binding: AccountBinding,
         state: JobState = .waiting,
         holdReason: HoldReason? = nil,
+        waitReason: WaitReason? = nil,
         attemptCount: Int = 0,
         nextAttemptAt: Date = .distantPast,
         lastError: String? = nil
@@ -140,6 +154,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.binding = binding
         self.state = state
         self.holdReason = holdReason
+        self.waitReason = waitReason
         self.attemptCount = attemptCount
         self.nextAttemptAt = nextAttemptAt
         self.lastError = lastError

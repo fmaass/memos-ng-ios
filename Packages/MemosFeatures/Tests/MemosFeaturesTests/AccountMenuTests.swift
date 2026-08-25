@@ -70,21 +70,25 @@ struct AccountMenuTests {
     }
 }
 
-/// Which sections the Settings screen has, held as a list so "these five and no others" is an
+/// Which sections the Settings screen has, held as a list so "these six and no others" is an
 /// assertion rather than a reading of a view body.
 @MainActor
 @Suite("The Settings screen's sections")
 struct SettingsScreenTests {
-    @Test("five sections, in the order they are read")
+    @Test("six sections, in the order they are read")
     func sectionsAndOrder() {
-        #expect(SettingsScreen.sections == [.account, .defaults, .appearance, .storage, .about])
+        #expect(
+            SettingsScreen.sections == [
+                .account, .defaults, .uploads, .appearance, .storage, .about,
+            ]
+        )
     }
 
     @Test("each section has the title the screen prints")
     func titles() {
         #expect(
             SettingsScreen.sections.map(\.title) == [
-                "Account", "Defaults", "Appearance", "Storage", "About",
+                "Account", "Defaults", "Uploads", "Appearance", "Storage", "About",
             ]
         )
     }

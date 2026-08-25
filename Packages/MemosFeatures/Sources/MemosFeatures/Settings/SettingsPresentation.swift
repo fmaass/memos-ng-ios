@@ -170,7 +170,7 @@ enum AccountMenu {
 
 /// The Settings screen's sections, in the order they are read.
 ///
-/// An explicit list rather than whatever the view body happens to contain, so that "these five and
+/// An explicit list rather than whatever the view body happens to contain, so that "these six and
 /// no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
 /// a section rendered as a disabled row or a "coming soon" line is a promise the app has not kept,
 /// and it costs a reader a tap to find that out. They arrive when they work.
@@ -178,6 +178,9 @@ enum SettingsScreen {
     enum Section: String, CaseIterable, Equatable {
         case account
         case defaults
+        /// Where a capture may go, which is a decision about behaviour rather than about looks —
+        /// so it sits with the other decision about what a new memo does, not after Appearance.
+        case uploads
         case appearance
         case storage
         case about
@@ -186,6 +189,7 @@ enum SettingsScreen {
             switch self {
             case .account: "Account"
             case .defaults: "Defaults"
+            case .uploads: "Uploads"
             case .appearance: "Appearance"
             case .storage: "Storage"
             case .about: "About"

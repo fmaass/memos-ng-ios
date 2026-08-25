@@ -12,6 +12,9 @@ private struct Harness {
     let persistence: any OutboxPersisting
     let http: ScriptedHTTP
     let scheduler: ScriptedScheduler
+    /// The network the phone is on, which a test can move under a running drain.
+    let network: StubNetworkPath
+    let preferencesName: String
     let completion: any MemoCompleting
     let engine: OutboxEngine
     let job: UploadJob
@@ -29,7 +32,9 @@ private struct Harness {
         scheduler: ScriptedScheduler = ScriptedScheduler(),
         credentials: OutboxCredentials? = Fixture.credentials(),
         binding: AccountBinding = Fixture.binding(),
-        refusedSaves: Int = 0
+        refusedSaves: Int = 0,
+        network: StubNetworkPath = StubNetworkPath(),
+        allowsMobileData: Bool = false
     ) async throws -> Harness {
         let root = try Fixture.temporaryDirectory()
         let repository = try OutboxRepository(root: root.appending(path: "outbox"))
@@ -41,6 +46,7 @@ private struct Harness {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let clock = MutableClock(now)
         let provider = SwitchableCredentials(credentials)
+        let preferences = Fixture.preferences(allowsMobileData: allowsMobileData)
         // Nil means the REAL completion path, driven by the same scripted server: the tests that
         // care about what a create actually sends and reads use that rather than a stand-in.
         let completion = completion ?? MemoCompletionEndpoint(http: http)
@@ -61,6 +67,8 @@ private struct Harness {
             http: http,
             scheduler: scheduler,
             completion: completion,
+            network: network,
+            preferences: preferences.store,
             clock: { clock.now }
         )
         return Harness(
@@ -69,6 +77,8 @@ private struct Harness {
             persistence: persistence,
             http: http,
             scheduler: scheduler,
+            network: network,
+            preferencesName: preferences.name,
             completion: completion,
             engine: engine,
             job: job,
@@ -79,6 +89,7 @@ private struct Harness {
 
     func cleanUp() {
         try? FileManager.default.removeItem(at: root)
+        Fixture.forgetting(preferencesName)
     }
 
     func reload() async -> UploadJob? {
@@ -638,5 +649,173 @@ struct BackgroundWorkTests {
         // Sending the next chunk from a count only this process holds is how the answer to it
         // becomes unusable: it would no longer match the offset the manifest still carries.
         #expect(scheduler.uploads.isEmpty)
+    }
+}
+
+/// The network the phone is on, and what the drain is allowed to do on it.
+///
+/// Every one of these asserts on what did NOT leave the device, because that is the whole subject:
+/// a capture held for the home network must cost nothing at all — not a chunk, not the health
+/// probe, not the request that opens an upload session. The gate is asked again before EVERY
+/// network-producing step rather than once per pass, so the path is moved under a running drain
+/// here as well as between them.
+@Suite("Draining over the network the phone is on")
+struct NetworkPolicyDrainTests {
+    @Test("mobile data with the toggle off costs nothing, and the row says what it waits for")
+    func refusedBeforeTheProbe() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            network: StubNetworkPath(.cellular),
+            allowsMobileData: false
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests.isEmpty, "not even the health probe")
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .waiting)
+        #expect(saved.waitReason == .homeNetwork)
+        #expect(saved.attemptCount == 0, "nothing was tried, so nothing is backing off")
+    }
+
+    @Test("the same phone with the toggle on probes and uploads")
+    func permittedWithTheToggleOn() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            network: StubNetworkPath(.cellular),
+            allowsMobileData: true
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests(method: "GET").count == 1)
+        #expect(harness.scheduler.uploads.count == 1)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .uploading)
+        #expect(saved.waitReason == nil)
+    }
+
+    @Test("the home wifi needs no toggle")
+    func wifiNeedsNoPermission() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            network: StubNetworkPath(.wifi),
+            allowsMobileData: false
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        #expect(harness.scheduler.uploads.count == 1)
+        let saved = try #require(await harness.reload())
+        #expect(saved.waitReason == nil)
+    }
+
+    /// Low Data Mode is a decision about the whole phone, and the toggle does not override it.
+    @Test("Low Data Mode waits even with the toggle on")
+    func lowDataModeAlwaysWaits() async throws {
+        let constrained = NetworkPath(usesCellular: false, isExpensive: false, isConstrained: true)
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            network: StubNetworkPath(constrained),
+            allowsMobileData: true
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests.isEmpty)
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.waitReason == .homeNetwork)
+    }
+
+    /// The path is read again for the ACTION, not once for the pass: the phone here is on the home
+    /// wifi when the drain decides to run and on mobile data by the time the first request would
+    /// go out. The probe went (it was permitted when it was made); the upload session did not.
+    @Test("a network that changes mid-drain stops the very next request")
+    func freshReadBeforeEachAction() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            network: StubNetworkPath(.wifi, thenAfterOneRead: .cellular),
+            allowsMobileData: false
+        )
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests(method: "GET").count == 1, "the probe was permitted")
+        #expect(harness.http.requests(method: "POST").isEmpty, "the upload session was not")
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].uploadUID == nil)
+        #expect(saved.waitReason == .homeNetwork)
+    }
+
+    /// The continuation `handle` re-enters `advance` with. A chunk that finished on the wifi is
+    /// banked — the server's count is never thrown away — but the NEXT one waits.
+    @Test("a chunk finishing after the network changed does not schedule the next one")
+    func theChunkContinuationIsGatedToo() async throws {
+        let network = StubNetworkPath(.wifi)
+        let harness = try await Harness.make(
+            bytes: 1000, http: .standard(chunkSize: 400), network: network
+        )
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        #expect(harness.scheduler.uploads.count == 1)
+
+        await network.move(to: .cellular)
+        await harness.engine.handle(
+            ChunkResult(
+                identity: harness.scheduler.uploads[0].identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].bytesConfirmed == 400, "what the server said is still banked")
+        #expect(harness.scheduler.uploads.count == 1, "and the next chunk is not sent")
+        #expect(saved.state == .waiting)
+        #expect(saved.waitReason == .homeNetwork)
+    }
+
+    /// The third network-producing action. A memo create is a request like any other, and a
+    /// capture whose bytes are all on the server still waits for a network it may use.
+    @Test("the memo create waits for the network too")
+    func theCreateIsGatedToo() async throws {
+        let network = StubNetworkPath(.wifi)
+        let completion = ScriptedCompletion([.created(uid: "m1")])
+        let harness = try await Harness.make(
+            bytes: 400,
+            http: .standard(chunkSize: 400),
+            completion: completion,
+            network: network
+        )
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+
+        await network.move(to: .cellular)
+        await harness.engine.handle(
+            ChunkResult(
+                identity: harness.scheduler.uploads[0].identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        #expect(completion.idempotencyKeys.isEmpty, "no memo was created on a refused network")
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].isComplete)
+        #expect(saved.state == .waiting)
+        #expect(saved.waitReason == .homeNetwork)
     }
 }

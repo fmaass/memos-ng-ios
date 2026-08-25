@@ -47,6 +47,11 @@ public final class Outbox {
     private var persistenceError: String?
     private var removalError: String?
 
+    /// The one that the ENGINE reads. The Settings screen changes this very object rather than a
+    /// second store over the same suite: a preference is only half a preference if the drain
+    /// waiting on it is not the thing that hears it change.
+    public let uploadPreferences: UploadPreferences
+
     private let repository: OutboxRepository
     private let credentials: any OutboxCredentialsProviding
     private let engine: OutboxEngine
@@ -60,22 +65,33 @@ public final class Outbox {
         http: any OutboxHTTPPerforming,
         scheduler: any OutboxChunkScheduling,
         completion: any MemoCompleting,
+        network: any NetworkPathProviding,
+        preferences: UploadPreferences,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         let changes = OutboxChangeBox()
         self.changes = changes
         self.repository = repository
         self.credentials = credentials
+        self.uploadPreferences = preferences
         self.engine = OutboxEngine(
             repository: repository,
             credentials: credentials,
             http: http,
             scheduler: scheduler,
             completion: completion,
+            network: network,
+            preferences: preferences,
             clock: clock,
             onChange: { await changes.fire() }
         )
         changes.attach { [weak self] in await self?.refresh() }
+        // The two events that can make a held capture sendable, wired to the only thing that can
+        // act on them. A job put down for the wrong network has to move when the network changes
+        // or when the person changes their mind — waiting for the next launch would make the
+        // toggle a promise the app keeps tomorrow.
+        network.onPathChange { [weak self] in await self?.drain() }
+        preferences.onChange { [weak self] in await self?.drain() }
     }
 
     /// The composed outbox: the app group's container, the one background session, and the live
@@ -96,7 +112,9 @@ public final class Outbox {
             credentials: credentials,
             http: http,
             scheduler: scheduler,
-            completion: MemoCompletionEndpoint(http: http)
+            completion: MemoCompletionEndpoint(http: http),
+            network: NetworkPathMonitor(),
+            preferences: UploadPreferences.live(appGroup: appGroup)
         )
         outbox.attachScheduler = { handler in await scheduler.attach(handler) }
         return outbox

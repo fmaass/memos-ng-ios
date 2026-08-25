@@ -95,10 +95,21 @@ public enum PendingMemoPresentation {
         case .uploading:
             return "Uploading \(percent(job))%"
         case .waiting:
+            // The reason comes before the attempt count on purpose. A capture refused by the
+            // network it is on is not spacing out a retry — nothing was tried — and "Waiting to
+            // try again" on a phone that will never try until it is back on wifi is the kind of
+            // sentence that makes a person force-quit the app.
+            if job.waitReason == .homeNetwork { return Self.waitingForHomeNetwork }
             if job.attemptCount > 0 { return "Waiting to try again" }
             return "Waiting for home wifi"
         }
     }
+
+    /// What a capture held for the wrong network says, which is also where the person is told
+    /// what would send it now. A row that only said "waiting" would be true and useless.
+    static let waitingForHomeNetwork =
+        "Waiting for your home network — turn on Upload over mobile data in Settings"
+        + " to send it now"
 
     /// A capture with no words is described by what it carries, so the row is never blank.
     public static func snippet(_ content: String, limit: Int = 120) -> String {

@@ -13,6 +13,7 @@ struct PendingMemoPresentationTests {
         files: [OutboxFile] = [],
         state: JobState = .waiting,
         holdReason: HoldReason? = nil,
+        waitReason: WaitReason? = nil,
         attemptCount: Int = 0,
         lastError: String? = nil,
         capturedAt: Date? = nil
@@ -27,6 +28,7 @@ struct PendingMemoPresentationTests {
             ),
             state: state,
             holdReason: holdReason,
+            waitReason: waitReason,
             attemptCount: attemptCount,
             lastError: lastError
         )
@@ -41,6 +43,29 @@ struct PendingMemoPresentationTests {
             uploadUID: "u1",
             bytesConfirmed: confirmed
         )
+    }
+
+    /// The sentence a phone away from home reads. It has to say what would send the capture NOW,
+    /// because the honest alternative — a row that says "uploading 0 %" for a deliberate hold — is
+    /// what this label replaces, and it is what made someone force-quit the app on 2026-08-25.
+    @Test("a capture held for the home network says so, and says what would send it")
+    func waitingForTheHomeNetwork() {
+        #expect(
+            PendingMemoPresentation.status(for: job(waitReason: .homeNetwork))
+                == "Waiting for your home network — turn on Upload over mobile data in Settings"
+                + " to send it now"
+        )
+    }
+
+    /// The reason beats the attempt count. A capture refused by the network was never tried, so
+    /// "Waiting to try again" would be describing a retry that is not happening.
+    @Test("a held capture that had also failed before still says what it is waiting for")
+    func theReasonBeatsTheAttemptCount() {
+        let status = PendingMemoPresentation.status(
+            for: job(waitReason: .homeNetwork, attemptCount: 3)
+        )
+        #expect(status.contains("home network"))
+        #expect(!status.contains("try again"))
     }
 
     @Test("every state a job can be in has its own sentence")

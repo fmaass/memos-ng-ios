@@ -25,6 +25,9 @@ struct SettingsView: View {
     // Optional for the same reason the outbox is on the timeline: a preview or a test host has no
     // settings store, and a missing environment value must not be a crash.
     @Environment(AppSettings.self) private var settings: AppSettings?
+    /// Optional for the same reason, and the same object the outbox listens to — see
+    /// `Outbox.uploadPreferences`.
+    @Environment(UploadSettings.self) private var uploadSettings: UploadSettings?
 
     /// The one conversation, handed in by the screen that also puts it in the toolbar menu. Two
     /// stages would be two machines and, between them, two revokes — see `SignOutConversation`.
@@ -68,6 +71,7 @@ struct SettingsView: View {
             switch section {
             case .account: account
             case .defaults: defaults
+            case .uploads: uploads
             case .appearance: appearance
             case .storage: storage
             case .about: about
@@ -132,6 +136,15 @@ struct SettingsView: View {
         }
     }
 
+    /// The one setting on this screen that decides whether bytes leave the phone. The footer says
+    /// what stays true with it on, because a toggle that reads as "send everything, always" would
+    /// be lying about Low Data Mode.
+    @ViewBuilder
+    private var uploads: some View {
+        SettingsCaption(UploadSettings.footer)
+        Toggle(UploadSettings.title, isOn: mobileData)
+    }
+
     @ViewBuilder
     private var appearance: some View {
         SettingsCaption("System follows the phone, and switches when it does.")
@@ -189,6 +202,15 @@ struct SettingsView: View {
                 guard let choice, choice != session.defaultVisibility else { return }
                 Task { await save(choice) }
             }
+        )
+    }
+
+    /// Written through the store the drain reads, and awaited: the write is what a queued capture
+    /// is waiting for, and the drain it starts is what sends it without another tap.
+    private var mobileData: Binding<Bool> {
+        Binding(
+            get: { uploadSettings?.allowsMobileData ?? false },
+            set: { value in Task { await uploadSettings?.select(value) } }
         )
     }
 

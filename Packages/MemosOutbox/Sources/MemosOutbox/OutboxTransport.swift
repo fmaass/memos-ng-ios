@@ -99,10 +99,16 @@ public enum OutboxSession {
         // The container the app group shares, so a chunk file and the session that uploads it are
         // reachable from every process that may be launched to finish the job.
         configuration.sharedContainerIdentifier = appGroup
-        // The home wifi is the only network that reaches this server, and someone's photo library
-        // is not going over a phone plan by accident.
-        configuration.allowsCellularAccess = false
-        configuration.allowsExpensiveNetworkAccess = false
+        // Which network a capture may go over is the ENGINE's decision, taken immediately before
+        // each request against the path as it is at that instant and the person's own choice
+        // (`UploadNetworkPolicy`). A session that refused cellular itself could not be told
+        // otherwise: its configuration is fixed for the lifetime of the process, so a toggle
+        // turned on this afternoon would hold every chunk until the app was force-quit — which is
+        // exactly what a phone away from home did on 2026-08-25, reporting "Uploading 0 %" for a
+        // deliberate hold. Constrained stays refused here as well as there: Low Data Mode is a
+        // decision about the whole phone, and this is the belt to the engine's braces.
+        configuration.allowsCellularAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
         configuration.allowsConstrainedNetworkAccess = false
         // Not discretionary: when the app is open and the wifi is right, the capture goes now.
         configuration.isDiscretionary = false

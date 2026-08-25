@@ -104,7 +104,10 @@ extension UploadJob {
             file.chunkSize = session.chunkSize > 0 ? session.chunkSize : file.chunkSize
             file.bytesConfirmed = Swift.min(Swift.max(session.bytesReceived, 0), file.byteSize)
         }
-        .with { $0.state = .uploading }
+        .with {
+            $0.state = .uploading
+            $0.waitReason = nil
+        }
     }
 
     /// The server said how much of a file it now holds. Nothing else may move this number.
@@ -117,6 +120,7 @@ extension UploadJob {
             $0.attemptCount = 0
             $0.nextAttemptAt = .distantPast
             $0.lastError = nil
+            $0.waitReason = nil
         }
     }
 
@@ -136,6 +140,9 @@ extension UploadJob {
             $0.nextAttemptAt = RetrySchedule.nextAttempt(afterFailure: $0.attemptCount, from: now)
             $0.state = .waiting
             $0.lastError = error
+            // A backoff waits on the clock, so whatever it was waiting for before is no longer
+            // what the row should say.
+            $0.waitReason = nil
         }
     }
 
@@ -145,6 +152,7 @@ extension UploadJob {
             $0.state = .held
             $0.holdReason = reason
             $0.lastError = error ?? $0.lastError
+            $0.waitReason = nil
         }
     }
 
@@ -153,6 +161,7 @@ extension UploadJob {
         with {
             $0.state = .waiting
             $0.holdReason = nil
+            $0.waitReason = nil
             $0.attemptCount = 0
             $0.nextAttemptAt = now
             $0.lastError = nil
@@ -160,7 +169,23 @@ extension UploadJob {
     }
 
     public func creatingMemo() -> UploadJob {
-        with { $0.state = .creating }
+        with {
+            $0.state = .creating
+            $0.waitReason = nil
+        }
+    }
+
+    /// The network this phone is on is not one this capture may use.
+    ///
+    /// Not a failure and never a backoff: nothing was tried, nothing went wrong, and the job is
+    /// waiting for an EVENT — the wifi coming back, or the toggle going on — rather than for a
+    /// timer. So the attempt count and the next attempt are left exactly as they were, and what
+    /// the row gains is the reason.
+    public func waitingForNetwork() -> UploadJob {
+        with {
+            $0.state = .waiting
+            $0.waitReason = .homeNetwork
+        }
     }
 
     /// Applies the part of a structured refusal that needs no network: the files the server has no
@@ -170,7 +195,10 @@ extension UploadJob {
         for fileID in recovery.restart {
             job = job.clearingLostUpload(fileID: fileID)
         }
-        return job.with { $0.state = .uploading }
+        return job.with {
+            $0.state = .uploading
+            $0.waitReason = nil
+        }
     }
 
     func updating(_ fileID: UUID, _ change: (inout OutboxFile) -> Void) -> UploadJob {

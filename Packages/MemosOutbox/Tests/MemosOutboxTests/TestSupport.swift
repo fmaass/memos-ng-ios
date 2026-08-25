@@ -119,6 +119,50 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     var cancellations: [OutboxTaskIdentity] { lock.withLock { cancelled } }
 }
 
+/// The network this phone is on, as a test decides it is — and the event that says it changed.
+///
+/// The event is half the point of the type: a capture put down for the wrong network has to move
+/// when the network moves, so the tests that prove it hand `move(to:)` the wifi and then assert
+/// what happened WITHOUT calling a drain themselves.
+final class StubNetworkPath: NetworkPathProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var path: NetworkPath
+    private var afterOneRead: NetworkPath?
+    private var handler: OutboxTrigger?
+
+    /// `thenAfterOneRead` is the train leaving the station mid-drain: the first read answers with
+    /// one network and every read after it with another, which is how a test can tell a policy
+    /// consulted once per pass from one consulted before each action.
+    init(_ path: NetworkPath = .wifi, thenAfterOneRead next: NetworkPath? = nil) {
+        self.path = path
+        self.afterOneRead = next
+    }
+
+    func currentPath() -> NetworkPath {
+        lock.withLock {
+            let answer = path
+            if let next = afterOneRead {
+                path = next
+                afterOneRead = nil
+            }
+            return answer
+        }
+    }
+
+    func onPathChange(_ handler: @escaping OutboxTrigger) {
+        lock.withLock { self.handler = handler }
+    }
+
+    /// Moves the phone onto another network and tells whoever asked to hear about it.
+    func move(to next: NetworkPath) async {
+        let handler: OutboxTrigger? = lock.withLock {
+            path = next
+            return self.handler
+        }
+        await handler?()
+    }
+}
+
 /// The completion path, scripted. It records the idempotency key of every attempt, which is what
 /// the replay-window test asserts on.
 final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
@@ -253,6 +297,24 @@ enum Fixture {
         return {
             try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
         }
+    }
+
+    /// A preference store of its own per test. The app group's suite is the DEVICE's, and a test
+    /// that wrote into it would change how the app behaves on whatever machine ran the gate. The
+    /// starting value is written straight to the key, so a test of `set` still tests `set`.
+    static func preferences(
+        allowsMobileData: Bool = false,
+        name: String = "memosng.outbox.tests.\(UUID().uuidString)"
+    ) -> (store: UploadPreferences, name: String) {
+        // Emptied first, so a named suite a previous run left behind cannot decide this one.
+        UserDefaults.standard.removePersistentDomain(forName: name)
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.set(allowsMobileData, forKey: UploadPreferences.allowsMobileDataKey)
+        return (UploadPreferences(defaults: defaults), name)
+    }
+
+    static func forgetting(_ name: String) {
+        UserDefaults.standard.removePersistentDomain(forName: name)
     }
 
     /// A temporary directory that the caller removes.

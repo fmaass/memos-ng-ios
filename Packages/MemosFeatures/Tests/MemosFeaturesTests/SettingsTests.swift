@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import MemosOutbox
 import SwiftUI
 import Testing
 import UIKit
@@ -75,6 +76,54 @@ struct AppSettingsTests {
         #expect(AppearancePreference.system.colorScheme == nil)
         #expect(AppearancePreference.light.colorScheme == .light)
         #expect(AppearancePreference.dark.colorScheme == .dark)
+    }
+}
+
+/// The upload toggle: the value, the sentence under it, and that the switch writes where the
+/// drain reads.
+///
+/// The screen itself is not rendered here — `SettingsView` reads a `SessionStore`, which this
+/// bundle cannot construct (see `SettingsRenderTests`) — so what the row IS made of is asserted
+/// directly, the same way every other decision on that screen is.
+@MainActor
+@Suite("The upload toggle on the Settings screen")
+struct UploadSettingsTests {
+    private func scratchPreferences() -> (preferences: UploadPreferences, name: String) {
+        let (defaults, name) = scratchDefaults()
+        return (UploadPreferences(defaults: defaults), name)
+    }
+
+    @Test("a phone nobody has told otherwise waits for the home network")
+    func offByDefault() {
+        let (preferences, name) = scratchPreferences()
+        defer { forgetting(name) }
+
+        #expect(UploadSettings(preferences: preferences).allowsMobileData == false)
+    }
+
+    /// The switch and the store are the same fact: choosing moves the screen AND writes where the
+    /// drain — which runs in a process with no screen at all — reads it back.
+    @Test("choosing writes through to the store the outbox reads")
+    func choosingWritesThrough() async {
+        let (preferences, name) = scratchPreferences()
+        defer { forgetting(name) }
+        let settings = UploadSettings(preferences: preferences)
+
+        await settings.select(true)
+
+        #expect(settings.allowsMobileData)
+        #expect(preferences.allowsMobileData)
+        #expect(UploadSettings(preferences: preferences).allowsMobileData)
+    }
+
+    /// The footer is a promise about behaviour, not decoration: it names the one thing the toggle
+    /// does NOT override. A row whose words claimed "always send" would be a lie about Low Data
+    /// Mode, which the policy refuses whatever this switch says.
+    @Test("the row says what it does, and what it does not")
+    func theWordsOnTheRow() {
+        #expect(UploadSettings.title == "Upload over mobile data")
+        #expect(UploadSettings.footer.contains("home network"))
+        #expect(UploadSettings.footer.contains("Low Data Mode always waits"))
     }
 }
 
