@@ -119,7 +119,11 @@ struct NativeSignInTests {
         #expect(session.lastError == nil)
     }
 
-    @Test("closing the sheet is not an error to report")
+    /// It used to be silent, on the reasoning that a cancel is a decision rather than a failure.
+    /// It is not silent any more: the app cannot tell a deliberate close apart from a finished
+    /// login whose callback never came back, and the second one is exactly what happens when the
+    /// return link goes untapped. Both looked like a button that did nothing.
+    @Test("closing the sign-in view says so rather than leaving the screen blank")
     func userCancel() async {
         let credentials = InMemoryCredentials()
         let presenter = StubPresenter(behaviour: .failure(.cancelled))
@@ -139,7 +143,10 @@ struct NativeSignInTests {
 
         #expect(!signedIn)
         #expect(session.state == .signedOut)
-        #expect(session.lastError == nil, "a cancel is a decision, not a failure")
+        #expect(
+            session.lastError?.contains("tap Sign in to try again") == true,
+            "a closed sign-in view left nothing on screen to read"
+        )
         #expect(exchanges.count == 0)
         #expect(credentials.isEmpty)
         #expect(pkce.verifier == nil)
@@ -190,6 +197,69 @@ struct NativeSignInTests {
         #expect(session.state == .signedOut)
         #expect(session.lastError?.contains("access_denied") == true)
         #expect(exchanges.count == 0, "there is no code to exchange")
+        #expect(pkce.verifier == nil)
+    }
+
+    /// The lane that actually carries this deployment's sign-ins. The server builds the
+    /// custom-scheme URL from the https one by construction — same query, different scheme — so a
+    /// login that came back this way must reach the same place as one that came back the other.
+    @Test("a sign-in that came back on the tap-to-return lane completes exactly as the other")
+    func signsInFromTheCustomSchemeLane() async {
+        let credentials = InMemoryCredentials()
+        let presenter = StubPresenter(
+            behaviour: .callback("memosng://auth-callback?code=handoff-123")
+        )
+        let session = store(credentials: credentials) { _, _, _ in
+            Stub.json(Stub.exchange(token: "memos_pat_device"))
+        }
+        let pkce = PKCE()
+
+        let signedIn = await session.signInNatively(
+            serverAddress: "memos.example.invalid",
+            deviceName: "iPhone",
+            presenter: presenter,
+            pkce: pkce
+        )
+
+        #expect(signedIn)
+        #expect(session.state.user?.subject == "fabian")
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_device")
+        #expect(session.lastError == nil)
+        #expect(pkce.verifier == nil)
+    }
+
+    /// The BFF sends refusals to the same callback page, so the tap-to-return link can carry an
+    /// `error` where a successful login carries a `code`. Read as "malformed", it would tell
+    /// somebody their sign-in came back incomplete when in fact it was turned down — and read as
+    /// nothing at all, it would be the silent dead button again.
+    @Test("a refusal that came back on the tap-to-return lane is surfaced as a refusal")
+    func refusalOnTheCustomSchemeLane() async {
+        let credentials = InMemoryCredentials()
+        let presenter = StubPresenter(
+            behaviour: .callback("memosng://auth-callback?error=access_denied")
+        )
+        let exchanges = Counter()
+        let session = store(credentials: credentials) { _, _, _ in
+            exchanges.increment()
+            return Stub.json(Stub.exchange(token: "memos_pat_device"))
+        }
+        let pkce = PKCE()
+
+        await session.signInNatively(
+            serverAddress: "memos.example.invalid",
+            deviceName: "iPhone",
+            presenter: presenter,
+            pkce: pkce
+        )
+
+        #expect(session.state == .signedOut)
+        #expect(session.lastError?.contains("access_denied") == true)
+        #expect(
+            session.lastError?.contains("incomplete") == false,
+            "a refusal must not be reported as a truncated callback"
+        )
+        #expect(exchanges.count == 0, "there is no code to exchange")
+        #expect(credentials.isEmpty)
         #expect(pkce.verifier == nil)
     }
 

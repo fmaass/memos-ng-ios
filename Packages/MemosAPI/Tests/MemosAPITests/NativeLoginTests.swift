@@ -103,6 +103,23 @@ struct NativeLoginTests {
         #expect(NativeLogin.callback(from: url) == .code("abc123"))
     }
 
+    /// The callback comes back on one of two lanes now — the server's https route, or the
+    /// tap-to-return link the callback page carries on the app's own scheme, which under this
+    /// estate's internal-only DNS is the only lane that can fire at all. The server builds the
+    /// second from the first by construction, so what is ON the URL is identical and is read by
+    /// this one parser either way.
+    @Test("the tap-to-return lane carries the same parameters and is read the same way")
+    func readsCodeFromTheCustomScheme() {
+        let url = URL(string: "memosng://auth-callback?code=abc123")!
+        #expect(NativeLogin.callback(from: url) == .code("abc123"))
+    }
+
+    @Test("a refusal on the tap-to-return lane is a refusal, not a malformed callback")
+    func readsErrorFromTheCustomScheme() {
+        let raw = "memosng://auth-callback?error=access_denied"
+        #expect(NativeLogin.callback(from: URL(string: raw)!) == .failed(reason: "access_denied"))
+    }
+
     @Test("a refused login comes back as an error parameter, not an HTTP status")
     func readsError() {
         let raw = "https://memos.example.invalid/ios/auth/callback?error=access_denied"
@@ -116,6 +133,9 @@ struct NativeLoginTests {
             "https://memos.example.invalid/ios/auth/callback?code=",
             "https://memos.example.invalid/ios/auth/callback?error=",
             "https://memos.example.invalid/ios/auth/callback?state=xyz",
+            "memosng://auth-callback",
+            "memosng://auth-callback?code=",
+            "memosng://auth-callback?error=",
         ]
     )
     func readsMalformed(_ raw: String) {
