@@ -902,12 +902,141 @@ s_entitlements() {
   return $rc
 }
 
+s_pins() {
+  # A rebuild that resolves different dependency versions than the last good build is a different
+  # app, and nothing in a green test run would say so. SwiftPM keeps its resolved-versions file
+  # INSIDE the project, which is generated and not committed — so the graph is tracked at the repo
+  # root instead and bin/generate.sh copies it in. This step asks SwiftPM to resolve against it and
+  # reads the file back: SwiftPM rewrites that file whenever the pins cannot satisfy the manifests
+  # (a dependency added, a requirement bumped past its pin, a hand edit), so a difference here IS
+  # the drift — caught before the build rather than at an archive.
+  #
+  # Pinning the five direct dependencies in project.yml instead would not have covered it: eight of
+  # the thirteen packages the app links are transitive and named in no manifest in this repo, so
+  # their versions would still float. Only the resolved graph pins the whole thing.
+  local tracked="Package.resolved"
+  local resolved="MemosNG.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+  [ -f "$tracked" ] || { echo "PINS FAIL: $tracked is not in the tree"; return 1; }
+  [ -f "$resolved" ] || {
+    echo "PINS FAIL: bin/generate.sh did not put the pins in $resolved"
+    return 1
+  }
+  xcodebuild -resolvePackageDependencies \
+    -project MemosNG.xcodeproj \
+    -scheme MemosNG \
+    -derivedDataPath "$DERIVED"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "PINS FAIL: package resolution failed (xcodebuild -resolvePackageDependencies exit $rc)"
+    return "$rc"
+  fi
+  # Copied back on every run, pass or fail: on a fail it is the file to adopt, and on a pass it is
+  # the evidence of what the build actually resolved.
+  cp "$resolved" .gate-artifacts/Package.resolved
+  /usr/bin/python3 - "$tracked" "$resolved" <<'PY'
+import glob, json, pathlib, re, sys
+
+tracked_path, resolved_path = sys.argv[1], sys.argv[2]
+
+
+def load(path):
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print("PINS FAIL: cannot read %s: %s" % (path, error))
+        sys.exit(1)
+
+
+def pins(document):
+    # Everything that decides WHAT gets compiled: where the package comes from, which version, and
+    # the exact commit. Deliberately not originHash — SwiftPM recomputes that on a re-resolve and
+    # was observed returning a different value for an unchanged set of manifests (2026-08-25), so
+    # a check that failed on it would go red for no reachable reason. `location` covers the case
+    # originHash would have caught here: a dependency re-pointed at another repository.
+    out = {}
+    for pin in document.get("pins", []):
+        state = pin.get("state", {})
+        out[pin.get("identity", "?")] = (
+            state.get("version") or state.get("branch") or "(revision only)",
+            state.get("revision", ""),
+            pin.get("location", ""),
+        )
+    return out
+
+
+def identity(url):
+    name = url.strip().strip('"').rstrip("/").rsplit("/", 1)[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    return name.lower()
+
+
+tracked, resolved = load(tracked_path), load(resolved_path)
+t, r = pins(tracked), pins(resolved)
+rc = 0
+
+# The control on the comparison below: two files that agreed because both were empty, or because
+# the wrong pair was read, would still "match". So the dependencies this project DECLARES are read
+# out of the two places that declare them and each one is looked up in what was resolved.
+declared = set()
+for path in ["project.yml", *sorted(glob.glob("Packages/*/Package.swift"))]:
+    text = pathlib.Path(path).read_text(encoding="utf-8")
+    for url in re.findall(r'\.package\(\s*url:\s*"([^"]+)"', text):
+        declared.add(identity(url))
+    for url in re.findall(r"^\s+url:\s*(https://\S+)\s*$", text, re.M):
+        declared.add(identity(url))
+if not declared:
+    print("PINS FAIL: no remote dependency is declared in project.yml or Packages/*/Package.swift"
+          " — the control below would pass on any file")
+    rc = 1
+missing = sorted(declared - set(r))
+if missing:
+    print("PINS FAIL: declared dependencies absent from the resolved graph: %s" % ", ".join(missing))
+    rc = 1
+elif declared:
+    print("PINS ok (control): all %d declared remote dependencies are in the resolved graph: %s"
+          % (len(declared), ", ".join("%s@%s" % (i, r[i][0]) for i in sorted(declared))))
+
+added = sorted(set(r) - set(t))
+removed = sorted(set(t) - set(r))
+changed = sorted(i for i in set(t) & set(r) if t[i] != r[i])
+if added or removed or changed:
+    print("PINS FAIL: resolution does not match the tracked %s — this build would not use the "
+          "versions this repo ships" % tracked_path)
+    for i in changed:
+        print("PINS FAIL:   %s: pinned %s (%s) from %s, resolved %s (%s) from %s"
+              % (i, t[i][0], t[i][1][:12], t[i][2], r[i][0], r[i][1][:12], r[i][2]))
+    for i in added:
+        print("PINS FAIL:   %s: resolved at %s, pinned nowhere" % (i, r[i][0]))
+    for i in removed:
+        print("PINS FAIL:   %s: pinned at %s, no longer part of the graph" % (i, t[i][0]))
+    rc = 1
+elif tracked.get("version") != resolved.get("version"):
+    print("PINS FAIL: the resolved-file format changed (version %s -> %s)"
+          % (tracked.get("version"), resolved.get("version")))
+    rc = 1
+else:
+    print("PINS ok: resolution reproduced all %d tracked pins, each at the same commit and from "
+          "the same repository: %s"
+          % (len(t), ", ".join("%s@%s" % (i, t[i][0]) for i in sorted(t))))
+
+if rc:
+    print("PINS FAIL: if this change is intended, re-record the pins from what was just resolved:")
+    print("PINS FAIL:   cp .gate-artifacts/Package.resolved Package.resolved   # then commit it")
+sys.exit(rc)
+PY
+}
+
 s_xcodebuild() {
+  # -onlyUsePackageVersionsFromResolvedFile is the second half of the pins step: that step proves
+  # the tracked graph and the resolved graph agree, this makes the build itself unable to resolve
+  # its way to anything else. Without it a build is always free to move a pin and say nothing.
   xcodebuild test \
     -scheme MemosNG \
     -destination "$GATE_DESTINATION" \
     -derivedDataPath "$DERIVED" \
     -resultBundlePath "$XCRESULT" \
+    -onlyUsePackageVersionsFromResolvedFile \
     -skipPackagePluginValidation
 }
 
@@ -1217,6 +1346,7 @@ PY
 step xcodegen   s_xcodegen
 step entitlements s_entitlements
 step swiftformat s_format
+step pins       s_pins
 step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck
 step warnaserr  s_warnings

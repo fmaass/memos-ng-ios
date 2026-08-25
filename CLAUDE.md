@@ -16,9 +16,9 @@ It refuses (exit 2) if the tree has no HEAD or if its remote target resolves out
 `bin/generate.sh` (which also asserts the version keys in the generated project) → the
 entitlement greps (the app declares the credential keychain group first and the app group
 second, read by index; the share extension declares no keychain group; both declare the app
-group as a positive control) → `swift format lint --strict --recursive .` → `xcodebuild test`
-(all five test bundles) → a read-back of the BUILT app and .appex (each one's
-`PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
+group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
+check (below) → `xcodebuild test` (all five test bundles) → a read-back of the BUILT app and
+.appex (each one's `PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
 `swift build -warnings-as-errors` for MemosAPI and MemosCore → the dependency-rule greps → a
 per-bundle test-count check. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
@@ -101,6 +101,27 @@ and refuses a conflict.
 `project.yml`; run `bin/generate.sh` after cloning (it stubs the per-machine `signing.local.yml` —
 see `signing.local.yml.example` for device signing). Never commit a `DEVELOPMENT_TEAM`, a
 provisioning profile, a server URL default, or a token.
+
+## Dependency pins
+
+`Package.resolved` at the repo root is the whole resolved dependency graph, and it is committed.
+SwiftPM reads that file from inside the project
+(`MemosNG.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/`), which is generated and therefore
+absent from a clone, so `bin/generate.sh` copies the tracked file in before anything resolves.
+Pinning the direct dependencies in `project.yml` with `exactVersion` would not be the same thing:
+eight of the thirteen packages the app links are transitive and named in no manifest in this
+repo, so their versions would still float.
+
+The gate's `pins` step resolves against the restored file and compares what came back with what is
+tracked, package by package: the version, the exact commit, and the repository it came from. SwiftPM rewrites that file whenever a pin
+cannot satisfy the manifests, so a mismatch IS drift — a dependency added, a requirement bumped
+past its pin, a hand edit — and the step fails with a `PINS FAIL:` line naming every package that
+moved. `xcodebuild test` then runs with `-onlyUsePackageVersionsFromResolvedFile`, so the build
+itself cannot resolve its way to a version the file does not name.
+
+After a deliberate dependency change the pins are re-recorded, not hand-edited: every run leaves
+what it resolved in `.gate-artifacts/Package.resolved`, so `cp .gate-artifacts/Package.resolved
+Package.resolved` and commit that.
 
 ## Outgoing text
 
