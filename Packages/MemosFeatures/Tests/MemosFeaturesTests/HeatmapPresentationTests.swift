@@ -166,6 +166,6 @@ struct HeatmapPresentationTests {
             from: ["2026-08-24": 2, "2026-08-25": 1, "2026-08-26": 4], today: Self.today
         )
 
-        #expect(grid.summary == "7 memos in the last 12 weeks")
+        #expect(grid.summary == "7 memos in the last week")
     }
 }
