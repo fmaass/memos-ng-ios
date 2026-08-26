@@ -159,14 +159,17 @@ public enum MemoDetailPresentation {
         case stay
     }
 
-    /// Where the memo's screen belongs once its editor has closed.
+    /// Whether the memo's screen goes now. BOTH halves, because either one alone is a bug that
+    /// has actually happened.
     ///
-    /// A decision separate from the `dismiss()` that carries it out, because WHEN it is asked is
-    /// the whole of this bug: asked while the sheet is still up, the pop is swallowed by the
-    /// sheet's own dismissal and the screen stays on a memo that no longer exists. It is asked
-    /// from the sheet's `onDismiss` instead — once the editor has actually gone.
-    public static func afterEditorClosed(memoDeleted: Bool) -> EditorExit {
-        memoDeleted ? .popToOverview : .stay
+    /// On `memoDeleted` alone, the pop is asked for while the sheet is still on its way out, and a
+    /// `dismiss()` issued by a view that is still presenting a sheet is spent on the sheet — the
+    /// editor closed and the detail view of the deleted memo stayed (build 4). On `sheetClosed`
+    /// alone, somebody who swipes the editor away while the delete is still in flight is never
+    /// asked again: the server answers to a closed sheet, and the screen stays on the memo it has
+    /// just deleted. So the screen goes on whichever of the two arrives second, and only then.
+    public static func popDecision(memoDeleted: Bool, sheetClosed: Bool) -> EditorExit {
+        memoDeleted && sheetClosed ? .popToOverview : .stay
     }
 
     /// The date an edit actually SENDS: only one the editor moved.
