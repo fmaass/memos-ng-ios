@@ -216,6 +216,62 @@ struct ReferenceLinkTests {
         #expect(projection("a [bracket] and (parens)").map(\.text) == ["a [bracket] and (parens)"])
     }
 
+    /// The class between "refused" and "tappable", read off the renderer the app ships
+    /// (MEMNG-165). markdown-it ACCEPTS `ftp:`, a scheme-relative `//host` and a relative path,
+    /// so the definition registers and its line is consumed; `memo_target_policy` then drops the
+    /// anchor off the link it built, and the label alone is what the SPA shows. A client that
+    /// asks the sanitiser's question at the DEFINITION instead renders the definition line and
+    /// the whole reference as literal markup — the divergence this pins.
+    @Test(
+        "a reference target the app will not open renders as its label, and as nothing else",
+        arguments: [
+            ("ftp, full", "[the file][f]\n\n[f]: ftp://example.com/pub", "the file"),
+            ("ftp, collapsed", "[f][]\n\n[f]: ftp://example.com/pub", "f"),
+            ("ftp, shortcut", "[f]\n\n[f]: ftp://example.com/pub", "f"),
+            ("scheme-relative", "[the host][h]\n\n[h]: //example.com/path", "the host"),
+            ("relative path", "[the page][p]\n\n[p]: /docs/readme.md", "the page"),
+            (
+                "the first definition decides",
+                "[f]: ftp://example.com/first\n[f]: https://example.com/second\n\n[the file][f]",
+                "the file"
+            ),
+        ]
+    )
+    func acceptedButUnopenableReferencesBecomeLabels(
+        name: String,
+        markdown: String,
+        expected: String
+    ) {
+        let blocks = projection(markdown)
+        #expect(blocks.map(\.text) == [expected], "\(name)")
+        #expect(blocks.allSatisfy { $0.links.isEmpty }, "\(name): \(blocks)")
+    }
+
+    /// The image half of the same rule: the image goes either way, and a source the app will not
+    /// fetch leaves its alt behind as plain text rather than raw `![…][…]` markup.
+    @Test(
+        "a reference image the app will not fetch leaves its alt text as words",
+        arguments: [
+            ("ftp", "![the chart][pic]\n\n[pic]: ftp://example.com/chart.png"),
+            ("a data image", "![the chart][pic]\n\n[pic]: data:image/png;base64,iVBORw0KGgo="),
+        ]
+    )
+    func acceptedButUnfetchableReferenceImagesKeepTheirAlt(name: String, markdown: String) {
+        #expect(projection(markdown).map(\.text) == ["the chart"], "\(name)")
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(!html.contains("<img"), "\(name): the renderer was handed an image:\n\(html)")
+        #expect(!html.contains("chart.png"), "\(name): the remote URL survived:\n\(html)")
+    }
+
+    /// The liveness half, read off the rendered pixels rather than off an `href`: a label the
+    /// policy reduced to text must not be painted in the accent, or the reader is invited to tap
+    /// a destination the app refuses to open.
+    @Test("an accepted-but-unopenable reference is painted as text, not as a link")
+    func acceptedButUnopenableReferencesAreNotPainted() throws {
+        let painted = try accentPixels(in: "[click][f]\n\n[f]: ftp://example.com/pub")
+        #expect(painted == 0, "\(painted) accent pixels — the reference stayed a link")
+    }
+
     @Test("a definition inside a code block is code, not a definition")
     func definitionsInsideCodeAreLeftAlone() {
         let fenced = projection("```\n[evil]: javascript:alert(1)\n```")
@@ -319,6 +375,89 @@ struct ReferenceLinkTests {
         let neutralised = try accentPixels(in: "[click][evil]\n\n[evil]: javascript:alert(1)")
         #expect(live > 0, "a real link was not painted in the accent at all")
         #expect(neutralised == 0, "\(neutralised) accent pixels — the reference stayed a link")
+    }
+
+    /// The MEMNG-165 review's repros, read off the renderer the app ships.
+    ///
+    /// Every string here is one the SPA renders with NO anchor at all — verified against the SPA
+    /// renderer itself under jsdom before this test was written — while the branch that
+    /// registered a definition on a grammar of its own handed cmark a live `javascript:`
+    /// destination for the first four. `destinations(in:)` reads what the RENDERER resolved,
+    /// not what an `href` survived, which is the only place that difference is visible.
+    @Test(
+        "a definition this scanner will not validate never becomes a live destination",
+        arguments: [
+            ("nested bracket label", "[[x](javascript:alert(1))]: ftp://example.com"),
+            (
+                "unterminated title",
+                "[f]: ftp://example.com \"unterminated [x](javascript:alert(1))"
+            ),
+            (
+                "continuation title with a stray backtick",
+                "[f]: ftp://example.com\n\"a title with a ` backtick\"\n\n[x](javascript:alert(1))"
+            ),
+            ("entity-encoded scheme", "[evil]: javascript&#x3A;alert(1)\n\n[click][evil]"),
+            (
+                "content after the destination",
+                "[f]: ftp://example.com [g]: javascript:alert(1)\n\n[click][f]"
+            ),
+            ("unmatched backtick", "a ` b [x](javascript:alert(1))"),
+            ("unmatched backtick across a blank line", "a ` b\n\n[x](javascript:alert(1))"),
+            ("unbalanced parenthesis", "[f]: ftp://example.com/a(b\n\n[click][f]"),
+            ("empty angle destination", "[f]: <>\n\n[click][f]"),
+        ]
+    )
+    func refusedGrammarNeverResolvesADestination(name: String, markdown: String) {
+        let refused = ProductionMarkdownProjection.destinations(in: markdown).filter {
+            let lowered = $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            return lowered.hasPrefix("javascript:") || lowered.hasPrefix("vbscript:")
+                || lowered.hasPrefix("file:") || lowered.hasPrefix("data:text")
+        }
+        #expect(refused.isEmpty, "\(name): the renderer resolved \(refused)")
+    }
+
+    /// The same repros as the SPA projects them, where this client can match it exactly. The
+    /// continuation-title spellings are deliberately MORE literal here and are pinned in
+    /// `MemoMarkdownSourceTests` instead: a grammar this scanner cannot validate falls back to
+    /// text, which is the parity gap the review accepted and not the hole it refused.
+    @Test(
+        "and it renders what the SPA renders",
+        arguments: [
+            (
+                "nested bracket label",
+                "[[x](javascript:alert(1))]: ftp://example.com",
+                ["[[x](javascript:alert(1))]: ftp://example.com"]
+            ),
+            (
+                "unterminated title",
+                "[f]: ftp://example.com \"unterminated [x](javascript:alert(1))",
+                ["[f]: ftp://example.com \"unterminated [x](javascript:alert(1))"]
+            ),
+            (
+                "content after the destination",
+                "[f]: ftp://example.com [g]: javascript:alert(1)\n\n[click][f]",
+                ["[f]: ftp://example.com [g]: javascript:alert(1)", "[click][f]"]
+            ),
+            (
+                "unmatched backtick",
+                "a ` b [x](javascript:alert(1))",
+                ["a ` b [x](javascript:alert(1))"]
+            ),
+        ]
+    )
+    func refusedGrammarRendersAsTheSPADoes(name: String, markdown: String, texts: [String]) {
+        #expect(projection(markdown).map(\.text) == texts, "\(name)")
+    }
+
+    /// A destination the parser resolves through an escape is the destination the policy has to
+    /// judge: `https\\://example.com` IS an https link in both renderers, and reducing it
+    /// to its label would drop an anchor the SPA paints.
+    @Test("an escaped destination is classified as the parser resolves it")
+    func escapedDestinationsStayLinks() {
+        let blocks = projection("[home]: https\\://example.com\n\n[site][home]")
+        #expect(blocks.count == 1)
+        #expect(blocks.first?.links == [MarkdownLink(href: "https://example.com", text: "site")])
+        #expect(blocks.first?.text == "site")
     }
 
     /// Accent-coloured means green-dominant: the accent is `#3E7C4F` in light appearance, while
