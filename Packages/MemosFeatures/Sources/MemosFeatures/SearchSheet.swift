@@ -13,6 +13,19 @@ import SwiftUI
 /// screen builds a fresh `MemoSearch` each time the loupe is tapped.
 struct SearchSheet: View {
     let search: MemoSearch
+    /// Reads the activity heatmap into the store the empty state draws. A closure rather than a
+    /// client, because this layer cannot name the API layer's types (the dependency rule) — and
+    /// because it is what makes the read the SHEET's: it happens when the sheet opens, and at no
+    /// other moment.
+    let loadHeatmap: (HeatmapStore) async -> Void
+    /// Takes the timeline to a day and leaves. The sheet does not decide which days can be jumped
+    /// to — `HeatmapDateJump` does — and it does not do the jumping either.
+    let jump: (MemoQueryAnchor) -> Void
+    /// Reads the account's tags into the store the chips draw. Same shape and same lifetime as
+    /// `loadHeatmap`: one read, when the sheet opens.
+    let loadTags: (TagStore) async -> Void
+    /// Runs a query the field did not type — a tag chip — with the text the field should show.
+    let runSearch: (MemoQuery, String) -> Void
     let close: () -> Void
     /// Leaves the sheet and pushes the results, which are a screen of their own over a timeline
     /// that never moved.
@@ -31,13 +44,26 @@ struct SearchSheet: View {
             SearchSheetHeader(close: close)
             field
             SearchOutcomeRow(outcome: search.outcome, showResults: showResults)
+            // Nothing typed yet: the way in is a date rather than a word. Once there is a term the
+            // sheet is about that term, and a heatmap under it would be answering a question
+            // nobody is asking any more.
+            if search.outcome == .idle {
+                // Tags before the heatmap: a word is the commoner way back to a memo than a day,
+                // and the chips are one line where the heatmap is a card — first is where they
+                // are still on a medium detent at the larger text sizes.
+                SearchSheetTags(load: loadTags, search: runSearch)
+                SearchSheetHeatmap(load: loadHeatmap, jump: jump)
+            }
             MonthScrubberSlot()
             Spacer(minLength: 0)
         }
         .padding(DesignTokens.Space.roomy)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemGroupedBackground))
-        .presentationDetents([.medium])
+        // Medium is what it opens at. Large is offered because the heatmap is twelve weeks of
+        // squares that grow with the text size: at the accessibility sizes the card alone is
+        // taller than half a phone, and a detent nobody can grow would simply cut it off.
+        .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         // The sheet exists to be typed into, so it opens with the keyboard up.
         .task { focused = true }
@@ -145,6 +171,35 @@ struct SearchOutcomeRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// The activity heatmap, as the sheet's empty-query state — and the store behind it.
+///
+/// The store is OWNED here, and that is the point of the type. SwiftUI builds this view fresh for
+/// every presentation of the sheet, so its `@State` is new each time and its `.task` runs each
+/// time: the heatmap is read when the sheet opens, once, and never on a launch or a pull of the
+/// timeline (MEMNG-126, and the refresh coupling MEMNG-166 complained about).
+///
+/// It takes plain closures rather than a client or a search, which is also what makes it the piece
+/// a test can host: `SearchSheetTests` hosts it in a window and reads back that appearing is what
+/// loads it.
+struct SearchSheetHeatmap: View {
+    let load: (HeatmapStore) async -> Void
+    let jump: (MemoQueryAnchor) -> Void
+
+    @State private var heatmap = HeatmapStore()
+    /// Folded away or not. Not persisted: the sheet is opened to be used, and a heatmap that
+    /// starts hidden is one nobody finds again.
+    @State private var expanded = true
+
+    var body: some View {
+        HeatmapCard(
+            grid: HeatmapPresentation.grid(from: heatmap.counts),
+            expanded: $expanded,
+            jump: jump
+        )
+        .task { await load(heatmap) }
     }
 }
 

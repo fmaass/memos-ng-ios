@@ -22,13 +22,9 @@ public struct TimelineView: View {
     @Environment(Outbox.self) private var outbox: Outbox?
     @Environment(\.scenePhase) private var scenePhase
     @State private var timeline: TimelineStore?
-    /// The activity heatmap behind the card at the top of the scroll. Built here rather than in
-    /// the `.task` the timeline is: it needs nothing from the session to exist, and a card that
-    /// waits for a store to be constructed flickers in on the first frame after launch.
-    @State private var heatmap = HeatmapStore()
-    /// Folded away or not. Deliberately not persisted: the card is the timeline's header, and a
-    /// header that starts hidden is one nobody finds again.
-    @State private var heatmapExpanded = true
+    /// How many times this screen has been taken to a day. It is a trigger, not a count: a jump
+    /// replaces the whole list, and the scroll it was read at belongs to a list that is gone.
+    @State private var jumps = 0
     @State private var composing: ComposeView.Mode?
     /// One conversation for the whole screen, shared with the Settings screen pushed from it —
     /// two stages would be two machines and, between them, two revokes.
@@ -124,6 +120,16 @@ public struct TimelineView: View {
                 if let search {
                     SearchSheet(
                         search: search,
+                        loadHeatmap: { store in
+                            guard let client = session.api else { return }
+                            await store.load(using: client)
+                        },
+                        jump: { jump(to: $0) },
+                        loadTags: { store in
+                            guard let client = session.api else { return }
+                            await store.load(using: client)
+                        },
+                        runSearch: { query, text in search.run(query, showing: text) },
                         close: { searching = false },
                         showResults: {
                             handingOff = true
@@ -156,9 +162,16 @@ public struct TimelineView: View {
         .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
         .task {
             if timeline == nil {
-                timeline = TimelineStore(onUnauthorized: { [session] in
-                    await session.handle(.unauthorized)
-                })
+                timeline = TimelineStore(
+                    // Every day this screen can be anchored at is a day the heatmap named, and
+                    // the heatmap's days are the server's UTC ones — see
+                    // `HeatmapDateJump.anchorCalendar` for what reading them in the device's zone
+                    // would hide.
+                    calendar: HeatmapDateJump.anchorCalendar,
+                    onUnauthorized: { [session] in
+                        await session.handle(.unauthorized)
+                    }
+                )
             }
             await load()
             // What "Default" resolves to is the account's setting, not something the app can
@@ -192,21 +205,43 @@ public struct TimelineView: View {
         }
     }
 
+    /// The screen's scroll, and the one thing that moves it on its own.
     @ViewBuilder
     private func content(_ timeline: TimelineStore) -> some View {
+        ScrollViewReader { proxy in
+            list(timeline)
+                // The list a jump produced starts at the anchored day, so the top of it IS that
+                // day — this puts the reader there rather than wherever the old list had been
+                // scrolled to. It is one call on purpose: scrolling INTO a day the server has not
+                // sent yet would be a paging engine, and the anchored request is what makes one
+                // unnecessary.
+                .onChange(of: jumps) { _, _ in
+                    withAnimation(.snappy) { proxy.scrollTo(Self.jumpTop, anchor: .top) }
+                }
+        }
+    }
+
+    /// The row a jump scrolls to: the notice that says which day the list was taken to, which is
+    /// the first thing in an anchored list.
+    private static let jumpTop = "timeline-jump-top"
+
+    @ViewBuilder
+    private func list(_ timeline: TimelineStore) -> some View {
         // The flat position of each memo, so the prefetch trigger still knows how close to the
         // end of the LIST a row is once the list has been cut into days.
         let positions = Dictionary(
             uniqueKeysWithValues: timeline.memos.enumerated().map { ($1.uid, $0) }
         )
         List {
-            // The scroll's header: what the household has been writing, above everything the
-            // list itself is about.
-            HeatmapCard(
-                grid: HeatmapPresentation.grid(from: heatmap.counts),
-                expanded: $heatmapExpanded
-            )
-            .cardRow()
+            // Why this list is not the one that was here a moment ago, and the way back to now.
+            if let anchor = timeline.query.anchor {
+                TimelineAnchorNotice(
+                    title: HeatmapDateJump.title(for: anchor),
+                    clear: clearAnchor
+                )
+                .cardRow()
+                .id(Self.jumpTop)
+            }
             if let outbox, !outbox.jobs.isEmpty {
                 Section {
                     ForEach(PendingMemoPresentation.rows(for: outbox.jobs)) { row in
@@ -437,10 +472,6 @@ public struct TimelineView: View {
         guard let client = session.api else { return }
         if await timeline.delete(uid: memo.uid, using: client) {
             feedback.fire(.deleted)
-            // A day just lost a memo. The heatmap is a count, not a list, so nothing else on this
-            // screen would have told it — and a square that stays dark until the next launch is
-            // the app disagreeing with itself.
-            await heatmap.load(using: client)
         }
     }
 
@@ -490,13 +521,39 @@ public struct TimelineView: View {
     }
 
     /// Everything this screen reads from the server, on the one signal that already means "read
-    /// it again": the screen appearing, a pull, and a queued capture becoming a memo. The heatmap
-    /// rides that signal rather than owning one of its own — a second refresh path is a second
-    /// thing to forget when a third way of creating a memo arrives.
+    /// it again": the screen appearing, a pull, and a queued capture becoming a memo.
+    ///
+    /// One read, and it is the memos. The activity heatmap used to ride this signal too, which
+    /// put a second request in front of every pull of a list nobody had asked a heatmap question
+    /// of (MEMNG-166); it belongs to the search sheet now and is read when that opens
+    /// (MEMNG-126).
     private func load() async {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
         await timeline?.refresh(using: client, baseURL: baseURL)
-        await heatmap.load(using: client)
+    }
+
+    /// A day tapped on the sheet's heatmap: the sheet goes away, and the list comes back anchored
+    /// at that day.
+    ///
+    /// Anchored, not scrolled. The memo written on 4 June is a hundred cursor pages down a list
+    /// that is still being paged, so scrolling to it would mean fetching everything in between;
+    /// the server already takes `created_before` (`MemoQuery.anchor`), so the list is simply asked
+    /// for from that day backwards and the reader arrives at the top of it.
+    private func jump(to anchor: MemoQueryAnchor) {
+        searching = false
+        guard let timeline else { return }
+        timeline.setQuery(MemoQuery(anchor: anchor))
+        Task {
+            await load()
+            jumps += 1
+        }
+    }
+
+    /// Back to now — the same list this screen opens with.
+    private func clearAnchor() {
+        guard let timeline else { return }
+        timeline.setQuery(.empty)
+        Task { await load() }
     }
 
 }
@@ -512,6 +569,47 @@ struct SectionHeading: View {
             .foregroundStyle(.primary)
             .textCase(nil)
             .padding(.vertical, DesignTokens.Space.tight)
+    }
+}
+
+/// What the timeline says about itself while it is anchored at a day, and the way back to now.
+///
+/// Without it a jump is a one-way door: every refresh this screen has keeps the query it was
+/// given, pulls included, so a list taken to a day in June stays there with nothing on screen to
+/// say why it looks like that or how to leave.
+struct TimelineAnchorNotice: View {
+    let title: String
+    let clear: () -> Void
+
+    var body: some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            Label {
+                Text(title).font(.subheadline)
+            } icon: {
+                Image(systemName: "calendar")
+            }
+            // Wrapping rather than truncating: at the accessibility sizes the sentence is longer
+            // than the card, and a date cut in half is the one part of this row that has to be
+            // readable.
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: DesignTokens.Space.snug)
+            TimelineAnchorClearButton(clear: clear)
+        }
+        .padding(DesignTokens.Space.regular)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+    }
+}
+
+/// The way back to now. Its own view because the row measures it: the notice puts a flexible gap
+/// in front of it, and a flexible gap reports whatever width it is offered.
+struct TimelineAnchorClearButton: View {
+    let clear: () -> Void
+
+    var body: some View {
+        Button("Today", action: clear)
+            .font(.subheadline.weight(.semibold))
     }
 }
 
