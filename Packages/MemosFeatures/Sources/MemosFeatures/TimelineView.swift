@@ -183,10 +183,10 @@ public struct TimelineView: View {
         }
         // The live media channel, and its single owner.
         //
-        // One channel for the whole signed-in app: this view is what `RootView` shows exactly
-        // while there is a session, and it holds the store every event is applied to — so a memo's
-        // own screen, pushed over this one, needs no channel of its own the way it once needed a
-        // poll of its own.
+        // One channel for the whole signed-in app: this view is the app's first tab, so it exists
+        // for exactly as long as there is a session (a tab switch does not tear it down), and it
+        // holds the store every event is applied to — so a memo's own screen, pushed over this
+        // one, needs no channel of its own the way it once needed a poll of its own.
         //
         // Attached to the NAVIGATION STACK, not to the timeline inside it. A view inside the stack
         // is the thing a push covers, and whether covering it cancels its `.task` is a detail of

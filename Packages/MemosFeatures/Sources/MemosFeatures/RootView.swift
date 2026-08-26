@@ -2,7 +2,7 @@ import Foundation
 import MemosCore
 import SwiftUI
 
-/// Chooses between the timeline and sign-in, and restores a stored credential at launch.
+/// Chooses between the signed-in app and sign-in, and restores a stored credential at launch.
 public struct RootView: View {
     @Environment(SessionStore.self) private var session
     // Optional for the same reason the outbox is on the timeline: a preview or a test host has no
@@ -15,7 +15,7 @@ public struct RootView: View {
         Group {
             switch session.state {
             case .signedIn:
-                TimelineView()
+                MainTabView()
             case .unreachable(let message):
                 UnreachableView(message: message)
             case .signedOut, .signingIn:
