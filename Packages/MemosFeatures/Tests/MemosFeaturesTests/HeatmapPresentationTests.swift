@@ -160,6 +160,26 @@ struct HeatmapPresentationTests {
         #expect(HeatmapPresentation.summary(memos: 0, weeks: 1) == "No memos in the last week")
     }
 
+    /// MEMNG-175. An unanswered heatmap and a household that has written nothing produce exactly
+    /// the same empty counts and exactly the same twelve weeks of level-0 days, so the sentence
+    /// read off the grid is a claim the app cannot make until the server has spoken — and the
+    /// first open of the search sheet used to make it.
+    @Test("an unanswered heatmap does not claim there were no memos")
+    func anUnansweredHeatmapClaimsNothing() {
+        let cold = HeatmapPresentation.grid(from: [:], today: Self.today)
+
+        #expect(HeatmapPresentation.summary(for: cold, loaded: false) == "Loading activity")
+        // Once it IS answered, an account with nothing on it says so — the emptiness is the news.
+        #expect(HeatmapPresentation.summary(for: cold, loaded: true) == cold.summary)
+        #expect(cold.summary.contains("No memos"))
+        // And an answered heatmap with something on it reads back what it counted, so the
+        // sentence above is the ABSENCE of an answer and not a summary that never says anything.
+        let warm = HeatmapPresentation.grid(from: ["2026-08-26": 4], today: Self.today)
+        #expect(HeatmapPresentation.summary(for: warm, loaded: true) == warm.summary)
+        #expect(warm.summary.contains("4 memos"))
+        #expect(HeatmapPresentation.summary(for: warm, loaded: false) == "Loading activity")
+    }
+
     @Test("the summary totals only the days the grid actually shows")
     func summaryTotalsTheWindow() {
         let grid = HeatmapPresentation.grid(

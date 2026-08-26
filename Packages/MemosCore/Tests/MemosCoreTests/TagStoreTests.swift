@@ -28,8 +28,22 @@ struct TagStoreTests {
         #expect(store.tags == [MemoTag(name: "travel", count: 3), MemoTag(name: "food", count: 1)])
         #expect(store.lastError == nil)
         #expect(!store.isLoading)
+        #expect(store.hasLoaded, "an answered store does not say it has been answered")
         // Control: this really went to the tags endpoint, built by the generated client.
         #expect(paths.get() == ["/api/tags"])
+    }
+
+    /// The twin of the heatmap store's case, and for the same reason (MEMNG-175): an account with
+    /// no tags and an account whose tags have not arrived hand the row the same empty list.
+    @Test("an empty answer is still an answer, and an unanswered store says it has none")
+    func anEmptyAnswerIsStillAnAnswer() async {
+        let store = TagStore()
+        #expect(!store.hasLoaded, "a store nobody has read says it has been answered")
+
+        await store.load(using: Stub.client { _, _, _ in Stub.json("[]") })
+
+        #expect(store.hasLoaded, "an answered store does not say it has been answered")
+        #expect(store.tags.isEmpty)
     }
 
     /// A row that empties itself because one read failed says the household files nothing under

@@ -37,6 +37,38 @@ enum TagChipsPresentation {
     /// this app's way of saying which kind of thing the word is.
     static func label(for tag: MemoTag) -> String { "#\(tag.name)" }
 
+    /// What a tap on a chip amounts to — a value rather than a call, the way `HeatmapDateJump`
+    /// already answers the same question for a day.
+    ///
+    /// It names BOTH halves because the owner's report (MEMNG-177) was that the tap did only the
+    /// first: the query ran, and what it found then sat behind a second tap on "Show results". A
+    /// chip is one gesture, and it ends on the results.
+    enum Tap: Equatable {
+        /// Not a control at all: the tag would search for nothing, or — worse — for everything.
+        case none
+        /// Run this query with this text in the field, and go straight to what it found.
+        case searchAndShow(MemoQuery, showing: String)
+    }
+
+    static func tap(on tag: MemoTag) -> Tap {
+        guard let query = query(for: tag) else { return .none }
+        return .searchAndShow(query, showing: label(for: tag))
+    }
+
+    /// Carries a tap out.
+    ///
+    /// Its own function because "one gesture" IS the fix: spelled out at the call site it is a
+    /// convention, and a convention is the thing a later edit keeps half of.
+    static func act(
+        on tap: Tap,
+        search: (MemoQuery, String) -> Void,
+        showResults: () -> Void
+    ) {
+        guard case .searchAndShow(let query, let text) = tap else { return }
+        search(query, text)
+        showResults()
+    }
+
     /// What VoiceOver reads on a chip: what it searches for, and how much is under it.
     static func accessibilityLabel(for tag: MemoTag) -> String {
         let memos = tag.count == 1 ? "1 memo" : "\(tag.count) memos"
@@ -48,21 +80,68 @@ enum TagChipsPresentation {
 ///
 /// The store is owned HERE, like the heatmap's: SwiftUI builds this view fresh for every
 /// presentation of the sheet, so the read happens when the sheet opens and never on a launch or a
-/// pull of the timeline. The task is on the outer stack rather than inside the `if`, because a
-/// row that only read its tags once it had some would never get any.
+/// pull of the timeline.
+///
+/// The read is driven by APPEARING rather than by a bare `.task` — see `SearchSectionLoad` for the
+/// first-presentation teardown that made a plain `.task` miss it (MEMNG-175). What it draws is
+/// `TagChipRow`, which takes its chips and its phase as plain values so both the waiting row and
+/// the loaded one can be measured against each other.
 struct SearchSheetTags: View {
     let load: (TagStore) async -> Void
     /// Runs this query, with the text the field should then show.
     let search: (MemoQuery, String) -> Void
+    /// Leaves for what the query found. A chip does not stop at running the search (MEMNG-177).
+    let showResults: () -> Void
 
     @State private var tags = TagStore()
+    @State private var lifecycle = SearchSectionLoad()
 
     var body: some View {
-        let chips = TagChipsPresentation.chips(for: tags.tags)
+        TagChipRow(
+            chips: TagChipsPresentation.chips(for: tags.tags),
+            phase: SearchSectionPhase.phase(
+                hasLoaded: tags.hasLoaded,
+                failed: tags.lastError != nil
+            ),
+            search: search,
+            showResults: showResults
+        )
+        .onAppear { lifecycle.appeared() }
+        .task(id: lifecycle.appearances) {
+            guard lifecycle.appearances > 0 else { return }
+            await load(tags)
+        }
+    }
+}
+
+/// The chips themselves, and the room kept for them while they are still coming.
+///
+/// Its inputs are plain values so the two states can be MEASURED against each other: a row that
+/// grew from nothing to a line of chips as the tags landed pushed everything under it down and the
+/// sheet past its detent, which is how the fields above ended up walking up the screen
+/// (MEMNG-176). Waiting, it draws the same shapes greyed, at the same height.
+struct TagChipRow: View {
+    let chips: [MemoTag]
+    let phase: SearchSectionPhase
+    let search: (MemoQuery, String) -> Void
+    let showResults: () -> Void
+
+    /// What a waiting row stands in for. The count is what makes the height right — a chip is a
+    /// name beside a number, and both are drawn whatever the words are.
+    static let placeholders: [MemoTag] = [
+        MemoTag(name: "\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}", count: 0),
+        MemoTag(name: "\u{2007}\u{2007}\u{2007}\u{2007}", count: 0),
+        MemoTag(name: "\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}", count: 0),
+    ]
+
+    /// Whether the row is drawn at all. Waiting, it always is — that is the room being kept. Once
+    /// the answer is in, a row with no chips is drawn as nothing rather than as a heading over an
+    /// empty line, which is a section that looks broken.
+    private var shows: Bool { phase == .loading || !chips.isEmpty }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-            // Nothing at all rather than an empty card: a heading over no chips is a section that
-            // looks broken, and a new account has no tags yet.
-            if !chips.isEmpty {
+            if shows {
                 Text("Tags")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -71,25 +150,39 @@ struct SearchSheetTags: View {
                 // sizes where there is least room to lose.
                 ScrollView(.horizontal) {
                     HStack(spacing: DesignTokens.Space.snug) {
-                        ForEach(chips) { tag in
-                            chip(tag)
+                        if phase == .loading {
+                            ForEach(Self.placeholders) { tag in
+                                TagChip(tag: tag)
+                            }
+                            .redacted(reason: .placeholder)
+                            .accessibilityHidden(true)
+                        } else {
+                            ForEach(chips) { tag in
+                                chip(tag)
+                            }
                         }
                     }
                 }
                 .scrollIndicators(.hidden)
+                .scrollDisabled(phase == .loading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task { await load(tags) }
+        // Reserving the room stops the chips MOVING anything; this stops their arrival being
+        // animated into the room, which is the same jump played slowly. Keyed on the phase, so
+        // it disables nothing else that happens to be in flight at the time.
+        .transaction(value: phase) { $0.disablesAnimations = true }
+        .accessibilityLabel(phase == .loading ? "Loading tags" : "Tags")
     }
 
     /// A chip is a Button only where the query would go somewhere — the same rule the heatmap's
     /// days follow, so a tag that would search for everything is not a control at all.
     @ViewBuilder
     private func chip(_ tag: MemoTag) -> some View {
-        if let query = TagChipsPresentation.query(for: tag) {
+        let tap = TagChipsPresentation.tap(on: tag)
+        if case .searchAndShow = tap, phase.acceptsTaps {
             Button {
-                search(query, TagChipsPresentation.label(for: tag))
+                TagChipsPresentation.act(on: tap, search: search, showResults: showResults)
             } label: {
                 TagChip(tag: tag)
             }
@@ -118,6 +211,6 @@ struct TagChip: View {
         .clipShape(.capsule)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(TagChipsPresentation.accessibilityLabel(for: tag))
-        .accessibilityHint("Searches for this tag")
+        .accessibilityHint("Searches for this tag and shows what it found")
     }
 }

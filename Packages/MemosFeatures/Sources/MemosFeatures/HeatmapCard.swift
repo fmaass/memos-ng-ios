@@ -18,6 +18,13 @@ struct HeatmapCard: View {
     @Binding var expanded: Bool
     /// Where a tapped day goes, or nil for a heatmap that is only a picture.
     var jump: ((MemoQueryAnchor) -> Void)?
+    /// Whether the counts are the server's answer or the absence of one.
+    ///
+    /// It defaults to `.ready` because everything that is not the search sheet already has its
+    /// counts by the time it draws this. Waiting, the grid is drawn greyed and inert, at exactly
+    /// the size it will be — the geometry is twelve weeks either way, so nothing under it moves
+    /// when the counts land (MEMNG-176) — and it does not claim there were no memos (MEMNG-175).
+    var phase: SearchSectionPhase = .ready
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
@@ -34,7 +41,18 @@ struct HeatmapCard: View {
             .accessibilityHint("Shows or hides the activity heatmap")
 
             if expanded {
-                HeatmapGridView(grid: grid, jump: jump)
+                HeatmapGridView(
+                    grid: grid,
+                    // A placeholder day is not a control: every square is level 0 while the
+                    // counts are unknown, so a tap would open the timeline at a date chosen by
+                    // the absence of data.
+                    jump: phase.acceptsTaps ? jump : nil,
+                    summary: HeatmapPresentation.summary(for: grid, loaded: phase == .ready)
+                )
+                .redacted(reason: phase == .loading ? .placeholder : [])
+                // The counts landing is not an animation. Keyed on the phase rather than put on
+                // the card, so the disclosure above keeps its own `withAnimation(.snappy)`.
+                .transaction(value: phase) { $0.disablesAnimations = true }
             }
         }
         .padding(DesignTokens.Space.regular)
@@ -66,6 +84,10 @@ struct HeatmapGridView: View {
     let grid: HeatmapGrid
     /// Where a tapped day goes. Nil draws the grid as the picture it has always been.
     var jump: ((MemoQueryAnchor) -> Void)?
+    /// What the whole grid amounts to in one sentence. Handed in rather than read off the grid,
+    /// because a grid with no counts in it means two different things and only the caller knows
+    /// which — see `HeatmapPresentation.summary(for:loaded:)`.
+    var summary: String?
 
     /// The square grows with the text size, because a fixed 12pt cell beside 50pt type is the
     /// defect `DesignTokens.Metric` exists to prevent — but only up to `maxSide`. Eighty-four
@@ -95,7 +117,7 @@ struct HeatmapGridView: View {
         // instead. Tappable, the days that are controls have to be reachable, so the grid becomes
         // a container holding them — and only them, because `square` labels no other cell.
         .accessibilityElement(children: jump == nil ? .ignore : .contain)
-        .accessibilityLabel(grid.summary)
+        .accessibilityLabel(summary ?? grid.summary)
     }
 
     /// A day, or the empty slot a short trailing column leaves behind — drawn as nothing at all

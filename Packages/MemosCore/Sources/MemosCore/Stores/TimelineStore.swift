@@ -225,8 +225,17 @@ public final class TimelineStore {
         return index >= memos.count - lookahead
     }
 
+    /// Says what went wrong — unless what went wrong was this app cancelling its own request.
+    ///
+    /// The lineage fence above cannot decide that one: a supersede cancels the transport BEFORE it
+    /// moves the lineage, so the cancelled request is still the current one when its `-999` lands
+    /// (MEMNG-180). `StoreFailure` recognises the cancellation itself, and it is the same
+    /// recognition in every store rather than five that drift apart.
     private func report(_ error: any Error) async {
-        let apiError = (error as? APIError) ?? .unexpected(description: error.localizedDescription)
+        guard let apiError = StoreFailure.reportable(error) else {
+            MemosLog.api.info("a cancelled request is not a failure and is not reported")
+            return
+        }
         lastError = apiError.errorDescription
         if apiError == .unauthorized { await onUnauthorized() }
     }
@@ -418,9 +427,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            let apiError =
-                (error as? APIError) ?? .unexpected(description: error.localizedDescription)
-            if apiError == .unauthorized { await onUnauthorized() }
+            if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
             return false
         }
     }
