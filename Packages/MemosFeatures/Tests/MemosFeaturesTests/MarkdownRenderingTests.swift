@@ -216,6 +216,62 @@ struct ReferenceLinkTests {
         #expect(projection("a [bracket] and (parens)").map(\.text) == ["a [bracket] and (parens)"])
     }
 
+    /// The class between "refused" and "tappable", read off the renderer the app ships
+    /// (MEMNG-165). markdown-it ACCEPTS `ftp:`, a scheme-relative `//host` and a relative path,
+    /// so the definition registers and its line is consumed; `memo_target_policy` then drops the
+    /// anchor off the link it built, and the label alone is what the SPA shows. A client that
+    /// asks the sanitiser's question at the DEFINITION instead renders the definition line and
+    /// the whole reference as literal markup — the divergence this pins.
+    @Test(
+        "a reference target the app will not open renders as its label, and as nothing else",
+        arguments: [
+            ("ftp, full", "[the file][f]\n\n[f]: ftp://example.com/pub", "the file"),
+            ("ftp, collapsed", "[f][]\n\n[f]: ftp://example.com/pub", "f"),
+            ("ftp, shortcut", "[f]\n\n[f]: ftp://example.com/pub", "f"),
+            ("scheme-relative", "[the host][h]\n\n[h]: //example.com/path", "the host"),
+            ("relative path", "[the page][p]\n\n[p]: /docs/readme.md", "the page"),
+            (
+                "the first definition decides",
+                "[f]: ftp://example.com/first\n[f]: https://example.com/second\n\n[the file][f]",
+                "the file"
+            ),
+        ]
+    )
+    func acceptedButUnopenableReferencesBecomeLabels(
+        name: String,
+        markdown: String,
+        expected: String
+    ) {
+        let blocks = projection(markdown)
+        #expect(blocks.map(\.text) == [expected], "\(name)")
+        #expect(blocks.allSatisfy { $0.links.isEmpty }, "\(name): \(blocks)")
+    }
+
+    /// The image half of the same rule: the image goes either way, and a source the app will not
+    /// fetch leaves its alt behind as plain text rather than raw `![…][…]` markup.
+    @Test(
+        "a reference image the app will not fetch leaves its alt text as words",
+        arguments: [
+            ("ftp", "![the chart][pic]\n\n[pic]: ftp://example.com/chart.png"),
+            ("a data image", "![the chart][pic]\n\n[pic]: data:image/png;base64,iVBORw0KGgo="),
+        ]
+    )
+    func acceptedButUnfetchableReferenceImagesKeepTheirAlt(name: String, markdown: String) {
+        #expect(projection(markdown).map(\.text) == ["the chart"], "\(name)")
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(!html.contains("<img"), "\(name): the renderer was handed an image:\n\(html)")
+        #expect(!html.contains("chart.png"), "\(name): the remote URL survived:\n\(html)")
+    }
+
+    /// The liveness half, read off the rendered pixels rather than off an `href`: a label the
+    /// policy reduced to text must not be painted in the accent, or the reader is invited to tap
+    /// a destination the app refuses to open.
+    @Test("an accepted-but-unopenable reference is painted as text, not as a link")
+    func acceptedButUnopenableReferencesAreNotPainted() throws {
+        let painted = try accentPixels(in: "[click][f]\n\n[f]: ftp://example.com/pub")
+        #expect(painted == 0, "\(painted) accent pixels — the reference stayed a link")
+    }
+
     @Test("a definition inside a code block is code, not a definition")
     func definitionsInsideCodeAreLeftAlone() {
         let fenced = projection("```\n[evil]: javascript:alert(1)\n```")

@@ -334,6 +334,128 @@ struct MemoMarkdownSourceTests {
         )
     }
 
+    /// The class between "refused" and "tappable", in REFERENCE spelling (MEMNG-165).
+    ///
+    /// markdown-it's `validateLink` ACCEPTS `ftp:`, a scheme-relative `//host` and a relative
+    /// path, so the definition registers, the definition line is consumed like any other, and
+    /// `memo_target_policy` then drops the anchor off the link it built — the label alone is
+    /// what the SPA shows. Neutralising the definition instead (which is what a scanner that
+    /// asks `isTappableScheme` here does) leaves the definition line AND the whole reference on
+    /// screen as literal markup, which is not what a reader of the same memo sees on the web.
+    @Test(
+        "reduces a reference link the SPA will not open to its label alone",
+        arguments: [
+            (
+                "ftp, in all three spellings",
+                "[the file][f], a collapsed [f][] and a bare [f].\n\n[f]: ftp://example.com/pub",
+                "the file, a collapsed f and a bare f.\n\n[f]: ftp://example.com/pub"
+            ),
+            (
+                "scheme-relative and relative",
+                "[the host][h] and [the page][p].\n\n[h]: //example.com/path\n[p]: /docs/a.md",
+                "the host and the page.\n\n[h]: //example.com/path\n[p]: /docs/a.md"
+            ),
+            (
+                "the label keeps its own emphasis",
+                "[**bold**][f]\n\n[f]: ftp://example.com/pub",
+                "**bold**\n\n[f]: ftp://example.com/pub"
+            ),
+            (
+                "the destination on the line after the label",
+                "[the file][f]\n\n[f]:\nftp://example.com/pub",
+                "the file\n\n[f]:\nftp://example.com/pub"
+            ),
+        ]
+    )
+    func referenceTargetsBecomeLabels(name: String, source: String, expected: String) {
+        #expect(MemoMarkdownSource.prepare(source) == expected, "\(name)")
+    }
+
+    /// The image half of the same rule: the image goes either way, and a source this client will
+    /// not open leaves the alt behind as plain text — `renderInlineAsText`'s output, escaped so
+    /// the words cannot open a construct of their own back in the source.
+    @Test(
+        "a reference image the SPA will not fetch leaves its alt text behind",
+        arguments: [
+            (
+                "ftp",
+                "![the chart][pic] and nothing else.\n\n[pic]: ftp://example.com/chart.png",
+                "the chart and nothing else.\n\n[pic]: ftp://example.com/chart.png"
+            ),
+            (
+                "a data image markdown-it accepts",
+                "![the chart][pic]\n\n[pic]: data:image/png;base64,iVBORw0KGgo=",
+                "the chart\n\n[pic]: data:image/png;base64,iVBORw0KGgo="
+            ),
+            (
+                "the alt is reduced to what it says",
+                "![*the* chart][pic]\n\n[pic]: ftp://example.com/chart.png",
+                "the chart\n\n[pic]: ftp://example.com/chart.png"
+            ),
+            (
+                "and escaped, so it opens nothing",
+                "![# not a heading][pic]\n\n[pic]: ftp://example.com/chart.png",
+                "\\# not a heading\n\n[pic]: ftp://example.com/chart.png"
+            ),
+        ]
+    )
+    func referenceImagesKeepTheirAlt(name: String, source: String, expected: String) {
+        #expect(MemoMarkdownSource.prepare(source) == expected, "\(name)")
+    }
+
+    /// A definition whose destination markdown-it accepts is a definition, so its line is left
+    /// exactly as the author wrote it — escaping the bracket would put the line back on screen
+    /// as text, which is a line the SPA does not show.
+    @Test("a definition the SPA will not open is still a definition")
+    func acceptedDefinitionsAreNotNeutralised() {
+        for source in [
+            "[f]: ftp://example.com/pub", "[h]: //example.com/path", "[p]: /docs/a.md",
+            "[pic]: data:image/png;base64,iVBORw0KGgo=",
+        ] {
+            #expect(MemoMarkdownSource.prepare(source) == source, "\(source)")
+        }
+    }
+
+    /// CommonMark resolves the FIRST definition of a label and ignores every later one, and both
+    /// renderers do. So the destination the policy is asked about is the first one: a reference
+    /// whose first definition is `ftp:` is a label, however safe the duplicate below it looks.
+    @Test("the first definition of a label is the one that decides")
+    func theFirstDefinitionWins() {
+        #expect(
+            MemoMarkdownSource.prepare(
+                "[f]: ftp://example.com/first\n[f]: https://example.com/second\n\n[the file][f]"
+            ) == "[f]: ftp://example.com/first\n[f]: https://example.com/second\n\nthe file"
+        )
+        // The control, so this cannot become "a later definition never matters": with the safe
+        // one FIRST the reference is a link, and its source stays as it was typed.
+        let safeFirst =
+            "[f]: https://example.com/first\n[f]: ftp://example.com/second\n\n[the file][f]"
+        #expect(MemoMarkdownSource.prepare(safeFirst) == safeFirst)
+    }
+
+    /// Code is still the author's, whichever class the definition belongs to: a reference image
+    /// written inside a fence is characters, not an image to drop.
+    @Test(
+        "an accepted definition does not reach into code either",
+        arguments: [
+            "[pic]: ftp://example.com/chart.png\n\n~~~\n![alt][pic]\n~~~",
+            "[pic]: ftp://example.com/chart.png\n\n    ![alt][pic]",
+            "[f]: ftp://example.com/pub\n\n~~~\n[the file][f]\n~~~",
+        ]
+    )
+    func acceptedDefinitionsDoNotRewriteCode(source: String) {
+        #expect(MemoMarkdownSource.prepare(source) == source)
+    }
+
+    /// A reference that names nothing is not a link in either renderer, whatever it looks like —
+    /// so the characters stay, and nothing here may start resolving a label the document never
+    /// defined.
+    @Test("a reference that names nothing is left alone in both spellings")
+    func danglingReferencesAreUntouched() {
+        let source = "[missing][nope] and ![alt][nope] stay text."
+        #expect(MemoMarkdownSource.prepare(source) == source)
+    }
+
     @Test("removes a reference image whole, and only when the label resolves")
     func removesReferenceImages() {
         #expect(
