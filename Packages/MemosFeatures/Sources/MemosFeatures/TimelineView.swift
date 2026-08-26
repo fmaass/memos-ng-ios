@@ -570,15 +570,19 @@ public struct TimelineView: View {
         await timeline?.refresh(using: client, baseURL: baseURL)
     }
 
-    /// A day tapped on the sheet's heatmap: the sheet goes away, and the list comes back anchored
-    /// at that day.
+    /// A day chosen on the sheet's scrubber: the list comes back anchored at that day, behind a
+    /// sheet that stays up.
+    ///
+    /// It used to close the sheet. It does not any more (MEMNG-178): the heatmap is a scrubber
+    /// now, and a scrubber that dismissed itself the moment a finger came off would be usable
+    /// exactly once per opening — an accidental lift mid-drag would be a jump nobody asked for,
+    /// with no way back but reopening the sheet. Done is what closes it.
     ///
     /// Anchored, not scrolled. The memo written on 4 June is a hundred cursor pages down a list
     /// that is still being paged, so scrolling to it would mean fetching everything in between;
     /// the server already takes `created_before` (`MemoQuery.anchor`), so the list is simply asked
     /// for from that day backwards and the reader arrives at the top of it.
     private func jump(to anchor: MemoQueryAnchor) {
-        searching = false
         guard let timeline else { return }
         timeline.setQuery(MemoQuery(anchor: anchor))
         topWatch.settled()

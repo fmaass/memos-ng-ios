@@ -14,6 +14,8 @@ public enum MemoAct: Equatable, Sendable, CaseIterable {
     case deleted
     case taskChecked
     case taskUnchecked
+    /// The scrubbing finger has crossed onto another day.
+    case dayScrubbed
 }
 
 /// The vocabulary, as values a test can compare. `SensoryFeedback` is an opaque SDK type; this
@@ -24,6 +26,8 @@ public enum FeedbackKind: Equatable, Sendable, CaseIterable {
     case warning
     case lightImpact
     case mediumImpact
+    /// The tick a picker wheel makes as it passes a value — one per step, never a pattern.
+    case selection
 }
 
 extension MemoAct {
@@ -38,6 +42,9 @@ extension MemoAct {
         case .deleted: .warning
         case .pinned, .unpinned, .taskUnchecked: .lightImpact
         case .taskChecked: .mediumImpact
+        // A scrub crosses dozens of days in one gesture, so its tick has to be the lightest
+        // thing the engine can say: an impact per cell would be a rumble, not feedback.
+        case .dayScrubbed: .selection
         }
     }
 
@@ -52,6 +59,7 @@ extension FeedbackKind {
         case .warning: .warning
         case .lightImpact: .impact(weight: .light)
         case .mediumImpact: .impact(weight: .medium)
+        case .selection: .selection
         }
     }
 }

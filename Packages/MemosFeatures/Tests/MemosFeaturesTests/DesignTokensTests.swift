@@ -104,6 +104,9 @@ struct HapticSignalTests {
         #expect(MemoAct.unpinned.kind == .lightImpact)
         #expect(MemoAct.taskChecked.kind == .mediumImpact)
         #expect(MemoAct.taskUnchecked.kind == .lightImpact)
+        // A scrub crosses dozens of days in one gesture: an impact per day would be a rumble.
+        #expect(MemoAct.dayScrubbed.kind == .selection)
+        #expect(MemoAct.dayScrubbed.kind != MemoAct.taskChecked.kind)
         // Deleting must never feel like success — the two are the pair most easily confused.
         #expect(MemoAct.deleted.kind != MemoAct.posted.kind)
         #expect(MemoAct.postFailed.kind != MemoAct.posted.kind)

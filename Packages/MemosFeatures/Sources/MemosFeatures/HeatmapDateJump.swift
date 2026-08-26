@@ -31,26 +31,55 @@ enum HeatmapDateJump {
     ///
     /// The count is the authority, not the level: level 0 IS count 0 today, but a bucket boundary
     /// is a display decision and this is not one.
+    ///
+    /// The count gate belongs to THIS decision only, and it is the one thing the scrubber does not
+    /// inherit (MEMNG-178). A bare tap that reloaded the timeline to show the same emptiness the
+    /// square already showed was a dead jump — nothing on screen would have explained it. A scrub
+    /// is not that: the square it passes over is written into a visible date field, so an empty
+    /// day is a date the reader can see they chose, and the list under it is the nearest older
+    /// content with the anchor notice on top saying which day was asked for.
     static func tap(on cell: HeatCell) -> HeatmapDayTap {
-        guard cell.count > 0 else { return .ignore }
+        guard cell.count > 0, let anchor = anchor(for: cell) else { return .ignore }
+        return .jump(anchor)
+    }
+
+    /// The day a square stands for, whether or not anything was written on it.
+    ///
+    /// Round-tripped rather than merely parsed. `Calendar.date(from:)` ROLLS OVER out-of-range
+    /// components — a "2026-13-40" key comes back as a real day in February 2027 — so parsing
+    /// alone would happily anchor the timeline to a day nobody has ever seen a square for.
+    static func anchor(for cell: HeatCell) -> MemoQueryAnchor? {
         let calendar = anchorCalendar
-        // Round-tripped rather than merely parsed. `Calendar.date(from:)` ROLLS OVER out-of-range
-        // components — a "2026-13-40" key comes back as a real day in February 2027 — so parsing
-        // alone would happily jump the timeline to a day nobody has ever seen a square for.
         guard let day = HeatmapPresentation.day(for: cell.date, calendar: calendar),
             HeatmapPresentation.key(for: day, calendar: calendar) == cell.date
-        else { return .ignore }
-        let parts = calendar.dateComponents([.year, .month, .day], from: day)
+        else { return nil }
+        return anchor(for: day)
+    }
+
+    /// The anchor a day becomes, read in the calendar the server keys its days in.
+    static func anchor(for day: Date) -> MemoQueryAnchor? {
+        let parts = anchorCalendar.dateComponents([.year, .month, .day], from: day)
         guard let year = parts.year, let month = parts.month, let dayOfMonth = parts.day else {
-            return .ignore
+            return nil
         }
-        return .jump(.day(year: year, month: month, day: dayOfMonth))
+        return .day(year: year, month: month, day: dayOfMonth)
+    }
+
+    /// A day as the server keys it — the key the grid indexes its squares by, so that a day chosen
+    /// in the date field lights the square that stands for it.
+    static func key(for day: Date) -> String {
+        HeatmapPresentation.key(for: day, calendar: anchorCalendar)
     }
 
     /// What VoiceOver reads on a square that can be tapped. The grid as a whole says how much the
     /// household wrote; a square that is a control has to say which day it would open.
     static func label(for cell: HeatCell, locale: Locale = .current) -> String {
-        let memos = cell.count == 1 ? "1 memo" : "\(cell.count) memos"
+        let memos =
+            switch cell.count {
+            case 0: "no memos"
+            case 1: "1 memo"
+            default: "\(cell.count) memos"
+            }
         return "\(text(for: cell.day, locale: locale)), \(memos)"
     }
 
