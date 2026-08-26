@@ -79,7 +79,7 @@ struct MemoMarkdownSourceTests {
             "Read /var/log/example.com now.", "Mail memo@example.com today.",
             "Bare https://example.com/a?b=1 stays.", "`~/trips/2026.md` is code.",
         ] {
-            #expect(MemoMarkdownSource.prepare(text) == text, text)
+            #expect(MemoMarkdownSource.prepare(text) == text, "\(text)")
         }
     }
 
