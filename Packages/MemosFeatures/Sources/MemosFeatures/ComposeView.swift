@@ -103,6 +103,9 @@ public struct ComposeView: View {
     @State private var imports = ComposeImports()
     @State private var isSaving = false
     @State private var detent: PresentationDetent = .medium
+    /// What the sheet has up — its keyboard and its photo picker — as one value, so the order
+    /// between them is a thing a test can hold. See `ComposeStage`.
+    @State private var stage = ComposeStage()
     @FocusState private var editorFocused: Bool
 
     public init(
@@ -172,12 +175,39 @@ public struct ComposeView: View {
                     .fontWeight(.semibold)
                 }
             }
-            .task { editorFocused = true }
+            .task {
+                stage.opened()
+                // Applied here as well as through the change handler below. The first raise is
+                // what decides whether this screen opens ready to be written in, and it must not
+                // rest on a handler having been installed before this task ran.
+                editorFocused = stage.wantsKeyboard
+            }
+            // Both directions on purpose. The stage raises and lowers the keyboard, but focus also
+            // moves without being asked — a tap into the editor, a drag that dismisses the
+            // keyboard — and a stage that missed those would believe the keyboard already down the
+            // next time the picker is asked for, lower nothing, and let the picker open over a
+            // standing keyboard exactly as it did before.
+            .onChange(of: editorFocused) { _, focused in stage.editorFocusChanged(to: focused) }
+            .onChange(of: stage.wantsKeyboard) { _, wants in editorFocused = wants }
         }
         .tint(DesignTokens.accent)
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationDragIndicator(.visible)
         .presentationContentInteraction(.scrolls)
+        // The picker, presented by the sheet itself rather than by the pill.
+        //
+        // A `PhotosPicker` control has no moment of its own between the tap and the presentation,
+        // and that moment is where the keyboard has to go down — see `ComposeStage`. As a modifier
+        // the presentation also stops being something the meta row carries: the row is a
+        // `ViewThatFits` that builds a candidate for each of five spellings, so a presentation
+        // source written into the pill is built five times over for one that is placed.
+        .photosPicker(
+            isPresented: pickingPhotos,
+            selection: $picked,
+            selectionBehavior: .ordered,
+            matching: .any(of: [.images, .videos]),
+            preferredItemEncoding: .current
+        )
     }
 
     /// A prompt rather than an empty grey rectangle. `TextEditor` has no placeholder, so it is one
@@ -326,13 +356,20 @@ public struct ComposeView: View {
     private func pills(_ verbosity: ComposeMetaRow.Verbosity) -> some View {
         ComposeMetaPills(
             verbosity: verbosity,
-            picked: $picked,
+            stage: $stage,
             attachmentCount: imports.attachments.count,
             isImporting: imports.isImporting,
             date: $date,
             visibility: $visibility,
             accountDefault: session?.defaultVisibility
         )
+    }
+
+    /// What the picker's presentation binds to. Only dismissal comes back through it — the picker
+    /// is opened by the pill and never by an assignment from outside, the same discipline
+    /// `MemoEditFlow.sheet` is built on.
+    private var pickingPhotos: Binding<Bool> {
+        Binding(get: { stage.pickingPhotos }, set: { if !$0 { stage.photosPickerClosed() } })
     }
 
     /// Emptying the picker fences whatever it is still loading first: the selection this clears
@@ -697,7 +734,7 @@ nonisolated public enum ComposeMetaRow {
 /// assert that nothing else has crept into the row.
 struct ComposeMetaPills: View {
     let verbosity: ComposeMetaRow.Verbosity
-    @Binding var picked: [PhotosPickerItem]
+    @Binding var stage: ComposeStage
     let attachmentCount: Int
     var isImporting: Bool = false
     @Binding var date: Date?
@@ -707,7 +744,7 @@ struct ComposeMetaPills: View {
     var body: some View {
         HStack(spacing: DesignTokens.Space.snug) {
             PhotosPickerPill(
-                picked: $picked,
+                stage: $stage,
                 count: attachmentCount,
                 isImporting: isImporting,
                 spelling: verbosity.count
@@ -722,23 +759,26 @@ struct ComposeMetaPills: View {
     }
 }
 
-/// The photos pill, which IS the picker: it replaced an "Add photos or videos" button that sat
+/// The photos pill, which OPENS the picker: it replaced an "Add photos or videos" button that sat
 /// apart from the meta row and moved whenever anything in that row changed.
+///
+/// It ASKS rather than presents. A `PhotosPicker` control goes straight from the tap to the
+/// presentation, leaving nowhere to put the keyboard down first — which is the moment the flicker
+/// lived in (see `ComposeStage`). The presentation is a modifier on the sheet; this is the button
+/// that reaches it, and it is a plain `Button` like the date pill beside it for that reason alone.
 struct PhotosPickerPill: View {
-    @Binding var picked: [PhotosPickerItem]
+    @Binding var stage: ComposeStage
     let count: Int
     var isImporting: Bool = false
     var spelling: ComposeMetaRow.Spelling = .short
 
     var body: some View {
-        PhotosPicker(
-            selection: $picked,
-            selectionBehavior: .ordered,
-            matching: .any(of: [.images, .videos]),
-            preferredItemEncoding: .current
-        ) {
+        Button {
+            stage.pickPhotos()
+        } label: {
             PhotosPill(count: count, isImporting: isImporting, spelling: spelling)
         }
+        .buttonStyle(.plain)
         .accessibilityLabel(
             ComposeMetaRow.photosAccessibilityLabel(count: count, isImporting: isImporting)
         )
