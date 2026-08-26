@@ -200,8 +200,8 @@ targets:
         # is verified from Apple's documentation and what is not: the durable fix for a duplicate
         # build number under Xcode Cloud is a ci_scripts/ci_pre_xcodebuild.sh that stamps
         # CURRENT_PROJECT_VERSION from $CI_BUILD_NUMBER, so that no hand edit is needed here.
-        MARKETING_VERSION: "1.0.1"
-        CURRENT_PROJECT_VERSION: "7"
+        MARKETING_VERSION: "1.0.2"
+        CURRENT_PROJECT_VERSION: "8"
         # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
         # classifies API calls as Local Network access; without this declaration iOS 18+ denies
         # them silently (NSURLError -1009 with a satisfied path).
@@ -266,8 +266,8 @@ targets:
         # without a bundle version cannot be installed at all — "bundleVersion must be set in
         # placeholder attributes for an app extension placeholder", which is a failure to
         # INSTALL the host app, not a warning about the extension.
-        MARKETING_VERSION: "1.0.1"
-        CURRENT_PROJECT_VERSION: "7"
+        MARKETING_VERSION: "1.0.2"
+        CURRENT_PROJECT_VERSION: "8"
 
   MemosAPITests:
     type: bundle.unit-test
