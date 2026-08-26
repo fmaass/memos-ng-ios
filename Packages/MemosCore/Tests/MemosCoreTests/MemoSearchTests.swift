@@ -18,7 +18,7 @@ struct MemoSearchTests {
     private static let pause = Duration.milliseconds(30)
 
     private static func search(
-        coalescing: Duration = pause,
+        coalescing: Duration = Self.pause,
         handler: @escaping StubTransport.Handler
     ) -> MemoSearch {
         MemoSearch(
@@ -159,8 +159,7 @@ struct MemoSearchTests {
         #expect(search.outcome.title == "No memos matched")
         #expect(
             search.outcome.detail?.contains("whole words") == true,
-            "the empty state does not explain whole-word matching: "
-                + (search.outcome.detail ?? "nil")
+            "the empty state does not explain whole-word matching: \(search.outcome.detail ?? "")"
         )
 
         // Positive control, one: a page that HAS a memo does not read as empty.

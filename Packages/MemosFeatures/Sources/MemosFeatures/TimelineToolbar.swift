@@ -16,10 +16,14 @@ import SwiftUI
 ///   as a second button rather than as who you are. The corner opposite the action is where the
 ///   web app and every other app on the household's phones keep the account, so that is where it
 ///   goes.
-/// - TRAILING: New memo — the screen's primary action, and the RIGHTMOST thing in the bar. The
-///   slot immediately to its left is deliberately empty: it belongs to the date-jump / search
-///   loupe (MEMNG-120), which will arrive BESIDE New memo rather than displace it. Nothing else
-///   is to be put there.
+/// - TRAILING: the search loupe and then New memo — the screen's primary action, still the
+///   RIGHTMOST thing in the bar. The loupe took the slot reserved for it immediately to New
+///   memo's left (MEMNG-120): it arrived BESIDE New memo rather than displacing it, and the bar
+///   holds three controls now. Nothing else is to be put there.
+///
+/// The loupe is a TARGET, not a control. Everything a search is made of — typing, clearing,
+/// dismissing — happens in the sheet it raises, where a thumb can reach it; the corner costs one
+/// tap and nothing else (`SearchSheet`).
 ///
 /// The menu itself is driven by `AccountMenu.rows`, which is where the ORDER lives — because the
 /// order carries a safety property. A menu opens with its first row directly under the anchor
@@ -41,6 +45,7 @@ struct TimelineToolbar: ToolbarContent {
     let composed: Int
     let openSettings: () -> Void
     let signOut: () -> Void
+    let search: () -> Void
     let newMemo: () -> Void
 
     var body: some ToolbarContent {
@@ -55,6 +60,16 @@ struct TimelineToolbar: ToolbarContent {
                 AccountAvatarView(image: avatar, name: name ?? "")
             }
             .accessibilityLabel("Account")
+        }
+        // Declared BEFORE New memo, which is what puts it to New memo's left: items with one
+        // placement are laid out in the order they are written, leading to trailing. The
+        // arrangement is measured out of a real bar rather than trusted to that
+        // (`TimelineToolbarTests`).
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(action: search) {
+                Image(systemName: "magnifyingglass")
+            }
+            .accessibilityLabel("Search")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button(action: newMemo) {

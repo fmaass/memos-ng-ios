@@ -215,9 +215,9 @@ struct TimelineToolbarTests {
         #expect(Set(labels) == ["Account", "Search", "New memo"], "\(bar.description)")
         #expect(labels.count == 3, "a control is drawn twice: \(bar.description)")
 
-        let account = try #require(bar.control("Account"), bar.description)
-        let search = try #require(bar.control("Search"), bar.description)
-        let newMemo = try #require(bar.control("New memo"), bar.description)
+        let account = try #require(bar.control("Account"), "\(bar.description)")
+        let search = try #require(bar.control("Search"), "\(bar.description)")
+        let newMemo = try #require(bar.control("New memo"), "\(bar.description)")
 
         // Trailing corner, between the face and New memo — the reserved slot, in that order.
         #expect(search.frame.midX > bar.middle, "the loupe is not in the trailing half")
