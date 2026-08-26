@@ -53,9 +53,11 @@ public final class HeatmapStore {
             // The counts already on screen stay. A heatmap that empties itself because one
             // refresh failed says the household wrote nothing, which is a worse lie than a
             // heatmap that is a few minutes stale.
-            let apiError =
-                (error as? APIError) ?? .unexpected(description: error.localizedDescription)
-            lastError = apiError.errorDescription
+            //
+            // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180).
+            if let apiError = StoreFailure.reportable(error) {
+                lastError = apiError.errorDescription
+            }
         }
         isLoading = false
     }

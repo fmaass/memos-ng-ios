@@ -48,9 +48,13 @@ public final class TagStore {
             guard mine == attempt else { return }
             // The chips already on screen stay. A tag row that empties itself because one read
             // failed says the household has no tags, which is a worse lie than a stale one.
-            let apiError =
-                (error as? APIError) ?? .unexpected(description: error.localizedDescription)
-            lastError = apiError.errorDescription
+            //
+            // A cancellation is not a read that failed. This store's `.task` is torn down every
+            // time the sheet goes away, and the `-999` that unwinds out of it is this app's own
+            // doing — `StoreFailure` is where that is decided, once, for every store (MEMNG-180).
+            if let apiError = StoreFailure.reportable(error) {
+                lastError = apiError.errorDescription
+            }
         }
         isLoading = false
     }

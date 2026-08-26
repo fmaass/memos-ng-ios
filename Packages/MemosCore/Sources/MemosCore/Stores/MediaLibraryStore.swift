@@ -196,8 +196,14 @@ public final class MediaLibraryStore {
         return out
     }
 
+    /// Says what went wrong — unless what went wrong was this app cancelling its own request.
+    /// Same rule, same helper, as `TimelineStore.report`: a supersede cancels the transport before
+    /// it moves the lineage, so the fence above cannot tell that `-999` from a real failure.
     private func report(_ error: any Error) async {
-        let apiError = (error as? APIError) ?? .unexpected(description: error.localizedDescription)
+        guard let apiError = StoreFailure.reportable(error) else {
+            MemosLog.api.info("a cancelled request is not a failure and is not reported")
+            return
+        }
         lastError = apiError.errorDescription
         if apiError == .unauthorized { await onUnauthorized() }
     }
