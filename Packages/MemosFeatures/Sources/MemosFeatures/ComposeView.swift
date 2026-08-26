@@ -1,6 +1,7 @@
 import MemosCore
 import PhotosUI
 import SwiftUI
+import UIKit
 
 /// What the compose screen hands back when someone taps Post or Save.
 public struct ComposeSubmission: Sendable, Equatable {
@@ -189,6 +190,20 @@ public struct ComposeView: View {
             // standing keyboard exactly as it did before.
             .onChange(of: editorFocused) { _, focused in stage.editorFocusChanged(to: focused) }
             .onChange(of: stage.wantsKeyboard) { _, wants in editorFocused = wants }
+            // The keyboard's own signals carry its PRESENCE — will-show the moment it starts
+            // arriving, did-hide only when the resignation has FINISHED and the sheet's geometry
+            // is done following it. The picker's presentation waits on these, never on focus,
+            // which can be gone while the keyboard is still moving (ComposeStage).
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIResponder.keyboardWillShowNotification
+                )
+            ) { _ in stage.keyboardShown() }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIResponder.keyboardDidHideNotification
+                )
+            ) { _ in stage.keyboardHidden() }
         }
         .tint(DesignTokens.accent)
         .presentationDetents([.medium, .large], selection: $detent)
