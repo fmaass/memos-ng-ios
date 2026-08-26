@@ -851,7 +851,7 @@ extension MemoMarkdownSource {
     static func splitMixedTaskLists(_ source: String) -> String {
         var lines = sourceLines(source)
         let scans = scanLines(lines)
-        var items: [ListItemLine?] = lines.indices.map { index in
+        let items: [ListItemLine?] = lines.indices.map { index in
             scans[index].isCode ? nil : listItemLine(lines[index])
         }
         var claimed = Set<Int>()
