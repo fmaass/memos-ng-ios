@@ -1,0 +1,91 @@
+# Headless TestFlight pipeline. Auth is an App Store Connect API key (no Apple ID / 2FA),
+# and signing runs in a dedicated keychain so codesign never touches the GUI login keychain
+# (the login keychain is unreachable over SSH -> errSecInternalComponent; that is the whole
+# reason this pipeline exists rather than `xcodebuild archive` over ssh).
+
+default_platform(:ios)
+
+APP_ID   = "live.discomarder.memosng"
+EXT_ID   = "live.discomarder.memosng.share"
+TEAM_ID  = "Y2JQ4VAF85"
+SCHEME   = "MemosNG"
+PROJECT  = "MemosNG.xcodeproj"
+KEYCHAIN = "memosng-ci.keychain-db"
+KEYPATH  = File.expand_path("~/Library/Keychains/#{KEYCHAIN}")
+ROOT     = File.expand_path("..", __dir__)
+ARCHIVE  = "#{ROOT}/build/MemosNG.xcarchive"
+IPA      = "#{ROOT}/build/MemosNG.ipa"
+
+def api_key
+  app_store_connect_api_key(
+    key_id:       ENV.fetch("ASC_KEY_ID"),
+    issuer_id:    ENV.fetch("ASC_ISSUER_ID"),
+    key_filepath: ENV.fetch("ASC_KEY_PATH"),
+    in_house:     false,
+  )
+end
+
+def prepare_signing(key)
+  kc_pw = ENV.fetch("CI_KEYCHAIN_PW")
+  unless File.exist?(KEYPATH)
+    create_keychain(
+      name: KEYCHAIN, password: kc_pw, default_keychain: false,
+      unlock: true, timeout: 7200, lock_when_sleeps: false, add_to_search_list: true,
+    )
+  end
+  unlock_keychain(path: KEYPATH, password: kc_pw)
+
+  cert(api_key: key, keychain_path: KEYPATH, keychain_password: kc_pw,
+       output_path: "#{ROOT}/fastlane/certs")
+
+  prof_app = get_provisioning_profile(
+    api_key: key, app_identifier: APP_ID, force: true,
+    output_path: "#{ROOT}/fastlane/profiles", filename: "app.mobileprovision",
+  )
+  prof_ext = get_provisioning_profile(
+    api_key: key, app_identifier: EXT_ID, force: true,
+    output_path: "#{ROOT}/fastlane/profiles", filename: "ext.mobileprovision",
+  )
+
+  # The archive step signs each target directly, so the profile must be written into the
+  # project per target -- export_options only governs the (unused) export step.
+  update_code_signing_settings(
+    use_automatic_signing: false, path: PROJECT, team_id: TEAM_ID,
+    targets: ["MemosNG"], code_sign_identity: "Apple Distribution", profile_name: prof_app,
+  )
+  update_code_signing_settings(
+    use_automatic_signing: false, path: PROJECT, team_id: TEAM_ID,
+    targets: ["MemosShare"], code_sign_identity: "Apple Distribution", profile_name: prof_ext,
+  )
+end
+
+platform :ios do
+  # Xcode 26.6's `-exportArchive` CreateIPA step fails with an opaque "Copy failed" (the app
+  # itself copies fine with ditto), so we archive only and assemble the IPA by hand from the
+  # already-distribution-signed .app -- a plain Payload/ zip is a valid App Store IPA.
+  desc "Archive and package a signed app-store IPA (no upload)"
+  lane :archive_ipa do
+    key = api_key
+    prepare_signing(key)
+    sh("rm -rf '#{ARCHIVE}' '#{IPA}' '#{ROOT}/build/Payload'")
+    build_app(
+      project: PROJECT, scheme: SCHEME, configuration: "Release",
+      skip_package_ipa: true, clean: true,
+      archive_path: ARCHIVE, derived_data_path: "#{ROOT}/build/dd",
+    )
+    app = "#{ARCHIVE}/Products/Applications/MemosNG.app"
+    sh("mkdir -p '#{ROOT}/build/Payload' && ditto '#{app}' '#{ROOT}/build/Payload/MemosNG.app' && " \
+       "cd '#{ROOT}/build' && /usr/bin/zip -qry MemosNG.ipa Payload")
+    UI.success("IPA ready: #{IPA}")
+    IPA
+  end
+
+  desc "Build and upload to TestFlight (headless)"
+  lane :beta do
+    archive_ipa
+    upload_to_testflight(
+      api_key: api_key, ipa: IPA, groups: ["household"],
+      distribute_external: false, skip_waiting_for_build_processing: true,
+    )
+  end
+end

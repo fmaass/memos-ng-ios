@@ -183,6 +183,34 @@ Actions** → add **TestFlight (Internal Testing Only)** → select the `househo
 Distribution to internal testers is a post-action on the archive; there is no review queue in front
 of it.
 
+### 8b. Headless release with fastlane — the working path (2026-08-26)
+
+Xcode Cloud (steps 7–8) still needs a one-time Xcode-GUI onboarding that has not happened. Until
+then — and as the primary path — a release runs **entirely over SSH from the orchestrator**, no
+GUI, no Mac login password:
+
+    ssh merkur.local
+    cd ~/projects/memos-ng-ios && git pull && ./bin/generate.sh
+    set -a; source ~/.config/memosng-ci.env; set +a
+    export PATH=/opt/homebrew/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+    fastlane beta
+
+- **Auth** is an App Store Connect API key (`~/.appstoreconnect/private_keys/AuthKey_<id>.p8`, a
+  team key with App Manager access) — no Apple ID, no 2FA.
+- **Signing** runs in a dedicated `memosng-ci` keychain so `codesign` never needs the GUI login
+  keychain, which is unreachable over SSH (`errSecInternalComponent`). The Distribution cert and
+  its private key live in that keychain and in `fastlane/certs` (both git-ignored).
+- **The IPA is assembled by hand.** Xcode 26.6's `-exportArchive` fails with an opaque
+  `Copy failed` (the app copies fine with `ditto`), so `fastlane beta` archives with
+  `skip_package_ipa`, zips the already-distribution-signed `.app` into `Payload/`, and uploads
+  that via `upload_to_testflight`.
+- **Distribution is automatic.** `household` is an internal group, so a processed build with the
+  export-compliance key set (`ITSAppUsesNonExemptEncryption: false`, already in `project.yml`)
+  reaches `IN_BETA_TESTING` for every internal tester with no manual enable and no review.
+
+Secrets live only on merkur: `~/.config/memosng-ci.env` (0600, holds the key id / issuer / `.p8`
+path / CI keychain password) and the `.p8` itself (0600). Nothing signing-related is committed.
+
 ---
 
 ## Part 3 — the build number

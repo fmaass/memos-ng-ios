@@ -23,3 +23,9 @@ signing.local.yml
 MemosNG.entitlements
 MemosShare.entitlements
 .env
+
+# fastlane build output + signing material (never commit credentials or artifacts)
+/build/
+*.p8
+*.p12
+*.mobileprovision
