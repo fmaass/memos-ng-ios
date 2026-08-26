@@ -456,6 +456,150 @@ struct MemoMarkdownSourceTests {
         #expect(MemoMarkdownSource.prepare(source) == source)
     }
 
+    // MARK: - the grammar a definition has to match before it is trusted (MEMNG-165 review)
+
+    /// A label may not hold an UNESCAPED bracket. `scanBracketed` allows nesting because an
+    /// inline link label may nest them; a definition's may not, and reading one as a definition
+    /// hands cmark a line holding a live `javascript:` link that markdown-it renders as text.
+    /// Probed on the SPA renderer: the whole line is one paragraph, no anchor anywhere.
+    @Test("a label with an unescaped bracket is not a definition")
+    func nestedBracketsAreNotALabel() {
+        #expect(
+            MemoMarkdownSource.prepare("[[x](javascript:alert(1))]: ftp://example.com")
+                == "\\[\\[x](javascript:alert(1))]: ftp://example.com"
+        )
+        // The control: a label whose brackets ARE escaped is a label, and it registers.
+        let escaped = "[a\\]b]: ftp://example.com"
+        #expect(MemoMarkdownSource.prepare(escaped) == escaped)
+    }
+
+    /// A title has to CLOSE on the line it opens on. cmark refuses the definition when it does
+    /// not and takes the line as a paragraph — where the `[x](javascript:…)` in the unterminated
+    /// title is a live link cmark builds and markdown-it refuses.
+    @Test("an unterminated title is not a definition")
+    func unterminatedTitlesAreRefused() {
+        #expect(
+            MemoMarkdownSource.prepare(
+                "[f]: ftp://example.com \"unterminated [x](javascript:alert(1))"
+            ) == "\\[f]: ftp://example.com \"unterminated \\[x](javascript:alert(1))"
+        )
+        // The controls: every title form that IS terminated registers, and its line is the
+        // parser's.
+        for source in [
+            "[f]: ftp://example.com \"a title\"",
+            "[f]: ftp://example.com 'a title'",
+            "[f]: ftp://example.com (a title)",
+            "[f]: <ftp://example.com> \"a title\"",
+        ] {
+            #expect(MemoMarkdownSource.prepare(source) == source, "\(source)")
+        }
+    }
+
+    /// A title may also sit on the line BELOW the destination — a spelling this scanner does not
+    /// validate. So the definition is not registered and its line is neutralised: the app shows
+    /// more literal text than the SPA there, which is the direction a grammar disagreement is
+    /// allowed to fail in. What it may NOT do is leave the link below live, which is what the
+    /// lone backtick in the title used to arrange.
+    @Test("a title on the next line is refused, and takes nothing with it")
+    func continuationTitlesAreRefused() {
+        let source = "[f]: ftp://e.com\n\"a title with a ` backtick\"\n\n[x](javascript:alert(1))"
+        let expected =
+            "\\[f]: ftp://e.com\n\"a title with a ` backtick\"\n\n\\[x](javascript:alert(1))"
+        #expect(MemoMarkdownSource.prepare(source) == expected)
+        #expect(
+            MemoMarkdownSource.prepare("[pic]: https://example.com/a.png\n(a title)\n\n![alt][pic]")
+                == "\\[pic]: https://example.com/a.png\n(a title)\n\n![alt][pic]"
+        )
+    }
+
+    /// The policy is asked about the destination the PARSER resolves, not the bytes the author
+    /// typed: markdown-it applies backslash escapes and decodes entity references before
+    /// `validateLink` ever sees it, and cmark resolves the link to the same string.
+    @Test("the destination is classified as the parser resolves it")
+    func destinationsAreDecodedBeforeTheyAreClassified() {
+        // Entity-encoded colon: refused, so the definition is text and the reference with it.
+        #expect(
+            MemoMarkdownSource.prepare("[evil]: javascript&#x3A;alert(1)\n\n[click][evil]")
+                == "\\[evil]: javascript&#x3A;alert(1)\n\n[click][evil]"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("[evil]: <javascript&#58;alert(1)>\n\n[click][evil]")
+                == "\\[evil]: <javascript&#58;alert(1)>\n\n[click][evil]"
+        )
+        // Backslash-escaped colon: an ordinary https link, which stays one — the reference is
+        // left exactly as it was typed rather than reduced to its label.
+        let escapedColon = "[home]: https\\://example.com\n\n[site][home]"
+        #expect(MemoMarkdownSource.prepare(escapedColon) == escapedColon)
+        // An entity the table does not know is left alone, as markdown-it leaves it: the URL is
+        // still an ordinary https destination.
+        let unknown = "[f]: https://example.com/a?x=1&foo;y=2\n\n[the file][f]"
+        #expect(MemoMarkdownSource.prepare(unknown) == unknown)
+    }
+
+    /// Nothing but whitespace or a title may follow the destination. `[f]: ftp://… [g]: …` is a
+    /// paragraph in both renderers, so `f` resolves nowhere — registering it deletes or rewrites
+    /// text the reader was meant to see.
+    @Test("content after the destination means the line is not a definition")
+    func trailingContentRefusesTheDefinition() {
+        #expect(
+            MemoMarkdownSource.prepare(
+                "[f]: ftp://example.com [g]: javascript:alert(1)\n\n[click][f]"
+            ) == "\\[f]: ftp://example.com [g]: javascript:alert(1)\n\n[click][f]"
+        )
+    }
+
+    /// The rest of the definition grammar, each spelling refused rather than guessed at. All four
+    /// are lines cmark does not register either; neutralising them costs a backslash that renders
+    /// as nothing and buys the guarantee that this scanner never registers what it cannot parse.
+    @Test(
+        "a definition this grammar cannot validate is neutralised, never registered",
+        arguments: [
+            ("unbalanced parenthesis", "[f]: ftp://example.com/a(b\n\n[the file][f]"),
+            ("empty angle destination", "[f]: <>\n\n[the file][f]"),
+            ("no destination at all", "[f]:\n\n[the file][f]"),
+            ("angle destination left open", "[f]: <ftp://example.com\n\n[the file][f]"),
+        ]
+    )
+    func unvalidatableDefinitionsAreNeutralised(name: String, source: String) {
+        let prepared = MemoMarkdownSource.prepare(source)
+        #expect(
+            prepared.hasPrefix("\\["),
+            "\(name): the definition was left for cmark: \(prepared)"
+        )
+        #expect(prepared.hasSuffix("[the file][f]"), "\(name): the reference resolved: \(prepared)")
+    }
+
+    /// A code span is a backtick RUN closed by a run of the SAME length, not a flag every
+    /// backtick flips. An unmatched backtick is an ordinary character in CommonMark, so
+    /// everything after it is still prose the scheme rule applies to — the toggle handed the rest
+    /// of the paragraph to the renderer untouched, which is a live `javascript:` link one stray
+    /// backtick away.
+    @Test("an unmatched backtick opens no code span")
+    func unmatchedBackticksAreNotCodeSpans() {
+        #expect(
+            MemoMarkdownSource.prepare("a ` b [x](javascript:alert(1))")
+                == "a ` b \\[x](javascript:alert(1))"
+        )
+        // A blank line ends the block, so a span cannot reach across one either.
+        #expect(
+            MemoMarkdownSource.prepare("a ` b\n\n[x](javascript:alert(1))")
+                == "a ` b\n\n\\[x](javascript:alert(1))"
+        )
+        // The controls: a real span — on one line and across two — is still the author's.
+        for source in [
+            "`[js](javascript:alert(1))`",
+            "`a\nb` and text",
+            "``a ` b`` and text",
+        ] {
+            #expect(MemoMarkdownSource.prepare(source) == source, "\(source)")
+        }
+        // And a span that closes leaves what follows it neutralised.
+        #expect(
+            MemoMarkdownSource.prepare("`a` [x](javascript:alert(1))")
+                == "`a` \\[x](javascript:alert(1))"
+        )
+    }
+
     @Test("removes a reference image whole, and only when the label resolves")
     func removesReferenceImages() {
         #expect(

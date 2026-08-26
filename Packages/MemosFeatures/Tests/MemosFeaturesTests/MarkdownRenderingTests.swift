@@ -377,6 +377,89 @@ struct ReferenceLinkTests {
         #expect(neutralised == 0, "\(neutralised) accent pixels — the reference stayed a link")
     }
 
+    /// The MEMNG-165 review's repros, read off the renderer the app ships.
+    ///
+    /// Every string here is one the SPA renders with NO anchor at all — verified against the SPA
+    /// renderer itself under jsdom before this test was written — while the branch that
+    /// registered a definition on a grammar of its own handed cmark a live `javascript:`
+    /// destination for the first four. `destinations(in:)` reads what the RENDERER resolved,
+    /// not what an `href` survived, which is the only place that difference is visible.
+    @Test(
+        "a definition this scanner will not validate never becomes a live destination",
+        arguments: [
+            ("nested bracket label", "[[x](javascript:alert(1))]: ftp://example.com"),
+            (
+                "unterminated title",
+                "[f]: ftp://example.com \"unterminated [x](javascript:alert(1))"
+            ),
+            (
+                "continuation title with a stray backtick",
+                "[f]: ftp://example.com\n\"a title with a ` backtick\"\n\n[x](javascript:alert(1))"
+            ),
+            ("entity-encoded scheme", "[evil]: javascript&#x3A;alert(1)\n\n[click][evil]"),
+            (
+                "content after the destination",
+                "[f]: ftp://example.com [g]: javascript:alert(1)\n\n[click][f]"
+            ),
+            ("unmatched backtick", "a ` b [x](javascript:alert(1))"),
+            ("unmatched backtick across a blank line", "a ` b\n\n[x](javascript:alert(1))"),
+            ("unbalanced parenthesis", "[f]: ftp://example.com/a(b\n\n[click][f]"),
+            ("empty angle destination", "[f]: <>\n\n[click][f]"),
+        ]
+    )
+    func refusedGrammarNeverResolvesADestination(name: String, markdown: String) {
+        let refused = ProductionMarkdownProjection.destinations(in: markdown).filter {
+            let lowered = $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            return lowered.hasPrefix("javascript:") || lowered.hasPrefix("vbscript:")
+                || lowered.hasPrefix("file:") || lowered.hasPrefix("data:text")
+        }
+        #expect(refused.isEmpty, "\(name): the renderer resolved \(refused)")
+    }
+
+    /// The same repros as the SPA projects them, where this client can match it exactly. The
+    /// continuation-title spellings are deliberately MORE literal here and are pinned in
+    /// `MemoMarkdownSourceTests` instead: a grammar this scanner cannot validate falls back to
+    /// text, which is the parity gap the review accepted and not the hole it refused.
+    @Test(
+        "and it renders what the SPA renders",
+        arguments: [
+            (
+                "nested bracket label",
+                "[[x](javascript:alert(1))]: ftp://example.com",
+                ["[[x](javascript:alert(1))]: ftp://example.com"]
+            ),
+            (
+                "unterminated title",
+                "[f]: ftp://example.com \"unterminated [x](javascript:alert(1))",
+                ["[f]: ftp://example.com \"unterminated [x](javascript:alert(1))"]
+            ),
+            (
+                "content after the destination",
+                "[f]: ftp://example.com [g]: javascript:alert(1)\n\n[click][f]",
+                ["[f]: ftp://example.com [g]: javascript:alert(1)", "[click][f]"]
+            ),
+            (
+                "unmatched backtick",
+                "a ` b [x](javascript:alert(1))",
+                ["a ` b [x](javascript:alert(1))"]
+            ),
+        ]
+    )
+    func refusedGrammarRendersAsTheSPADoes(name: String, markdown: String, texts: [String]) {
+        #expect(projection(markdown).map(\.text) == texts, "\(name)")
+    }
+
+    /// A destination the parser resolves through an escape is the destination the policy has to
+    /// judge: `https\\://example.com` IS an https link in both renderers, and reducing it
+    /// to its label would drop an anchor the SPA paints.
+    @Test("an escaped destination is classified as the parser resolves it")
+    func escapedDestinationsStayLinks() {
+        let blocks = projection("[home]: https\\://example.com\n\n[site][home]")
+        #expect(blocks.count == 1)
+        #expect(blocks.first?.links == [MarkdownLink(href: "https://example.com", text: "site")])
+        #expect(blocks.first?.text == "site")
+    }
+
     /// Accent-coloured means green-dominant: the accent is `#3E7C4F` in light appearance, while
     /// body text and every antialiased shade of it have equal channels.
     private func accentPixels(in content: String) throws -> Int {

@@ -43,6 +43,15 @@ import Foundation
 /// does) leaves the definition line AND every reference to it on screen as markup the SPA never
 /// shows.
 ///
+/// Which line IS a definition is then the whole question, and `strictDefinition` is the only
+/// answer given: one grammar decides both whether a label may resolve and whether the line is the
+/// parser's to read rather than this walk's. Every spelling it cannot validate — a label holding
+/// an unescaped bracket, a title that never closes, a title on the line below, anything at all
+/// after the destination — is refused there and neutralised as text, and the destination is
+/// classified as the PARSER resolves it (escapes applied, entities decoded) rather than as the
+/// author typed it. So a disagreement between this grammar and cmark's can only ever put more
+/// literal markup on screen; it cannot leave a destination live that the SPA refuses.
+///
 /// Two more things the SPA's pipeline does that cmark-gfm does not, both settled by the same
 /// fixture: markdown-it's `linkify` makes a link out of a bare host name (`example.com`, which
 /// cmark's autolink extension leaves alone), and its task-list plugin marks ONLY the items that
@@ -79,7 +88,11 @@ public enum MemoMarkdownSource {
 
         for index in lines.indices {
             let line = lines[index]
-            guard scans[index].isCode || scans[index].isConsumedByADefinition else {
+            // A blank line — or a line that was nothing but container markers — ends the block
+            // above it, so no inline construct may reach across one. Ending the prose run there
+            // is what keeps an unclosed code span from swallowing the rest of the document.
+            let ends = line.content.trimmingCharacters(in: .whitespaces).isEmpty
+            guard scans[index].isCode || scans[index].isConsumedByADefinition || ends else {
                 prose += line.raw + line.ending
                 continue
             }
@@ -101,7 +114,6 @@ public enum MemoMarkdownSource {
         let chars = Array(source)
         var out = ""
         var index = 0
-        var inCodeSpan = false
 
         while index < chars.count {
             let character = chars[index]
@@ -113,14 +125,19 @@ public enum MemoMarkdownSource {
                 continue
             }
             if character == "`" {
-                inCodeSpan.toggle()
-                out.append(character)
-                index += 1
-                continue
-            }
-            if inCodeSpan {
-                out.append(character)
-                index += 1
+                // A code span is a backtick RUN closed by a run of the SAME length — not every
+                // backtick toggling a flag. An unmatched backtick is an ordinary character in
+                // CommonMark, so a memo that contains one (`a ` b [x](javascript:…)`) must still
+                // have the link after it neutralised; treating it as an opener handed the rest of
+                // the paragraph to the renderer untouched.
+                let run = backtickRun(chars, at: index)
+                if let close = closingBacktickRun(chars, from: run, length: run - index) {
+                    out += String(chars[index..<close])
+                    index = close
+                } else {
+                    out += String(chars[index..<run])
+                    index = run
+                }
                 continue
             }
             if character == "!", index + 1 < chars.count, chars[index + 1] == "[",
@@ -186,6 +203,34 @@ public enum MemoMarkdownSource {
             index += 1
         }
         return out
+    }
+
+    /// The index just past the run of backticks that starts at `start`.
+    private static func backtickRun(_ chars: [Character], at start: Int) -> Int {
+        var index = start
+        while index < chars.count, chars[index] == "`" { index += 1 }
+        return index
+    }
+
+    /// The index just past the run of exactly `length` backticks that closes the span opened at
+    /// `start`, or `nil` when there is none — in which case the backticks are ordinary text.
+    /// Backslash escapes do not work inside a code span, so a `\\` here escapes nothing.
+    private static func closingBacktickRun(
+        _ chars: [Character],
+        from start: Int,
+        length: Int
+    ) -> Int? {
+        var index = start
+        while index < chars.count {
+            guard chars[index] == "`" else {
+                index += 1
+                continue
+            }
+            let end = backtickRun(chars, at: index)
+            if end - index == length { return end }
+            index = end
+        }
+        return nil
     }
 
     /// An image's alt text as `renderInlineAsText` gives it: the characters, with every inline
@@ -387,9 +432,8 @@ extension MemoMarkdownSource {
         var destinations: [String: String] = [:]
 
         for index in lines.indices {
-            guard let definition = scans[index].definition,
-                let href = scans[index].destination, !href.isEmpty
-            else { continue }
+            guard let definition = scans[index].definition else { continue }
+            let href = scans[index].decoded ?? ""
 
             if scans[index].registers {
                 // CommonMark resolves the FIRST definition of a label and ignores every later
@@ -397,7 +441,13 @@ extension MemoMarkdownSource {
                 // above or below it points at.
                 let name = normalizedLabel(definition.label)
                 if destinations[name] == nil { destinations[name] = href }
-            } else if !MarkdownInline.isAllowedDestination(href) {
+            } else if !MarkdownInline.isAllowedDestination(href) || scans[index].atBlockStart {
+                // Two reasons to put the bracket back on screen, and the second one is the fix
+                // for MEMNG-165's review: a destination the SPA's parser refuses is text there,
+                // and a line this scanner DECLINED to validate must not be left for cmark to
+                // register on a grammar of its own — `[[x](javascript:…)]: ftp://…` is a
+                // paragraph in markdown-it and a live link in cmark. Escaping is free: `\\[`
+                // renders as `[`, so a line that was prose all along looks exactly as it did.
                 var characters = Array(lines[index].raw)
                 characters.insert("\\", at: lines[index].contentOffset + definition.bracketOffset)
                 lines[index].raw = String(characters)
@@ -417,8 +467,14 @@ extension MemoMarkdownSource {
         /// A `[label]: destination` line, wherever one is written. It is a DEFINITION only when
         /// `registers` says so.
         var definition: DefinitionLine?
-        /// The destination that definition would have, the next-line spelling included.
-        var destination: String?
+        /// The destination that definition would have — the next-line spelling included, and as
+        /// the PARSER resolves it (escapes applied, entities decoded), which is what the policy
+        /// has to be asked about.
+        var decoded: String?
+        /// A new block may begin on this line, so CommonMark would let a definition register
+        /// here. A line where one may NOT is a line cmark leaves as paragraph text whatever it
+        /// looks like, so nothing there needs neutralising.
+        var atBlockStart = false
         /// The line is a definition that CommonMark registers AND whose destination markdown-it
         /// accepts — the only case where a label may resolve. The test is `validateLink`'s, not
         /// the sanitiser's: markdown-it registers `[f]: ftp://…` and renders the reference that
@@ -551,22 +607,30 @@ extension MemoMarkdownSource {
                     destination = firstToken(of: next.content)
                 }
             }
+            let strict = strictDefinition(
+                line,
+                next: index + 1 < lines.count ? lines[index + 1] : nil,
+                after: index + 2 < lines.count ? lines[index + 2] : nil
+            )
             scans[index].definition = definition
-            scans[index].destination = destination
+            scans[index].decoded = strict?.destination ?? destination.map(decodedDestination)
+            scans[index].atBlockStart = atBlockStart
 
-            let survives = destination.map(MarkdownInline.isAllowedDestination) ?? false
-            scans[index].registers = atBlockStart && survives
-            if scans[index].registers, definition.tailIsClean {
+            // ONE predicate, both decisions: a label resolves only where a strictly-validated
+            // definition registers it, and only such a line is handed to the renderer unread.
+            let href = scans[index].decoded ?? ""
+            scans[index].registers =
+                atBlockStart && strict != nil && !href.isEmpty
+                && MarkdownInline.isAllowedDestination(href)
+            if scans[index].registers {
                 scans[index].isConsumedByADefinition = true
-                if definition.destination == nil, index + 1 < lines.count,
-                    tailIsClean(afterTheFirstTokenOf: lines[index + 1].content)
-                {
+                if strict?.spansNextLine == true, index + 1 < lines.count {
                     scans[index + 1].isConsumedByADefinition = true
                 }
             }
             // One definition may follow another; a definition never opens a paragraph — but a
             // line that was NOT one leaves the paragraph it belongs to open underneath it.
-            atBlockStart = scans[index].registers && definition.destination != nil
+            atBlockStart = scans[index].registers && strict?.spansNextLine == false
         }
         return scans
     }
@@ -792,10 +856,6 @@ extension MemoMarkdownSource {
         var destination: String?
         /// Where the `[` sits inside the line's CONTENT, so the escape lands in front of it.
         var bracketOffset: Int
-        /// Nothing follows the destination but whitespace or a title, which is what CommonMark
-        /// requires of a definition. A line carrying anything else is not one — so whatever is
-        /// on it is inline content the prose walk still has to look at.
-        var tailIsClean: Bool
     }
 
     private static func definitionLine(_ line: SourceLine) -> DefinitionLine? {
@@ -815,30 +875,11 @@ extension MemoMarkdownSource {
         index += 1
         while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
 
-        let rest = String(chars[index...])
         return DefinitionLine(
             label: label.text,
-            destination: destinationToken(rest),
-            bracketOffset: bracketOffset,
-            tailIsClean: tailIsClean(afterTheFirstTokenOf: rest)
+            destination: destinationToken(String(chars[index...])),
+            bracketOffset: bracketOffset
         )
-    }
-
-    /// True when what follows the first token of `content` is whitespace, or a title, or nothing
-    /// at all — the shape CommonMark allows a definition to have.
-    private static func tailIsClean(afterTheFirstTokenOf content: String) -> Bool {
-        let trimmed = content.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return true }
-        let tail: Substring
-        if trimmed.hasPrefix("<"), let close = trimmed.dropFirst().firstIndex(of: ">") {
-            tail = trimmed[trimmed.index(after: close)...]
-        } else if let space = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) {
-            tail = trimmed[space...]
-        } else {
-            return true
-        }
-        guard let first = tail.trimmingCharacters(in: .whitespaces).first else { return true }
-        return first == "\"" || first == "'" || first == "("
     }
 
     /// The destination as CommonMark reads it: either `<…>` or an unbroken run of characters.
@@ -854,6 +895,301 @@ extension MemoMarkdownSource {
 
     private static func firstToken(of content: String) -> String? {
         destinationToken(content)
+    }
+
+    // MARK: The one grammar both decisions ask
+
+    /// A link reference definition as CommonMark defines one, validated strictly.
+    ///
+    /// ONE predicate answers both questions — may this label resolve, and is this line the
+    /// parser's rather than the prose walk's — because a scanner that registers on one grammar
+    /// and passes a line through on another hands the renderer a line nothing validated. Every
+    /// spelling this cannot validate is refused HERE and neutralised as text instead, so a
+    /// disagreement between this grammar and cmark's can only ever put more literal markup on
+    /// screen; it can never leave a destination live that the SPA refuses (MEMNG-165 review).
+    private struct StrictDefinition {
+        var label: String
+        /// The destination the parser resolves — escapes applied, entities decoded.
+        var destination: String
+        /// The destination sat on the line below the label, so that line belongs to the
+        /// definition too and is handed to the renderer with it.
+        var spansNextLine: Bool
+    }
+
+    private static func strictDefinition(
+        _ line: SourceLine,
+        next: SourceLine?,
+        after: SourceLine?
+    ) -> StrictDefinition? {
+        guard line.indentColumns < 4 else { return nil }
+        let chars = Array(line.content)
+        var index = 0
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+        guard let label = strictLabel(chars, at: index) else { return nil }
+        index = label.end
+        guard index < chars.count, chars[index] == ":" else { return nil }
+        index += 1
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+
+        let rest = String(chars[index...])
+        if rest.trimmingCharacters(in: .whitespaces).isEmpty {
+            // CommonMark lets the destination sit on the line below the label. A TITLE below
+            // THAT is a third line this grammar does not model, so a line that could open one
+            // ends the match and the definition falls back to text.
+            guard let next, next.depth <= line.depth, next.indentColumns < 4,
+                let destination = strictDestination(next.content),
+                destination.rest.trimmingCharacters(in: .whitespaces).isEmpty,
+                !opensATitle(after)
+            else { return nil }
+            return StrictDefinition(
+                label: label.text,
+                destination: destination.href,
+                spansNextLine: true
+            )
+        }
+
+        guard let destination = strictDestination(rest) else { return nil }
+        switch titleTail(destination.rest) {
+        case .absent:
+            // A title may also sit on the NEXT line. That spelling is not modelled, so a line
+            // that could be one refuses the match rather than being read as prose while cmark
+            // reads it as part of the definition.
+            guard !opensATitle(next) else { return nil }
+        case .terminated:
+            break
+        case .invalid:
+            return nil
+        }
+        return StrictDefinition(
+            label: label.text,
+            destination: destination.href,
+            spansNextLine: false
+        )
+    }
+
+    /// A definition's label: no UNESCAPED bracket may appear inside one, which is exactly what
+    /// `scanBracketed` allows (an inline link label may nest them, a definition's may not).
+    /// `[[x](javascript:alert(1))]: ftp://…` is therefore not a definition at all — it is a
+    /// paragraph holding a link markdown-it refuses to build and cmark builds live.
+    private static func strictLabel(_ chars: [Character], at start: Int) -> Bracketed? {
+        guard start < chars.count, chars[start] == "[" else { return nil }
+        var text = ""
+        var index = start + 1
+        while index < chars.count {
+            let character = chars[index]
+            if character == "\\", index + 1 < chars.count {
+                text.append(character)
+                text.append(chars[index + 1])
+                index += 2
+                continue
+            }
+            if character == "[" { return nil }
+            if character == "]" {
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    text.count <= 999
+                else { return nil }
+                return Bracketed(text: text, end: index + 1)
+            }
+            text.append(character)
+            index += 1
+        }
+        return nil
+    }
+
+    /// The destination and whatever follows it: `<…>` or an unbroken run whose parentheses
+    /// balance and which holds no ASCII control character — CommonMark's rule, not "up to the
+    /// first space".
+    private static func strictDestination(_ rest: String) -> (href: String, rest: String)? {
+        let chars = Array(rest)
+        var index = 0
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+        guard index < chars.count else { return nil }
+
+        if chars[index] == "<" {
+            var raw = ""
+            index += 1
+            while index < chars.count {
+                let character = chars[index]
+                if character == "\\", index + 1 < chars.count {
+                    raw.append(character)
+                    raw.append(chars[index + 1])
+                    index += 2
+                    continue
+                }
+                if character == "<" { return nil }
+                if character == ">" {
+                    guard !raw.isEmpty else { return nil }
+                    return (decodedDestination(raw), String(chars[(index + 1)...]))
+                }
+                raw.append(character)
+                index += 1
+            }
+            return nil
+        }
+
+        var raw = ""
+        var depth = 0
+        while index < chars.count {
+            let character = chars[index]
+            if character == "\\", index + 1 < chars.count {
+                raw.append(character)
+                raw.append(chars[index + 1])
+                index += 2
+                continue
+            }
+            if character == " " || character == "\t" { break }
+            if let ascii = character.asciiValue, ascii < 0x20 || ascii == 0x7f { return nil }
+            if character == "(" { depth += 1 }
+            if character == ")" {
+                depth -= 1
+                if depth < 0 { return nil }
+            }
+            raw.append(character)
+            index += 1
+        }
+        guard !raw.isEmpty, depth == 0 else { return nil }
+        return (decodedDestination(raw), String(chars[index...]))
+    }
+
+    private enum TitleTail {
+        case absent
+        case terminated
+        case invalid
+    }
+
+    /// What follows the destination: nothing, a title that CLOSES on this line with nothing after
+    /// it, or something else. An unterminated title is `invalid` — cmark refuses the definition
+    /// then, and a scanner that accepts it hands the renderer `[f]: ftp://… "unterminated
+    /// [x](javascript:…)` to parse as a paragraph.
+    private static func titleTail(_ rest: String) -> TitleTail {
+        let chars = Array(rest)
+        var index = 0
+        while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+        guard index < chars.count else { return .absent }
+        let opener = chars[index]
+        let closer: Character
+        switch opener {
+        case "\"": closer = "\""
+        case "'": closer = "'"
+        case "(": closer = ")"
+        default: return .invalid
+        }
+        index += 1
+        while index < chars.count {
+            let character = chars[index]
+            if character == "\\", index + 1 < chars.count {
+                index += 2
+                continue
+            }
+            // An unescaped `(` inside a parenthesised title ends it in CommonMark.
+            if character == "(", opener == "(" { return .invalid }
+            if character == closer {
+                let tail = String(chars[(index + 1)...]).trimmingCharacters(in: .whitespaces)
+                return tail.isEmpty ? .terminated : .invalid
+            }
+            index += 1
+        }
+        return .invalid
+    }
+
+    /// Whether this line could be the title of the definition above it. Only "could": the
+    /// spelling is not modelled, so the possibility alone refuses the match.
+    private static func opensATitle(_ line: SourceLine?) -> Bool {
+        guard let line, line.indentColumns < 4,
+            let first = line.content.trimmingCharacters(in: .whitespaces).first
+        else { return false }
+        return first == "\"" || first == "'" || first == "("
+    }
+
+    /// The destination as the PARSER resolves it: backslash escapes applied, entity references
+    /// decoded. markdown-it hands `validateLink` exactly this, and cmark resolves the link to it,
+    /// so classifying the author's raw bytes reads `javascript&#x3A;alert(1)` as an ordinary
+    /// destination and registers a label that is a live `javascript:` link in both renderers.
+    ///
+    /// An entity this table does not know is left as the characters it is written with — which is
+    /// what markdown-it does with an unknown one too, and what keeps a URL like `?x=1&foo;y=2` a
+    /// link. That is safe rather than lucky: no named entity stands for an ASCII LETTER, and the
+    /// ones that stand for a colon or a slash are in the table, so a name this does not recognise
+    /// cannot spell a scheme that is not already visible in the text.
+    private static let namedEntities: [String: Character] = [
+        "amp": "&", "colon": ":", "sol": "/", "quest": "?", "num": "#", "percnt": "%",
+        "ast": "*", "period": ".", "comma": ",", "semi": ";", "excl": "!", "lpar": "(",
+        "rpar": ")", "lbrack": "[", "rbrack": "]", "lbrace": "{", "rbrace": "}", "plus": "+",
+        "equals": "=", "dollar": "$", "commat": "@", "lowbar": "_", "grave": "`",
+        "verbar": "|", "vert": "|", "bsol": "\\", "quot": "\"", "apos": "'", "lt": "<",
+        "gt": ">", "Tab": "\t", "NewLine": "\n", "nbsp": "\u{00a0}", "midast": "*",
+    ]
+
+    /// The characters a backslash may escape in CommonMark: ASCII punctuation, and only that.
+    private static func isEscapablePunctuation(_ character: Character) -> Bool {
+        guard let ascii = character.asciiValue else { return false }
+        return (33...47).contains(ascii) || (58...64).contains(ascii)
+            || (91...96).contains(ascii) || (123...126).contains(ascii)
+    }
+
+    private static func decodedDestination(_ raw: String) -> String {
+        let chars = Array(raw)
+        var out = ""
+        var index = 0
+        while index < chars.count {
+            let character = chars[index]
+            if character == "\\", index + 1 < chars.count,
+                isEscapablePunctuation(chars[index + 1])
+            {
+                out.append(chars[index + 1])
+                index += 2
+                continue
+            }
+            if character == "&", let entity = entityReference(chars, at: index) {
+                out.append(entity.character)
+                index = entity.end
+                continue
+            }
+            out.append(character)
+            index += 1
+        }
+        return out
+    }
+
+    private static func entityReference(
+        _ chars: [Character],
+        at start: Int
+    ) -> (character: Character, end: Int)? {
+        var index = start + 1
+        guard index < chars.count else { return nil }
+
+        if chars[index] == "#" {
+            index += 1
+            var digits = ""
+            var radix = 10
+            if index < chars.count, chars[index] == "x" || chars[index] == "X" {
+                radix = 16
+                index += 1
+            }
+            while index < chars.count, chars[index].isHexDigit, digits.count < 7 {
+                if radix == 10, !chars[index].isNumber { break }
+                digits.append(chars[index])
+                index += 1
+            }
+            guard !digits.isEmpty, index < chars.count, chars[index] == ";",
+                let value = UInt32(digits, radix: radix)
+            else { return nil }
+            // CommonMark maps a codepoint that is not a character to the replacement character.
+            let scalar = Unicode.Scalar(value) ?? Unicode.Scalar(0xfffd)!
+            return (Character(value == 0 ? Unicode.Scalar(0xfffd)! : scalar), index + 1)
+        }
+
+        var name = ""
+        while index < chars.count, name.count < 32,
+            chars[index].isLetter || chars[index].isNumber
+        {
+            name.append(chars[index])
+            index += 1
+        }
+        guard !name.isEmpty, index < chars.count, chars[index] == ";",
+            let character = namedEntities[name]
+        else { return nil }
+        return (character, index + 1)
     }
 
     private static func fenceMarker(
