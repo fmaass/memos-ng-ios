@@ -109,7 +109,7 @@ public struct MemoDetailView: View {
                 }
             }
         }
-        .sheet(item: edit.sheet) { mode in
+        .sheet(item: edit.sheet, onDismiss: { editorClosed() }) { mode in
             ComposeView(
                 mode: mode,
                 delete: ComposeDelete(
@@ -122,11 +122,20 @@ public struct MemoDetailView: View {
                 await edit.submit(submission, save: save)
             }
         }
-        .onChange(of: edit.memoDeleted) { _, gone in
-            // The memo is gone from the server, so the screen it was open on goes with it. Landing
-            // back on a detail view of something that no longer exists is the bug here, not the
-            // safe default: the row behind it is already gone from the timeline.
-            if gone { dismiss() }
+    }
+
+    /// Where this screen belongs now the editor has closed.
+    ///
+    /// Asked from the sheet's `onDismiss` rather than from an `onChange` on `memoDeleted`, because
+    /// a `dismiss()` issued by a view that is still presenting a sheet is spent on the sheet: the
+    /// editor closed, the detail view of the deleted memo stayed underneath it, and that is where
+    /// the person who had just deleted it was left (build 4). By `onDismiss` the sheet has really
+    /// gone, so the pop has somewhere to land — the overview, whose row for this memo the store
+    /// dropped the moment the server said it was gone.
+    private func editorClosed() {
+        switch MemoDetailPresentation.afterEditorClosed(memoDeleted: edit.memoDeleted) {
+        case .popToOverview: dismiss()
+        case .stay: break
         }
     }
 

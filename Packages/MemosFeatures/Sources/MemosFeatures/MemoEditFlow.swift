@@ -22,8 +22,9 @@ public final class MemoEditFlow {
     public private(set) var lastError: String?
     /// How far the delete conversation has got. See `nextDelete`.
     public private(set) var deleteStage = DeleteStage.idle
-    /// Set once the server has confirmed the memo is gone. The screen it was open on has to go
-    /// with it — a detail view of a memo that no longer exists is a screen showing a lie.
+    /// Set once the server has confirmed the memo is gone, and never before the sheet has closed
+    /// (see `settle`). The screen it was open on has to go with it — a detail view of a memo that
+    /// no longer exists is a screen showing a lie.
     public private(set) var memoDeleted = false
 
     public init() {}
@@ -144,8 +145,12 @@ public final class MemoEditFlow {
         guard case .returned(let succeeded) = event else { return }
         if succeeded {
             lastError = nil
-            memoDeleted = true
+            // The sheet closes FIRST, and only then is the memo reported gone. Observation
+            // notifies its observers synchronously, so the screen watching `memoDeleted` is woken
+            // in whatever state this method has reached by then — and a screen woken while its own
+            // sheet is still open cannot leave: the dismissal it asks for is spent on the sheet.
             editing = nil
+            memoDeleted = true
         } else {
             lastError = Self.deleteFailureMessage
         }
