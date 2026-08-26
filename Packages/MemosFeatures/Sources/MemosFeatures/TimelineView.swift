@@ -22,6 +22,17 @@ public struct TimelineView: View {
     @Environment(Outbox.self) private var outbox: Outbox?
     @Environment(\.scenePhase) private var scenePhase
     @State private var timeline: TimelineStore?
+    /// Whether the list has been away from its top since the last time it was there — the whole
+    /// of the upward-paging trigger, kept as a value so the sequence can be asserted
+    /// (`TimelineTopWatch`).
+    @State private var topWatch = TimelineTopWatch()
+    /// The row the reader was standing on when a block of newer memos went above it, and the
+    /// trigger that puts them back on it. A counter for the same reason `jumps` is one: two
+    /// prepends can restore to the same row, and a plain `onChange` of the uid would see no
+    /// change at all the second time.
+    @State private var restoreTop: String?
+    @State private var restores = 0
+
     /// How many times this screen has been taken to a day. It is a trigger, not a count: a jump
     /// replaces the whole list, and the scroll it was read at belongs to a list that is gone.
     @State private var jumps = 0
@@ -216,7 +227,34 @@ public struct TimelineView: View {
                 // sent yet would be a paging engine, and the anchored request is what makes one
                 // unnecessary.
                 .onChange(of: jumps) { _, _ in
-                    withAnimation(.snappy) { proxy.scrollTo(Self.jumpTop, anchor: .top) }
+                    withAnimation(.snappy) {
+                        proxy.scrollTo(Self.jumpTop, anchor: .top)
+                    } completion: {
+                        // This scroll passes through "away from the top" on its way to the top.
+                        // Left unsaid, its arrival would read as a reader scrolling back up and
+                        // would page the memos they just jumped away from straight back on.
+                        topWatch.settled()
+                    }
+                }
+                // A list that grew upwards under a still finger has carried the reader down the
+                // page by exactly as much as it grew. Unanimated on purpose: the reader did not
+                // move, so nothing should appear to.
+                .onChange(of: restores) { _, _ in
+                    guard let restoreTop else { return }
+                    proxy.scrollTo(restoreTop, anchor: .top)
+                }
+                // An anchored list has memos above it, and until MEMNG-179 nothing in this app
+                // could ask for them: the cursor only ever descends. Arriving at the top is what
+                // asks now — an arrival, not a top row appearing, for the reason `TimelineTopWatch`
+                // gives.
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    TimelineTopWatch.isAtTop(
+                        contentOffsetY: geometry.contentOffset.y,
+                        topInset: geometry.contentInsets.top
+                    )
+                } action: { _, atTop in
+                    guard topWatch.arrivedAtTop(atTop) else { return }
+                    Task { await loadNewer(in: timeline) }
                 }
         }
     }
@@ -543,6 +581,8 @@ public struct TimelineView: View {
         searching = false
         guard let timeline else { return }
         timeline.setQuery(MemoQuery(anchor: anchor))
+        topWatch.settled()
+        restoreTop = nil
         Task {
             await load()
             jumps += 1
@@ -553,7 +593,21 @@ public struct TimelineView: View {
     private func clearAnchor() {
         guard let timeline else { return }
         timeline.setQuery(.empty)
+        topWatch.settled()
+        restoreTop = nil
         Task { await load() }
+    }
+
+    /// The page ABOVE an anchored list, and the reader put back where they were reading.
+    ///
+    /// The store decides whether there is anything above and refuses a second read while one is
+    /// out, so arriving at the top repeatedly costs one request, not one per frame.
+    private func loadNewer(in timeline: TimelineStore) async {
+        guard timeline.shouldLoadNewer(before: 0) else { return }
+        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        guard let top = await timeline.loadNewer(using: client, baseURL: baseURL) else { return }
+        restoreTop = top
+        restores += 1
     }
 
 }
