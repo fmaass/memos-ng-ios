@@ -88,6 +88,18 @@ public struct MediaImageKey: Hashable, Sendable {
     public var storageKey: String {
         "\(uid.utf8.count):\(uid)/\(tier)"
     }
+
+    /// The same key, inside one fetch generation — what the decoded-image store actually files
+    /// under.
+    ///
+    /// A uid is unique to ONE server, so `(uid, tier)` alone is only safe for as long as the
+    /// device is the same device. The generation is what makes it safe across a rotation: an
+    /// entry the previous identity stored is not an entry the current one prefers not to use, it
+    /// is one whose name the current one never forms. Same seam as the response cache
+    /// (`GenerationScopedURLCache`), one layer up.
+    public func storageKey(inGeneration generation: Int) -> String {
+        "g\(generation)/\(storageKey)"
+    }
 }
 
 /// Which signed-in identity the media layer's decoded images belong to.
@@ -100,24 +112,57 @@ public struct MediaImageKey: Hashable, Sendable {
 ///
 /// Emptying the cache at sign-out is necessary and not sufficient: a fetch already on the wire
 /// when the account changed can land afterwards and put A's photo back. So this is a CLOCK, not a
-/// signal — a fetch reads it when it starts and again before it stores, and an answer for a
-/// generation that has ended is dropped rather than kept. It is the same shape as the session's
-/// own generation check on `loadSettings`, for exactly the same reason: dropping a client does
-/// not reliably cancel a request already in flight.
+/// signal — a fetch reads it when it starts, stamps it on the request, and every cache the answer
+/// touches files it under that number. An answer for a generation that has ended is not dropped
+/// on trust; it is filed where no later reader looks. It is the same shape as the session's own
+/// generation check on `loadSettings`, for exactly the same reason: dropping a client does not
+/// reliably cancel a request already in flight.
+///
+/// The clock itself is `MediaFetchGeneration` — a lock-protected, launch-surviving counter,
+/// because the caches it fences are read from the URL loading system's threads and one of them
+/// outlives the process. This type is the main-actor face of it that the stores and the session
+/// talk to.
 ///
 /// `SessionStore` rotates it at the two moments a device changes who it is — the same two sites
 /// that publish and revoke the share extension's account licence.
 @MainActor
 public final class MediaIdentity {
-    public static let shared = MediaIdentity()
+    public static let shared = MediaIdentity(
+        clock: .shared,
+        // Resolved when a rotation happens rather than when this is built: `MediaSession.shared`
+        // builds a cache, and a static that reaches another static at initialisation is an order
+        // dependency nobody can see.
+        cache: { MediaSession.shared.cache }
+    )
 
-    /// Starts at zero and only ever increases, so "has this moved?" is the only question anyone
-    /// has to ask of it.
-    public private(set) var generation = 0
+    private let clock: MediaFetchGeneration
+    private let cache: () -> (any DerivedMediaCache)?
 
-    public init() {}
+    /// Starts at zero on a device that has never signed in and only ever increases, so "has this
+    /// moved?" is the only question anyone has to ask of it.
+    public var generation: Int { clock.current }
 
+    /// A default clock of its own, unpersisted: a test that builds an identity is asking for one
+    /// nobody else can move, and a shared counter would make its assertions depend on what
+    /// another suite was doing.
+    public init(
+        clock: MediaFetchGeneration = MediaFetchGeneration(),
+        cache: @escaping () -> (any DerivedMediaCache)? = { nil }
+    ) {
+        self.clock = clock
+        self.cache = cache
+    }
+
+    /// The device is somebody else now: the clock moves, and the response cache is emptied.
+    ///
+    /// The emptying is RECLAMATION, not the fence. Nothing depends on it having run — the
+    /// previous identity's entries are already unreachable once the clock has moved, because no
+    /// reader will form their keys again. What it buys is the 256 MB back, immediately, instead of
+    /// leaving it to be evicted as dead weight. That is also why it is safe to do here and was not
+    /// safe before: a fetch landing a moment after this line writes under the generation it
+    /// STARTED in, so it cannot refill what was just emptied.
     public func rotate() {
-        generation += 1
+        clock.rotate()
+        cache()?.removeAllCachedResponses()
     }
 }

@@ -120,14 +120,21 @@ extension MemoAttachment {
 public enum MediaCache {
     /// Sized for a scrolling timeline of thumbnails, not for an offline archive: an on-disk cache
     /// that outgrows the signatures in it is just a pile of URLs that no longer verify.
+    ///
+    /// It is a `GenerationScopedURLCache`, and that is the whole of the cross-identity fence: every
+    /// entry is filed under the fetch generation the request was made in, so bytes fetched for the
+    /// account that has signed out are not entries the next account might be served — they are
+    /// entries whose key it never forms. See `MediaFetchGeneration`.
     public static func makeURLCache(
         memoryCapacity: Int = 32 * 1024 * 1024,
-        diskCapacity: Int = 256 * 1024 * 1024
+        diskCapacity: Int = 256 * 1024 * 1024,
+        clock: MediaFetchGeneration = .shared
     ) -> URLCache {
-        URLCache(
+        GenerationScopedURLCache(
             memoryCapacity: memoryCapacity,
             diskCapacity: diskCapacity,
-            diskPath: "memos-media"
+            diskPath: "memos-media",
+            clock: clock
         )
     }
 
