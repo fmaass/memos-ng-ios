@@ -56,19 +56,6 @@ struct MediaLibraryStoreTests {
         list.map { item(uid: $0) }
     }
 
-    /// Waits for the scripted transport to reach the request the test is about — and gives up.
-    ///
-    /// Bounded rather than a bare spin: a change that stops the next page from being asked for at
-    /// all would otherwise hang this test forever on the build host every run after it, and a gate
-    /// that never returns is worse than one that fails.
-    private static func reached(_ flag: LockedValue<Bool>) async -> Bool {
-        for _ in 0..<5_000 {
-            if flag.get() { return true }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        return flag.get()
-    }
-
     @Test("the first page is asked for with no cursor, and All sends no type at all")
     func firstPageOfAll() async {
         let paths = LockedValue<[String]>([])
@@ -226,17 +213,15 @@ struct MediaLibraryStoreTests {
 
     @Test("a page that answers a tab nobody is on any more is dropped, cursor and all")
     func supersededPageIsDropped() async {
-        let entered = LockedValue<Bool>(false)
-        let release = LockedValue<Bool>(false)
+        let entered = Signal()
+        let release = Signal()
         let paths = LockedValue<[String]>([])
         let client = Stub.client { request, _, _ in
             let path = request.path ?? ""
             paths.set(paths.get() + [path])
             if path.contains("cursor=") {
-                entered.set(true)
-                while !release.get() {
-                    try await Task.sleep(for: .milliseconds(1))
-                }
+                entered.signal()
+                await release.wait()
                 // The tab as it stood when the scroll asked for it, and a cursor into that tab.
                 return Self.page(Self.uids(["stale"]), nextCursor: "page-3")
             }
@@ -252,11 +237,12 @@ struct MediaLibraryStoreTests {
         await store.refresh(using: client, baseURL: Stub.baseURL)
 
         let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
-        let asked = await Self.reached(entered)
-        #expect(asked, "the next page was never asked for, so nothing could be superseded")
+        // Resumes at the moment the next page ENTERS the transport, not a moment a clock guessed
+        // at — so the supersede below provably happens with that request in flight.
+        await entered.wait()
         store.setFilter(.videos)
         await store.refresh(using: client, baseURL: Stub.baseURL)
-        release.set(true)
+        release.signal()
         await inFlight.value
 
         #expect(store.items.map(\.uid) == ["clip"], "the superseded page was merged anyway")
@@ -318,5 +304,38 @@ struct MediaLibraryStoreTests {
         // `AttachmentListItem` carries no duration, so the app has none to print. A zero here
         // would put "0:00" under every clip in the library.
         #expect(row.duration == nil)
+    }
+}
+
+/// A one-shot hand-off between a test and the scripted transport it is driving.
+///
+/// The interleaving this file is about — a page in flight while the tab changes under it — needs
+/// the test to know that the request has REACHED the transport, and the transport to be held there
+/// until the test says go. Both directions used to be a sleep-poll, and a poll is the same test
+/// written as a race: on a loaded build host (merkur's one-minute load passed 200 the day this was
+/// written) the poll's ceiling can expire before the request has started, and a fence that works
+/// perfectly gets reported broken.
+///
+/// `AsyncStream` removes the clock from both directions. The waiter resumes when — and only when —
+/// the other side signals, and because the stream buffers, a signal that arrives BEFORE anyone
+/// waits is delivered rather than missed. So neither order of the two events can produce a
+/// different outcome, which is what makes the interleaving a fact of the test rather than of the
+/// machine it ran on.
+private final class Signal: Sendable {
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let made = AsyncStream.makeStream(of: Void.self)
+        stream = made.stream
+        continuation = made.continuation
+    }
+
+    /// Called from inside the transport, which the client runs off the main actor.
+    func signal() { continuation.yield() }
+
+    func wait() async {
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
     }
 }
