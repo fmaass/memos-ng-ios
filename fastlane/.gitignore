@@ -1,0 +1,9 @@
+certs/
+profiles/
+*.p8
+*.p12
+*.mobileprovision
+report.xml
+Preview.html
+README.md
+test_output/

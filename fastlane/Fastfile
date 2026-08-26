@@ -1,0 +1,71 @@
+# Headless TestFlight pipeline. Auth is an App Store Connect API key (no Apple ID / 2FA),
+# and signing runs in a throwaway keychain so codesign never touches the GUI login keychain
+# (the login keychain is unreachable over SSH -> errSecInternalComponent; that is the whole
+# reason this pipeline exists rather than `xcodebuild archive` over ssh).
+
+default_platform(:ios)
+
+APP_ID   = "live.discomarder.memosng"
+EXT_ID   = "live.discomarder.memosng.share"
+TEAM_ID  = "Y2JQ4VAF85"
+SCHEME   = "MemosNG"
+KEYCHAIN = "memosng-ci.keychain-db"
+KEYPATH  = File.expand_path("~/Library/Keychains/#{KEYCHAIN}")
+
+def api_key
+  app_store_connect_api_key(
+    key_id:       ENV.fetch("ASC_KEY_ID"),
+    issuer_id:    ENV.fetch("ASC_ISSUER_ID"),
+    key_filepath: ENV.fetch("ASC_KEY_PATH"),
+    in_house:     false,
+  )
+end
+
+platform :ios do
+  desc "Build a signed app-store archive and upload it to TestFlight (headless)"
+  lane :beta do
+    key = api_key
+    kc_pw = ENV.fetch("CI_KEYCHAIN_PW")
+
+    delete_keychain(name: KEYCHAIN) if File.exist?(KEYPATH)
+    create_keychain(
+      name: KEYCHAIN, password: kc_pw,
+      default_keychain: false, unlock: true, timeout: 3600,
+      lock_when_sleeps: false, add_to_search_list: true,
+    )
+
+    cert(
+      api_key: key, keychain_path: KEYPATH, keychain_password: kc_pw,
+      output_path: "./fastlane/certs",
+    )
+
+    prof_app = get_provisioning_profile(
+      api_key: key, app_identifier: APP_ID, force: true,
+      output_path: "./fastlane/profiles", filename: "app.mobileprovision",
+    )
+    prof_ext = get_provisioning_profile(
+      api_key: key, app_identifier: EXT_ID, force: true,
+      output_path: "./fastlane/profiles", filename: "ext.mobileprovision",
+    )
+
+    build_app(
+      project: "MemosNG.xcodeproj", scheme: SCHEME, configuration: "Release",
+      export_method: "app-store",
+      output_directory: "./build", output_name: "MemosNG.ipa",
+      derived_data_path: "./build/dd", clean: true,
+      export_options: {
+        signingStyle: "manual", teamID: TEAM_ID,
+        provisioningProfiles: { APP_ID => prof_app, EXT_ID => prof_ext },
+      },
+      xcargs: "CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=#{TEAM_ID} " \
+              "OTHER_CODE_SIGN_FLAGS=--keychain\\ #{KEYPATH}",
+    )
+
+    upload_to_testflight(
+      api_key: key, groups: ["household"],
+      distribute_external: false, skip_waiting_for_build_processing: true,
+    )
+
+    delete_keychain(name: KEYCHAIN)
+  end
+end
