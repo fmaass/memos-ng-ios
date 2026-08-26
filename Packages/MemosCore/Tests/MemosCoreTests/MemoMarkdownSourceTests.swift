@@ -614,4 +614,56 @@ struct MemoMarkdownSourceTests {
         let unresolved = "![alt][nope] stays"
         #expect(MemoMarkdownSource.prepare(unresolved) == unresolved)
     }
+
+    /// A code span is bounded by its BLOCK, and a thematic break or a setext underline ends one
+    /// as surely as a blank line does. cmark reads a `---` in the middle of a paragraph as a leaf
+    /// block of its own, so an opener above it and a closer below it are two stray backticks and
+    /// not a span — while a walk that matched them across the boundary handed everything between
+    /// to the renderer unread, a `[x](javascript:…)` included (MEMNG-165 review, round 3).
+    @Test(
+        "a block boundary ends the prose run, so no code span reaches across one",
+        arguments: ["---", "***", "___", "===", "- - -", "* * *", "--", "="]
+    )
+    func blockBoundariesEndAProseRun(boundary: String) {
+        let source = "`a\n\(boundary)\n[x](javascript:alert(1))`"
+        let expected = "`a\n\(boundary)\n\\[x](javascript:alert(1))`"
+        #expect(MemoMarkdownSource.prepare(source) == expected, "boundary \(boundary)")
+    }
+
+    /// The other direction, because ending a run too eagerly is only cheap while it stays inside
+    /// the rule: a span that opens and closes inside ONE paragraph is the author's code whatever
+    /// the lines between them hold, and the dashes that end a run are the ones that are ALONE on
+    /// their line.
+    @Test(
+        "a code span inside one paragraph still spans its lines",
+        arguments: [
+            "text\n`spanning\nseveral\nlines` still code",
+            "`a --- b` and text",
+            "`a\nb - c\nd` and text",
+        ]
+    )
+    func codeSpansInsideOneParagraphAreUntouched(source: String) {
+        #expect(MemoMarkdownSource.prepare(source) == source)
+    }
+
+    /// The control-character exclusion belongs to the DECODED destination, and to both spellings
+    /// of one. `java&#9;script:alert(1)` and `<java&Tab;script:alert(1)>` are ordinary-looking
+    /// bytes that resolve to a destination with a tab inside it — which a client strips before it
+    /// navigates, leaving `javascript:`. Refusing the definition costs a backslash that renders as
+    /// nothing; registering it puts the label one strip away from live.
+    @Test(
+        "a destination that decodes to a control character is not a definition",
+        arguments: [
+            ("raw destination", "[f]: java&#9;script:alert(1)\n\n[the file][f]"),
+            ("angle destination", "[f]: <java&Tab;script:alert(1)>\n\n[the file][f]"),
+        ]
+    )
+    func decodedControlCharactersRefuseTheDefinition(name: String, source: String) {
+        let prepared = MemoMarkdownSource.prepare(source)
+        #expect(prepared.hasPrefix("\\["), "\(name): the definition registered: \(prepared)")
+        #expect(
+            prepared.hasSuffix("[the file][f]"),
+            "\(name): the reference resolved: \(prepared)"
+        )
+    }
 }

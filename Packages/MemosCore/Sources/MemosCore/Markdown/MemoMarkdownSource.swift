@@ -88,10 +88,11 @@ public enum MemoMarkdownSource {
 
         for index in lines.indices {
             let line = lines[index]
-            // A blank line — or a line that was nothing but container markers — ends the block
-            // above it, so no inline construct may reach across one. Ending the prose run there
-            // is what keeps an unclosed code span from swallowing the rest of the document.
-            let ends = line.content.trimmingCharacters(in: .whitespaces).isEmpty
+            // A blank line — or a line that was nothing but container markers, or a thematic
+            // break, or a setext underline — ends the block above it, so no inline construct may
+            // reach across one. Ending the prose run there is what keeps an unclosed code span
+            // from swallowing the rest of the document.
+            let ends = endsAProseRun(line)
             guard scans[index].isCode || scans[index].isConsumedByADefinition || ends else {
                 prose += line.raw + line.ending
                 continue
@@ -850,6 +851,34 @@ extension MemoMarkdownSource {
         return false
     }
 
+    /// True when this line cannot belong to the paragraph above it, so no inline construct the
+    /// walk reads may reach across it.
+    ///
+    /// Blank and marker-only lines are the obvious ones. The rest are the shapes cmark reads as a
+    /// leaf block of their own in the middle of a paragraph: a thematic break (three or more `-`,
+    /// `*` or `_`, spaces allowed between them) and a setext underline (a run of `=`, or of `-`,
+    /// under a paragraph line). A code span the walk matched ACROSS one of those is a span cmark
+    /// never built, and everything the walk copied out with it — a `[x](javascript:…)` included —
+    /// reached the renderer unread and live (MEMNG-165 review, round 3).
+    ///
+    /// The test is deliberately wider than either grammar, and wider than `endsABlock`: any line
+    /// holding nothing but `-`, `*`, `_`, `=` and spaces ends the run, one such character being
+    /// enough. `-*-` and a lone `_` are paragraph text in CommonMark and end a run here, which
+    /// costs a span that spanned them its backticks — the characters the author typed, on screen
+    /// as themselves. A single `=` is the other side of the same coin and the reason one
+    /// character is enough: it IS a setext underline, and a run that read past it is the blocker
+    /// above. Too literal is a rendering difference; too permissive is a live `javascript:` link,
+    /// so this errs the way the whole file errs.
+    ///
+    /// It is deliberately NOT `endsABlock`, which decides where a DEFINITION may register: making
+    /// that one wider registers labels the document never defined and deletes text the reader was
+    /// meant to see. Widening this one only ever puts more literal markup on screen.
+    private static func endsAProseRun(_ line: SourceLine) -> Bool {
+        let body = line.content.trimmingCharacters(in: .whitespaces)
+        if body.isEmpty { return true }
+        return body.allSatisfy { "-*_= \t".contains($0) }
+    }
+
     private struct DefinitionLine {
         var label: String
         /// `nil` when the label was followed by nothing — the destination is on the next line.
@@ -997,8 +1026,14 @@ extension MemoMarkdownSource {
     }
 
     /// The destination and whatever follows it: `<…>` or an unbroken run whose parentheses
-    /// balance and which holds no ASCII control character — CommonMark's rule, not "up to the
-    /// first space".
+    /// balance — CommonMark's rule, not "up to the first space".
+    ///
+    /// Neither spelling may resolve to a destination holding an ASCII control character, and the
+    /// test runs on what the destination DECODES to, in both branches. The raw scan below rejects
+    /// a control character an author typed; only the decoded test also rejects the ones a `&#9;`,
+    /// a `&Tab;` or a `&NewLine;` spells — bytes that look ordinary here and reach the renderer as
+    /// `java<TAB>script:`, one whitespace-stripping client away from live (MEMNG-165 review,
+    /// round 3).
     private static func strictDestination(_ rest: String) -> (href: String, rest: String)? {
         let chars = Array(rest)
         var index = 0
@@ -1019,7 +1054,9 @@ extension MemoMarkdownSource {
                 if character == "<" { return nil }
                 if character == ">" {
                     guard !raw.isEmpty else { return nil }
-                    return (decodedDestination(raw), String(chars[(index + 1)...]))
+                    let href = decodedDestination(raw)
+                    guard !holdsAControlCharacter(href) else { return nil }
+                    return (href, String(chars[(index + 1)...]))
                 }
                 raw.append(character)
                 index += 1
@@ -1048,7 +1085,15 @@ extension MemoMarkdownSource {
             index += 1
         }
         guard !raw.isEmpty, depth == 0 else { return nil }
-        return (decodedDestination(raw), String(chars[index...]))
+        let href = decodedDestination(raw)
+        guard !holdsAControlCharacter(href) else { return nil }
+        return (href, String(chars[index...]))
+    }
+
+    /// Whether a destination holds an ASCII control character, DEL included. Asked of the decoded
+    /// string, which is the only place `&#9;` and `&Tab;` are visible as what they are.
+    private static func holdsAControlCharacter(_ destination: String) -> Bool {
+        destination.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
     }
 
     private enum TitleTail {
