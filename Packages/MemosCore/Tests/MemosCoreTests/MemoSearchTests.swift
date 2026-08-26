@@ -36,6 +36,14 @@ struct MemoSearchTests {
         return parsed
     }
 
+    /// Keeps a scripted request open until the test lets it go. `nonisolated`, because the
+    /// transport runs off the main actor.
+    private nonisolated static func hold(until release: LockedValue<Bool>) async throws {
+        while !release.get() {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
     /// A term below the minimum is not a short search, it is no search: `q=t` over a household's
     /// memos matches almost everything, and the request is a round trip whose answer nobody can
     /// use. The minimum is stated by the presentation as well, so the field says why nothing is
@@ -72,21 +80,45 @@ struct MemoSearchTests {
         #expect(Self.sent(paths.get()[0])["q"] == ["tr"])
     }
 
-    /// A person types a word; the app must not ask the server about every prefix of it. The pause
-    /// is the web client's 300 ms, and each keystroke replaces the one waiting rather than queuing
-    /// behind it.
+    /// A person types a word; the app must not ask the server about every prefix of it. The
+    /// coalescing is DRIVEN here, not timed: the debounce sleeps against an injected clock the
+    /// test holds still, so each keystroke's task genuinely PARKS in the pause and the next
+    /// keystroke cancels a task that is really waiting — which is the only thing the pause buys.
+    ///
+    /// The zero-pause control at the end is what makes this test able to fail: the SAME code with
+    /// the pause removed lets every keystroke race to its own request. So one request with the
+    /// pause and one-per-keystroke without it is proof the pause is load-bearing — an earlier
+    /// version of this test typed synchronously and would have passed with the debounce deleted,
+    /// because the cancel alone coalesces keystrokes that never got to run (Codex review of
+    /// f5699b0).
     @Test("typing coalesces into one request")
     func typingCoalescesIntoOneRequest() async {
         let paths = LockedValue<[String]>([])
-        let search = Self.search { request, _, _ in
-            paths.set(paths.get() + [request.path ?? ""])
-            return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-        }
+        let gate = DebounceGate()
+        let search = MemoSearch(
+            client: Stub.client { request, _, _ in
+                paths.set(paths.get() + [request.path ?? ""])
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            },
+            baseURL: Stub.baseURL,
+            coalescing: .milliseconds(300),
+            sleep: { await gate.sleep($0) }
+        )
 
-        // Four keystrokes with nothing awaited between them: one person typing, not four searches.
-        for term in ["tr", "tra", "trav", "trave"] {
+        let terms = ["tr", "tra", "trav", "trave"]
+        for (index, term) in terms.enumerated() {
             search.typed(term)
+            // Wait until this keystroke's task has entered the debounce and parked, so the next
+            // keystroke cancels a task that is genuinely waiting. A bounded spin, so a build that
+            // deleted the sleep entirely fails on the request count below instead of hanging here.
+            var spins = 0
+            while await gate.entries() < index + 1 {
+                await Task.yield()
+                spins += 1
+                if spins > 100_000 { break }
+            }
         }
+        await gate.releaseAll()
         await search.settled()
 
         #expect(paths.get().count == 1, "typing sent \(paths.get().count) requests")
@@ -95,13 +127,40 @@ struct MemoSearchTests {
             "the one request that went carried a term the field had already moved past"
         )
 
-        // Positive control: a term typed after the pause is its own request. The rule is a pause,
-        // not a cap of one request per search — without this a store that sent nothing at all
-        // after the first search would pass the assertion above.
-        search.typed("holiday")
-        await search.settled()
-        #expect(paths.get().count == 2, "a second search after the pause was swallowed")
-        #expect(Self.sent(paths.get()[1])["q"] == ["holiday"])
+        // Control: the SAME setup with a zero pause. The debounce is what coalesces, so with none
+        // every keystroke reaches the server — one request per key, not one for the word. This
+        // both proves the assertion above is not vacuous and is the red the review asked for,
+        // made permanent: it fails the moment the pause stops holding tasks back.
+        let zeroPaths = LockedValue<[String]>([])
+        let zeroGate = DebounceGate()
+        let zero = MemoSearch(
+            client: Stub.client { request, _, _ in
+                zeroPaths.set(zeroPaths.get() + [request.path ?? ""])
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            },
+            baseURL: Stub.baseURL,
+            coalescing: .zero,
+            sleep: { await zeroGate.sleep($0) }
+        )
+        for (index, term) in terms.enumerated() {
+            zero.typed(term)
+            // Wait for THIS keystroke's request to land before the next, so nothing coalesces by
+            // accident of timing: with no pause each key really does get its own request.
+            var spins = 0
+            while zeroPaths.get().count < index + 1 {
+                await Task.yield()
+                spins += 1
+                if spins > 100_000 { break }
+            }
+        }
+        await zero.settled()
+        #expect(
+            zeroPaths.get().count == terms.count,
+            """
+            without the pause the keystrokes still coalesced to \(zeroPaths.get().count); \
+            the coalescing assertion above would then pass with the debounce disabled
+            """
+        )
     }
 
     /// Clearing the field is how a person takes a search back, and the answer to a search nobody
@@ -179,5 +238,73 @@ struct MemoSearchTests {
         await broken.settled()
         #expect(broken.outcome != .noMatches, "a 500 was reported as an empty result")
         #expect(broken.results.lastError != nil)
+    }
+
+    /// Dismissing the sheet has to ABANDON the search, not merely hide it. A debounced or
+    /// in-flight task that outlived the sheet would go on to write a result into a model nobody is
+    /// looking at any more — the very thing `TimelineView`'s `onDismiss` now guards against by
+    /// calling this. Tested at the model, where the guarantee actually lives: the view wiring is
+    /// one line that funnels every close through it.
+    @Test("dismissing abandons the search in flight and mutates nothing after")
+    func dismissingAbandonsThePendingSearch() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let search = Self.search { _, _, _ in
+            entered.set(true)
+            try await Self.hold(until: release)
+            return Stub.json(Stub.memoList(["late"], nextCursor: nil))
+        }
+
+        search.typed("travel")
+        while !entered.get() {
+            await Task.yield()
+        }
+
+        // The sheet goes away — Done, or a swipe UIKit performs without telling the app.
+        search.stop()
+        await search.settled()
+        // Let the abandoned request finish: it must change nothing, because the store's lineage
+        // moved out from under it when the search was abandoned.
+        release.set(true)
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+
+        #expect(search.results.memos.isEmpty, "an abandoned search still published its page")
+        #expect(search.results.lastError == nil, "an abandoned search reported an error")
+        #expect(search.outcome == .idle)
+
+        // Control: the SAME search NOT dismissed does complete — so the emptiness above is the
+        // abandonment and not a search that never works.
+        let control = Self.search { _, _, _ in
+            Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        control.typed("travel")
+        await control.settled()
+        #expect(control.outcome == .matched)
+        #expect(control.results.memos.map(\.uid) == ["a"])
+    }
+}
+
+/// A clock the debounce is driven against, so a test can keep a task parked in the pause while it
+/// delivers the next keystroke. It counts entries (a keystroke reached the pause) and parks every
+/// positive-duration sleep until released; a zero pause returns at once, exactly as `Task.sleep`
+/// does, which is what lets the control prove the pause is load-bearing.
+private actor DebounceGate {
+    private var entered = 0
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    func sleep(_ duration: Duration) async {
+        entered += 1
+        if duration == .zero { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    func entries() -> Int { entered }
+
+    func releaseAll() {
+        let waiters = parked
+        parked = []
+        for waiter in waiters { waiter.resume() }
     }
 }

@@ -92,6 +92,12 @@ public final class MemoSearch {
     private let client: any APIProtocol
     private let baseURL: URL
     private let pause: Duration
+    /// How the debounce waits — the real `Task.sleep` in the app, a clock a test can hold
+    /// still. It is injected because the whole point of the pause is that a keystroke
+    /// arriving DURING it cancels the request, and a test cannot prove that against a wall
+    /// clock it does not control: it has to be able to keep a task parked in the pause while
+    /// it delivers the next keystroke.
+    private let sleep: @Sendable (Duration) async -> Void
     /// The pause and the request it turns into. One task, so one `cancel()` reaches both.
     private var work: Task<Void, Never>?
     /// The query the work in flight was scheduled for, so a keystroke that changes nothing the
@@ -104,11 +110,13 @@ public final class MemoSearch {
         coalescing: Duration = MemoSearch.coalescingPause,
         pageSize: Int = 20,
         calendar: Calendar = .current,
+        sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
         onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.client = client
         self.baseURL = baseURL
         self.pause = coalescing
+        self.sleep = sleep
         self.results = TimelineStore(
             pageSize: pageSize,
             calendar: calendar,
@@ -135,7 +143,7 @@ public final class MemoSearch {
         outcome = .searching
         work?.cancel()
         work = Task { [self] in
-            try? await Task.sleep(for: self.pause)
+            await self.sleep(self.pause)
             // The keystroke after this one cancelled the pause; the term it carries is the one
             // that gets a request.
             guard !Task.isCancelled else { return }
@@ -156,16 +164,34 @@ public final class MemoSearch {
         await work?.value
     }
 
-    /// Ends the search in flight, wherever it had got to.
+    /// Cancels the pause and the request it had become, and forgets what it was for — but
+    /// leaves the loaded rows where they are.
+    ///
+    /// This is the whole of what dismissing the sheet HAS to do: a debounced or in-flight
+    /// task that outlived the sheet would go on to write a result into a model nobody is
+    /// looking at any more. It is separate from `stop` because the sheet has one close that
+    /// is not an abandonment — a hand-off to the results screen, which has just adopted this
+    /// store — and resetting the store there would empty the list the reader is walking into
+    /// and cost it the cursor its next page needs.
+    public func cancelInFlight() {
+        work?.cancel()
+        asked = nil
+    }
+
+    /// Abandons the search entirely: cancels it AND resets the store to the plain timeline.
     ///
     /// `setQuery` is what makes the cancellation safe rather than merely fast: it moves the
     /// store's lineage, so a page or a failure already on its way answers a query nobody is
     /// reading and is dropped on arrival (`TimelineStore.refresh`) instead of landing over an
-    /// empty field.
-    private func stop() {
-        work?.cancel()
-        asked = nil
+    /// empty field. Used by a cleared field and by every sheet close that is not a hand-off.
+    public func stop() {
+        cancelInFlight()
         results.setQuery(.empty)
+        // Back to the blank sheet. An abandoned search left reading `.searching` is a state
+        // nothing would ever move off — the reopened sheet builds a fresh search, but the
+        // model should not sit in a lie in the meantime. The hand-off path deliberately does
+        // NOT come through here: its `.matched` is what the results screen reads.
+        outcome = .idle
     }
 
     /// What the store's own state means to a person who typed a word.

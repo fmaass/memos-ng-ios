@@ -42,6 +42,10 @@ public struct TimelineView: View {
     /// sheet pushes outlives the sheet.
     @State private var search: MemoSearch?
     @State private var searching = false
+    /// Set only for the one sheet close that is a hand-off to the results screen rather than
+    /// an abandonment, so `dismissSearch` knows not to reset the store the results screen has
+    /// just adopted.
+    @State private var handingOff = false
 
     public init() {}
 
@@ -105,12 +109,17 @@ public struct TimelineView: View {
             // Attached HERE, inside the stack, and not out on the chain that carries the compose
             // sheet and the viewer: two presentations on one view is how one of them silently
             // stops appearing, which is the reason the cover was moved out in the first place.
-            .sheet(isPresented: $searching) {
+            // `onDismiss` is bound so EVERY close funnels through one place — Done, the
+            // hand-off to the results screen, and an interactive swipe the app never hears
+            // about otherwise. A debounced or in-flight search that outlived the sheet would
+            // otherwise write its result into a model nobody is looking at.
+            .sheet(isPresented: $searching, onDismiss: dismissSearch) {
                 if let search {
                     SearchSheet(
                         search: search,
                         close: { searching = false },
                         showResults: {
+                            handingOff = true
                             searching = false
                             path.append(SearchResultsRoute())
                         }
@@ -350,6 +359,21 @@ public struct TimelineView: View {
             onUnauthorized: { [session] in await session.handle(.unauthorized) }
         )
         searching = true
+    }
+
+    /// Every way the sheet closes funnels through here.
+    ///
+    /// A hand-off to the results screen is the one close that is not an abandonment — the
+    /// results screen has just adopted this search's store — so it cancels any stray task but
+    /// keeps the loaded rows and their cursor. Every other close (Done, an interactive swipe)
+    /// abandons the search and resets it.
+    private func dismissSearch() {
+        if handingOff {
+            handingOff = false
+            search?.cancelInFlight()
+        } else {
+            search?.stop()
+        }
     }
 
     /// A tapped tile opens that attachment full screen, on the page it was tapped at — a video
