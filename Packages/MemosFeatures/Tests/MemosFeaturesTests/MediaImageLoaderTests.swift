@@ -12,6 +12,10 @@ import UIKit
 /// the cache-policy decision are all the units under test and all of them run for real.
 actor ScriptedTransport: MediaTransport {
     private(set) var calls = 0
+    /// Every request as it went out. What the generation fence is asserted against: the stamp a
+    /// request carries is what the caches file its answer under, so "which identity do these
+    /// bytes belong to" is a question about this array.
+    private(set) var requests: [URLRequest] = []
     private let payload: Data
     private let status: Int
 
@@ -22,6 +26,7 @@ actor ScriptedTransport: MediaTransport {
 
     func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         calls += 1
+        requests.append(request)
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: "https://memos.example.invalid/")!,
             statusCode: status,
@@ -58,6 +63,8 @@ actor RefusingTransport: MediaTransport {
 /// finish, and between them the test can change who the device is signed in as.
 actor GatedTransport: MediaTransport {
     private let payload: Data
+    /// Every request as it went out — see `ScriptedTransport.requests`.
+    private(set) var requests: [URLRequest] = []
     private var hasStarted = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var isReleased = false
@@ -80,6 +87,7 @@ actor GatedTransport: MediaTransport {
     }
 
     func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        requests.append(request)
         hasStarted = true
         let waiting = startWaiters
         startWaiters = []
@@ -469,6 +477,97 @@ struct MediaImageLoaderTests {
         #expect(cache.cachedResponse(for: URLRequest(url: url)) != nil, "the seed did not land")
         return cache
     }
+
+    // MARK: - The cross-identity fence
+
+    /// The property everything else rests on: a fetch is filed under the identity that ASKED for
+    /// it, not the one that happens to be signed in when it lands.
+    ///
+    /// The response bytes are cached by the URL loading system itself, on its own account, at the
+    /// moment the answer arrives — which for a fetch that was in flight across a sign-out is after
+    /// the rotation. A cache that read the clock then would file the previous account's photo
+    /// under the new account's number, and every purge in the world runs too early to catch it.
+    /// The stamp on the request is what makes that impossible, so this is the assertion that the
+    /// stamp is taken before the wire and never refreshed.
+    @Test("a fetch that outlives its identity is still stamped with the one it started in")
+    func aFetchIsStampedWithTheGenerationItStartedIn() async throws {
+        let key = MediaImageKey(uid: "stamp-start", tier: "thumb")
+        let url = MediaFixture.signed(uid: "stamp-start")
+        let started = identity.generation
+        let transport = GatedTransport(payload: MediaFixture.png(.red))
+
+        let inFlight = Task {
+            await MediaImageLoader.uiImage(for: key, url: url, transport: transport)
+        }
+        await transport.waitUntilStarted()
+        // The device becomes somebody else while the answer is in the air.
+        identity.rotate()
+        await transport.release()
+        let painted = await inFlight.value
+
+        let sent = try #require(await transport.requests.first)
+        let stamp = try #require(MediaFetchGeneration.generation(of: sent))
+        #expect(stamp == started, "the answer was filed under the identity it landed in")
+        #expect(stamp != identity.generation)
+        // And the same fetch is refused a view, which is the other half: filing it harmlessly is
+        // not permission to paint it.
+        #expect(painted == nil, "a photo from the account that signed out was handed to a view")
+        #expect(MediaImageLoader.cachedUIImage(for: key) == nil)
+    }
+
+    /// The race the third review round found, run in the order that made it a defect: the LIVE
+    /// account's answer lands first and the previous account's lands on top of it.
+    ///
+    /// Under a fence that removed entries by URL this was unwinnable — the two answers shared a
+    /// key, so the late writer either overwrote the live picture or the fence evicted the live
+    /// picture trying to stop it. They do not share a key any more, and neither branch exists.
+    @Test("a stale answer landing after a live one leaves the live picture in place")
+    func aStaleAnswerCannotLandOnTheLivePicture() async throws {
+        let key = MediaImageKey(uid: "reverse-order", tier: "thumb")
+        let url = MediaFixture.signed(uid: "reverse-order")
+        let stale = GatedTransport(payload: MediaFixture.png(.red))
+
+        let inFlight = Task {
+            await MediaImageLoader.uiImage(for: key, url: url, transport: stale)
+        }
+        await stale.waitUntilStarted()
+        identity.rotate()
+
+        // The account now signed in asks for the same (uid, tier) — a uid is only unique within
+        // one server, which is the whole reason this hurts — and its answer lands FIRST.
+        let live = ScriptedTransport(payload: MediaFixture.png(.blue))
+        let painted = try #require(
+            await MediaImageLoader.uiImage(for: key, url: url, transport: live)
+        )
+
+        // Only now does the previous account's answer arrive.
+        await stale.release()
+        let stalePainted = await inFlight.value
+        #expect(stalePainted == nil)
+
+        let held = try #require(MediaImageLoader.cachedUIImage(for: key))
+        #expect(held === painted, "the previous account's photo replaced the live one")
+    }
+
+    /// The other direction, and the reason this is a fence rather than a purge: a device that has
+    /// not changed pays nothing for it. Two views of one photo, one request.
+    @Test("a second view of the same photo in one identity never reaches the network")
+    func aStableGenerationIsStillAHit() async throws {
+        let key = MediaImageKey(uid: "hit-stable", tier: "thumb")
+        let url = MediaFixture.signed(uid: "hit-stable")
+        let transport = ScriptedTransport(payload: MediaFixture.png(.green))
+
+        let first = try #require(
+            await MediaImageLoader.uiImage(for: key, url: url, transport: transport)
+        )
+        let second = try #require(
+            await MediaImageLoader.uiImage(for: key, url: url, transport: transport)
+        )
+
+        #expect(second === first)
+        #expect(await transport.calls == 1, "a stable identity re-fetched what it already held")
+        #expect(MediaImageLoader.cachedUIImage(for: key) === first)
+    }
 }
 
 @MainActor
@@ -518,6 +617,52 @@ struct MediaImageStoreTests {
         #expect(store.image(forKey: key) == nil)
 
         store.store(image, forKey: key, generation: store.generation)
+        #expect(store.image(forKey: key) === image)
+    }
+
+    /// The decoded half of the fence, stated where nothing else can be doing the work: the entry
+    /// is FILED under the generation it was stored in, so two identities cannot share a key even
+    /// when they share a `(uid, tier)`.
+    ///
+    /// Written in the order that made this a defect — the live answer first, the previous
+    /// account's afterwards. The emptying at the rotation has already happened by then and cannot
+    /// help; only the key can.
+    @Test("an answer from the previous identity cannot land on the current one's picture")
+    func aStaleStoreCannotReachTheCurrentIdentity() throws {
+        let identity = MediaIdentity()
+        let store = MediaImageStore(countLimit: 8, totalCostLimit: 1 << 20, identity: identity)
+        let key = MediaImageKey(uid: "reverse", tier: "thumb")
+        let previous = try #require(UIImage(data: MediaFixture.png(.red)))
+        let current = try #require(UIImage(data: MediaFixture.png(.blue)))
+        let stale = store.generation
+
+        identity.rotate()
+        #expect(store.store(current, forKey: key, generation: store.generation))
+
+        // The previous identity's fetch lands last, for the very same (uid, tier).
+        #expect(
+            !store.store(previous, forKey: key, generation: stale),
+            "an answer for an identity that has ended was declared paintable"
+        )
+        #expect(
+            store.image(forKey: key) === current,
+            "the previous identity's photo replaced the current one's"
+        )
+    }
+
+    /// The counterpart nobody should have to pay for: an identity that has not moved reads back
+    /// exactly what it stored.
+    @Test("a stable identity reads back what it stored")
+    func aStableIdentityKeepsItsPictures() throws {
+        let store = MediaImageStore(
+            countLimit: 8,
+            totalCostLimit: 1 << 20,
+            identity: MediaIdentity()
+        )
+        let key = MediaImageKey(uid: "stable", tier: "thumb")
+        let image = try #require(UIImage(data: MediaFixture.png(.green)))
+
+        #expect(store.store(image, forKey: key, generation: store.generation))
         #expect(store.image(forKey: key) === image)
     }
 }

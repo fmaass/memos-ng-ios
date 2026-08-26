@@ -23,10 +23,13 @@ final class MediaImageStore {
     }
 
     /// Emptied the moment the device is a different device, checked on EVERY access rather than
-    /// pushed from the sign-out. Pushing it would work too, right up until a path that changes
-    /// identity forgets to call it — and the failure then is silent and wrong-looking: another
-    /// account's photo, painted instantly, out of memory, with no request to notice in a log. A
-    /// pull cannot be forgotten, and the check is an integer compare.
+    /// pushed from the sign-out.
+    ///
+    /// This is RECLAMATION and not the fence — the fence is the key. Every entry is filed under
+    /// the generation it was stored in (`MediaImageKey.storageKey(inGeneration:)`), so the
+    /// previous identity's photos are not entries this one might be served but entries whose name
+    /// it never forms, whether or not this ever ran. What this buys is the megabytes: a store
+    /// holding two identities' bitmaps would spend its cost limit on pictures nobody can ask for.
     private func syncToIdentity() {
         let current = identity.generation
         guard current != filledFor else { return }
@@ -45,19 +48,36 @@ final class MediaImageStore {
 
     func image(forKey key: MediaImageKey) -> UIImage? {
         syncToIdentity()
-        return cache.object(forKey: key.storageKey as NSString)
+        return cache.object(forKey: storageKey(key) as NSString)
     }
 
-    /// `generation` is what the CALLER read before it went to the network. A store for a
-    /// generation that has since moved is dropped: that is the in-flight fetch from the previous
-    /// account, arriving after the switch, and keeping it would put the old server's photo back
-    /// into a cache that was just emptied for exactly that reason.
+    /// `generation` is what the CALLER read before it went to the network, and it is the
+    /// generation the entry is FILED under — not a claim that is checked and then discarded.
+    ///
+    /// An answer from the previous account, arriving after the switch, is stored under the
+    /// previous account's number, where nothing in this identity will ever look for it. That is
+    /// what makes the ordering of two racing writers stop mattering: they do not share a key, so
+    /// the late one cannot land on top of the live one.
+    ///
+    /// The returned value is a different question — whether the CALLER may paint this picture.
+    /// A stale answer must not be handed to a view even though it was harmlessly filed, because
+    /// painting it is the same mistake one frame earlier.
     @discardableResult
     func store(_ image: UIImage, forKey key: MediaImageKey, generation: Int) -> Bool {
         syncToIdentity()
-        guard generation == identity.generation else { return false }
-        cache.setObject(image, forKey: key.storageKey as NSString, cost: Self.cost(of: image))
-        return true
+        cache.setObject(
+            image,
+            forKey: key.storageKey(inGeneration: generation) as NSString,
+            cost: Self.cost(of: image)
+        )
+        return generation == identity.generation
+    }
+
+    /// What this identity files under. Read at the moment of the access, never remembered: the
+    /// clock can move between two calls, and a key held over from before the move is the previous
+    /// account's.
+    private func storageKey(_ key: MediaImageKey) -> String {
+        key.storageKey(inGeneration: identity.generation)
     }
 
     /// Drops ONE entry — the decoded half of what `MediaCache.evictExpired` does to the response
@@ -68,7 +88,7 @@ final class MediaImageStore {
     /// leave the rest, which is a cache half-emptied for the wrong reason.
     func remove(forKey key: MediaImageKey) {
         syncToIdentity()
-        cache.removeObject(forKey: key.storageKey as NSString)
+        cache.removeObject(forKey: storageKey(key) as NSString)
     }
 
     func purge() {
@@ -215,6 +235,14 @@ public enum MediaImageLoader {
         // A URL whose signature has already lapsed must not be answered out of the URLCache: the
         // entry can only be stale, and the request is going to be refused anyway.
         request.cachePolicy = SignedMediaURL(url: url).cachePolicy(at: Date())
+        // The generation travels ON THE REQUEST, and this line is the whole cross-identity fence.
+        // The URL loading system caches what it fetched by itself, at the moment the answer lands
+        // — which for a fetch that was in flight across a sign-out is after the rotation, so a
+        // cache asking the clock at that moment would file the previous account's photo under the
+        // new account's number. Stamped here, before the wire, those bytes are filed under the
+        // identity that asked for them no matter when they arrive, and the next identity cannot
+        // name them. See `GenerationScopedURLCache`.
+        MediaFetchGeneration.stamp(&request, generation: generation)
 
         guard let answer = try? await transport.fetch(request) else { return nil }
         let (data, response) = answer
