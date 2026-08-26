@@ -477,4 +477,301 @@ extension TimelineStoreTests {
         #expect(!(await store.delete(uid: "a", using: client)))
         #expect(unauthorizedCalled.get())
     }
+
+    // MARK: - the query the list is asking for
+
+    /// The query parameters of one request, as the server would read them: repeated names kept in
+    /// order, percent-encoding undone. Reading them back off the URL is the point — the claim is
+    /// about what actually left the app, not about what the store meant to send.
+    private static func sent(_ path: String) -> [String: [String]] {
+        var parsed: [String: [String]] = [:]
+        for item in URLComponents(string: path)?.queryItems ?? [] {
+            parsed[item.name, default: []].append(item.value ?? "")
+        }
+        return parsed
+    }
+
+    /// Keeps a request open until the test lets it go. `nonisolated static`, because the scripted
+    /// transport runs off the main actor. (The pagination-fence suite holds its own copy: the two
+    /// suites share no state, and a helper reaching across them would couple them.)
+    private nonisolated static func hold(until release: LockedValue<Bool>) async throws {
+        while !release.get() {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    @Test("a filtered page sends every filter on the second page too")
+    func everyFilterTravelsOnEveryPage() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            return path.contains("cursor=page-2")
+                ? Stub.json(Stub.memoList(["b"], nextCursor: nil))
+                : Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        let store = TimelineStore(
+            pageSize: 1,
+            query: MemoQuery(
+                term: "travel",
+                anchor: .day(year: 2026, month: 8, day: 24),
+                tags: ["trip", "food"],
+                visibility: .protected,
+                includeArchived: true
+            ),
+            calendar: calendar
+        )
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.loadMore(using: client, baseURL: Stub.baseURL)
+
+        #expect(store.memos.map(\.uid) == ["a", "b"])
+        let requests = paths.get().map { Self.sent($0) }
+        #expect(requests.count == 2)
+        // The server's cursor carries no filter state — it is base64 `created_at|id`
+        // (`app/services/memos.py:43-49`) — so a filter the second page forgets silently widens
+        // the list halfway down it.
+        for (index, request) in requests.enumerated() {
+            let page = index + 1
+            #expect(request["q"] == ["travel"], "page \(page) dropped the term")
+            #expect(
+                request["created_before"] == ["2026-08-24T22:00:00Z"],
+                "page \(page) dropped the date bound"
+            )
+            #expect(request["tag"] == ["trip", "food"], "page \(page) dropped a tag")
+            #expect(request["visibility"] == ["PROTECTED"], "page \(page) dropped the visibility")
+            #expect(request["include_archived"] == ["true"], "page \(page) dropped the archives")
+            #expect(request["archived_only"] == nil, "page \(page) invented archived-only")
+            #expect(request["limit"] == ["1"])
+        }
+        #expect(requests[0]["cursor"] == nil, "the first page asked from a cursor")
+        #expect(
+            requests[1]["cursor"] == ["page-2"],
+            "control: the second request really is the next page"
+        )
+    }
+
+    /// The regression that guards everything else in this phase: with no query, the request is
+    /// EXACTLY the one this app sent before it could be filtered at all — the parameter names are
+    /// asserted as a whole set, so a filter sent as `false` or `""` fails here.
+    @Test("an empty query asks for exactly the plain timeline page")
+    func anEmptyQuerySendsCursorAndLimitOnly() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            return path.contains("cursor=page-2")
+                ? Stub.json(Stub.memoList(["b"], nextCursor: nil))
+                : Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+        }
+        let store = TimelineStore(pageSize: 1)
+        #expect(store.query.isEmpty, "the default query is the plain timeline")
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.loadMore(using: client, baseURL: Stub.baseURL)
+
+        let requests = paths.get().map { Self.sent($0) }
+        #expect(requests.count == 2)
+        #expect(Set(requests[0].keys) == ["limit"], "the plain first page carried a filter")
+        #expect(
+            Set(requests[1].keys) == ["cursor", "limit"],
+            "the plain next page carried a filter"
+        )
+        #expect(requests[0]["limit"] == ["1"])
+        #expect(requests[1]["cursor"] == ["page-2"])
+        #expect(store.memos.map(\.uid) == ["a", "b"])
+    }
+
+    /// The fence, extended: a page is a continuation of a QUERY as much as of a list, and one that
+    /// answers a superseded term carries rows nobody asked for and a cursor into a lineage nobody
+    /// is reading.
+    @Test("a page for a superseded query is dropped")
+    func aPageForASupersededQueryIsDropped() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            if path.contains("cursor=page-2") {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.json(Stub.memoList(["unfiltered"], nextCursor: "page-3"))
+            }
+            return Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+        }
+        let store = TimelineStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.memos.map(\.uid) == ["a"])
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        release.set(true)
+        await inFlight.value
+
+        #expect(
+            store.memos.map(\.uid) == ["a"],
+            "a page answering the unfiltered list was merged into a filtered one"
+        )
+        #expect(store.query == MemoQuery(term: "travel"))
+        // The cursor is the damage that outlives the merge: adopted, every later page would walk
+        // the unfiltered lineage while the list claims to be a search.
+        #expect(
+            !store.shouldLoadMore(after: 0),
+            "the superseded page's cursor became the filtered list's cursor"
+        )
+        #expect(
+            !paths.get().contains { $0.contains("cursor=page-3") },
+            "the dropped page's cursor was asked for"
+        )
+        #expect(
+            paths.get().contains { $0.contains("cursor=page-2") },
+            "control: the page that was dropped is one this store really did ask for"
+        )
+    }
+
+    @Test("setting the same query again does not disturb a page in flight")
+    func settingAnUnchangedQueryChangesNothing() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("cursor=page-2") else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+            }
+            entered.set(true)
+            try await Self.hold(until: release)
+            return Stub.json(Stub.memoList(["b"], nextCursor: nil))
+        }
+        let store = TimelineStore(pageSize: 1, query: MemoQuery(term: "travel"))
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.memos.map(\.uid) == ["a", "b"], "re-asking the same thing threw a page away")
+        #expect(!store.hasMore)
+    }
+
+    /// A new query has to be able to READ, not merely to be recorded.
+    ///
+    /// The request the old query has in flight is exactly what a person changing a filter is
+    /// waiting for the end of, so a "one refresh at a time" rule that counts it turns the change
+    /// into nothing at all: fenced, unread, and no trigger left to try again.
+    @Test("a refresh for a new query is not blocked by the old query's request")
+    func aNewQueryRefreshesWhileTheOldOneIsStillInFlight() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("q=travel") else {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.json(Stub.memoList(["unfiltered"], nextCursor: "page-2"))
+            }
+            return Stub.json(Stub.memoList(["travelled"], nextCursor: nil))
+        }
+        let store = TimelineStore(pageSize: 1)
+
+        let inFlight = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        #expect(store.memos.map(\.uid) == ["travelled"], "the new query never got to read anything")
+        #expect(!store.isLoading, "the store still says it is loading a query nobody is reading")
+
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.memos.map(\.uid) == ["travelled"], "the superseded page landed anyway")
+        #expect(!store.isLoading)
+        #expect(store.lastError == nil)
+    }
+
+    /// A failure belongs to the request that suffered it. One arriving late from a query nobody is
+    /// reading must not put an error over a list that loaded perfectly well — and a 401 from it
+    /// must not end the session, because the current query's own request asks the same question
+    /// and is the one entitled to answer it.
+    @Test("a failure from a superseded query is not reported")
+    func aFailureFromASupersededQueryIsDropped() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let unauthorizedCalled = LockedValue<Bool>(false)
+        let travelPages = Counter()
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("q=travel") else {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.empty(.unauthorized)
+            }
+            travelPages.increment()
+            return travelPages.count == 1
+                ? Stub.json(Stub.memoList(["travelled"], nextCursor: nil))
+                : Stub.empty(.unauthorized)
+        }
+        let store = TimelineStore(
+            pageSize: 1,
+            onUnauthorized: { unauthorizedCalled.set(true) }
+        )
+
+        let inFlight = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.memos.map(\.uid) == ["travelled"])
+
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a failure nobody was waiting for was put on screen")
+        #expect(!unauthorizedCalled.get(), "a superseded request ended the session")
+        #expect(store.memos.map(\.uid) == ["travelled"], "the failed request disturbed the list")
+
+        // Control: the fence drops errors from a superseded lineage, not errors as such — the
+        // current query's own 401 still reports and still ends the session.
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.lastError != nil, "control: a current failure was swallowed too")
+        #expect(unauthorizedCalled.get(), "control: a current 401 no longer ends the session")
+    }
+
+    @Test("a superseded next page that fails leaves the current list alone")
+    func aFailedSupersededNextPageIsNotReported() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            if path.contains("cursor=page-2") {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.empty(.internalServerError)
+            }
+            return Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+        }
+        let store = TimelineStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a next page nobody is reading reported its failure")
+        #expect(store.memos.map(\.uid) == ["a"])
+    }
 }

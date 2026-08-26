@@ -53,27 +53,90 @@ public final class TimelineStore {
     /// list they touched and must still land.
     private var timelineGeneration = 0
     private let pageSize: Int
+    /// The calendar an anchored query's day is read in — injected rather than reached for, so what
+    /// a chosen day becomes on the wire is decided by a time zone a test can name.
+    private let calendar: Calendar
     private let onUnauthorized: @MainActor @Sendable () async -> Void
+
+    /// What this list is asking the server for. `.empty` is the plain timeline, and it is the
+    /// default: a store nobody has filtered sends exactly what it always sent.
+    public private(set) var query: MemoQuery
 
     public init(
         pageSize: Int = 20,
+        query: MemoQuery = .empty,
+        calendar: Calendar = .current,
         onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.pageSize = pageSize
+        self.query = query
+        self.calendar = calendar
         self.onUnauthorized = onUnauthorized
     }
 
+    /// Asks for a different list.
+    ///
+    /// The loaded rows are left on screen until a refresh replaces them — the same choice the
+    /// refresh path already makes, and for the same reason: a list that blanks the moment a filter
+    /// changes is a worse lie than one that is a moment out of date.
+    public func setQuery(_ query: MemoQuery) {
+        guard query != self.query else { return }
+        self.query = query
+        // Back to the state a store starts in: nothing read yet, and no reason to believe there is
+        // no more. The old cursor is a position inside the old list's rows and means nothing under
+        // a filter that removes some of them; `loadMore` reads nothing until a refresh hands it a
+        // cursor of this query's own.
+        nextCursor = nil
+        hasMore = true
+        // A page already in flight was a continuation of the query it set out under, not of this
+        // one, so it is superseded exactly as a page from a replaced list is.
+        timelineGeneration += 1
+    }
+
+    /// Which list a page in flight was asked for — the generation AND the query, because either
+    /// one moving makes the answer a continuation of something nobody is reading any more.
+    private struct Lineage: Equatable {
+        var generation: Int
+        var query: MemoQuery
+    }
+
+    private var lineage: Lineage { Lineage(generation: timelineGeneration, query: query) }
+
+    /// Which lineage the first page in flight belongs to, or nil when none is.
+    ///
+    /// `isLoading` alone cannot decide whether a refresh is redundant. The request a superseded
+    /// query left in flight is exactly what a person changing a filter is waiting for the end of,
+    /// so counting it turns the change into nothing at all: the old page is fenced out on arrival,
+    /// the new query was never read, and no trigger is left to try again. What is redundant is a
+    /// refresh of the lineage ALREADY being read; a refresh of a different one is the whole point.
+    private var loadingLineage: Lineage?
+
     public func refresh(using client: any APIProtocol, baseURL: URL) async {
-        guard !isLoading else { return }
+        let lineage = self.lineage
+        guard loadingLineage != lineage else { return }
+        loadingLineage = lineage
         isLoading = true
-        defer { isLoading = false }
-        let generation = timelineGeneration
+        // Only the newest reader clears the flag. A superseded request finishing while the current
+        // one is still out would otherwise take the spinner down over a list still being read.
+        defer {
+            if loadingLineage == lineage {
+                loadingLineage = nil
+                isLoading = false
+            }
+        }
         do {
-            let page = try await Self.page(client, cursor: nil, limit: pageSize, baseURL: baseURL)
+            let page = try await Self.page(
+                client,
+                query: lineage.query,
+                calendar: calendar,
+                cursor: nil,
+                limit: pageSize,
+                baseURL: baseURL
+            )
             // A first page read before a delete still has the deleted memo on it, so publishing it
             // now would undo the delete on screen. It is dropped whole rather than filtered: the
             // list stays as it is, which is the truth minus one row, and the next pull re-reads it.
-            guard generation == timelineGeneration else {
+            guard lineage == self.lineage else {
                 MemosLog.api.info("GET /api/memos answered for a list that has moved on")
                 return
             }
@@ -84,6 +147,14 @@ public final class TimelineStore {
             // This IS a different list — a new lineage, whose cursor no page in flight shares.
             timelineGeneration += 1
         } catch {
+            // A failure belongs to the request that suffered it. One from a list nobody is reading
+            // any more would put an error over a list that loaded perfectly well — and, on a 401,
+            // end the session on the word of a request that has been superseded. The current
+            // lineage asks the server the same question and is the one entitled to answer it.
+            guard lineage == self.lineage else {
+                MemosLog.api.info("GET /api/memos failed for a list that has moved on")
+                return
+            }
             await report(error)
         }
     }
@@ -106,17 +177,22 @@ public final class TimelineStore {
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
-        // The cursor and the generation are re-read on every pass: after a drop, the page that
+        // The cursor and the lineage are re-read on every pass: after a drop, the page that
         // comes next is the CURRENT list's next page, not the one this call set out to fetch.
         while !isLoading, hasMore, let cursor = nextCursor {
-            let generation = timelineGeneration
+            let lineage = self.lineage
             do {
                 let page = try await Self.page(
-                    client, cursor: cursor, limit: pageSize, baseURL: baseURL
+                    client,
+                    query: lineage.query,
+                    calendar: calendar,
+                    cursor: cursor,
+                    limit: pageSize,
+                    baseURL: baseURL
                 )
                 // The continuation of a list that is gone continues nothing: its rows can include
                 // a memo the delete removed, and its cursor walks a lineage nobody is reading.
-                guard generation == timelineGeneration else {
+                guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/memos answered for a list that has moved on")
                     continue
                 }
@@ -129,6 +205,13 @@ public final class TimelineStore {
                 lastError = nil
                 return
             } catch {
+                // Fenced exactly as the page above it is: a failure that answers a superseded
+                // request says nothing about the list being read now, and the loop asks again for
+                // the page that follows the list as it stands.
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("GET /api/memos failed for a list that has moved on")
+                    continue
+                }
                 await report(error)
                 return
             }
@@ -497,14 +580,36 @@ public final class TimelineStore {
         return next ?? memos.count
     }
 
+    /// One page of whatever the query asks for.
+    ///
+    /// Every parameter travels on EVERY page, because the server's cursor carries no filter state
+    /// — it is base64 `created_at|id` (`app/services/memos.py:43-49`) — so a filter left off the
+    /// second request quietly widens the list halfway down it.
+    ///
+    /// An empty query contributes nothing but nils, which the generated client omits: the request
+    /// is then character for character the `cursor` + `limit` one this store has always sent.
     static func page(
         _ client: any APIProtocol,
+        query: MemoQuery,
+        calendar: Calendar,
         cursor: String?,
         limit: Int,
         baseURL: URL
     ) async throws -> (memos: [Memo], nextCursor: String?) {
+        let parameters = query.parameters(in: calendar)
         let response = try await client.listMemosApiMemosGet(
-            .init(query: .init(cursor: cursor, limit: limit))
+            .init(
+                query: .init(
+                    createdBefore: parameters.createdBefore,
+                    tag: parameters.tag,
+                    visibility: parameters.visibility?.generated,
+                    q: parameters.q,
+                    includeArchived: parameters.includeArchived,
+                    archivedOnly: parameters.archivedOnly,
+                    cursor: cursor,
+                    limit: limit
+                )
+            )
         )
         switch response {
         case .ok(let ok):
