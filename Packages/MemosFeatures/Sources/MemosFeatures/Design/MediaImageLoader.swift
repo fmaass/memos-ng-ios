@@ -10,8 +10,24 @@ import UIKit
 /// things — a count bounds how many rows of scroll-back survive, a cost bounds how many megabytes
 /// of bitmap do, and a screen holding one 2048 px photo is a different shape of expensive from one
 /// holding twelve 800 px tiles.
+/// What the store holds for a key: the decoded picture, and the URL its bytes came from.
+///
+/// The URL rides along because the fence below needs PROVENANCE, not presence. When an answer
+/// that outlived its account drops the response bytes it left behind, it must not drop the ones
+/// the account now signed in has cached under the same URL — and what tells those apart is which
+/// fetch put this entry here.
+final class HeldImage {
+    let image: UIImage
+    let url: URL
+
+    init(image: UIImage, url: URL) {
+        self.image = image
+        self.url = url
+    }
+}
+
 final class MediaImageStore {
-    private let cache = NSCache<NSString, UIImage>()
+    private let cache = NSCache<NSString, HeldImage>()
     private let identity: MediaIdentity
     /// The other half of the same picture: the response BYTES the media session caches, on disk
     /// and across launches. Held here so that one movement of the clock empties both layers at
@@ -67,9 +83,21 @@ final class MediaImageStore {
     /// rotation, and emptying its cache for an arrival that belongs to nobody would send its
     /// timeline back to the server for every tile.
     @discardableResult
-    func dropIfStale(_ generation: Int, answeredFrom url: URL) -> Bool {
+    func dropIfStale(_ generation: Int, forKey key: MediaImageKey, answeredFrom url: URL) -> Bool {
         syncToIdentity()
         guard generation != identity.generation else { return false }
+        // Never a blind removal by URL. Between this answer being cached and the loader seeing it
+        // again, the account now signed in can have fetched the SAME url and cached its own
+        // response over it — and evicting that is a miss this fence inflicted on the very account
+        // it exists to protect, one that repeats every time the pair of them race. So the entry
+        // goes only when nothing here says it is the live account's: a picture held for this key
+        // was stored by a fetch of the current generation, and when it names this url the bytes
+        // under it are that fetch's.
+        //
+        // What it can be wrong about is an answer of the live account's that is cached but still
+        // decoding. Being wrong there costs one re-fetch. Being wrong the other way serves
+        // another account's photograph.
+        guard cache.object(forKey: key.storageKey as NSString)?.url != url else { return true }
         derived.removeCachedResponse(for: URLRequest(url: url))
         return true
     }
@@ -85,7 +113,7 @@ final class MediaImageStore {
 
     func image(forKey key: MediaImageKey) -> UIImage? {
         syncToIdentity()
-        return cache.object(forKey: key.storageKey as NSString)
+        return cache.object(forKey: key.storageKey as NSString)?.image
     }
 
     /// `generation` is what the CALLER read before it went to the network. A store for a
@@ -93,10 +121,15 @@ final class MediaImageStore {
     /// account, arriving after the switch, and keeping it would put the old server's photo back
     /// into a cache that was just emptied for exactly that reason.
     @discardableResult
-    func store(_ image: UIImage, forKey key: MediaImageKey, generation: Int) -> Bool {
+    func store(_ image: UIImage, forKey key: MediaImageKey, from url: URL, generation: Int) -> Bool
+    {
         syncToIdentity()
         guard generation == identity.generation else { return false }
-        cache.setObject(image, forKey: key.storageKey as NSString, cost: Self.cost(of: image))
+        cache.setObject(
+            HeldImage(image: image, url: url),
+            forKey: key.storageKey as NSString,
+            cost: Self.cost(of: image)
+        )
         return true
     }
 
@@ -256,7 +289,17 @@ public enum MediaImageLoader {
         // entry can only be stale, and the request is going to be refused anyway.
         request.cachePolicy = SignedMediaURL(url: url).cachePolicy(at: Date())
 
-        guard let answer = try? await transport.fetch(request) else { return nil }
+        let answer: (Data, URLResponse)
+        do {
+            answer = try await transport.fetch(request)
+        } catch {
+            // A fetch does not have to SUCCEED to have left bytes behind: a body can arrive, be
+            // cached, and the task be cancelled a moment later on the way out of an account.
+            // There is nothing to hand back and nothing to decode, and the bytes are the previous
+            // account's just the same.
+            store.dropIfStale(generation, forKey: key, answeredFrom: url)
+            return nil
+        }
         let (data, response) = answer
 
         // The answer has crossed back in, and the clock is read again the moment it does. Its
@@ -265,18 +308,22 @@ public enum MediaImageLoader {
         // the previous account's photo into the cache that rotation emptied. It is checked here,
         // before the answer is judged usable or decodable, because a refusal and a corrupt body
         // were cached exactly the same way.
-        guard !store.dropIfStale(generation, answeredFrom: url) else { return nil }
-        guard isUsable(response) else { return nil }
-        let decoded = await Task.detached(priority: .userInitiated) {
-            MediaImageDecoder.decode(data)
-        }.value
-        guard let decoded else { return nil }
+        guard !store.dropIfStale(generation, forKey: key, answeredFrom: url) else { return nil }
+
+        let decoded =
+            isUsable(response)
+            ? await Task.detached(priority: .userInitiated) {
+                MediaImageDecoder.decode(data)
+            }.value
+            : nil
 
         // Not stored AND not handed back: the caller would paint it, which is the same mistake
-        // one frame earlier. The decode is another await, so the account can change across it
-        // too — and then the bytes underneath the refused picture go with it, by the same rule.
-        guard store.store(decoded, forKey: key, generation: generation) else {
-            store.dropIfStale(generation, answeredFrom: url)
+        // one frame earlier. One exit for every way the answer can fail to become a picture — a
+        // refusal, bytes that are not an image, or an account that changed across the decode,
+        // which is another await — and the bytes underneath it go by the same rule.
+        guard let decoded, store.store(decoded, forKey: key, from: url, generation: generation)
+        else {
+            store.dropIfStale(generation, forKey: key, answeredFrom: url)
             return nil
         }
         return decoded

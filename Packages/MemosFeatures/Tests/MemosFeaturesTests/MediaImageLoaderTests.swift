@@ -145,18 +145,58 @@ enum MediaFixture {
 /// `@unchecked Sendable` for the same reason `MediaSession` is: both stored properties are `let`,
 /// and `URLCache` is documented as safe to use from several threads.
 final class CachingGatedTransport: MediaTransport, @unchecked Sendable {
+    /// WHEN the bytes reach the cache, which is what the two races turn on. `onTheWayOut` is the
+    /// answer that caches as it completes. `beforeTheGate` is the one whose bytes were cached
+    /// long before the loader ever sees them again — the real shape of a slow response, and the
+    /// reason a fence that runs when the answer RESUMES can find somebody else's entry there.
+    enum Moment {
+        case beforeTheGate
+        case onTheWayOut
+    }
+
     let gate: GatedTransport
     private let cache: URLCache
+    private let payload: Data
+    private let moment: Moment
+    private let failsAfterCaching: Bool
 
-    init(payload: Data, cache: URLCache) {
+    init(
+        payload: Data,
+        cache: URLCache,
+        moment: Moment = .onTheWayOut,
+        failsAfterCaching: Bool = false
+    ) {
         gate = GatedTransport(payload: payload)
         self.cache = cache
+        self.payload = payload
+        self.moment = moment
+        self.failsAfterCaching = failsAfterCaching
     }
 
     func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        if moment == .beforeTheGate { cacheNow(request) }
         let (data, response) = try await gate.fetch(request)
-        cache.storeCachedResponse(CachedURLResponse(response: response, data: data), for: request)
+        if moment == .onTheWayOut {
+            cache.storeCachedResponse(
+                CachedURLResponse(response: response, data: data), for: request
+            )
+        }
+        // A body received and then thrown away by a cancellation is still a body that was cached.
+        if failsAfterCaching { throw URLError(.cancelled) }
         return (data, response)
+    }
+
+    private func cacheNow(_ request: URLRequest) {
+        let url = request.url ?? URL(string: "https://memos.example.invalid/")!
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/png"]
+        )!
+        cache.storeCachedResponse(
+            CachedURLResponse(response: response, data: payload), for: request
+        )
     }
 }
 
@@ -514,16 +554,88 @@ struct MediaImageLoaderTests {
         )
     }
 
+    /// A fetch does not have to SUCCEED to have left bytes behind: a body can arrive and be
+    /// cached, and the task be cancelled on the way out of the account a moment later. The
+    /// failure returns nothing to fence, and the bytes it cached are the previous account's all
+    /// the same.
+    @Test("bytes cached by a fetch that then failed are dropped too")
+    func aFailedFetchLeavesNoBytesBehind() async throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let key = MediaImageKey(uid: "in-flight-failed", tier: "thumb")
+        let url = MediaFixture.signed(uid: "in-flight-failed")
+        let transport = installCachingTransport(scratch, failsAfterCaching: true)
+
+        let load = Task { await MediaImageLoader.uiImage(for: key, url: url) }
+        await transport.gate.waitUntilStarted()
+        identity.rotate()
+        #expect(MediaImageLoader.cached(for: key) == nil)
+        await transport.gate.release()
+        let answer = await load.value
+
+        #expect(answer == nil)
+        #expect(
+            scratch.cache.cachedResponse(for: URLRequest(url: url)) == nil,
+            "a failed fetch left the previous account's bytes in the cache"
+        )
+    }
+
+    /// The other side of the fence, and the one it can get wrong: the account now signed in has
+    /// already fetched the SAME url and cached ITS answer. The stale arrival must drop the bytes
+    /// it left behind and nothing else — evicting the live account's entry is a miss this fence
+    /// inflicted on the account it exists to protect, and the next scroll pays for it.
+    @Test("a stale arrival does not evict what the account now signed in has cached")
+    func aStaleArrivalKeepsTheLiveAccountsBytes() async throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let key = MediaImageKey(uid: "same-url", tier: "thumb")
+        let url = MediaFixture.signed(uid: "same-url")
+        let request = URLRequest(url: url)
+        // The previous account's answer caches BEFORE it is handed back, and then sits on the
+        // wire — so by the time the loader sees it again, the entry under that url is not its own.
+        let previous = installCachingTransport(scratch, moment: .beforeTheGate)
+
+        let load = Task { await MediaImageLoader.uiImage(for: key, url: url) }
+        await previous.gate.waitUntilStarted()
+        identity.rotate()
+
+        // The account now signed in fetches the same url and caches its own answer, after the
+        // purge and before the previous account's answer lands.
+        let live = CachingGatedTransport(payload: MediaFixture.png(.blue), cache: scratch.cache)
+        await live.gate.release()
+        MediaImageLoader.transport = live
+        #expect(await MediaImageLoader.uiImage(for: key, url: url) != nil)
+        let cachedForLive = try #require(scratch.cache.cachedResponse(for: request)?.data)
+
+        await previous.gate.release()
+        #expect(await load.value == nil, "the previous account's photo was handed back")
+
+        #expect(
+            scratch.cache.cachedResponse(for: request)?.data == cachedForLive,
+            "the live account's bytes were evicted by the previous account's arrival"
+        )
+        #expect(MediaImageLoader.cached(for: key) != nil, "and its decoded picture went with them")
+    }
+
     /// Both in-flight tests need the store and the transport pointed at the SAME cache: a fence
     /// asserted against one cache while the fetch writes to another would pass without meaning.
-    private func installCachingTransport(_ scratch: ScratchDerivedCache) -> CachingGatedTransport {
+    private func installCachingTransport(
+        _ scratch: ScratchDerivedCache,
+        moment: CachingGatedTransport.Moment = .onTheWayOut,
+        failsAfterCaching: Bool = false
+    ) -> CachingGatedTransport {
         MediaImageLoader.store = MediaImageStore(
             countLimit: MediaImageLoader.countLimit,
             totalCostLimit: MediaImageLoader.totalCostLimit,
             identity: identity,
             derived: scratch.cache
         )
-        let transport = CachingGatedTransport(payload: MediaFixture.png(.red), cache: scratch.cache)
+        let transport = CachingGatedTransport(
+            payload: MediaFixture.png(.red),
+            cache: scratch.cache,
+            moment: moment,
+            failsAfterCaching: failsAfterCaching
+        )
         MediaImageLoader.transport = transport
         return transport
     }
@@ -563,8 +675,13 @@ struct MediaImageLoaderTests {
         let picture = try #require(UIImage(data: MediaFixture.png(.red)))
         let other = try #require(UIImage(data: MediaFixture.png(.blue)))
         let generation = MediaImageLoader.store.generation
-        MediaImageLoader.store.store(picture, forKey: key, generation: generation)
-        MediaImageLoader.store.store(other, forKey: neighbour, generation: generation)
+        MediaImageLoader.store.store(picture, forKey: key, from: dead, generation: generation)
+        MediaImageLoader.store.store(
+            other,
+            forKey: neighbour,
+            from: MediaFixture.signed(uid: "lapsed-neighbour"),
+            generation: generation
+        )
         // Both really are there beforehand — otherwise the assertions below say nothing.
         #expect(MediaImageLoader.cachedUIImage(for: key) === picture)
         #expect(MediaImageLoader.cachedUIImage(for: neighbour) === other)
@@ -596,7 +713,7 @@ struct MediaImageLoaderTests {
 
         let picture = try #require(UIImage(data: MediaFixture.png(.green)))
         MediaImageLoader.store.store(
-            picture, forKey: key, generation: MediaImageLoader.store.generation
+            picture, forKey: key, from: live, generation: MediaImageLoader.store.generation
         )
 
         let dropped = MediaImageLoader.evictLapsedSignature(url: live, key: key, cache: cache)
@@ -669,13 +786,23 @@ struct MediaImageStoreTests {
         let key = MediaImageKey(uid: "purge", tier: "thumb")
         let image = try #require(UIImage(data: MediaFixture.png(.red)))
 
-        store.store(image, forKey: key, generation: store.generation)
+        store.store(
+            image,
+            forKey: key,
+            from: MediaFixture.signed(uid: "purge"),
+            generation: store.generation
+        )
         #expect(store.image(forKey: key) === image)
 
         store.purge()
         #expect(store.image(forKey: key) == nil)
 
-        store.store(image, forKey: key, generation: store.generation)
+        store.store(
+            image,
+            forKey: key,
+            from: MediaFixture.signed(uid: "purge"),
+            generation: store.generation
+        )
         #expect(store.image(forKey: key) === image)
     }
 
@@ -697,7 +824,12 @@ struct MediaImageStoreTests {
         )
         let key = MediaImageKey(uid: "shared-uid", tier: "thumb")
         let image = try #require(UIImage(data: MediaFixture.png(.red)))
-        store.store(image, forKey: key, generation: store.generation)
+        store.store(
+            image,
+            forKey: key,
+            from: MediaFixture.signed(uid: "shared-uid"),
+            generation: store.generation
+        )
         let request = try scratch.seed(MediaFixture.signed(uid: "shared-uid"))
         // A second entry, so the assertion below is "the cache holds nothing" rather than "this
         // one key was evicted" — a per-key eviction would satisfy the first pair on its own.
@@ -738,7 +870,12 @@ struct MediaImageStoreTests {
         )
         let key = MediaImageKey(uid: "kept", tier: "thumb")
         let image = try #require(UIImage(data: MediaFixture.png(.green)))
-        store.store(image, forKey: key, generation: store.generation)
+        store.store(
+            image,
+            forKey: key,
+            from: MediaFixture.signed(uid: "kept"),
+            generation: store.generation
+        )
         let request = try scratch.seed(MediaFixture.signed(uid: "kept"))
 
         // Every access syncs, so "no rotation" has to survive being asked repeatedly.
@@ -772,7 +909,12 @@ struct MediaImageStoreTests {
         #expect(scratch.cache.currentDiskUsage == scratch.emptyDiskUsage)
 
         let image = try #require(UIImage(data: MediaFixture.png(.blue)))
-        store.store(image, forKey: key, generation: store.generation)
+        store.store(
+            image,
+            forKey: key,
+            from: MediaFixture.signed(uid: "nothing-cached"),
+            generation: store.generation
+        )
         #expect(store.image(forKey: key) === image, "the rotation left the store unusable")
     }
 }

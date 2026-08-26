@@ -274,7 +274,7 @@ struct MediaCacheClearingTests {
         let decoded = MediaImageStore(countLimit: 8, totalCostLimit: 1 << 20)
         let image = try #require(UIImage(data: png))
         let key = MediaImageKey(uid: "x", tier: "thumb")
-        decoded.store(image, forKey: key, generation: decoded.generation)
+        decoded.store(image, forKey: key, from: url, generation: decoded.generation)
         #expect(decoded.image(forKey: key) != nil)
         #expect(cache.cachedResponse(for: request) != nil)
 
