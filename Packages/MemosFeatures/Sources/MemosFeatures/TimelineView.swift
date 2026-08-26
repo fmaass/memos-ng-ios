@@ -64,24 +64,22 @@ public struct TimelineView: View {
                     MemoDetailView(uid: route.uid, initial: memo, timeline: timeline)
                 }
             }
-            // Top-LEFT is deliberately empty. The ellipsis that used to sit there is retired:
-            // everything behind it now hangs off the account's own face on the right, where the
-            // web app has put it for years, and a lone overflow button opposite it was a second
-            // place to look for the same three things. The space is reserved for the date-jump /
-            // search affordance (MEMNG-120) rather than refilled with something else.
+            // Top-LEFT is the account's own face, top-RIGHT is New memo, and which is which is
+            // decided in `TimelineToolbar` rather than here — a placement written inline in a
+            // screen that needs a live session to construct is one no test can read back. The
+            // slot between them, immediately left of New memo, stays empty for the date-jump /
+            // search loupe (MEMNG-120).
+            //
+            // This screen's job is only to say what the bar is showing and what its controls do.
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    accountMenu
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        composing = .create
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                            .symbolEffect(.bounce, value: feedback.count)
-                    }
-                    .accessibilityLabel("New memo")
-                }
+                TimelineToolbar(
+                    avatar: avatar,
+                    name: session.state.user?.name,
+                    composed: feedback.count,
+                    openSettings: { path.append(SettingsRoute()) },
+                    signOut: { signOut.send(.menuTapped, to: session) },
+                    newMemo: { composing = .create }
+                )
             }
         }
         // On the navigation stack rather than further down the chain, so it is a different view
@@ -140,32 +138,6 @@ public struct TimelineView: View {
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
             Task { await load() }
         }
-    }
-
-    /// The account's face, and everything that hangs off it.
-    ///
-    /// Driven by `AccountMenu.rows`, which is where the ORDER lives — because the order carries a
-    /// safety property. A menu opens with its first row directly under the anchor that opened it,
-    /// and when that row was the destructive one a second tap on the anchor revoked a live
-    /// credential (MEMNG-119). The heading occupies that position; the destructive row is last;
-    /// and the tap itself only ever asks (`SignOutFlow`). The rows are built by walking that list
-    /// rather than written out here, so the test that holds the order is holding THIS menu.
-    ///
-    /// The rows themselves are `AccountMenuRows`, so the screenshot render and the system popover
-    /// draw the same view tree — a system popover cannot be rendered, and a second hand-written
-    /// copy of its rows would be a picture of something the app does not have.
-    @ViewBuilder
-    private var accountMenu: some View {
-        Menu {
-            AccountMenuRows(
-                rows: AccountMenu.rows(name: session.state.user?.name),
-                openSettings: { path.append(SettingsRoute()) },
-                signOut: { signOut.send(.menuTapped, to: session) }
-            )
-        } label: {
-            AccountAvatarView(image: avatar, name: session.state.user?.name ?? "")
-        }
-        .accessibilityLabel("Account")
     }
 
     @ViewBuilder
