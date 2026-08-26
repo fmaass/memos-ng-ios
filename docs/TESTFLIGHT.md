@@ -208,7 +208,9 @@ GUI, no Mac login password:
   `hasAccessToAllBuilds` off and Apple's API refuses to enable it afterwards, so a processed build
   is INVISIBLE to testers until it is attached to the group. `fastlane beta` therefore waits for
   processing and performs the attach itself (never re-add `skip_waiting_for_build_processing` --
-  it exits before the build exists in ASC and the attach silently never runs). There is still no
+  it exits before the build exists in ASC and the attach silently never runs; and keep
+  `submit_beta_review: false` -- the default posts an external-testing review submission that
+  fails on this app and kills the lane between processing and the attach). There is still no
   review queue and no per-tester step; the export-compliance key in `project.yml` keeps the
   compliance prompt away.
 

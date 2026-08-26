@@ -88,9 +88,13 @@ platform :ios do
     # hasAccessToAllBuilds (the API refuses to enable it post-creation), an unattached
     # build is INVISIBLE to every tester -- 1.0.2 (8) sat processed and unseen until a
     # manual API attach. Waiting costs minutes and makes distribution real.
+    # submit_beta_review defaults to TRUE and posts a Beta App Review submission -- an
+    # EXTERNAL-testing requirement the internal household group neither needs nor satisfies
+    # (no beta description is filled in), so the lane died there AFTER processing and BEFORE
+    # the group assign, leaving 1.0.3 (9) processed and unattached until a manual API attach.
     upload_to_testflight(
       api_key: api_key, ipa: IPA, groups: ["household"],
-      distribute_external: false,
+      distribute_external: false, submit_beta_review: false,
     )
   end
 end
