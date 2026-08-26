@@ -50,12 +50,18 @@ public struct TimelineView: View {
     @State private var viewing: MediaViewerSelection?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
-    /// The search the loupe raised, and the list it fills. Built fresh at every tap — a term left
-    /// over from last time is a filter silently hiding memos, which is the worse failure (design
-    /// note §5, Q4) — and kept here rather than inside the sheet because the results screen the
-    /// sheet pushes outlives the sheet.
-    @State private var search: MemoSearch?
-    @State private var searching = false
+    /// The search the loupe raised, its sheet, and the list it fills. Built fresh at every tap —
+    /// a term left over from last time is a filter silently hiding memos, which is the worse
+    /// failure (design note §5, Q4) — and kept here rather than inside the sheet because the
+    /// results screen the sheet pushes outlives the sheet.
+    ///
+    /// ONE object rather than a store beside a boolean. A sheet raised by a boolean draws whatever
+    /// its content closure can see when the presentation begins, and a content gated on a separate
+    /// optional draws nothing at all if that optional has not landed — a blank sheet with no
+    /// `.task` on it to load anything either, right until it is closed and opened again
+    /// (MEMNG-175). `SearchPresentation` carries the store in the item the sheet is raised FROM,
+    /// so the two cannot be out of step.
+    @State private var searchPresentation = SearchPresentation()
     /// Set only for the one sheet close that is a hand-off to the results screen rather than
     /// an abandonment, so `dismissSearch` knows not to reset the store the results screen has
     /// just adopted.
@@ -64,7 +70,10 @@ public struct TimelineView: View {
     public init() {}
 
     public var body: some View {
-        NavigationStack(path: $path) {
+        // The sheet is raised from an ITEM, and an item needs a binding into the presentation
+        // rather than to it.
+        @Bindable var presentation = searchPresentation
+        return NavigationStack(path: $path) {
             Group {
                 if let timeline {
                     content(timeline)
@@ -94,7 +103,7 @@ public struct TimelineView: View {
                 }
             }
             .navigationDestination(for: SearchResultsRoute.self) { _ in
-                if let search {
+                if let search = searchPresentation.search {
                     SearchResultsView(
                         search: search,
                         mediaZoom: mediaZoom,
@@ -127,28 +136,26 @@ public struct TimelineView: View {
             // hand-off to the results screen, and an interactive swipe the app never hears
             // about otherwise. A debounced or in-flight search that outlived the sheet would
             // otherwise write its result into a model nobody is looking at.
-            .sheet(isPresented: $searching, onDismiss: dismissSearch) {
-                if let search {
-                    SearchSheet(
-                        search: search,
-                        loadHeatmap: { store in
-                            guard let client = session.api else { return }
-                            await store.load(using: client)
-                        },
-                        jump: { jump(to: $0) },
-                        loadTags: { store in
-                            guard let client = session.api else { return }
-                            await store.load(using: client)
-                        },
-                        runSearch: { query, text in search.run(query, showing: text) },
-                        close: { searching = false },
-                        showResults: {
-                            handingOff = true
-                            searching = false
-                            path.append(SearchResultsRoute())
-                        }
-                    )
-                }
+            .sheet(item: $presentation.session, onDismiss: dismissSearch) { raised in
+                SearchSheet(
+                    search: raised.search,
+                    loadHeatmap: { store in
+                        guard let client = session.api else { return }
+                        await store.load(using: client)
+                    },
+                    jump: { jump(to: $0) },
+                    loadTags: { store in
+                        guard let client = session.api else { return }
+                        await store.load(using: client)
+                    },
+                    runSearch: { query, text in raised.search.run(query, showing: text) },
+                    close: { searchPresentation.close() },
+                    showResults: {
+                        handingOff = true
+                        searchPresentation.close()
+                        path.append(SearchResultsRoute())
+                    }
+                )
             }
         }
         // On the navigation stack rather than further down the chain, so it is a different view
@@ -427,7 +434,7 @@ public struct TimelineView: View {
     /// and a memo in both is the same memo.
     private func holder(of uid: String) -> (memo: Memo, store: TimelineStore)? {
         if let timeline, let memo = memo(uid, in: timeline) { return (memo, timeline) }
-        if let results = search?.results, let memo = memo(uid, in: results) {
+        if let results = searchPresentation.search?.results, let memo = memo(uid, in: results) {
             return (memo, results)
         }
         return nil
@@ -440,26 +447,30 @@ public struct TimelineView: View {
     /// opened an empty sheet would be the only control on the screen that pretended to work.
     private func openSearch() {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        search = MemoSearch(
-            client: client,
-            baseURL: baseURL,
-            onUnauthorized: { [session] in await session.handle(.unauthorized) }
+        searchPresentation.open(
+            MemoSearch(
+                client: client,
+                baseURL: baseURL,
+                onUnauthorized: { [session] in await session.handle(.unauthorized) }
+            )
         )
-        searching = true
     }
 
     /// Every way the sheet closes funnels through here.
     ///
-    /// A hand-off to the results screen is the one close that is not an abandonment — the
-    /// results screen has just adopted this search's store — so it cancels any stray task but
-    /// keeps the loaded rows and their cursor. Every other close (Done, an interactive swipe)
-    /// abandons the search and resets it.
+    /// A hand-off to the results screen is the one close that is not an abandonment: the results
+    /// screen has just adopted this search's store — rows, cursor, AND any answer still on its
+    /// way. Cancelling that answer here left the reader on a spinner over nothing whenever the
+    /// network was slower than the dismissal animation (MEMNG-177, review round), so a hand-off
+    /// touches nothing; the sheet's own section loads end with their `.task`s on teardown. Every
+    /// other close (Done, an interactive swipe) abandons the search and resets it. The decision
+    /// itself is `SearchPresentation.closeAction`, where it is asserted.
     private func dismissSearch() {
-        if handingOff {
+        switch SearchPresentation.closeAction(handingOff: handingOff) {
+        case .adopt:
             handingOff = false
-            search?.cancelInFlight()
-        } else {
-            search?.stop()
+        case .abandon:
+            searchPresentation.search?.stop()
         }
     }
 

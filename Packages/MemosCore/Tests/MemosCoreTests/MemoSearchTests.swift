@@ -296,6 +296,10 @@ struct MemoSearchTests {
 
     /// A tag chip is not a word. It goes out as `tag`, not as `q`, and that is the difference
     /// between the memos FILED under #travel and the memos that happen to contain the word.
+    ///
+    /// It RUNS, here and always: the request below is the whole of what a chip asks the store for,
+    /// with no second call and no pause in front of it. The half MEMNG-177 was actually missing is
+    /// the sheet's — what the chip did next — and it is pinned in `TagChipsTests`.
     @Test("a tag chip searches by tag, not by text")
     func aTagChipSendsATagFilter() async {
         let paths = LockedValue<[String]>([])

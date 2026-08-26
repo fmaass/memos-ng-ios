@@ -18,6 +18,14 @@ public final class HeatmapStore {
     /// Days to memo counts, keyed exactly as the server keys them.
     public private(set) var counts: [String: Int] = [:]
     public private(set) var isLoading = false
+    /// Whether the server has ever answered this store.
+    ///
+    /// It is the difference between "no memos" and "no memos YET", and nothing else here can tell
+    /// them apart: `counts` is empty before the first load and after an account with no history,
+    /// and `isLoading` is false both before a load starts and after one was cancelled. A card that
+    /// cannot tell them apart draws a household's whole activity as twelve empty weeks the moment
+    /// the sheet opens (MEMNG-175).
+    public private(set) var hasLoaded = false
     public private(set) var lastError: String?
 
     /// Which load is the current one. A monotonic attempt id, taken before the request goes out
@@ -47,15 +55,18 @@ public final class HeatmapStore {
                 return
             }
             counts = loaded
+            hasLoaded = true
             lastError = nil
         } catch {
             guard mine == attempt else { return }
             // The counts already on screen stay. A heatmap that empties itself because one
             // refresh failed says the household wrote nothing, which is a worse lie than a
             // heatmap that is a few minutes stale.
-            let apiError =
-                (error as? APIError) ?? .unexpected(description: error.localizedDescription)
-            lastError = apiError.errorDescription
+            //
+            // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180).
+            if let apiError = StoreFailure.reportable(error) {
+                lastError = apiError.errorDescription
+            }
         }
         isLoading = false
     }

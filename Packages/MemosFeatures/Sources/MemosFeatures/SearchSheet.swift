@@ -43,7 +43,7 @@ struct SearchSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Space.roomy) {
+        SearchSheetColumn {
             SearchSheetHeader(close: close)
             field
             SearchOutcomeRow(outcome: search.outcome, showResults: showResults)
@@ -54,15 +54,11 @@ struct SearchSheet: View {
                 // Tags before the heatmap: a word is the commoner way back to a memo than a day,
                 // and the chips are one line where the heatmap is a card — first is where they
                 // are still on a medium detent at the larger text sizes.
-                SearchSheetTags(load: loadTags, search: runSearch)
+                SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
                 SearchSheetHeatmap(load: loadHeatmap, jump: jump)
             }
             MonthScrubberSlot()
-            Spacer(minLength: 0)
         }
-        .padding(DesignTokens.Space.roomy)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.systemGroupedBackground))
         // Medium is what it opens at. Large is offered because the heatmap is twelve weeks of
         // squares that grow with the text size: at the accessibility sizes the card alone is
         // taller than half a phone, and a detent nobody can grow would simply cut it off.
@@ -99,6 +95,37 @@ struct SearchSheet: View {
         .padding(DesignTokens.Space.regular)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+    }
+}
+
+/// Everything the sheet draws, in the one arrangement that cannot walk away from under a reader.
+///
+/// Stacked bare, the sheet's content is laid out inside whatever the detent offers, and the moment
+/// it wants more room than that — the tags landing, the keyboard arriving, an accessibility text
+/// size — an over-tall stack is CENTRED in what it was offered, which walks the title and the
+/// field up off the top while the sheet is still growing into place. That is what MEMNG-176
+/// reported: "every field moves up by itself while the sheet grows".
+///
+/// A scroll pinned to the top has nowhere to walk to. Content that does not fit scrolls, and
+/// everything above whatever landed stays exactly where it was put. It is its own type so that is
+/// measurable: `SearchSheetTests` offers it less height than it wants and reads back that it took
+/// the offer rather than overflowing it.
+struct SearchSheetColumn<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: DesignTokens.Space.roomy) {
+                content
+            }
+            .padding(DesignTokens.Space.roomy)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // Nothing to bounce against when it all fits, which is the ordinary case: a sheet that
+        // rubber-bands under a thumb reads as a list, and this is not one.
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(.systemGroupedBackground))
     }
 }
 
@@ -195,14 +222,26 @@ struct SearchSheetHeatmap: View {
     /// Folded away or not. Not persisted: the sheet is opened to be used, and a heatmap that
     /// starts hidden is one nobody finds again.
     @State private var expanded = true
+    @State private var lifecycle = SearchSectionLoad()
 
     var body: some View {
         SearchDateScrubber(
             grid: HeatmapPresentation.grid(from: heatmap.counts),
             expanded: $expanded,
-            commit: jump
+            commit: jump,
+            phase: SearchSectionPhase.phase(
+                hasLoaded: heatmap.hasLoaded,
+                failed: heatmap.lastError != nil
+            )
         )
-        .task { await load(heatmap) }
+        // Appearing is what reads it, and every appearance reads it — a bare `.task` runs once
+        // for a view's identity and a first presentation SwiftUI re-attaches would lose the read
+        // it started (`SearchSectionLoad`, MEMNG-175). The store fences duplicates.
+        .onAppear { lifecycle.appeared() }
+        .task(id: lifecycle.appearances) {
+            guard lifecycle.appearances > 0 else { return }
+            await load(heatmap)
+        }
     }
 }
 

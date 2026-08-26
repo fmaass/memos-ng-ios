@@ -126,13 +126,15 @@ struct SearchSheetTests {
         let loads = Box(0)
         let read = Signal()
         let searched = Box<MemoQuery?>(nil)
+        let shown = Box(false)
         let host = UIHostingController(
             rootView: SearchSheetTags(
                 load: { _ in
                     loads.value += 1
                     read.fire()
                 },
-                search: { query, _ in searched.value = query }
+                search: { query, _ in searched.value = query },
+                showResults: { shown.value = true }
             )
         )
         host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 200)
@@ -144,11 +146,145 @@ struct SearchSheetTests {
         read.wait()
 
         #expect(loads.value >= 1, "appearing did not read the tags")
-        // And opening the sheet searches for nothing by itself: a search is a tap on a chip.
+        // And opening the sheet searches for nothing by itself, nor leaves for a result screen:
+        // both are a tap on a chip.
         #expect(searched.value == nil)
+        #expect(!shown.value)
         withExtendedLifetime(window) {}
     }
 
+    /// The report itself (MEMNG-175): the first open showed nothing until it was closed and
+    /// reopened. The load is DELAYED here — held open for as long as the test looks — because that
+    /// is the only window in which the defect exists, and it is the window a cold first open spends
+    /// entirely inside.
+    @Test("a sheet whose tags have not arrived shows that they are coming, not that there are none")
+    func aDelayedTagRowShowsItIsLoading() {
+        let read = Signal()
+        let host = UIHostingController(
+            rootView: SearchSheetTags(
+                // Never answers. The row has to be worth looking at anyway.
+                load: { _ in
+                    read.fire()
+                    try? await Task.sleep(for: .seconds(3600))
+                },
+                search: { _, _ in },
+                showResults: {}
+            )
+        )
+        host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 200)
+        let window = UIWindow(frame: host.view.frame)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        read.wait()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+
+        let drawn = host.sizeThatFits(
+            in: CGSize(width: Self.contentWidth, height: LayoutProbe.unbounded)
+        )
+        #expect(drawn.height > 0, "a sheet whose tags are still coming drew nothing at all")
+        withExtendedLifetime(window) {}
+    }
+
+    /// Which of the two states a section is in, from the only two facts that separate them — one
+    /// case per input category, because the interesting one is the pair that look identical from
+    /// the outside: an account with no tags, and an account whose tags have not arrived.
+    @Test("a section is loading until it has been answered, one way or the other")
+    func thePhaseIsDecidedByWhetherTheServerHasSpoken() {
+        #expect(SearchSectionPhase.phase(hasLoaded: false, failed: false) == .loading)
+        #expect(SearchSectionPhase.phase(hasLoaded: true, failed: false) == .ready)
+        // A read that failed has been answered: the server said no, and a section spinning for
+        // ever over that would be the worse lie.
+        #expect(SearchSectionPhase.phase(hasLoaded: false, failed: true) == .ready)
+        #expect(SearchSectionPhase.phase(hasLoaded: true, failed: true) == .ready)
+        // Nothing in a waiting section is a control — a placeholder chip searches for a tag
+        // nobody has, and a placeholder day opens the timeline at a date chosen by no data.
+        #expect(!SearchSectionPhase.loading.acceptsTaps)
+        #expect(SearchSectionPhase.ready.acceptsTaps)
+    }
+
+    /// The lifetime rule behind the first-presentation defect. A bare `.task` runs once per view
+    /// identity; every appearance is a fresh id here, so a presentation SwiftUI tears down and
+    /// re-attaches asks again instead of sitting on a read that was cancelled.
+    @Test("every appearance of a section is a read of its own")
+    func everyAppearanceIsItsOwnRead() {
+        let lifecycle = SearchSectionLoad()
+        #expect(lifecycle.appearances == 0, "a section that has not appeared owes a read")
+
+        lifecycle.appeared()
+        #expect(lifecycle.appearances == 1)
+        lifecycle.appeared()
+        #expect(lifecycle.appearances == 2, "a second appearance reused the first one's read")
+    }
+
+    /// MEMNG-176. The row grew from nothing to a line of chips as the tags landed, and everything
+    /// under it moved with it. Waiting, it now keeps the room the chips will take.
+    @Test("the tag row is the same height waiting as it is once the tags land")
+    func theTagRowKeepsTheRoomItsChipsWillTake() {
+        let loaded = [
+            MemoTag(name: "travel", count: 9),
+            MemoTag(name: "books", count: 4),
+            MemoTag(name: "food", count: 2),
+        ]
+        let waiting = LayoutProbe.size(
+            TagChipRow(chips: [], phase: .loading, search: { _, _ in }, showResults: {}),
+            width: Self.contentWidth,
+            typeSize: .large
+        )
+        let arrived = LayoutProbe.size(
+            TagChipRow(chips: loaded, phase: .ready, search: { _, _ in }, showResults: {}),
+            width: Self.contentWidth,
+            typeSize: .large
+        )
+
+        #expect(waiting.height > 0, "a waiting row kept no room at all")
+        #expect(
+            waiting.height == arrived.height,
+            "the tags landing moved the sheet by \(arrived.height - waiting.height)pt"
+        )
+        // Control: the height is the ROW's, not a constant — an answered row with nothing in it
+        // really does collapse, which is the deliberate "nothing rather than an empty card".
+        let empty = LayoutProbe.size(
+            TagChipRow(chips: [], phase: .ready, search: { _, _ in }, showResults: {}),
+            width: Self.contentWidth,
+            typeSize: .large
+        )
+        #expect(empty.height < waiting.height)
+    }
+
+    /// The other half of MEMNG-176. Bare, the sheet's stack is laid out inside the detent and an
+    /// over-tall one is centred in what it was offered — which is what walked the title and the
+    /// field up off the top while the sheet was still growing.
+    @Test("the sheet's content takes the height it is offered instead of overflowing it")
+    func theColumnFitsItselfIntoTheSheet() {
+        let offered: CGFloat = 300
+        let tall = VStack(spacing: 0) {
+            ForEach(0..<40, id: \.self) { _ in
+                Color.clear.frame(height: 40)
+            }
+        }
+
+        let column = LayoutProbe.size(
+            SearchSheetColumn { tall },
+            width: Self.contentWidth,
+            height: offered
+        )
+        #expect(
+            column.height <= offered,
+            "the sheet's content overflowed its detent by \(column.height - offered)pt"
+        )
+
+        // Control: the content really does want more than it was offered, so the fit above is the
+        // column's doing and not a stack that happened to be short.
+        let bare = LayoutProbe.size(
+            tall.padding(DesignTokens.Space.roomy),
+            width: Self.contentWidth,
+            height: offered
+        )
+        #expect(bare.height > offered, "the control content fits, so it proves nothing")
+    }
 }
 
 /// One thing a hosted view did, and the wait for it — with no clock in it anywhere.

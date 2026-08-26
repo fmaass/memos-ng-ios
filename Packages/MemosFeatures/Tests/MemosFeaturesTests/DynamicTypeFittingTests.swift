@@ -180,7 +180,7 @@ struct DynamicTypeFittingTests {
     ) -> ComposeMetaPills {
         ComposeMetaPills(
             verbosity: verbosity,
-            picked: .constant([]),
+            stage: .constant(ComposeStage()),
             attachmentCount: count,
             date: .constant(date),
             visibility: .constant(visibility),

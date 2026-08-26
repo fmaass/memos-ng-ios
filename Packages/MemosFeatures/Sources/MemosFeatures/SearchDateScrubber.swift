@@ -87,6 +87,9 @@ struct SearchDateScrubber: View {
     /// Takes the timeline to a day. Called on the end of a scrub and on a picked date, never
     /// while a finger is moving.
     let commit: (MemoQueryAnchor) -> Void
+    /// Whether the counts under the scrubber are the server's answer yet — threaded through to
+    /// the card, which draws a waiting grid greyed, inert and at its final size (MEMNG-175/176).
+    var phase: SearchSectionPhase = .ready
 
     @State private var selection = SearchDaySelection()
 
@@ -103,7 +106,8 @@ struct SearchDateScrubber: View {
                         if let anchor = selection.endScrub() { commit(anchor) }
                     },
                     cancelled: { selection.cancelScrub() }
-                )
+                ),
+                phase: phase
             )
         }
     }

@@ -37,6 +37,36 @@ struct HeatmapStoreTests {
         #expect(paths.get() == ["/api/stats/heatmap"])
     }
 
+    /// The one fact the card cannot work out for itself (MEMNG-175): an account that has written
+    /// nothing and an account whose counts have not arrived hand it the SAME empty map, and
+    /// `isLoading` is false on both sides of a load. Drawing the first over the second is how the
+    /// first open of the search sheet came to say "No memos in the last 12 weeks".
+    @Test("an empty answer is still an answer, and an unanswered store says it has none")
+    func anEmptyAnswerIsStillAnAnswer() async {
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, _ in
+            try await Self.hold(until: release)
+            return Stub.json("{}")
+        }
+        let store = HeatmapStore()
+        #expect(!store.hasLoaded, "a store nobody has read says it has been answered")
+
+        let reading = Task { await store.load(using: client) }
+        while !store.isLoading {
+            await Task.yield()
+        }
+        #expect(!store.hasLoaded, "a store answered nothing yet while its read was still out")
+        #expect(store.counts.isEmpty)
+
+        release.set(true)
+        await reading.value
+
+        // The emptiness is now the news rather than the absence of it — the same counts, the
+        // opposite meaning.
+        #expect(store.hasLoaded, "an answered store does not say it has been answered")
+        #expect(store.counts.isEmpty)
+    }
+
     /// A heatmap that empties itself because one refresh failed says the household wrote nothing.
     @Test("a failed load keeps the counts already on screen")
     func failedLoadKeepsPreviousCounts() async {

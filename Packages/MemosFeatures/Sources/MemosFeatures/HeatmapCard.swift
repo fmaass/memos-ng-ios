@@ -18,6 +18,13 @@ struct HeatmapCard: View {
     @Binding var expanded: Bool
     /// What a finger on the grid moves, or nil for a heatmap that is only a picture.
     var scrubbing: HeatmapScrubbing?
+    /// Whether the counts are the server's answer or the absence of one.
+    ///
+    /// It defaults to `.ready` because everything that is not the search sheet already has its
+    /// counts by the time it draws this. Waiting, the grid is drawn greyed and inert, at exactly
+    /// the size it will be — the geometry is twelve weeks either way, so nothing under it moves
+    /// when the counts land (MEMNG-176) — and it does not claim there were no memos (MEMNG-175).
+    var phase: SearchSectionPhase = .ready
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
@@ -34,7 +41,18 @@ struct HeatmapCard: View {
             .accessibilityHint("Shows or hides the activity heatmap")
 
             if expanded {
-                HeatmapGridView(grid: grid, scrubbing: scrubbing)
+                HeatmapGridView(
+                    grid: grid,
+                    // A placeholder day is not a control: every square is level 0 while the
+                    // counts are unknown, so a scrub would move the field to a date chosen by
+                    // the absence of data.
+                    scrubbing: phase.acceptsTaps ? scrubbing : nil,
+                    summary: HeatmapPresentation.summary(for: grid, loaded: phase == .ready)
+                )
+                .redacted(reason: phase == .loading ? .placeholder : [])
+                // The counts landing is not an animation. Keyed on the phase rather than put on
+                // the card, so the disclosure above keeps its own `withAnimation(.snappy)`.
+                .transaction(value: phase) { $0.disablesAnimations = true }
             }
         }
         .padding(DesignTokens.Space.regular)
@@ -66,6 +84,10 @@ struct HeatmapGridView: View {
     let grid: HeatmapGrid
     /// What a finger on the grid moves. Nil draws it as the picture it has always been.
     var scrubbing: HeatmapScrubbing?
+    /// What the whole grid amounts to in one sentence. Handed in rather than read off the grid,
+    /// because a grid with no counts in it means two different things and only the caller knows
+    /// which — see `HeatmapPresentation.summary(for:loaded:)`.
+    var summary: String?
 
     /// The square grows with the text size, because a fixed 12pt cell beside 50pt type is the
     /// defect `DesignTokens.Metric` exists to prevent — but only up to `maxSide`. Eighty-four
@@ -124,7 +146,7 @@ struct HeatmapGridView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Activity")
                 .accessibilityValue(
-                    HeatmapScrub.spoken(scrubbing.selectedKey, in: grid) ?? grid.summary
+                    HeatmapScrub.spoken(scrubbing.selectedKey, in: grid) ?? summary ?? grid.summary
                 )
                 .accessibilityHint("Adjust to choose a day, then activate to open it")
                 .accessibilityAdjustableAction { direction in
@@ -156,7 +178,7 @@ struct HeatmapGridView: View {
             // cells are non-interactive `<span>`s and this is the parity port of them.
             squares(cellSide)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(grid.summary)
+                .accessibilityLabel(summary ?? grid.summary)
         }
     }
 
