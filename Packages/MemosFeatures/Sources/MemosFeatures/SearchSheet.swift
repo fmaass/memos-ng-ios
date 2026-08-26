@@ -18,8 +18,11 @@ struct SearchSheet: View {
     /// because it is what makes the read the SHEET's: it happens when the sheet opens, and at no
     /// other moment.
     let loadHeatmap: (HeatmapStore) async -> Void
-    /// Takes the timeline to a day and leaves. The sheet does not decide which days can be jumped
-    /// to — `HeatmapDateJump` does — and it does not do the jumping either.
+    /// Takes the timeline to a day, and the sheet STAYS. The heatmap is a scrubber now
+    /// (MEMNG-178): a sheet that put itself away on every release would be a date field nobody
+    /// could correct, and the highlight a typed date moves would never be seen moving. The sheet
+    /// does not decide which days can be chosen — `HeatmapDateJump` does — and it does not do the
+    /// jumping either.
     let jump: (MemoQueryAnchor) -> Void
     /// Reads the account's tags into the store the chips draw. Same shape and same lifetime as
     /// `loadHeatmap`: one read, when the sheet opens.
@@ -201,7 +204,7 @@ struct SearchOutcomeRow: View {
     }
 }
 
-/// The activity heatmap, as the sheet's empty-query state — and the store behind it.
+/// The date field with the activity heatmap under it as its scrubber — and the store behind it.
 ///
 /// The store is OWNED here, and that is the point of the type. SwiftUI builds this view fresh for
 /// every presentation of the sheet, so its `@State` is new each time and its `.task` runs each
@@ -222,10 +225,10 @@ struct SearchSheetHeatmap: View {
     @State private var lifecycle = SearchSectionLoad()
 
     var body: some View {
-        HeatmapCard(
+        SearchDateScrubber(
             grid: HeatmapPresentation.grid(from: heatmap.counts),
             expanded: $expanded,
-            jump: jump,
+            commit: jump,
             phase: SearchSectionPhase.phase(
                 hasLoaded: heatmap.hasLoaded,
                 failed: heatmap.lastError != nil

@@ -117,25 +117,36 @@ public struct MemoQuery: Sendable, Equatable, Codable {
     public struct Parameters: Sendable, Equatable {
         public var q: String?
         public var createdBefore: Date?
+        /// The INCLUSIVE-from-above bound: `created_at > created_after`
+        /// (`app/services/memos.py:322-323`). Only a page read towards now carries one, and it is
+        /// nil for every other request, so the older direction stays the request it always was.
+        public var createdAfter: Date?
         public var tag: [String]?
         public var visibility: MemoVisibility?
         public var includeArchived: Bool?
         public var archivedOnly: Bool?
+        /// The server's `sort`, or nil to let its own default (`-created_at`) stand. Sent only by
+        /// the direction that needs the other one — see `MemoPageDirection`.
+        public var sort: String?
 
         public init(
             q: String? = nil,
             createdBefore: Date? = nil,
+            createdAfter: Date? = nil,
             tag: [String]? = nil,
             visibility: MemoVisibility? = nil,
             includeArchived: Bool? = nil,
-            archivedOnly: Bool? = nil
+            archivedOnly: Bool? = nil,
+            sort: String? = nil
         ) {
             self.q = q
             self.createdBefore = createdBefore
+            self.createdAfter = createdAfter
             self.tag = tag
             self.visibility = visibility
             self.includeArchived = includeArchived
             self.archivedOnly = archivedOnly
+            self.sort = sort
         }
     }
 

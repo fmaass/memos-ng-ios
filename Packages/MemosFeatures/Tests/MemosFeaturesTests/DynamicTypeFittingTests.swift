@@ -92,13 +92,18 @@ struct DynamicTypeFittingTests {
         let cells = HeatmapGridView(grid: grid)
         let cellsLargest = LayoutProbe.idealWidth(cells, typeSize: .accessibility5)
         #expect(cellsLargest <= content, "the grid wants \(cellsLargest)pt of \(content)")
-        // The days that became controls are the same size as the days that did not: a button is
-        // what a square DOES, not a shape wrapped around it, and a grid that grew when it became
-        // tappable would run off the sheet at exactly the text sizes this test exists for.
-        let tappable = HeatmapGridView(grid: grid, jump: { _ in })
+        // The days that answer to a finger are the same size as the days that do not: scrubbing
+        // is what a square DOES, not a shape wrapped around it, and a grid that grew when it
+        // became a control would run off the sheet at exactly the text sizes this test exists for.
+        let scrubbable = HeatmapGridView(
+            grid: grid,
+            scrubbing: HeatmapScrubbing(
+                selectedKey: "2026-08-25", move: { _ in }, end: {}, cancelled: {}
+            )
+        )
         #expect(
-            LayoutProbe.idealWidth(tappable, typeSize: .accessibility5) == cellsLargest,
-            "the tappable grid is not the size of the inert one"
+            LayoutProbe.idealWidth(scrubbable, typeSize: .accessibility5) == cellsLargest,
+            "the scrubbable grid is not the size of the inert one"
         )
         // And it fits because it is capped, not because it was pinned: a grid that ignored the
         // text size would measure the same at both.
