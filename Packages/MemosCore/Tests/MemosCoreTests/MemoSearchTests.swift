@@ -93,6 +93,15 @@ struct MemoSearchTests {
     /// f5699b0).
     @Test("typing coalesces into one request")
     func typingCoalescesIntoOneRequest() async {
+        // The pin the injected clock below cannot provide: the mechanics inject their own
+        // pause, so this one line is what fails if the SHIPPED default is regressed to zero —
+        // the pause the app actually runs (`TimelineView` constructs `MemoSearch` without an
+        // override, so it is `coalescingPause`).
+        #expect(
+            MemoSearch.coalescingPause > .zero,
+            "the shipped debounce pause was regressed to zero — typing would not coalesce"
+        )
+
         let paths = LockedValue<[String]>([])
         let gate = DebounceGate()
         let search = MemoSearch(
