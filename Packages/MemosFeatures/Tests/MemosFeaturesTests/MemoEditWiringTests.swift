@@ -364,6 +364,87 @@ struct MemoDeleteWiringTests {
         #expect(store.uids.isEmpty, "a closed sheet deleted a memo")
     }
 
+    /// WHEN the screen is told the memo has gone, relative to the sheet closing.
+    ///
+    /// Observation notifies its observers SYNCHRONOUSLY, before the value they are watching has
+    /// finished changing — so this reads the exact state the memo's screen is woken in. It has to
+    /// be a sheet that has already closed: a `dismiss()` issued by a view that is still presenting
+    /// one goes to the sheet, not to the screen, and the person who deleted the memo is left on
+    /// the detail view of a memo that no longer exists (the bug on build 4).
+    @Test("the screen is not told the memo has gone until the editor has closed")
+    func theScreenIsToldOnlyAfterTheSheetCloses() async {
+        let flow = opened()
+        let store = DeleteRecorder(result: true)
+        let told = Box(false)
+        let sheetStillOpen = Box(false)
+
+        withObservationTracking {
+            _ = flow.memoDeleted
+        } onChange: {
+            MainActor.assumeIsolated {
+                told.value = true
+                sheetStillOpen.value = flow.editing != nil
+            }
+        }
+
+        await flow.advanceDelete(.tapped, delete: store.delete)
+        await flow.advanceDelete(.confirmed, delete: store.delete)
+
+        #expect(store.uids == ["m1"], "the delete never reached the store")
+        // The control: an assertion about WHEN nothing was ever told would hold vacuously.
+        #expect(told.value, "nothing was ever told the memo had gone")
+        #expect(!sheetStillOpen.value, "the screen was told to go while its own sheet was open")
+    }
+
+    /// The decision itself, one case per way an editor can close, driven through the real flow
+    /// rather than fed its own answer.
+    @Test("what the memo's screen does once its editor has closed")
+    func theExitIsDecidedByWhetherTheMemoIsGone() async {
+        typealias Exit = MemoDetailPresentation.EditorExit
+
+        let saved = MemoEditFlow()
+        saved.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        _ = await saved.submit(
+            ComposeSubmission(content: "after", visibility: nil),
+            save: SubmissionRecorder(result: true).save
+        )
+        let afterSaved = MemoDetailPresentation.popDecision(
+            memoDeleted: saved.memoDeleted, sheetClosed: true
+        )
+        #expect(afterSaved == Exit.stay)
+
+        let cancelled = MemoEditFlow()
+        cancelled.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        cancelled.sheet.wrappedValue = nil
+        let afterCancel = MemoDetailPresentation.popDecision(
+            memoDeleted: cancelled.memoDeleted, sheetClosed: true
+        )
+        #expect(afterCancel == Exit.stay)
+
+        let deleted = MemoEditFlow()
+        let store = DeleteRecorder(result: true)
+        deleted.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        await deleted.advanceDelete(.tapped, delete: store.delete)
+        await deleted.advanceDelete(.confirmed, delete: store.delete)
+        #expect(store.uids == ["m1"], "the delete never reached the store")
+        let afterDelete = MemoDetailPresentation.popDecision(
+            memoDeleted: deleted.memoDeleted, sheetClosed: true
+        )
+        #expect(afterDelete == Exit.popToOverview)
+
+        // A delete that failed is not a delete: the memo is still there and so is its screen.
+        let failed = MemoEditFlow()
+        let refuser = DeleteRecorder(result: false)
+        failed.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        await failed.advanceDelete(.tapped, delete: refuser.delete)
+        await failed.advanceDelete(.confirmed, delete: refuser.delete)
+        #expect(refuser.uids == ["m1"], "the delete never reached the store")
+        let afterFailed = MemoDetailPresentation.popDecision(
+            memoDeleted: failed.memoDeleted, sheetClosed: true
+        )
+        #expect(afterFailed == Exit.stay)
+    }
+
     @Test("opening the sheet again starts the conversation over")
     func beginResetsTheDeleteState() async {
         let flow = opened()
@@ -410,6 +491,154 @@ struct MemoDeleteWiringTests {
             "the probe found nothing of the new-memo sheet: \(creating)"
         )
         #expect(!creating.contains("Delete memo"), "a new memo offered to delete itself")
+    }
+}
+
+/// When the memo's screen leaves, across both orders the two events can arrive in.
+///
+/// The screen goes when the memo is confirmed gone AND its editor has closed, on whichever of the
+/// two is second. Both orders are real and both have been wrong: popping on the memo alone asks a
+/// view that is still presenting its sheet to dismiss, and the dismissal is spent on the sheet;
+/// popping only when the editor closes strands whoever swiped the editor away while the request
+/// was still out, because the server then answers to a sheet that has already gone.
+///
+/// The events are fed in by hand because a modal presentation never completes under
+/// `xcodebuild test` — measured across four shapes of run-loop wait, in a scene-attached key
+/// window as much as a bare one — so a test that put the real screen up would be red about the
+/// harness rather than about the code. `MemoDetailView` calls exactly these three and nothing
+/// else: `editorOpened()` from the Edit button, `editorClosed(memoDeleted:)` from the sheet's
+/// `onDismiss`, and `memoDeletedChanged(_:)` from `.onChange(of: edit.memoDeleted)`.
+///
+/// Every test counts POPS rather than reading a flag, because "at most one, and at least one" is
+/// the property — a screen that leaves twice is as wrong as one that never leaves.
+@MainActor
+@Suite("Memo detail exit")
+struct MemoDetailExitTests {
+    private let created = Date(timeIntervalSince1970: 1_750_000_000)
+
+    private func editorOpened(_ exit: MemoDetailExit) -> MemoEditFlow {
+        exit.editorOpened()
+        let flow = MemoEditFlow()
+        flow.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        return flow
+    }
+
+    /// The race: Delete is confirmed, and the editor is swiped away while the request is still
+    /// out. `onDismiss` has been and gone by the time the server answers, so nothing would ask
+    /// again — and the person is left on the memo they have just deleted.
+    @Test("an editor swiped away mid-delete still takes the screen with it, once")
+    func dismissedMidDeleteStillPops() async {
+        let exit = MemoDetailExit()
+        let flow = editorOpened(exit)
+        let store = DeleteRecorder(result: true)
+        let pops = Box(0)
+
+        await flow.advanceDelete(.tapped, delete: store.delete)
+        // The closure runs at exactly the in-flight moment: the request is out, the answer is not
+        // back. That is where the swipe lands.
+        await flow.advanceDelete(.confirmed) { uid in
+            flow.sheet.wrappedValue = nil
+            #expect(flow.deleteStage == .deleting, "a dismissal aborted a request already sent")
+            if exit.editorClosed(memoDeleted: flow.memoDeleted) { pops.value += 1 }
+            #expect(pops.value == 0, "the screen left before the server had answered")
+            return await store.delete(uid)
+        }
+
+        #expect(store.uids == ["m1"], "the delete never reached the store: \(store.uids)")
+        #expect(flow.memoDeleted)
+        if exit.memoDeletedChanged(flow.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 1, "the deleted memo's screen was left up: \(pops.value) pops")
+    }
+
+    /// The ordinary order: the answer comes back to an editor that is still on screen, so the
+    /// memo is reported gone first and the sheet finishes closing second.
+    @Test("a delete confirmed with the editor still up takes the screen once, on the close")
+    func confirmedDeletePopsOnTheClose() async {
+        let exit = MemoDetailExit()
+        let flow = editorOpened(exit)
+        let store = DeleteRecorder(result: true)
+        let pops = Box(0)
+
+        await flow.advanceDelete(.tapped, delete: store.delete)
+        await flow.advanceDelete(.confirmed, delete: store.delete)
+        #expect(store.uids == ["m1"])
+
+        if exit.memoDeletedChanged(flow.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 0, "the screen left while its editor was still on the way out")
+
+        if exit.editorClosed(memoDeleted: flow.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 1, "the deleted memo's screen was left up")
+    }
+
+    /// An editor closed with nothing deleted leaves the memo's screen where it is, whichever
+    /// event arrives and however often.
+    @Test("an editor closed without a delete never takes the screen")
+    func closingWithoutADeleteNeverPops() async {
+        let exit = MemoDetailExit()
+        let flow = editorOpened(exit)
+        let store = DeleteRecorder(result: false)
+        let pops = Box(0)
+
+        // Cancelled outright.
+        flow.sheet.wrappedValue = nil
+        if exit.editorClosed(memoDeleted: flow.memoDeleted) { pops.value += 1 }
+        if exit.memoDeletedChanged(flow.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 0, "a cancelled edit threw the memo's screen away")
+
+        // And a delete the server refused is not a delete either.
+        let refused = editorOpened(exit)
+        await refused.advanceDelete(.tapped, delete: store.delete)
+        await refused.advanceDelete(.confirmed, delete: store.delete)
+        #expect(store.uids == ["m1"], "the delete never reached the store")
+        #expect(!refused.memoDeleted)
+        if exit.memoDeletedChanged(refused.memoDeleted) { pops.value += 1 }
+        if exit.editorClosed(memoDeleted: refused.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 0, "a delete that failed threw the memo's screen away")
+    }
+
+    /// Both events fire in every real run, and either may repeat. One screen leaves once.
+    @Test("both events, and repeats of them, still take the screen exactly once")
+    func repeatedEventsPopOnlyOnce() async {
+        let exit = MemoDetailExit()
+        let flow = editorOpened(exit)
+        let store = DeleteRecorder(result: true)
+        let pops = Box(0)
+
+        await flow.advanceDelete(.tapped, delete: store.delete)
+        await flow.advanceDelete(.confirmed, delete: store.delete)
+
+        for _ in 0..<3 {
+            if exit.memoDeletedChanged(flow.memoDeleted) { pops.value += 1 }
+            if exit.editorClosed(memoDeleted: flow.memoDeleted) { pops.value += 1 }
+        }
+
+        #expect(pops.value == 1, "the screen left \(pops.value) times")
+    }
+
+    /// A cancelled editor must not arm the NEXT one: `sheetClosed` is about the editor that is on
+    /// screen now. Without the reset, the second delete would pop while its own sheet was still
+    /// up, and that dismissal would be spent on the sheet — the original bug, returned.
+    @Test("a cancelled editor does not arm the next delete")
+    func reopeningTheEditorDisarmsTheClose() async {
+        let exit = MemoDetailExit()
+        let cancelled = editorOpened(exit)
+        let pops = Box(0)
+
+        cancelled.sheet.wrappedValue = nil
+        if exit.editorClosed(memoDeleted: cancelled.memoDeleted) { pops.value += 1 }
+        #expect(exit.sheetClosed, "the editor closed and nothing recorded it")
+
+        let flow = editorOpened(exit)
+        #expect(!exit.sheetClosed, "the second editor opened onto the first one's closure")
+        let store = DeleteRecorder(result: true)
+        await flow.advanceDelete(.tapped, delete: store.delete)
+        await flow.advanceDelete(.confirmed, delete: store.delete)
+
+        if exit.memoDeletedChanged(flow.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 0, "the screen left while its second editor was still up")
+
+        if exit.editorClosed(memoDeleted: flow.memoDeleted) { pops.value += 1 }
+        #expect(pops.value == 1, "the deleted memo's screen was left up")
     }
 }
 

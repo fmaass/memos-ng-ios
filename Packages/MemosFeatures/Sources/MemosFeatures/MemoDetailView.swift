@@ -21,6 +21,7 @@ public struct MemoDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var viewing: MediaViewerSelection?
     @State private var edit = MemoEditFlow()
+    @State private var exit = MemoDetailExit()
     @State private var feedback = MemoFeedbackTrigger()
     /// What the zoom transition matches the full-screen viewer to: the picture that was tapped.
     @Namespace private var mediaZoom
@@ -101,6 +102,9 @@ public struct MemoDetailView: View {
             if let mode = MemoDetailPresentation.editMode(for: memo) {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        // An editor is opening, so nothing has closed since — whatever the last
+                        // one did. See `MemoDetailExit.editorOpened`.
+                        exit.editorOpened()
                         edit.begin(mode)
                     } label: {
                         Image(systemName: "pencil")
@@ -109,7 +113,7 @@ public struct MemoDetailView: View {
                 }
             }
         }
-        .sheet(item: edit.sheet) { mode in
+        .sheet(item: edit.sheet, onDismiss: { editorDidClose() }) { mode in
             ComposeView(
                 mode: mode,
                 delete: ComposeDelete(
@@ -123,11 +127,17 @@ public struct MemoDetailView: View {
             }
         }
         .onChange(of: edit.memoDeleted) { _, gone in
-            // The memo is gone from the server, so the screen it was open on goes with it. Landing
-            // back on a detail view of something that no longer exists is the bug here, not the
-            // safe default: the row behind it is already gone from the timeline.
-            if gone { dismiss() }
+            // The server's answer, which can arrive to an editor that has ALREADY closed: whoever
+            // swiped it away while the delete was in flight gets no second `onDismiss`.
+            if exit.memoDeletedChanged(gone) { dismiss() }
         }
+    }
+
+    /// The editor has gone from the screen. Whether the memo went with it is the other half, and
+    /// `MemoDetailExit` is what holds the two together — the screen leaves on whichever arrives
+    /// second, once.
+    private func editorDidClose() {
+        if exit.editorClosed(memoDeleted: edit.memoDeleted) { dismiss() }
     }
 
     /// The request itself. WHEN it runs — once, on the transition into `deleting`, for the memo
@@ -225,5 +235,55 @@ public struct MemoDetailView: View {
         guard await timeline.toggleTask(at: index, in: uid, using: client, baseURL: baseURL)
         else { return }
         feedback.fire(checked ? .taskChecked : .taskUnchecked)
+    }
+}
+
+/// Whether the memo's screen has left yet, and on which event it may.
+///
+/// Two things have to have happened before the screen goes: the server has confirmed the memo is
+/// gone, and the editor has actually closed. EITHER can be the second one. The ordinary way round
+/// is confirm and wait — the answer arrives, the flow closes the sheet, and the sheet finishing
+/// its dismissal is the later event. The other way round is somebody swiping the editor away while
+/// the request is still out: `onDismiss` has been and gone by the time the server answers, and the
+/// answer is the later event. Acting on only one of them strands the person on the detail view of
+/// a memo that no longer exists — the same bug from opposite directions.
+///
+/// A model rather than two flags in a view body, because "at most one pop, on whichever event is
+/// second" is a rule with orders to it, and orders are what a view body cannot be asked about.
+@MainActor
+@Observable
+final class MemoDetailExit {
+    /// Whether the editor has closed since it was last opened.
+    private(set) var sheetClosed = false
+    /// Whether the screen has already left. The second event must not pop a second time.
+    private(set) var popped = false
+
+    /// An editor is on screen again, so nothing has closed since. Without this, an editor that was
+    /// cancelled would leave `sheetClosed` standing, and the NEXT delete would pop while its own
+    /// sheet was still up — which is the swallowed dismissal all over again.
+    func editorOpened() {
+        sheetClosed = false
+    }
+
+    /// The editor has gone from the screen. Answers whether the memo's screen goes now.
+    @discardableResult
+    func editorClosed(memoDeleted: Bool) -> Bool {
+        sheetClosed = true
+        return pop(memoDeleted: memoDeleted)
+    }
+
+    /// The server has answered about the memo. Answers whether the memo's screen goes now.
+    @discardableResult
+    func memoDeletedChanged(_ memoDeleted: Bool) -> Bool {
+        pop(memoDeleted: memoDeleted)
+    }
+
+    private func pop(memoDeleted: Bool) -> Bool {
+        let decision = MemoDetailPresentation.popDecision(
+            memoDeleted: memoDeleted, sheetClosed: sheetClosed
+        )
+        guard !popped, decision == .popToOverview else { return false }
+        popped = true
+        return true
     }
 }

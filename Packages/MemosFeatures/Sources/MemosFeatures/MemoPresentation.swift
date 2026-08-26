@@ -149,6 +149,29 @@ public enum MemoDetailPresentation {
         return .edit(uid: memo.uid, content: memo.content, createdAt: memo.createdAt)
     }
 
+    /// What is left of the memo's own screen once its editor has closed.
+    public enum EditorExit: Equatable, Sendable {
+        /// The memo is gone from the server, so the screen it was open on goes with it. A detail
+        /// view of a memo that no longer exists is a screen showing a lie.
+        case popToOverview
+        /// Every other way an editor closes — saved, cancelled, a delete that failed — leaves
+        /// the memo where it was, and its screen with it.
+        case stay
+    }
+
+    /// Whether the memo's screen goes now. BOTH halves, because either one alone is a bug that
+    /// has actually happened.
+    ///
+    /// On `memoDeleted` alone, the pop is asked for while the sheet is still on its way out, and a
+    /// `dismiss()` issued by a view that is still presenting a sheet is spent on the sheet — the
+    /// editor closed and the detail view of the deleted memo stayed (build 4). On `sheetClosed`
+    /// alone, somebody who swipes the editor away while the delete is still in flight is never
+    /// asked again: the server answers to a closed sheet, and the screen stays on the memo it has
+    /// just deleted. So the screen goes on whichever of the two arrives second, and only then.
+    public static func popDecision(memoDeleted: Bool, sheetClosed: Bool) -> EditorExit {
+        memoDeleted && sheetClosed ? .popToOverview : .stay
+    }
+
     /// The date an edit actually SENDS: only one the editor moved.
     ///
     /// An untouched date would be a rewrite of the memo's own value dressed up as an edit. It is a
