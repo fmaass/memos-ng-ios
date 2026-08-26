@@ -168,6 +168,10 @@ struct TagChipRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Reserving the room stops the chips MOVING anything; this stops their arrival being
+        // animated into the room, which is the same jump played slowly. Keyed on the phase, so
+        // it disables nothing else that happens to be in flight at the time.
+        .transaction(value: phase) { $0.disablesAnimations = true }
         .accessibilityLabel(phase == .loading ? "Loading tags" : "Tags")
     }
 

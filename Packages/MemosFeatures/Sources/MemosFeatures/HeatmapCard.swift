@@ -50,6 +50,9 @@ struct HeatmapCard: View {
                     summary: HeatmapPresentation.summary(for: grid, loaded: phase == .ready)
                 )
                 .redacted(reason: phase == .loading ? .placeholder : [])
+                // The counts landing is not an animation. Keyed on the phase rather than put on
+                // the card, so the disclosure above keeps its own `withAnimation(.snappy)`.
+                .transaction(value: phase) { $0.disablesAnimations = true }
             }
         }
         .padding(DesignTokens.Space.regular)
