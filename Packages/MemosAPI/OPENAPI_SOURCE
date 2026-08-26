@@ -1,7 +1,7 @@
 # Provenance of the memos-ng artefacts vendored into this package.
 # Written by scripts/sync-openapi.sh — do not edit by hand.
 repo=memos-ng
-commit=433a3fecbe72ed3db3b76d832ed2d9ab7f84c516
-subject=Make retried memo creation exactly-once and upload linking strict (#88)
-committed=2026-08-24T13:20:21+02:00
+commit=b1c6490b6ca617ed6b6457e12fd2464466e5451b
+subject=Settle the residual markdown divergences on the web side (#109)
+committed=2026-08-26T08:05:16+02:00
 files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md

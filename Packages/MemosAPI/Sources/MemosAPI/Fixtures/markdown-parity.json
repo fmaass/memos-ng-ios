@@ -31,6 +31,66 @@
       ]
     },
     {
+      "id": "code-fenced-backtick-in-info-string",
+      "markdown": "```a`b\n[x](javascript:alert(1))",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "```a`b\n[x](javascript:alert(1))",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "code-fenced-quoted-closer-is-content",
+      "markdown": "```\ncode one\n> ```\n[x](javascript:alert(1))\n```",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "code one\n> ```\n[x](javascript:alert(1))\n",
+          "type": "code"
+        }
+      ]
+    },
+    {
+      "id": "code-fenced-tilde-reference-image",
+      "markdown": "[pic]: https://example.com/red.png\n\n~~~\n![alt][pic]\n~~~",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "![alt][pic]\n",
+          "type": "code"
+        }
+      ]
+    },
+    {
+      "id": "code-fenced-tilde-unsafe-link",
+      "markdown": "~~~\n[x](javascript:alert(1))\n~~~",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "[x](javascript:alert(1))\n",
+          "type": "code"
+        }
+      ]
+    },
+    {
+      "id": "code-indented-reference-image",
+      "markdown": "[pic]: https://example.com/red.png\n\n    ![alt][pic]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "![alt][pic]\n",
+          "type": "code"
+        }
+      ]
+    },
+    {
       "id": "emphasis-and-inline-code",
       "markdown": "**bold** and _italic_ and ~~struck~~ and `inline code` in one line.",
       "projection": [
@@ -177,6 +237,301 @@
       ]
     },
     {
+      "id": "image-unsafe-scheme",
+      "markdown": "![A red square](javascript:alert(1))\n\n![The chart](data:text/html,hi)",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "A red square",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "The chart",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-after-indented-code",
+      "markdown": "    code line\n[pic]: https://example.com/red.png\n\n![shot][pic]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "code line\n",
+          "type": "code"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-carriage-return-only",
+      "markdown": "[evil]: javascript:alert(1)\r\r[click][evil]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "[evil]: javascript:alert(1)",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-crlf-fence",
+      "markdown": "```\r\ncode\r\n```\r\n\r\n[evil]: javascript:alert(1)\r\n\r\n[click][evil]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "code\n",
+          "type": "code"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[evil]: javascript:alert(1)",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-duplicate-refused-first",
+      "markdown": "[pic]: javascript:alert(1)\n[pic]: https://example.com/red.png\n\n![alt][pic]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [
+            {
+              "href": "https://example.com/red.png",
+              "text": "https://example.com/red.png"
+            }
+          ],
+          "text": "[pic]: javascript:alert(1)\n[pic]: https://example.com/red.png",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "![alt][pic]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-image",
+      "markdown": "![shot][pic]\n\nThe reference image above renders as nothing.\n\n[pic]: https://example.com/red.png",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "The reference image above renders as nothing.",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-in-list-item",
+      "markdown": "- [evil]: javascript:alert(1)\n\n[click][evil]",
+      "projection": [
+        {
+          "inline": [],
+          "items": [
+            "[evil]: javascript:alert(1)"
+          ],
+          "level": 0,
+          "links": [],
+          "ordered": false,
+          "text": "",
+          "type": "list"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-in-paragraph",
+      "markdown": "prose\n[a]: https://example.com/a\n[pic]: https://example.com/red.png\n\n![alt][pic]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [
+            {
+              "href": "https://example.com/a",
+              "text": "https://example.com/a"
+            },
+            {
+              "href": "https://example.com/red.png",
+              "text": "https://example.com/red.png"
+            }
+          ],
+          "text": "prose\n[a]: https://example.com/a\n[pic]: https://example.com/red.png",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "![alt][pic]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-in-quoted-indented-code",
+      "markdown": ">     code line\n> [evil]: javascript:alert(1)\n\n[click][evil]",
+      "projection": [
+        {
+          "inline": [
+            {
+              "text": "code line",
+              "type": "code"
+            }
+          ],
+          "links": [],
+          "text": "code line [evil]: javascript:alert(1)",
+          "type": "blockquote"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-marker-only-item",
+      "markdown": "-\n  [evil]: javascript:alert(1)\n\n[click][evil]",
+      "projection": [
+        {
+          "inline": [],
+          "items": [
+            "[evil]: javascript:alert(1)"
+          ],
+          "level": 0,
+          "links": [],
+          "ordered": false,
+          "text": "",
+          "type": "list"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-safe",
+      "markdown": "[site][home] and a collapsed [home][].\n\n[home]: https://example.com/a?b=1",
+      "projection": [
+        {
+          "inline": [],
+          "links": [
+            {
+              "href": "https://example.com/a?b=1",
+              "text": "site"
+            },
+            {
+              "href": "https://example.com/a?b=1",
+              "text": "home"
+            }
+          ],
+          "text": "site and a collapsed home.",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-tab-after-marker",
+      "markdown": "-\t[evil]: javascript:alert(1)\n\n[click][evil]",
+      "projection": [
+        {
+          "inline": [],
+          "items": [
+            "[evil]: javascript:alert(1)"
+          ],
+          "level": 0,
+          "links": [],
+          "ordered": false,
+          "text": "",
+          "type": "list"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-unsafe",
+      "markdown": "[click][evil] and [evil] and [evil][].\n\n[evil]: javascript:alert(1)",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil] and [evil] and [evil][].",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[evil]: javascript:alert(1)",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "link-reference-unsafe-multiline",
+      "markdown": "[evil]:\njavascript:alert(1)\n\n[click][evil]",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "[evil]:\njavascript:alert(1)",
+          "type": "paragraph"
+        },
+        {
+          "inline": [],
+          "links": [],
+          "text": "[click][evil]",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
       "id": "link-schemes",
       "markdown": "[site](https://example.com/a?b=1) and [mail](mailto:memo@example.com) are links;\n\n[js](javascript:alert(1)) and [data](data:text/html,hi) are not.",
       "projection": [
@@ -204,6 +559,18 @@
       ]
     },
     {
+      "id": "link-schemes-ftp-and-relative",
+      "markdown": "[the file](ftp://example.com/pub/readme.txt) and [the host](//example.com/path) are not links.",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "the file and the host are not links.",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
       "id": "linkify-bare",
       "markdown": "Bare https://example.com/a?b=1 and memo@example.com become links.",
       "projection": [
@@ -220,6 +587,23 @@
             }
           ],
           "text": "Bare https://example.com/a?b=1 and memo@example.com become links.",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
+      "id": "linkify-bare-domain",
+      "markdown": "Visit example.com for the docs.",
+      "projection": [
+        {
+          "inline": [],
+          "links": [
+            {
+              "href": "http://example.com",
+              "text": "example.com"
+            }
+          ],
+          "text": "Visit example.com for the docs.",
           "type": "paragraph"
         }
       ]
@@ -429,6 +813,18 @@
       ]
     },
     {
+      "id": "tags-carriage-return-kept",
+      "markdown": "#curated\r\nHello",
+      "projection": [
+        {
+          "inline": [],
+          "links": [],
+          "text": "#curated\nHello",
+          "type": "paragraph"
+        }
+      ]
+    },
+    {
       "id": "tags-stripped-vs-inline",
       "markdown": "#curated\n\nsee #curated inline\n\n#curated #trip\n\n# Heading is not a tag",
       "projection": [
@@ -525,6 +921,43 @@
       ]
     },
     {
+      "id": "task-list-single-task-among-plain",
+      "markdown": "- plain one\n- [ ] the only task\n- plain two",
+      "projection": [
+        {
+          "inline": [],
+          "items": [
+            "plain one"
+          ],
+          "level": 0,
+          "links": [],
+          "ordered": false,
+          "text": "",
+          "type": "list"
+        },
+        {
+          "checked": false,
+          "inline": [],
+          "level": 0,
+          "links": [],
+          "ordered": false,
+          "text": "the only task",
+          "type": "task"
+        },
+        {
+          "inline": [],
+          "items": [
+            "plain two"
+          ],
+          "level": 0,
+          "links": [],
+          "ordered": false,
+          "text": "",
+          "type": "list"
+        }
+      ]
+    },
+    {
       "id": "unicode-nfc-nfd",
       "markdown": "caf\u00e9 vs cafe\u0301 \ud83d\ude80",
       "projection": [
@@ -549,6 +982,6 @@
       ]
     }
   ],
-  "generator": "markdown-it@14.2.0+markdown-it-task-lists@2.1.1+dompurify@3.4.11+renderer-sha256:647012201ad20b80",
+  "generator": "markdown-it@14.2.0+markdown-it-task-lists@2.1.1+dompurify@3.4.11+renderer-sha256:b1f0b0f6bafe63cf",
   "schema": 1
 }
