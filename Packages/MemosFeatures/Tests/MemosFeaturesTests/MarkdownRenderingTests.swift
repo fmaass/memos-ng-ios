@@ -379,8 +379,21 @@ struct MarkdownTargetDecisionTests {
     func orderedMixedList() {
         let blocks = projection("1. plain\n2. [ ] the task\n3. plain again")
         #expect(blocks.map(\.type) == [.list, .task, .list])
-        #expect(blocks.allSatisfy { $0.ordered == true })
         #expect(blocks.map(\.items) == [["plain"], nil, ["plain again"]])
+        #expect(blocks.filter { $0.type == .list }.allSatisfy { $0.ordered == true })
+    }
+
+    /// A divergence this phase did NOT invent and cannot reach: `BlockNode.taskList` carries
+    /// `isTight` and its items and nothing else, so the ordered-ness of the list a task was
+    /// written in is gone before any view or projection sees it — an ordered task item is drawn,
+    /// and projected, as an unordered one. No fixture case covers it (every task case the SPA
+    /// pins is a bullet list), and closing it means not rendering task lists through MarkdownUI
+    /// at all. Pinned so it stays visible and cannot change unnoticed.
+    @Test("a task in an ordered list loses its numbering — today's divergence, pinned")
+    func orderedTaskItemsProjectUnordered() {
+        let blocks = projection("1. [ ] the task")
+        #expect(blocks.map(\.type) == [.task])
+        #expect(blocks.first?.ordered == false)
     }
 
     /// The other half of the rule: a list that does not mix is left exactly as it was, so the
