@@ -82,9 +82,11 @@ struct TimelineUpwardPagingTests {
         #expect(!store.hasNewer, "the server said that page was the last one above")
 
         let upward = try #require(paths.get().last.map { Self.sent($0) })
-        // The bound is the newest memo ALREADY LOADED, not the anchor's ceiling: a memo written
-        // exactly on the ceiling falls in neither direction, both comparisons being strict.
-        #expect(upward["created_after"] == ["2026-08-24T18:00:00Z"])
+        // The bound is read from the newest memo ALREADY LOADED, not the anchor's ceiling — and
+        // a run STARTS one second below that row: `created_after` is strict, so asking from the
+        // row's exact timestamp would strand an unseen sibling written in the same second. The
+        // overlap the ease invites comes back and is dropped by uid, which a test below holds.
+        #expect(upward["created_after"] == ["2026-08-24T17:59:59Z"])
         #expect(upward["sort"] == ["created_at"])
         #expect(
             upward["created_before"] == nil,
@@ -139,11 +141,184 @@ struct TimelineUpwardPagingTests {
         // crash here would take every later suite down with it instead of failing one test.
         let firstUp = try #require(upward.first)
         let secondUp = try #require(upward.last)
-        #expect(firstUp["created_after"] == ["2026-08-24T18:00:00Z"])
+        #expect(firstUp["created_after"] == ["2026-08-24T17:59:59Z"])
+        #expect(firstUp["cursor"] == nil)
+        // Mid-run, the position is the SERVER's cursor — it carries the (created_at, id) tuple
+        // the keyset really orders by. A timestamp recomputed from the loaded rows cannot: a
+        // page boundary inside one second of memos would strand that second's unseen half.
         #expect(
-            secondUp["created_after"] == ["2026-08-26T09:00:00Z"],
-            "the second page above asked from the same place as the first"
+            secondUp["cursor"] == ["up-2"],
+            "the second page above dropped the server's own continuation"
         )
+        #expect(
+            secondUp["created_after"] == nil,
+            "a timestamp bound rode along with the cursor and narrowed it"
+        )
+    }
+
+    @Test("a sibling written in the newest row's own second is not stranded")
+    func aSameSecondSiblingIsStillReachable() async {
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("sort=created_at") else {
+                return Stub.json(Self.anchoredPage)
+            }
+            // The eased start re-answers the newest loaded row and the sibling that shares its
+            // second — which is exactly what the server says for created_after one below it.
+            return Stub.json(
+                Stub.page(
+                    [
+                        Stub.memo(uid: "a", createdAt: "2026-08-24T18:00:00Z"),
+                        Stub.memo(uid: "a2", createdAt: "2026-08-24T18:00:00Z"),
+                    ],
+                    nextCursor: nil
+                )
+            )
+        }
+        let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+
+        #expect(
+            store.memos.map(\.uid) == ["a2", "a", "b"],
+            "the same-second sibling never reached the list, or the known row was doubled"
+        )
+    }
+
+    @Test("an overlap-only page is followed to the one above it, not handed back")
+    func anOverlapOnlyPageFollowsItsContinuation() async throws {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            guard path.contains("sort=created_at") else { return Stub.json(Self.anchoredPage) }
+            // The eased start answers with nothing the list does not already have — and a
+            // cursor, because newer memos remain beyond the overlap.
+            guard path.contains("cursor=") else {
+                return Stub.json(
+                    Stub.page(
+                        [
+                            Stub.memo(uid: "a", createdAt: "2026-08-24T18:00:00Z"),
+                            Stub.memo(uid: "b", createdAt: "2026-08-24T08:00:00Z"),
+                        ],
+                        nextCursor: "up-2"
+                    )
+                )
+            }
+            return Stub.json(
+                Stub.page(
+                    [Stub.memo(uid: "n1", createdAt: "2026-08-25T09:00:00Z")],
+                    nextCursor: nil
+                )
+            )
+        }
+        let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let restore = await store.loadNewer(using: client, baseURL: Stub.baseURL)
+
+        #expect(
+            store.memos.map(\.uid) == ["n1", "a", "b"],
+            "the page beyond the overlap never arrived: the reader's top-arrival bought nothing"
+        )
+        #expect(restore == "a")
+        let upward = paths.get().filter { $0.contains("sort=created_at") }.map { Self.sent($0) }
+        #expect(upward.count == 2, "the continuation the overlap page carried was not followed")
+        #expect(try #require(upward.last)["cursor"] == ["up-2"])
+    }
+
+    @Test("a page in flight while a memo is pinned is dropped, not merged")
+    func anUpwardPageInFlightAcrossAPinIsDropped() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            if path.contains("/pin") {
+                return Stub.json(
+                    Stub.memo(uid: "b", pinned: true, createdAt: "2026-08-24T08:00:00Z")
+                )
+            }
+            guard path.contains("sort=created_at") else { return Stub.json(Self.anchoredPage) }
+            entered.set(true)
+            try await Self.hold(until: release)
+            return Stub.json(
+                Stub.page(
+                    [Stub.memo(uid: "n1", createdAt: "2026-08-25T09:00:00Z")],
+                    nextCursor: nil
+                )
+            )
+        }
+        let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        let deadline = Date().addingTimeInterval(5)
+        while !entered.get(), Date() < deadline {
+            await Task.yield()
+        }
+        #expect(entered.get(), "the page above was never asked for")
+        // The pin is a MOVE: the list is pinned-first, and the block in flight was measured
+        // against the unpinned order (review round: the pin path bypassed the fence).
+        await store.setPinned(true, uid: "b", using: client, baseURL: Stub.baseURL)
+        release.set(true)
+        let restore = await inFlight.value
+
+        #expect(
+            store.memos.map(\.uid) == ["b", "a"],
+            "a page measured against the unpinned order was merged around the pinned memo"
+        )
+        #expect(restore == nil)
+    }
+
+    @Test("a page above measured before a memo moved is dropped, not merged")
+    func anUpwardPageForAReorderedListIsDropped() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("sort=created_at") else {
+                return Stub.json(Self.anchoredPage)
+            }
+            entered.set(true)
+            try await Self.hold(until: release)
+            return Stub.json(
+                Stub.page(
+                    [Stub.memo(uid: "n1", createdAt: "2026-08-25T09:00:00Z")],
+                    nextCursor: nil
+                )
+            )
+        }
+        let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        let deadline = Date().addingTimeInterval(5)
+        while !entered.get(), Date() < deadline {
+            await Task.yield()
+        }
+        #expect(entered.get(), "the page above was never asked for")
+        // The server re-dates a loaded memo to ABOVE the block in flight. The block was bounded
+        // below the old order: merged anyway, it would sit above rows it is older than, and the
+        // next bound - read from the moved row - would skip everything the move jumped over.
+        store.apply(
+            Memo(
+                uid: "b",
+                owner: "fabian",
+                mine: true,
+                content: "b",
+                visibility: .private,
+                pinned: false,
+                createdAt: Date(timeIntervalSince1970: 1_787_994_000),
+                updatedAt: Date(timeIntervalSince1970: 1_787_994_000)
+            )
+        )
+        release.set(true)
+        let restore = await inFlight.value
+
+        #expect(
+            store.memos.map(\.uid) == ["b", "a"],
+            "a page measured against the old order was merged over the moved memo"
+        )
+        #expect(restore == nil)
     }
 
     @Test("a plain timeline never reads above its own first page")

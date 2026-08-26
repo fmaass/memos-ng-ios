@@ -81,6 +81,8 @@ struct HeatmapGridView: View {
     /// somewhere in a sheet whose offset the hit-testing would then have to know about.
     private static let space = "heatmap-grid"
 
+    @GestureState private var scrubTouch = false
+
     var body: some View {
         let cellSide = min(side, Self.maxSide)
         if let scrubbing {
@@ -101,7 +103,14 @@ struct HeatmapGridView: View {
                             scrubbing.move(cell)
                         }
                         .onEnded { _ in scrubbing.end() }
+                        .updating($scrubTouch) { _, touching, _ in touching = true }
                 )
+                // `@GestureState` resets on EVERY way the gesture stops, cancellation included —
+                // the one signal SwiftUI gives for a drag the system takes away. On a normal end
+                // it fires after `end()`, where the roll-back is a no-op.
+                .onChange(of: scrubTouch) { _, touching in
+                    if !touching { scrubbing.cancelled() }
+                }
                 // One tick per DAY crossed, not per frame: the trigger is the chosen day, so a
                 // finger travelling inside one square is silent and every boundary is felt. The
                 // feel itself comes from the act table, where it can be asserted.

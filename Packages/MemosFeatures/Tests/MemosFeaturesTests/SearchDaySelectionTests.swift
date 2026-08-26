@@ -172,4 +172,33 @@ struct SearchDaySelectionTests {
             )
         }
     }
+
+    @Test("a scrub the system takes away rolls the field back and commits nothing")
+    func aCancelledScrubRollsBack() {
+        let selection = SearchDaySelection(today: Self.day(2026, 8, 26))
+        let opened = selection.day
+
+        selection.scrub(to: Self.day(2026, 8, 22))
+        #expect(selection.day != opened, "the scrub never moved the field")
+        selection.cancelScrub()
+
+        #expect(
+            selection.day == opened,
+            "a cancelled scrub left the field naming an uncommitted day"
+        )
+        #expect(selection.endScrub() == nil, "a cancelled scrub still had something to commit")
+    }
+
+    @Test("a cancellation after a normal end changes nothing")
+    func aLateCancellationIsANoOp() {
+        let selection = SearchDaySelection(today: Self.day(2026, 8, 26))
+        let target = Self.day(2026, 8, 22)
+
+        selection.scrub(to: target)
+        #expect(selection.endScrub() != nil)
+        let committed = selection.day
+        selection.cancelScrub()
+
+        #expect(selection.day == committed, "the reset after a normal end rolled back a commit")
+    }
 }

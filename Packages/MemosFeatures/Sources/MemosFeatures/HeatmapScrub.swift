@@ -107,4 +107,9 @@ struct HeatmapScrubbing {
     let move: (HeatCell) -> Void
     /// The finger has come off. This is where the query runs.
     let end: () -> Void
+    /// The system took the gesture away without an end — nothing must commit, and the display
+    /// rolls back. Also delivered (harmlessly, after the commit) on a normal end, because the
+    /// only reliable cancellation signal SwiftUI offers is `@GestureState`'s reset, which cannot
+    /// tell the two apart.
+    let cancelled: () -> Void
 }

@@ -97,7 +97,9 @@ struct DynamicTypeFittingTests {
         // became a control would run off the sheet at exactly the text sizes this test exists for.
         let scrubbable = HeatmapGridView(
             grid: grid,
-            scrubbing: HeatmapScrubbing(selectedKey: "2026-08-25", move: { _ in }, end: {})
+            scrubbing: HeatmapScrubbing(
+                selectedKey: "2026-08-25", move: { _ in }, end: {}, cancelled: {}
+            )
         )
         #expect(
             LayoutProbe.idealWidth(scrubbable, typeSize: .accessibility5) == cellsLargest,

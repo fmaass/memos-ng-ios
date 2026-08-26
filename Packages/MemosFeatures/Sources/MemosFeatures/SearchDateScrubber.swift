@@ -14,20 +14,22 @@ import SwiftUI
 @MainActor
 @Observable
 final class SearchDaySelection {
-    /// The chosen day, at its start in the calendar the server keys its days in.
-    ///
-    /// It starts at today rather than at nothing so the field and the grid agree from the moment
-    /// the sheet opens: the field says a date, and the square that date names is lit. A field that
-    /// began blank would have to invent a "no day" state that the picker below it cannot show.
-    private(set) var day: Date
+    /// The day the interface SHOWS: the scrub under the finger when there is one, else the last
+    /// day that actually became a request. Split so that a gesture the system cancels can roll
+    /// the display back instead of leaving the field naming a day the timeline never went to
+    /// (review round).
+    var day: Date { pending ?? committed }
 
-    /// Whether a scrub is in progress. Without it, a finger that never moved onto a square — a
-    /// touch that began and ended on the card's padding — would commit the day that was already
-    /// there and reload the timeline for nothing.
-    private var scrubbing = false
+    /// The last day that was committed — shown whenever no finger is down. Starts at today so the
+    /// field and the grid agree from the moment the sheet opens.
+    private var committed: Date
+
+    /// The day under a finger mid-scrub, or nil when no scrub is in progress. Its nil-ness also
+    /// keeps a touch that never reached a square from committing anything.
+    private var pending: Date?
 
     init(today: Date = .now) {
-        day = HeatmapDateJump.anchorCalendar.startOfDay(for: today)
+        committed = HeatmapDateJump.anchorCalendar.startOfDay(for: today)
     }
 
     /// The square drawn as selected, as the server keys it.
@@ -35,8 +37,7 @@ final class SearchDaySelection {
 
     /// The finger has moved onto a day. Live, and ONLY live.
     func scrub(to day: Date) {
-        scrubbing = true
-        self.day = HeatmapDateJump.anchorCalendar.startOfDay(for: day)
+        pending = HeatmapDateJump.anchorCalendar.startOfDay(for: day)
     }
 
     /// The finger has come off: the one moment in a scrub that becomes a request.
@@ -44,17 +45,26 @@ final class SearchDaySelection {
     /// - Returns: the anchor to take the timeline to, or nil when no scrub happened.
     @discardableResult
     func endScrub() -> MemoQueryAnchor? {
-        guard scrubbing else { return nil }
-        scrubbing = false
-        return HeatmapDateJump.anchor(for: day)
+        guard let pending else { return nil }
+        self.pending = nil
+        committed = pending
+        return HeatmapDateJump.anchor(for: pending)
+    }
+
+    /// The system took the gesture away — a call, an interruption, the sheet moving. Nothing
+    /// commits and the display falls back to the committed day, so the field never names a day
+    /// the timeline is not on. After a normal end this is a no-op: the commit already cleared
+    /// the pending day.
+    func cancelScrub() {
+        pending = nil
     }
 
     /// A day chosen in the date field, read in the DEVICE's calendar and re-cut in the server's.
     @discardableResult
     func pick(_ picked: Date, in device: Calendar = .current) -> MemoQueryAnchor? {
         guard let day = SearchDay.utcDay(from: picked, in: device) else { return nil }
-        scrubbing = false
-        self.day = day
+        pending = nil
+        committed = day
         return HeatmapDateJump.anchor(for: day)
     }
 
@@ -91,7 +101,8 @@ struct SearchDateScrubber: View {
                     move: { selection.scrub(to: $0.day) },
                     end: {
                         if let anchor = selection.endScrub() { commit(anchor) }
-                    }
+                    },
+                    cancelled: { selection.cancelScrub() }
                 )
             )
         }

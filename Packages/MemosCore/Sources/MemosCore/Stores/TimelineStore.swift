@@ -44,6 +44,11 @@ public final class TimelineStore {
     /// since is above it — and false again as soon as the server says an upward page was the last
     /// one (MEMNG-179).
     public private(set) var hasNewer = false
+    /// The server's own ascending continuation for the CURRENT upward run, or nil when the next
+    /// upward page starts a new run from the newest loaded row. The cursor carries the full
+    /// (created_at, id) keyset tuple, which a timestamp alone cannot: a page boundary inside a
+    /// group of equal timestamps would strand the group's unseen half for ever (review round).
+    private var newerCursor: String?
 
     private var nextCursor: String?
     /// Which loaded list this is. Bumped at the two moments the list stops being the one an
@@ -102,6 +107,7 @@ public final class TimelineStore {
         // from the query it actually read, so a query set and never refreshed cannot leave a
         // stale upward promise behind.
         hasNewer = false
+        newerCursor = nil
         // A page already in flight was a continuation of the query it set out under, not of this
         // one, so it is superseded exactly as a page from a replaced list is.
         timelineGeneration += 1
@@ -160,6 +166,7 @@ public final class TimelineStore {
             // An anchored first page starts BELOW a ceiling, so everything written after that day
             // is above it. An unanchored one starts at the newest memo there is, so nothing is.
             hasNewer = lineage.query.anchor != nil
+            newerCursor = nil
             lastError = nil
             // This IS a different list — a new lineage, whose cursor no page in flight shares.
             timelineGeneration += 1
@@ -273,35 +280,54 @@ public final class TimelineStore {
         defer { isLoadingNewer = false }
         let lineage = self.lineage
         let previousTop = memos.first?.uid
+        // Mid-run, the server's own cursor is the position — it carries the (created_at, id)
+        // tuple the keyset really orders by. A run START has no cursor, so it asks from ONE
+        // SECOND below the newest loaded row and lets uid-dedup drop the overlap: a bound taken
+        // at the row's exact timestamp would strictly exclude an unseen sibling written in the
+        // same second, on either side of a page boundary (review round).
+        var continuation = newerCursor
         let bound = memos.map(\.createdAt).max()
         do {
-            let page = try await Self.page(
-                client,
-                query: lineage.query,
-                calendar: calendar,
-                direction: .newer,
-                after: bound,
-                cursor: nil,
-                limit: pageSize,
-                baseURL: baseURL
-            )
-            // Fenced exactly as every other page is: a refresh or a delete has replaced the list
-            // this block was measured against, and a block measured against a list that is gone
-            // can put back a deleted memo and sit above rows it is older than.
-            guard lineage == self.lineage else {
-                MemosLog.api.info("GET /api/memos answered for a list that has moved on")
-                return nil
+            // Followed in a loop, not handed back: the eased start can answer with nothing but
+            // rows the list already has while the cursor says more remain, and returning nil
+            // there would consume the reader's top-arrival with nothing to show — the page
+            // above would sit stranded until they scrolled away and back (review round). Each
+            // pass advances the server's own cursor; eight known-only pages in a row is a
+            // server that is not converging, not a household timeline.
+            for _ in 0..<8 {
+                let page = try await Self.page(
+                    client,
+                    query: lineage.query,
+                    calendar: calendar,
+                    direction: .newer,
+                    after: continuation == nil ? bound?.addingTimeInterval(-1) : nil,
+                    cursor: continuation,
+                    limit: pageSize,
+                    baseURL: baseURL
+                )
+                // Fenced exactly as every other page is: a refresh or a delete has replaced the
+                // list this block was measured against, and a block measured against a list that
+                // is gone can put back a deleted memo and sit above rows it is older than.
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("GET /api/memos answered for a list that has moved on")
+                    return nil
+                }
+                // The server says whether it was the last page, exactly as it does downwards.
+                // Read BEFORE the emptiness check, because an upward page that adds nothing new
+                // is still the server saying there is nothing above.
+                hasNewer = page.nextCursor != nil
+                newerCursor = page.nextCursor
+                let known = Set(memos.map(\.uid))
+                let fresh = page.memos.filter { !known.contains($0.uid) }
+                lastError = nil
+                if !fresh.isEmpty {
+                    memos = Array(fresh.reversed()) + memos
+                    return previousTop
+                }
+                guard let next = page.nextCursor else { return nil }
+                continuation = next
             }
-            // The server says whether it was the last page, exactly as it does downwards. Read
-            // BEFORE the emptiness check, because an upward page that adds nothing new is still
-            // the server saying there is nothing above.
-            hasNewer = page.nextCursor != nil
-            let known = Set(memos.map(\.uid))
-            let fresh = page.memos.filter { !known.contains($0.uid) }
-            lastError = nil
-            guard !fresh.isEmpty else { return nil }
-            memos = Array(fresh.reversed()) + memos
-            return previousTop
+            return nil
         } catch {
             guard lineage == self.lineage else {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
@@ -438,13 +464,12 @@ public final class TimelineStore {
                 case .undocumented(let statusCode, _): throw APIError.fromStatus(statusCode)
                 }
             }
-            // Pinning is also a MOVE: the list is pinned-first, so the updated memo re-enters at
-            // the position its new flag earns. (Fine-grained recency ordering is the server's;
-            // the next refresh settles it.)
+            // Pinning is also a MOVE, and a move is a new lineage: it goes through `apply`,
+            // whose re-place branch bumps the generation, so a page in flight measured against
+            // the old order drops on arrival instead of merging around the moved memo (review
+            // round: `placed` called here directly bypassed exactly that fence).
             let updated = Memo(json, baseURL: baseURL)
-            if memos.contains(where: { $0.uid == updated.uid }) {
-                memos = Self.placed(updated, in: memos, tie: .alreadyExisted)
-            }
+            apply(updated)
             lastError = nil
             return true
         } catch {
@@ -634,7 +659,7 @@ public final class TimelineStore {
     /// memos newer than it, until something else forced a refresh. So it is re-placed — and only
     /// when an ordering key actually moved, because an ordinary content edit must not reshuffle
     /// a list whose exact order came from the server.
-    private func apply(_ memo: Memo) {
+    public func apply(_ memo: Memo) {
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
         let previous = memos[position]
         guard previous.createdAt != memo.createdAt || previous.pinned != memo.pinned else {
@@ -642,6 +667,12 @@ public final class TimelineStore {
             return
         }
         memos = Self.placed(memo, in: memos, tie: .alreadyExisted)
+        // An ordering key moved, so the order every in-flight page was measured against is gone:
+        // an upward block bounded below the memo's OLD place would land above rows it is older
+        // than, and the next bound - read from the moved row - would skip the interval it jumped
+        // over. Same fence as setQuery: the lineage moves, and stale answers drop on arrival.
+        timelineGeneration += 1
+        newerCursor = nil
     }
 
     /// The loaded list with one memo put where the server's own ordering puts it, replacing any
