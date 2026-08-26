@@ -137,6 +137,29 @@ enum MediaFixture {
     }
 }
 
+/// A gated transport that also CACHES what it answers, the way the URL loading system does: by
+/// the time `fetch` returns, the bytes are in the cache. That ORDERING is the whole point — the
+/// write lands after the purge, because the purge ran while the request was still on the wire,
+/// and no purge can reach bytes that did not exist when it ran.
+///
+/// `@unchecked Sendable` for the same reason `MediaSession` is: both stored properties are `let`,
+/// and `URLCache` is documented as safe to use from several threads.
+final class CachingGatedTransport: MediaTransport, @unchecked Sendable {
+    let gate: GatedTransport
+    private let cache: URLCache
+
+    init(payload: Data, cache: URLCache) {
+        gate = GatedTransport(payload: payload)
+        self.cache = cache
+    }
+
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let (data, response) = try await gate.fetch(request)
+        cache.storeCachedResponse(CachedURLResponse(response: response, data: data), for: request)
+        return (data, response)
+    }
+}
+
 /// A `URLCache` of a test's own, ON DISK, in a directory it creates and deletes again.
 ///
 /// On disk because that is the half MEMNG-135 is about: the decoded pictures die with the
@@ -435,6 +458,74 @@ struct MediaImageLoaderTests {
 
         #expect(answer != nil)
         #expect(MediaImageLoader.cached(for: key) != nil)
+    }
+
+    /// The same arrival one layer down, and the half a purge cannot reach: the request was
+    /// already on the wire when the account changed, so the URL loading system caches its bytes
+    /// AFTER the purge emptied everything the previous account had. A signed URL stays servable
+    /// for about two hours, so what is left behind is a photo of server A's, answerable off the
+    /// disk for a uid that now means something else.
+    @Test("bytes that arrive after the account changed are not left in the cache")
+    func anInFlightAnswerLeavesNoBytesBehind() async throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let key = MediaImageKey(uid: "in-flight-bytes", tier: "thumb")
+        let url = MediaFixture.signed(uid: "in-flight-bytes")
+        let transport = installCachingTransport(scratch)
+
+        let load = Task { await MediaImageLoader.uiImage(for: key, url: url) }
+        await transport.gate.waitUntilStarted()
+        identity.rotate()
+        // The purge, at the first touch after the clock moved — and before the answer lands,
+        // which is exactly why it cannot reach what that answer is about to cache.
+        #expect(MediaImageLoader.cached(for: key) == nil)
+        await transport.gate.release()
+        let answer = await load.value
+
+        #expect(answer == nil, "the previous account's photo was handed back to be painted")
+        #expect(MediaImageLoader.cached(for: key) == nil, "and it repopulated the decoded store")
+        #expect(
+            scratch.cache.cachedResponse(for: URLRequest(url: url)) == nil,
+            "the previous account's bytes outlived the purge, ready to answer for its uid"
+        )
+    }
+
+    /// The control that fence is worthless without: the identical race with NO change of account
+    /// keeps its bytes. That cache is the feature — a fence that dropped every answer would send
+    /// the timeline back to the server for every tile it has already seen.
+    @Test("with no change of account the answer's bytes are kept")
+    func anInFlightAnswerForTheSameAccountKeepsItsBytes() async throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let key = MediaImageKey(uid: "in-flight-bytes-control", tier: "thumb")
+        let url = MediaFixture.signed(uid: "in-flight-bytes-control")
+        let transport = installCachingTransport(scratch)
+
+        let load = Task { await MediaImageLoader.uiImage(for: key, url: url) }
+        await transport.gate.waitUntilStarted()
+        await transport.gate.release()
+        let answer = await load.value
+
+        #expect(answer != nil)
+        #expect(MediaImageLoader.cached(for: key) != nil)
+        #expect(
+            scratch.cache.cachedResponse(for: URLRequest(url: url)) != nil,
+            "an answer for the account that asked for it lost its bytes"
+        )
+    }
+
+    /// Both in-flight tests need the store and the transport pointed at the SAME cache: a fence
+    /// asserted against one cache while the fetch writes to another would pass without meaning.
+    private func installCachingTransport(_ scratch: ScratchDerivedCache) -> CachingGatedTransport {
+        MediaImageLoader.store = MediaImageStore(
+            countLimit: MediaImageLoader.countLimit,
+            totalCostLimit: MediaImageLoader.totalCostLimit,
+            identity: identity,
+            derived: scratch.cache
+        )
+        let transport = CachingGatedTransport(payload: MediaFixture.png(.red), cache: scratch.cache)
+        MediaImageLoader.transport = transport
+        return transport
     }
 
     /// An expired signature must not be answered out of the URLCache — the entry can only be

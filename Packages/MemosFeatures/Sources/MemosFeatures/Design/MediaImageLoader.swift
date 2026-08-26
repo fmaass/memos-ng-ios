@@ -54,6 +54,26 @@ final class MediaImageStore {
         filledFor = current
     }
 
+    /// Whether an answer that STARTED under `generation` has outlived it — and, when it has, the
+    /// drop of the response bytes the URL loading system cached for it on the way in.
+    ///
+    /// This is the half the purge cannot do. A request already on the wire when the account
+    /// changed is cached when it lands, which is AFTER the rotation emptied everything the
+    /// previous account had, so the purge ran before these bytes existed. Left there, they are
+    /// the previous server's photo, answerable off the disk for a uid that now means somebody
+    /// else's, for as long as the signature holds — about two hours.
+    ///
+    /// One entry rather than another purge: the account now signed in has been fetching since the
+    /// rotation, and emptying its cache for an arrival that belongs to nobody would send its
+    /// timeline back to the server for every tile.
+    @discardableResult
+    func dropIfStale(_ generation: Int, answeredFrom url: URL) -> Bool {
+        syncToIdentity()
+        guard generation != identity.generation else { return false }
+        derived.removeCachedResponse(for: URLRequest(url: url))
+        return true
+    }
+
     /// The generation this store is currently holding images for. A fetch reads it when it starts
     /// and hands it back when it stores, so an answer that outlived its session is refused.
     var generation: Int {
@@ -238,6 +258,14 @@ public enum MediaImageLoader {
 
         guard let answer = try? await transport.fetch(request) else { return nil }
         let (data, response) = answer
+
+        // The answer has crossed back in, and the clock is read again the moment it does. Its
+        // bytes are already cached: the URL loading system stores what it fetched on its own
+        // account, under no clock of ours, so a rotation while this was on the wire has just put
+        // the previous account's photo into the cache that rotation emptied. It is checked here,
+        // before the answer is judged usable or decodable, because a refusal and a corrupt body
+        // were cached exactly the same way.
+        guard !store.dropIfStale(generation, answeredFrom: url) else { return nil }
         guard isUsable(response) else { return nil }
         let decoded = await Task.detached(priority: .userInitiated) {
             MediaImageDecoder.decode(data)
@@ -245,8 +273,12 @@ public enum MediaImageLoader {
         guard let decoded else { return nil }
 
         // Not stored AND not handed back: the caller would paint it, which is the same mistake
-        // one frame earlier.
-        guard store.store(decoded, forKey: key, generation: generation) else { return nil }
+        // one frame earlier. The decode is another await, so the account can change across it
+        // too — and then the bytes underneath the refused picture go with it, by the same rule.
+        guard store.store(decoded, forKey: key, generation: generation) else {
+            store.dropIfStale(generation, answeredFrom: url)
+            return nil
+        }
         return decoded
     }
 

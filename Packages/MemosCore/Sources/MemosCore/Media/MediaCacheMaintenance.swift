@@ -18,9 +18,14 @@ public protocol DerivedMediaCache: AnyObject {
     /// The ceiling it was built with, in bytes.
     var diskCapacity: Int { get }
     func removeAllCachedResponses()
+    /// ONE entry, named by the request that fetched it. It is here for the answer that arrives
+    /// after the account changed: the purge at the rotation cannot reach bytes that did not exist
+    /// when it ran, and emptying the whole cache again would throw away what the account now
+    /// signed in has legitimately fetched since. Still not a file — a request is all it can name.
+    func removeCachedResponse(for request: URLRequest)
 }
 
-// `URLCache` already declares all three members with these exact names, so this conformance adds
+// `URLCache` already declares all four members with these exact names, so this conformance adds
 // no behaviour — it only says that the cache the media layer fetches through is the thing the
 // Storage screen measures.
 extension URLCache: DerivedMediaCache {}

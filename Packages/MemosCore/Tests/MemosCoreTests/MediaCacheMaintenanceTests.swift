@@ -28,6 +28,10 @@ final class SpyCache: DerivedMediaCache {
     func removeAllCachedResponses() {
         calls.append("removeAllCachedResponses")
     }
+
+    func removeCachedResponse(for request: URLRequest) {
+        calls.append("removeCachedResponse(\(request.url?.absoluteString ?? "?"))")
+    }
 }
 
 @Suite("Media cache size, as a person reads it")
