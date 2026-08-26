@@ -83,9 +83,14 @@ platform :ios do
   desc "Build and upload to TestFlight (headless)"
   lane :beta do
     archive_ipa
+    # No skip_waiting here: leaving before ASC finishes processing means the groups:
+    # assignment silently never runs, and with an internal group that cannot be
+    # hasAccessToAllBuilds (the API refuses to enable it post-creation), an unattached
+    # build is INVISIBLE to every tester -- 1.0.2 (8) sat processed and unseen until a
+    # manual API attach. Waiting costs minutes and makes distribution real.
     upload_to_testflight(
       api_key: api_key, ipa: IPA, groups: ["household"],
-      distribute_external: false, skip_waiting_for_build_processing: true,
+      distribute_external: false,
     )
   end
 end

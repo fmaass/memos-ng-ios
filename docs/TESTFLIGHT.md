@@ -204,9 +204,13 @@ GUI, no Mac login password:
   `Copy failed` (the app copies fine with `ditto`), so `fastlane beta` archives with
   `skip_package_ipa`, zips the already-distribution-signed `.app` into `Payload/`, and uploads
   that via `upload_to_testflight`.
-- **Distribution is automatic.** `household` is an internal group, so a processed build with the
-  export-compliance key set (`ITSAppUsesNonExemptEncryption: false`, already in `project.yml`)
-  reaches `IN_BETA_TESTING` for every internal tester with no manual enable and no review.
+- **Distribution happens through the group attach, not by magic.** `household` was created with
+  `hasAccessToAllBuilds` off and Apple's API refuses to enable it afterwards, so a processed build
+  is INVISIBLE to testers until it is attached to the group. `fastlane beta` therefore waits for
+  processing and performs the attach itself (never re-add `skip_waiting_for_build_processing` --
+  it exits before the build exists in ASC and the attach silently never runs). There is still no
+  review queue and no per-tester step; the export-compliance key in `project.yml` keeps the
+  compliance prompt away.
 
 Secrets live only on merkur: `~/.config/memosng-ci.env` (0600, holds the key id / issuer / `.p8`
 path / CI keychain password) and the `.p8` itself (0600). Nothing signing-related is committed.
