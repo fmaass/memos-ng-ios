@@ -192,14 +192,26 @@ struct SearchSheetHeatmap: View {
     /// Folded away or not. Not persisted: the sheet is opened to be used, and a heatmap that
     /// starts hidden is one nobody finds again.
     @State private var expanded = true
+    @State private var lifecycle = SearchSectionLoad()
 
     var body: some View {
         HeatmapCard(
             grid: HeatmapPresentation.grid(from: heatmap.counts),
             expanded: $expanded,
-            jump: jump
+            jump: jump,
+            phase: SearchSectionPhase.phase(
+                hasLoaded: heatmap.hasLoaded,
+                failed: heatmap.lastError != nil
+            )
         )
-        .task { await load(heatmap) }
+        // Appearing is what reads it, and every appearance reads it — a bare `.task` runs once
+        // for a view's identity and a first presentation SwiftUI re-attaches would lose the read
+        // it started (`SearchSectionLoad`, MEMNG-175). The store fences duplicates.
+        .onAppear { lifecycle.appeared() }
+        .task(id: lifecycle.appearances) {
+            guard lifecycle.appearances > 0 else { return }
+            await load(heatmap)
+        }
     }
 }
 

@@ -15,6 +15,11 @@ public final class TagStore {
     /// drawing surface's decisions (`TagChipsPresentation`), not this store's.
     public private(set) var tags: [MemoTag] = []
     public private(set) var isLoading = false
+    /// Whether the server has ever answered this store — the difference between "no tags" and "no
+    /// tags YET". `tags` is empty in both cases and `isLoading` is false before a load starts as
+    /// well as after a cancelled one, so a row that reads either of those alone draws a household
+    /// with a hundred tags as one with none (MEMNG-175).
+    public private(set) var hasLoaded = false
     public private(set) var lastError: String?
 
     /// Which load is the current one — taken before the request goes out and checked before
@@ -43,6 +48,7 @@ public final class TagStore {
                 return
             }
             tags = loaded
+            hasLoaded = true
             lastError = nil
         } catch {
             guard mine == attempt else { return }

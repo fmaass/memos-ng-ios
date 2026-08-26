@@ -143,6 +143,16 @@ public enum HeatmapPresentation {
         return "\(memos) memo\(memos == 1 ? "" : "s") in \(span)"
     }
 
+    /// What the card says it amounts to — and what it must not say before the server has spoken.
+    ///
+    /// An unanswered heatmap and a household that has written nothing produce the SAME empty
+    /// counts, and the grid derived from them is the same twelve weeks of level-0 days. Reading
+    /// "No memos in the last 12 weeks" off it is therefore a claim the app cannot make yet, and it
+    /// is the one the first open of the search sheet used to make (MEMNG-175).
+    public static func summary(for grid: HeatmapGrid, loaded: Bool) -> String {
+        loaded ? grid.summary : "Loading activity"
+    }
+
     /// A day as the server keys it.
     public static func key(for day: Date, calendar: Calendar = dayCalendar) -> String {
         let parts = calendar.dateComponents([.year, .month, .day], from: day)

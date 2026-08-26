@@ -153,6 +153,72 @@ struct SearchSheetTests {
         withExtendedLifetime(window) {}
     }
 
+    /// The report itself (MEMNG-175): the first open showed nothing until it was closed and
+    /// reopened. The load is DELAYED here — held open for as long as the test looks — because that
+    /// is the only window in which the defect exists, and it is the window a cold first open spends
+    /// entirely inside.
+    @Test("a sheet whose tags have not arrived shows that they are coming, not that there are none")
+    func aDelayedTagRowShowsItIsLoading() {
+        let read = Signal()
+        let host = UIHostingController(
+            rootView: SearchSheetTags(
+                // Never answers. The row has to be worth looking at anyway.
+                load: { _ in
+                    read.fire()
+                    try? await Task.sleep(for: .seconds(3600))
+                },
+                search: { _, _ in },
+                showResults: {}
+            )
+        )
+        host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 200)
+        let window = UIWindow(frame: host.view.frame)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        read.wait()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+
+        let drawn = host.sizeThatFits(
+            in: CGSize(width: Self.contentWidth, height: LayoutProbe.unbounded)
+        )
+        #expect(drawn.height > 0, "a sheet whose tags are still coming drew nothing at all")
+        withExtendedLifetime(window) {}
+    }
+
+    /// Which of the two states a section is in, from the only two facts that separate them — one
+    /// case per input category, because the interesting one is the pair that look identical from
+    /// the outside: an account with no tags, and an account whose tags have not arrived.
+    @Test("a section is loading until it has been answered, one way or the other")
+    func thePhaseIsDecidedByWhetherTheServerHasSpoken() {
+        #expect(SearchSectionPhase.phase(hasLoaded: false, failed: false) == .loading)
+        #expect(SearchSectionPhase.phase(hasLoaded: true, failed: false) == .ready)
+        // A read that failed has been answered: the server said no, and a section spinning for
+        // ever over that would be the worse lie.
+        #expect(SearchSectionPhase.phase(hasLoaded: false, failed: true) == .ready)
+        #expect(SearchSectionPhase.phase(hasLoaded: true, failed: true) == .ready)
+        // Nothing in a waiting section is a control — a placeholder chip searches for a tag
+        // nobody has, and a placeholder day opens the timeline at a date chosen by no data.
+        #expect(!SearchSectionPhase.loading.acceptsTaps)
+        #expect(SearchSectionPhase.ready.acceptsTaps)
+    }
+
+    /// The lifetime rule behind the first-presentation defect. A bare `.task` runs once per view
+    /// identity; every appearance is a fresh id here, so a presentation SwiftUI tears down and
+    /// re-attaches asks again instead of sitting on a read that was cancelled.
+    @Test("every appearance of a section is a read of its own")
+    func everyAppearanceIsItsOwnRead() {
+        let lifecycle = SearchSectionLoad()
+        #expect(lifecycle.appearances == 0, "a section that has not appeared owes a read")
+
+        lifecycle.appeared()
+        #expect(lifecycle.appearances == 1)
+        lifecycle.appeared()
+        #expect(lifecycle.appearances == 2, "a second appearance reused the first one's read")
+    }
+
 }
 
 /// One thing a hosted view did, and the wait for it — with no clock in it anywhere.

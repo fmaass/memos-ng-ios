@@ -80,8 +80,12 @@ enum TagChipsPresentation {
 ///
 /// The store is owned HERE, like the heatmap's: SwiftUI builds this view fresh for every
 /// presentation of the sheet, so the read happens when the sheet opens and never on a launch or a
-/// pull of the timeline. The task is on the outer stack rather than inside the `if`, because a
-/// row that only read its tags once it had some would never get any.
+/// pull of the timeline.
+///
+/// The read is driven by APPEARING rather than by a bare `.task` — see `SearchSectionLoad` for the
+/// first-presentation teardown that made a plain `.task` miss it (MEMNG-175). What it draws is
+/// `TagChipRow`, which takes its chips and its phase as plain values so both the waiting row and
+/// the loaded one can be measured against each other.
 struct SearchSheetTags: View {
     let load: (TagStore) async -> Void
     /// Runs this query, with the text the field should then show.
@@ -90,13 +94,54 @@ struct SearchSheetTags: View {
     let showResults: () -> Void
 
     @State private var tags = TagStore()
+    @State private var lifecycle = SearchSectionLoad()
 
     var body: some View {
-        let chips = TagChipsPresentation.chips(for: tags.tags)
+        TagChipRow(
+            chips: TagChipsPresentation.chips(for: tags.tags),
+            phase: SearchSectionPhase.phase(
+                hasLoaded: tags.hasLoaded,
+                failed: tags.lastError != nil
+            ),
+            search: search,
+            showResults: showResults
+        )
+        .onAppear { lifecycle.appeared() }
+        .task(id: lifecycle.appearances) {
+            guard lifecycle.appearances > 0 else { return }
+            await load(tags)
+        }
+    }
+}
+
+/// The chips themselves, and the room kept for them while they are still coming.
+///
+/// Its inputs are plain values so the two states can be MEASURED against each other: a row that
+/// grew from nothing to a line of chips as the tags landed pushed everything under it down and the
+/// sheet past its detent, which is how the fields above ended up walking up the screen
+/// (MEMNG-176). Waiting, it draws the same shapes greyed, at the same height.
+struct TagChipRow: View {
+    let chips: [MemoTag]
+    let phase: SearchSectionPhase
+    let search: (MemoQuery, String) -> Void
+    let showResults: () -> Void
+
+    /// What a waiting row stands in for. The count is what makes the height right — a chip is a
+    /// name beside a number, and both are drawn whatever the words are.
+    static let placeholders: [MemoTag] = [
+        MemoTag(name: "\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}", count: 0),
+        MemoTag(name: "\u{2007}\u{2007}\u{2007}\u{2007}", count: 0),
+        MemoTag(name: "\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}", count: 0),
+    ]
+
+    /// Whether the row is drawn at all. Waiting, it always is — that is the room being kept. Once
+    /// the answer is in, a row with no chips is drawn as nothing rather than as a heading over an
+    /// empty line, which is a section that looks broken.
+    private var shows: Bool { phase == .loading || !chips.isEmpty }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-            // Nothing at all rather than an empty card: a heading over no chips is a section that
-            // looks broken, and a new account has no tags yet.
-            if !chips.isEmpty {
+            if shows {
                 Text("Tags")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -105,16 +150,25 @@ struct SearchSheetTags: View {
                 // sizes where there is least room to lose.
                 ScrollView(.horizontal) {
                     HStack(spacing: DesignTokens.Space.snug) {
-                        ForEach(chips) { tag in
-                            chip(tag)
+                        if phase == .loading {
+                            ForEach(Self.placeholders) { tag in
+                                TagChip(tag: tag)
+                            }
+                            .redacted(reason: .placeholder)
+                            .accessibilityHidden(true)
+                        } else {
+                            ForEach(chips) { tag in
+                                chip(tag)
+                            }
                         }
                     }
                 }
                 .scrollIndicators(.hidden)
+                .scrollDisabled(phase == .loading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task { await load(tags) }
+        .accessibilityLabel(phase == .loading ? "Loading tags" : "Tags")
     }
 
     /// A chip is a Button only where the query would go somewhere — the same rule the heatmap's
@@ -122,7 +176,7 @@ struct SearchSheetTags: View {
     @ViewBuilder
     private func chip(_ tag: MemoTag) -> some View {
         let tap = TagChipsPresentation.tap(on: tag)
-        if case .searchAndShow = tap {
+        if case .searchAndShow = tap, phase.acceptsTaps {
             Button {
                 TagChipsPresentation.act(on: tap, search: search, showResults: showResults)
             } label: {
