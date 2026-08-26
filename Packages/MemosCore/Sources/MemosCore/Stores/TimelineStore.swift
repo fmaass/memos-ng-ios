@@ -392,6 +392,11 @@ public final class TimelineStore {
             // from — recovering would mean re-uploading files this call never sent.
             case .conflict:
                 throw APIError.server(status: 409)
+            // A keyed edit that lost a race and left nothing behind. Neither patch path sends an
+            // edit key, so neither can safely repeat itself: the memo is put back and the person
+            // is told, rather than the app guessing at what the winner wrote.
+            case .serviceUnavailable:
+                throw APIError.server(status: 503)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):
@@ -428,6 +433,11 @@ public final class TimelineStore {
             // from — recovering would mean re-uploading files this call never sent.
             case .conflict:
                 throw APIError.server(status: 409)
+            // A keyed edit that lost a race and left nothing behind. Neither patch path sends an
+            // edit key, so neither can safely repeat itself: the memo is put back and the person
+            // is told, rather than the app guessing at what the winner wrote.
+            case .serviceUnavailable:
+                throw APIError.server(status: 503)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):
