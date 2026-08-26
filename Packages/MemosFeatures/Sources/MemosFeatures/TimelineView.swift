@@ -420,15 +420,18 @@ public struct TimelineView: View {
 
     /// Every way the sheet closes funnels through here.
     ///
-    /// A hand-off to the results screen is the one close that is not an abandonment — the
-    /// results screen has just adopted this search's store — so it cancels any stray task but
-    /// keeps the loaded rows and their cursor. Every other close (Done, an interactive swipe)
-    /// abandons the search and resets it.
+    /// A hand-off to the results screen is the one close that is not an abandonment: the results
+    /// screen has just adopted this search's store — rows, cursor, AND any answer still on its
+    /// way. Cancelling that answer here left the reader on a spinner over nothing whenever the
+    /// network was slower than the dismissal animation (MEMNG-177, review round), so a hand-off
+    /// touches nothing; the sheet's own section loads end with their `.task`s on teardown. Every
+    /// other close (Done, an interactive swipe) abandons the search and resets it. The decision
+    /// itself is `SearchPresentation.closeAction`, where it is asserted.
     private func dismissSearch() {
-        if handingOff {
+        switch SearchPresentation.closeAction(handingOff: handingOff) {
+        case .adopt:
             handingOff = false
-            searchPresentation.search?.cancelInFlight()
-        } else {
+        case .abandon:
             searchPresentation.search?.stop()
         }
     }

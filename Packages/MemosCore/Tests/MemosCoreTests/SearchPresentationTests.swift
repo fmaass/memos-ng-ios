@@ -63,3 +63,71 @@ struct SearchPresentationTests {
         #expect(presentation.search === search, "closing the sheet took the results' list with it")
     }
 }
+
+extension SearchPresentationTests {
+    @Test("a hand-off adopts the search; every other close abandons it")
+    func closeActionPerCause() {
+        #expect(SearchPresentation.closeAction(handingOff: true) == .adopt)
+        #expect(SearchPresentation.closeAction(handingOff: false) == .abandon)
+    }
+
+    /// The review blocker's exact sequence: the chip starts the search, the sheet closes on the
+    /// hand-off, and the answer arrives only after the dismissal. Adoption means nobody touched
+    /// the store, so the late answer still fills the results the reader walked into.
+    @Test("an answer that lands after a hand-off still fills the results")
+    func aHandedOffSearchSurvivesItsSheet() async {
+        let entered = Latch()
+        let release = Latch()
+        let search = MemoSearch(
+            client: Stub.client { _, _, _ in
+                entered.signal()
+                await release.wait()
+                if Task.isCancelled { throw URLError(.cancelled) }
+                return Stub.json(Stub.memoList(["late"], nextCursor: nil))
+            },
+            baseURL: Stub.baseURL
+        )
+
+        search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
+        await entered.wait()
+        // The sheet closes on a hand-off. `closeAction(.adopt)` is "touch nothing", so the test,
+        // like the view, calls nothing on the store.
+        release.signal()
+        await search.settled()
+
+        guard case .matched = search.outcome else {
+            Issue.record("the handed-off search ended in \(search.outcome), not matched")
+            return
+        }
+        #expect(
+            search.results.memos.map(\.uid) == ["late"],
+            "the late answer never reached the reader"
+        )
+    }
+
+    /// The contrast that keeps `.abandon` honest: the same late answer after `stop()` lands
+    /// nowhere — and silently, which is StoreCancellationTests' half of the contract.
+    @Test("an abandoned search does not keep its late answer")
+    func anAbandonedSearchIsReset() async {
+        let entered = Latch()
+        let release = Latch()
+        let search = MemoSearch(
+            client: Stub.client { _, _, _ in
+                entered.signal()
+                await release.wait()
+                if Task.isCancelled { throw URLError(.cancelled) }
+                return Stub.json(Stub.memoList(["late"], nextCursor: nil))
+            },
+            baseURL: Stub.baseURL
+        )
+
+        search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
+        await entered.wait()
+        search.stop()
+        release.signal()
+        await search.settled()
+
+        #expect(search.results.memos.isEmpty, "an abandoned search kept rows nobody is reading")
+        #expect(search.results.lastError == nil)
+    }
+}

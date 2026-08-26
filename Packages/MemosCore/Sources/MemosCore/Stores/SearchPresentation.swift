@@ -58,3 +58,25 @@ public final class SearchPresentation {
         session = nil
     }
 }
+
+extension SearchPresentation {
+    /// What a closing sheet does with the search it presented.
+    public enum CloseAction: Equatable {
+        /// The results screen has adopted the store — rows, cursor, and any answer still on its
+        /// way. Nothing may be cancelled: the reader is walking into exactly that answer.
+        case adopt
+        /// Nobody is left reading. Cancel and reset.
+        case abandon
+    }
+
+    /// The one decision every sheet close funnels through.
+    ///
+    /// The hand-off case exists because cancelling "stray" work on close cancelled the search
+    /// itself whenever the network was slower than the dismissal animation: the chip tap's own
+    /// request was still the store's in-flight task, so the results screen opened over a spinner
+    /// that could never resolve (MEMNG-177, review round). A hand-off therefore touches nothing;
+    /// the sheet's own section loads end with their `.task`s on teardown.
+    public static func closeAction(handingOff: Bool) -> CloseAction {
+        handingOff ? .adopt : .abandon
+    }
+}

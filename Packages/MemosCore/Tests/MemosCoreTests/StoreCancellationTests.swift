@@ -28,13 +28,14 @@ struct StoreCancellationTests {
     /// started — a cancellation delivered before the request is out proves nothing.
     /// `nonisolated`, because the transport runs off the main actor.
     private nonisolated static func hold(
-        entered: LockedValue<Bool>,
-        until release: LockedValue<Bool>
+        entered: Latch,
+        until release: Latch
     ) async throws {
-        entered.set(true)
-        while !release.get() {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        entered.signal()
+        await release.wait()
+        // A task cancelled while parked resumes here (the stream ends on cancellation); surface
+        // it exactly as URLSession would.
+        if Task.isCancelled { throw URLError(.cancelled) }
     }
 
     /// What the generated client actually throws when its transport fails this way — envelope,
@@ -100,8 +101,8 @@ struct StoreCancellationTests {
     /// it), the store cancels — and the transport's `-999` must not become a sentence on screen.
     @Test("a cancelled search says nothing about the cancellation")
     func aCancelledSearchIsSilent() async {
-        let entered = LockedValue<Bool>(false)
-        let release = LockedValue<Bool>(false)
+        let entered = Latch()
+        let release = Latch()
         let search = MemoSearch(
             client: Stub.client { _, _, _ in
                 // What URLSession does to a transfer whose task is cancelled.
@@ -116,11 +117,9 @@ struct StoreCancellationTests {
         )
 
         search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
-        while !entered.get() {
-            await Task.yield()
-        }
+        await entered.wait()
         search.cancelInFlight()
-        release.set(true)
+        release.signal()
         await search.settled()
 
         #expect(
@@ -158,13 +157,13 @@ struct StoreCancellationTests {
     @Test("no fenced store reports a cancellation, and every one still reports a real failure")
     func noFencedStoreReportsACancellation() async {
         for cancelled in [true, false] {
-            let entered = LockedValue<Bool>(false)
-            let release = LockedValue<Bool>(false)
+            let entered = LockedValue<Latch>(Latch())
+            let release = LockedValue<Latch>(Latch())
             let client = Stub.client { _, _, _ in
                 if cancelled {
                     // What URLSession does to a transfer whose task is cancelled.
                     do {
-                        try await Self.hold(entered: entered, until: release)
+                        try await Self.hold(entered: entered.get(), until: release.get())
                     } catch {
                         throw URLError(.cancelled)
                     }
@@ -192,16 +191,14 @@ struct StoreCancellationTests {
             ]
 
             for (name, read, reported) in reads {
-                entered.set(false)
-                release.set(false)
+                entered.set(Latch())
+                release.set(Latch())
                 let work = Task { await read() }
                 if cancelled {
                     // A cancellation delivered before the request is out would prove nothing.
-                    while !entered.get() {
-                        await Task.yield()
-                    }
+                    await entered.get().wait()
                     work.cancel()
-                    release.set(true)
+                    release.get().signal()
                 }
                 await work.value
 
@@ -218,5 +215,26 @@ struct StoreCancellationTests {
                 }
             }
         }
+    }
+}
+
+/// One-shot hand-offs between a test and its scripted transport — signals, not clocks:
+/// `AsyncStream` buffers, so a signal sent before the other side waits is delivered rather than
+/// missed, and neither ordering of the two events can change the outcome.
+final class Latch: Sendable {
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let made = AsyncStream.makeStream(of: Void.self)
+        stream = made.stream
+        continuation = made.continuation
+    }
+
+    func signal() { continuation.yield() }
+
+    func wait() async {
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
     }
 }
