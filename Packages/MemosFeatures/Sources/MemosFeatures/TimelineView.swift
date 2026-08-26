@@ -36,6 +36,16 @@ public struct TimelineView: View {
     @State private var viewing: MediaViewerSelection?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
+    /// The search the loupe raised, and the list it fills. Built fresh at every tap — a term left
+    /// over from last time is a filter silently hiding memos, which is the worse failure (design
+    /// note §5, Q4) — and kept here rather than inside the sheet because the results screen the
+    /// sheet pushes outlives the sheet.
+    @State private var search: MemoSearch?
+    @State private var searching = false
+    /// Set only for the one sheet close that is a hand-off to the results screen rather than
+    /// an abandonment, so `dismissSearch` knows not to reset the store the results screen has
+    /// just adopted.
+    @State private var handingOff = false
 
     public init() {}
 
@@ -59,16 +69,30 @@ public struct TimelineView: View {
             .navigationDestination(for: SettingsRoute.self) { _ in
                 SettingsView(signOut: signOut, avatar: avatar)
             }
+            // The memo is looked for in BOTH lists. A card tapped on the search results is a
+            // memo the home timeline has very often never loaded, and a destination that only
+            // knew the timeline pushed an empty screen for exactly those memos. Whichever list
+            // held it is also the list the detail screen edits, so an edit made from a result
+            // lands where it was read.
             .navigationDestination(for: MemoRoute.self) { route in
-                if let timeline, let memo = memo(route.uid, in: timeline) {
-                    MemoDetailView(uid: route.uid, initial: memo, timeline: timeline)
+                if let found = holder(of: route.uid) {
+                    MemoDetailView(uid: route.uid, initial: found.memo, timeline: found.store)
                 }
             }
-            // Top-LEFT is the account's own face, top-RIGHT is New memo, and which is which is
-            // decided in `TimelineToolbar` rather than here — a placement written inline in a
-            // screen that needs a live session to construct is one no test can read back. The
-            // slot between them, immediately left of New memo, stays empty for the date-jump /
-            // search loupe (MEMNG-120).
+            .navigationDestination(for: SearchResultsRoute.self) { _ in
+                if let search {
+                    SearchResultsView(
+                        search: search,
+                        mediaZoom: mediaZoom,
+                        openMemo: { path.append(MemoRoute(uid: $0)) },
+                        openAttachment: { open($0, of: $1) }
+                    )
+                }
+            }
+            // Top-LEFT is the account's own face; top-RIGHT is the search loupe and then New
+            // memo, which stays rightmost. Which is which is decided in `TimelineToolbar` rather
+            // than here — a placement written inline in a screen that needs a live session to
+            // construct is one no test can read back.
             //
             // This screen's job is only to say what the bar is showing and what its controls do.
             .toolbar {
@@ -78,8 +102,29 @@ public struct TimelineView: View {
                     composed: feedback.count,
                     openSettings: { path.append(SettingsRoute()) },
                     signOut: { signOut.send(.menuTapped, to: session) },
+                    search: { openSearch() },
                     newMemo: { composing = .create }
                 )
+            }
+            // Attached HERE, inside the stack, and not out on the chain that carries the compose
+            // sheet and the viewer: two presentations on one view is how one of them silently
+            // stops appearing, which is the reason the cover was moved out in the first place.
+            // `onDismiss` is bound so EVERY close funnels through one place — Done, the
+            // hand-off to the results screen, and an interactive swipe the app never hears
+            // about otherwise. A debounced or in-flight search that outlived the sheet would
+            // otherwise write its result into a model nobody is looking at.
+            .sheet(isPresented: $searching, onDismiss: dismissSearch) {
+                if let search {
+                    SearchSheet(
+                        search: search,
+                        close: { searching = false },
+                        showResults: {
+                            handingOff = true
+                            searching = false
+                            path.append(SearchResultsRoute())
+                        }
+                    )
+                }
             }
         }
         // On the navigation stack rather than further down the chain, so it is a different view
@@ -289,6 +334,46 @@ public struct TimelineView: View {
 
     private func memo(_ uid: String, in timeline: TimelineStore) -> Memo? {
         timeline.memos.first { $0.uid == uid }
+    }
+
+    /// The list a memo was read from, and the memo. The timeline first: it is the canonical list,
+    /// and a memo in both is the same memo.
+    private func holder(of uid: String) -> (memo: Memo, store: TimelineStore)? {
+        if let timeline, let memo = memo(uid, in: timeline) { return (memo, timeline) }
+        if let results = search?.results, let memo = memo(uid, in: results) {
+            return (memo, results)
+        }
+        return nil
+    }
+
+    /// Raises the sheet on a search that has never been used before.
+    ///
+    /// The client and the base URL are read here rather than inside the sheet because a search
+    /// without a session is not a search: signed out there is no timeline either, and a loupe that
+    /// opened an empty sheet would be the only control on the screen that pretended to work.
+    private func openSearch() {
+        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        search = MemoSearch(
+            client: client,
+            baseURL: baseURL,
+            onUnauthorized: { [session] in await session.handle(.unauthorized) }
+        )
+        searching = true
+    }
+
+    /// Every way the sheet closes funnels through here.
+    ///
+    /// A hand-off to the results screen is the one close that is not an abandonment — the
+    /// results screen has just adopted this search's store — so it cancels any stray task but
+    /// keeps the loaded rows and their cursor. Every other close (Done, an interactive swipe)
+    /// abandons the search and resets it.
+    private func dismissSearch() {
+        if handingOff {
+            handingOff = false
+            search?.cancelInFlight()
+        } else {
+            search?.stop()
+        }
     }
 
     /// A tapped tile opens that attachment full screen, on the page it was tapped at — a video

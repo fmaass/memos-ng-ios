@@ -61,6 +61,7 @@ struct TimelineToolbarTests {
             composed: 0,
             openSettings: {},
             signOut: {},
+            search: {},
             newMemo: {}
         )
     }
@@ -193,6 +194,39 @@ struct TimelineToolbarTests {
         // Positive control: the walk above reaches labelled views at all, so a label it does not
         // find is an absence rather than a walk that visited nothing.
         #expect(!labels.isEmpty)
+    }
+
+    /// The loupe MEMNG-120 reserved the slot for, arriving where the reservation said it would:
+    /// in the trailing corner, immediately LEFT of New memo, which stays the rightmost thing in
+    /// the bar. The account's face is untouched in the leading corner.
+    ///
+    /// "The only new bar item" is the half a placement test usually misses. A search surface is
+    /// easy to ship as two controls — a loupe and a cancel, or a loupe and a filter — and a bar
+    /// with four things in it is a different screen from the one this arrangement was decided
+    /// for. So the set of labels is asserted WHOLE rather than by looking for the new one.
+    @Test("the corner button is the only new bar item and it is labelled for VoiceOver")
+    func theLoupeIsTheOnlyNewBarItem() throws {
+        let bar = try hostedBar()
+        print("MEMOSNG_TOOLBAR_BEGIN\n\(bar.description)\nMEMOSNG_TOOLBAR_END")
+        let labels = bar.controls.map(\.label)
+
+        // Three, and exactly these three. A fourth control, or a second copy of one of them,
+        // fails here rather than in a screenshot nobody takes.
+        #expect(Set(labels) == ["Account", "Search", "New memo"], "\(bar.description)")
+        #expect(labels.count == 3, "a control is drawn twice: \(bar.description)")
+
+        let account = try #require(bar.control("Account"), "\(bar.description)")
+        let search = try #require(bar.control("Search"), "\(bar.description)")
+        let newMemo = try #require(bar.control("New memo"), "\(bar.description)")
+
+        // Trailing corner, between the face and New memo — the reserved slot, in that order.
+        #expect(search.frame.midX > bar.middle, "the loupe is not in the trailing half")
+        #expect(account.frame.midX < search.frame.midX, "the loupe is not right of the account")
+        #expect(search.frame.midX < newMemo.frame.midX, "the loupe is not left of New memo")
+        #expect(
+            bar.controls.allSatisfy({ $0.frame.maxX <= newMemo.frame.maxX }),
+            "the loupe displaced New memo from the right-hand end: \(bar.description)"
+        )
     }
 
     /// An account with no name still has an anchor — the monogram falls back on `AccountAvatar`,
