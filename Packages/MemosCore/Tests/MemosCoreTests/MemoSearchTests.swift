@@ -293,6 +293,52 @@ struct MemoSearchTests {
         #expect(control.outcome == .matched)
         #expect(control.results.memos.map(\.uid) == ["a"])
     }
+
+    /// A tag chip is not a word. It goes out as `tag`, not as `q`, and that is the difference
+    /// between the memos FILED under #travel and the memos that happen to contain the word.
+    @Test("a tag chip searches by tag, not by text")
+    func aTagChipSendsATagFilter() async {
+        let paths = LockedValue<[String]>([])
+        let search = Self.search { request, _, _ in
+            paths.set(paths.get() + [request.path ?? ""])
+            return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+
+        search.run(MemoQuery(tags: ["travel"]), showing: "#travel")
+        await search.settled()
+
+        #expect(search.term == "#travel", "the field does not say what it found results for")
+        #expect(search.outcome == .matched)
+        #expect(search.results.memos.map(\.uid) == ["a"])
+        let requests = paths.get().map { Self.sent($0) }
+        #expect(requests.count == 1)
+        #expect(requests.first?["tag"] == ["travel"])
+        #expect(requests.first?["q"] == nil, "a tag went out as a text search")
+    }
+
+    /// The refusal that matters. A blank tag normalises to the EMPTY query, which IS the plain
+    /// timeline — run as a search it would put every memo the account can see behind "Show
+    /// results" as though each one had matched.
+    @Test("a query that asks for everything is never run as a search")
+    func anEmptyQueryIsRefused() async {
+        let paths = LockedValue<[String]>([])
+        let search = Self.search { request, _, _ in
+            paths.set(paths.get() + [request.path ?? ""])
+            return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+
+        search.run(MemoQuery(tags: ["   "]), showing: "#   ")
+        await search.settled()
+
+        #expect(paths.get().isEmpty, "the whole timeline was fetched as a search")
+        #expect(search.outcome == .idle)
+        #expect(search.term.isEmpty, "the field was written for a search that never ran")
+
+        // Positive control: a real tag through the very same call does reach the network.
+        search.run(MemoQuery(tags: ["travel"]), showing: "#travel")
+        await search.settled()
+        #expect(paths.get().count == 1)
+    }
 }
 
 /// A clock the debounce is driven against, so a test can keep a task parked in the pause while it

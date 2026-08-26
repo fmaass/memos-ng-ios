@@ -74,10 +74,14 @@ struct DynamicTypeFittingTests {
         )
     }
 
-    /// The card the timeline is headed by. Its squares are a texture rather than type, so the
+    /// The card the search sheet's empty-query state is made of — the timeline's header until
+    /// MEMNG-126, and the same card either way. Its squares are a texture rather than type, so the
     /// thing that has to hold is that the grid grows with the text size and then STOPS — twelve
     /// weeks of cells at the accessibility scale factor would want a grid three times wider than
     /// the card, and a grid wider than its card is drawn off the edge of the screen.
+    ///
+    /// The sheet's content width and the timeline row's are the same 361pt, so this measurement
+    /// holds for the card in its new home without being taken twice.
     @Test("the heatmap card fits at the largest text size")
     func heatmapCardFitsAtAccessibility5() {
         let content = Self.cardWidth - 2 * DesignTokens.Space.regular
@@ -88,6 +92,14 @@ struct DynamicTypeFittingTests {
         let cells = HeatmapGridView(grid: grid)
         let cellsLargest = LayoutProbe.idealWidth(cells, typeSize: .accessibility5)
         #expect(cellsLargest <= content, "the grid wants \(cellsLargest)pt of \(content)")
+        // The days that became controls are the same size as the days that did not: a button is
+        // what a square DOES, not a shape wrapped around it, and a grid that grew when it became
+        // tappable would run off the sheet at exactly the text sizes this test exists for.
+        let tappable = HeatmapGridView(grid: grid, jump: { _ in })
+        #expect(
+            LayoutProbe.idealWidth(tappable, typeSize: .accessibility5) == cellsLargest,
+            "the tappable grid is not the size of the inert one"
+        )
         // And it fits because it is capped, not because it was pinned: a grid that ignored the
         // text size would measure the same at both.
         #expect(cellsLargest > LayoutProbe.idealWidth(cells, typeSize: .large))
@@ -106,6 +118,21 @@ struct DynamicTypeFittingTests {
         let ordinary = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .large)
         #expect(largest.width <= Self.cardWidth)
         #expect(largest.height > ordinary.height, "the card ignored the text size")
+    }
+
+    /// A tag chip is a control with a word in it, so it has to grow with the word — and still fit
+    /// the sheet it is offered in, because a chip wider than the sheet is one a thumb cannot reach
+    /// the end of.
+    @Test("a tag chip grows with the text size and still fits the sheet")
+    func tagChipFitsAtAccessibility5() {
+        let chip = TagChip(tag: MemoTag(name: "travel", count: 12))
+        let largest = LayoutProbe.idealWidth(chip, typeSize: .accessibility5)
+        let ordinary = LayoutProbe.idealWidth(chip, typeSize: .large)
+
+        #expect(largest <= Self.cardWidth, "the chip wants \(largest)pt of \(Self.cardWidth)")
+        // It fits because it is small enough, not because it was pinned: a chip that ignored the
+        // text size would measure the same at both.
+        #expect(largest > ordinary)
     }
 
     @Test("the timeline card's visibility pill also survives the largest text size")

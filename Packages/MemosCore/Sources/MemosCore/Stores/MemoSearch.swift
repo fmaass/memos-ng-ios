@@ -156,6 +156,34 @@ public final class MemoSearch {
         }
     }
 
+    /// Runs a query the FIELD did not produce — a tag chip today, the month scrubber next.
+    ///
+    /// There is no pause. The debounce exists because a field is typed into one character at a
+    /// time; a chip is tapped once, and a tap that sat still for 300 ms would read as a chip that
+    /// did not work.
+    ///
+    /// `showing` is what the field then holds, so the sheet says what it found results FOR.
+    /// Editing it from there is an ordinary text search again, which is honest: the field is a
+    /// field, not a token — and the tag it was standing in for is on the wire as `tag`, not `q`.
+    public func run(_ query: MemoQuery, showing text: String) {
+        // An empty query is the WHOLE timeline. Run as a search it would put every memo the
+        // account can see behind "Show results" as though each one had matched — which is exactly
+        // what a blank or space-only tag becomes, because `MemoQuery` normalises it away.
+        guard !query.isEmpty else { return }
+        term = text
+        guard query != asked else { return }
+        asked = query
+        outcome = .searching
+        work?.cancel()
+        work = Task { [self] in
+            results.setQuery(query)
+            await results.refresh(using: client, baseURL: baseURL)
+            // Cancelled during the request — the sheet was dismissed, or another chip tapped.
+            guard !Task.isCancelled else { return }
+            outcome = Self.answer(from: results)
+        }
+    }
+
     /// Waits for whatever this search has in flight: the pause, and the request it becomes.
     ///
     /// The results screen awaits it before it decides between a list and an empty state, so a

@@ -1,16 +1,23 @@
+import MemosCore
 import SwiftUI
 
-/// The activity heatmap, as the timeline's own scrollable header.
+/// The activity heatmap, as the search sheet's empty-query state.
 ///
-/// It sits above the first day group and folds away behind a disclosure, because a card that a
-/// reader cannot put away is a card that crowds the feed it is supposed to introduce.
+/// It opened the TIMELINE until MEMNG-126. It reads better here and it costs less: the sheet is
+/// where a date is looked for, and a card the timeline was headed by put a second request in front
+/// of every pull of the list (MEMNG-166) for something a reader was not asking for.
 ///
-/// The squares are deliberately NOT tappable: the web client's cells are inert `<span>`s and this
-/// is the parity port of them. `HeatCell` already carries the day a tap would need, so the loupe
-/// that turns the heatmap into a date axis (MEMNG-120) adds a gesture, not a model.
+/// It folds away behind a disclosure, because a card that a reader cannot put away is a card that
+/// crowds whatever it is introducing.
+///
+/// The squares are tappable only when the sheet hands it somewhere to go: `jump` is what turns a
+/// day into a control, and `HeatmapDateJump` decides which days are ones. The web client's cells
+/// are inert `<span>`s, so a heatmap drawn with no `jump` is still the parity port of them.
 struct HeatmapCard: View {
     let grid: HeatmapGrid
     @Binding var expanded: Bool
+    /// Where a tapped day goes, or nil for a heatmap that is only a picture.
+    var jump: ((MemoQueryAnchor) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
@@ -27,7 +34,7 @@ struct HeatmapCard: View {
             .accessibilityHint("Shows or hides the activity heatmap")
 
             if expanded {
-                HeatmapGridView(grid: grid)
+                HeatmapGridView(grid: grid, jump: jump)
             }
         }
         .padding(DesignTokens.Space.regular)
@@ -57,6 +64,8 @@ struct HeatmapHeader: View {
 /// Twelve weeks of days, seven to a column, oldest column first.
 struct HeatmapGridView: View {
     let grid: HeatmapGrid
+    /// Where a tapped day goes. Nil draws the grid as the picture it has always been.
+    var jump: ((MemoQueryAnchor) -> Void)?
 
     /// The square grows with the text size, because a fixed 12pt cell beside 50pt type is the
     /// defect `DesignTokens.Metric` exists to prevent — but only up to `maxSide`. Eighty-four
@@ -81,29 +90,50 @@ struct HeatmapGridView: View {
                 }
             }
         }
-        // One element for the whole grid. A rotor that stops on eighty-four unlabelled squares is
-        // worse than one that stops on none, so the card says what it amounts to instead.
-        .accessibilityElement(children: .ignore)
+        // Inert, the whole grid is ONE element: a rotor that stops on eighty-four unlabelled
+        // squares is worse than one that stops on none, so the card says what it amounts to
+        // instead. Tappable, the days that are controls have to be reachable, so the grid becomes
+        // a container holding them — and only them, because `square` labels no other cell.
+        .accessibilityElement(children: jump == nil ? .ignore : .contain)
         .accessibilityLabel(grid.summary)
     }
 
     /// A day, or the empty slot a short trailing column leaves behind — drawn as nothing at all
     /// rather than as a zero-count day, which would claim a day that has not happened yet.
+    ///
+    /// A day is a BUTTON only where a jump would actually go somewhere, so the no-op on an empty
+    /// day is the absence of a control rather than a control that does nothing: nothing highlights
+    /// under the finger, and VoiceOver never offers it.
     @ViewBuilder
     private func square(row: Int, of column: [HeatCell]) -> some View {
         if column.indices.contains(row) {
             let cell = column[row]
-            RoundedRectangle(cornerRadius: DesignTokens.Space.hair, style: .continuous)
-                .fill(Self.fill(for: cell.level))
-                .overlay {
-                    if cell.isToday {
-                        RoundedRectangle(cornerRadius: DesignTokens.Space.hair, style: .continuous)
-                            .strokeBorder(.primary, lineWidth: 1)
-                    }
+            if let jump, case .jump(let anchor) = HeatmapDateJump.tap(on: cell) {
+                Button {
+                    jump(anchor)
+                } label: {
+                    swatch(cell)
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(HeatmapDateJump.label(for: cell))
+                .accessibilityHint("Opens the timeline at this day")
+            } else {
+                swatch(cell)
+            }
         } else {
             Color.clear
         }
+    }
+
+    private func swatch(_ cell: HeatCell) -> some View {
+        RoundedRectangle(cornerRadius: DesignTokens.Space.hair, style: .continuous)
+            .fill(Self.fill(for: cell.level))
+            .overlay {
+                if cell.isToday {
+                    RoundedRectangle(cornerRadius: DesignTokens.Space.hair, style: .continuous)
+                        .strokeBorder(.primary, lineWidth: 1)
+                }
+            }
     }
 
     /// The five buckets. Level 0 is a system fill and the rest are the app's own accent, so both

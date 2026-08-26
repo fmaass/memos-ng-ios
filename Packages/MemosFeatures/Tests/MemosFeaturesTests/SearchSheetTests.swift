@@ -72,4 +72,109 @@ struct SearchSheetTests {
         #expect(MemoSearchOutcome.matched.detail == nil)
         #expect(MemoSearchOutcome.failed("the server said no").detail == "the server said no")
     }
+
+    /// The heatmap is the SHEET's read now, and this is the assertion that says so: appearing is
+    /// what loads it.
+    ///
+    /// Until MEMNG-126 the activity card headed the TIMELINE, and it was re-read on every pull of
+    /// that list — a second request in front of a refresh nobody had asked a heatmap question of
+    /// (MEMNG-166). The sheet's empty-query state owns the store instead, and SwiftUI builds that
+    /// view fresh for every presentation, so the read is once per opening of the sheet and at no
+    /// other moment.
+    ///
+    /// `SearchSheetHeatmap` is what makes it assertable at all: the sheet as a whole needs a
+    /// `MemoSearch`, which needs a client from the API layer this bundle deliberately does not
+    /// link — the same wall `TimelineToolbarTests` and `SettingsRenderTests` both document.
+    @Test("the empty-query state reads the heatmap when it appears")
+    func theEmptyStateReadsTheHeatmapWhenItAppears() {
+        let loads = Box(0)
+        let read = Signal()
+        let jumped = Box<MemoQueryAnchor?>(nil)
+        let host = UIHostingController(
+            rootView: SearchSheetHeatmap(
+                load: { _ in
+                    loads.value += 1
+                    read.fire()
+                },
+                jump: { jumped.value = $0 }
+            )
+        )
+        host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 400)
+        let window = UIWindow(frame: host.view.frame)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        // The read is a task, so it lands after the hierarchy exists rather than during it. The
+        // wait ENDS ON THE READ (`Signal.fire` stops the run loop) instead of after a window
+        // somebody guessed: a fixed window is a false red on a busy build host and a bill every
+        // green run pays on a quiet one.
+        read.wait()
+
+        #expect(loads.value >= 1, "appearing did not read the heatmap")
+        // And opening the sheet jumps nowhere by itself: a jump is a tap on a day.
+        #expect(jumped.value == nil)
+        // The window is held to the end: a hosted view whose window has gone is a view whose task
+        // was cancelled, and the count would then be a reading of the timing rather than of this.
+        withExtendedLifetime(window) {}
+    }
+    /// The tag chips read themselves on the same signal, and this is the case that would silently
+    /// never load: with no tags yet the row draws nothing at all, so a read attached to the chips
+    /// instead of to the row would be a row that only fetched its tags once it had some.
+    @Test("the tag row reads its tags when it appears, even with none to show")
+    func theTagRowReadsItsTagsWhenItAppears() {
+        let loads = Box(0)
+        let read = Signal()
+        let searched = Box<MemoQuery?>(nil)
+        let host = UIHostingController(
+            rootView: SearchSheetTags(
+                load: { _ in
+                    loads.value += 1
+                    read.fire()
+                },
+                search: { query, _ in searched.value = query }
+            )
+        )
+        host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 200)
+        let window = UIWindow(frame: host.view.frame)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        read.wait()
+
+        #expect(loads.value >= 1, "appearing did not read the tags")
+        // And opening the sheet searches for nothing by itself: a search is a tap on a chip.
+        #expect(searched.value == nil)
+        withExtendedLifetime(window) {}
+    }
+
+}
+
+/// One thing a hosted view did, and the wait for it — with no clock in it anywhere.
+///
+/// A view's `.task` starts when the view appears, and appearing needs the run loop to turn, so the
+/// run loop is what a test has to wait on. It waits INDEFINITELY and the event ENDS the wait:
+/// `fire` stops the run loop, so `wait` returns the instant the view acts. That is the difference
+/// between this and `run(until: now + 0.4)` — a fixed window is a failure the test invents when the
+/// host is loaded (merkur peaked at a one-minute load of 218 on 2026-08-26) and a delay every green
+/// run pays when it is not.
+///
+/// The slice inside the loop is not a deadline. It is a floor against a run loop with no input
+/// source left to process, which would otherwise spin the CPU; the loop around it has no bound at
+/// all, so a slow host waits longer rather than reporting something that did not happen.
+@MainActor
+private final class Signal {
+    private var fired = 0
+
+    func fire() {
+        fired += 1
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
+
+    func wait() {
+        while fired == 0 {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+    }
 }
