@@ -74,6 +74,40 @@ struct DynamicTypeFittingTests {
         )
     }
 
+    /// The card the timeline is headed by. Its squares are a texture rather than type, so the
+    /// thing that has to hold is that the grid grows with the text size and then STOPS — twelve
+    /// weeks of cells at the accessibility scale factor would want a grid three times wider than
+    /// the card, and a grid wider than its card is drawn off the edge of the screen.
+    @Test("the heatmap card fits at the largest text size")
+    func heatmapCardFitsAtAccessibility5() {
+        let content = Self.cardWidth - 2 * DesignTokens.Space.regular
+        let grid = HeatmapPresentation.grid(
+            from: ["2026-08-25": 4], today: Date(timeIntervalSince1970: 1_787_702_400)
+        )
+
+        let cells = HeatmapGridView(grid: grid)
+        let cellsLargest = LayoutProbe.idealWidth(cells, typeSize: .accessibility5)
+        #expect(cellsLargest <= content, "the grid wants \(cellsLargest)pt of \(content)")
+        // And it fits because it is capped, not because it was pinned: a grid that ignored the
+        // text size would measure the same at both.
+        #expect(cellsLargest > LayoutProbe.idealWidth(cells, typeSize: .large))
+
+        for expanded in [true, false] {
+            let header = HeatmapHeader(expanded: expanded)
+            let headerLargest = LayoutProbe.idealWidth(header, typeSize: .accessibility5)
+            #expect(headerLargest <= content, "the disclosure wants \(headerLargest)pt")
+            #expect(headerLargest > LayoutProbe.idealWidth(header, typeSize: .large))
+        }
+
+        // The whole card, at the width the list really gives it: never wider than its row, and
+        // taller at the largest text size — so it answered the size rather than ignoring it.
+        let card = HeatmapCard(grid: grid, expanded: .constant(true))
+        let largest = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .accessibility5)
+        let ordinary = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .large)
+        #expect(largest.width <= Self.cardWidth)
+        #expect(largest.height > ordinary.height, "the card ignored the text size")
+    }
+
     @Test("the timeline card's visibility pill also survives the largest text size")
     func timelinePillFitsAtAccessibility5() {
         for visibility in MemoVisibility.allCases {

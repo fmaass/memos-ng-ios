@@ -22,6 +22,13 @@ public struct TimelineView: View {
     @Environment(Outbox.self) private var outbox: Outbox?
     @Environment(\.scenePhase) private var scenePhase
     @State private var timeline: TimelineStore?
+    /// The activity heatmap behind the card at the top of the scroll. Built here rather than in
+    /// the `.task` the timeline is: it needs nothing from the session to exist, and a card that
+    /// waits for a store to be constructed flickers in on the first frame after launch.
+    @State private var heatmap = HeatmapStore()
+    /// Folded away or not. Deliberately not persisted: the card is the timeline's header, and a
+    /// header that starts hidden is one nobody finds again.
+    @State private var heatmapExpanded = true
     @State private var composing: ComposeView.Mode?
     /// One conversation for the whole screen, shared with the Settings screen pushed from it —
     /// two stages would be two machines and, between them, two revokes.
@@ -193,6 +200,13 @@ public struct TimelineView: View {
             uniqueKeysWithValues: timeline.memos.enumerated().map { ($1.uid, $0) }
         )
         List {
+            // The scroll's header: what the household has been writing, above everything the
+            // list itself is about.
+            HeatmapCard(
+                grid: HeatmapPresentation.grid(from: heatmap.counts),
+                expanded: $heatmapExpanded
+            )
+            .cardRow()
             if let outbox, !outbox.jobs.isEmpty {
                 Section {
                     ForEach(PendingMemoPresentation.rows(for: outbox.jobs)) { row in
@@ -423,6 +437,10 @@ public struct TimelineView: View {
         guard let client = session.api else { return }
         if await timeline.delete(uid: memo.uid, using: client) {
             feedback.fire(.deleted)
+            // A day just lost a memo. The heatmap is a count, not a list, so nothing else on this
+            // screen would have told it — and a square that stays dark until the next launch is
+            // the app disagreeing with itself.
+            await heatmap.load(using: client)
         }
     }
 
@@ -471,9 +489,14 @@ public struct TimelineView: View {
         return posted
     }
 
+    /// Everything this screen reads from the server, on the one signal that already means "read
+    /// it again": the screen appearing, a pull, and a queued capture becoming a memo. The heatmap
+    /// rides that signal rather than owning one of its own — a second refresh path is a second
+    /// thing to forget when a third way of creating a memo arrives.
     private func load() async {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
         await timeline?.refresh(using: client, baseURL: baseURL)
+        await heatmap.load(using: client)
     }
 
 }
