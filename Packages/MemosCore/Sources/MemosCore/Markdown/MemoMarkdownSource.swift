@@ -24,13 +24,25 @@ import Foundation
 ///
 /// The scheme test is DOMPurify's allowlist (`isTappableScheme`), the same one the inline form
 /// uses, so both spellings of a link answer to one rule. It is stricter than markdown-it's
-/// `validateLink`: a destination markdown-it builds a link from but DOMPurify then strips the
-/// `href` off (`ftp:`, a relative path) renders in the SPA as the label text alone, and here as
-/// the literal characters the author typed. That difference is pre-existing, deliberate and the
-/// same for both spellings — safety is decided by one predicate, not by which syntax was used.
+/// `validateLink`, and the two verdicts mean two different things on screen (MEMNG-144, the
+/// canonical decisions the SPA now implements in `memo_target_policy`):
+///
+/// - a destination `validateLink` REFUSES (`javascript:`, `vbscript:`, `file:`, a non-image
+///   `data:`) never becomes a link at all, so the whole `[label](destination)` stays on screen as
+///   the literal characters the author typed;
+/// - a destination it accepts but DOMPurify would strip the `href` off (`ftp:`, a scheme-relative
+///   `//host`, a relative path) becomes the LABEL ALONE, with no anchor anywhere;
+/// - an image is dropped either way, but an image whose source is not an allowed scheme leaves
+///   its alt text behind as plain text, so the reader sees the words rather than raw markup.
+///
+/// Two more things the SPA's pipeline does that cmark-gfm does not, both settled by the same
+/// fixture: markdown-it's `linkify` makes a link out of a bare host name (`example.com`, which
+/// cmark's autolink extension leaves alone), and its task-list plugin marks ONLY the items that
+/// carry a checkbox, while cmark-gfm turns a whole list into a task list as soon as one item does.
 public enum MemoMarkdownSource {
     public static func prepare(_ content: String) -> String {
-        let references = neutralizeUnsafeReferenceDefinitions(stripTagOnlyLines(content))
+        let lists = splitMixedTaskLists(stripTagOnlyLines(content))
+        let references = neutralizeUnsafeReferenceDefinitions(lists)
         return neutralizeUnsafeInline(references.source, resolvableLabels: references.labels)
     }
 
@@ -75,7 +87,8 @@ public enum MemoMarkdownSource {
     /// code block, which is why the run ends at one.
     private static func neutralizeUnsafeInline(
         inProse source: String,
-        resolvableLabels: Set<String>
+        resolvableLabels: Set<String>,
+        linkifying: Bool = true
     ) -> String {
         let chars = Array(source)
         var out = ""
@@ -103,28 +116,102 @@ public enum MemoMarkdownSource {
                 continue
             }
             if character == "!", index + 1 < chars.count, chars[index + 1] == "[",
+                let label = scanBracketed(chars, at: index + 1),
                 let link = scanLink(chars, at: index + 1, resolvableLabels: resolvableLabels)
             {
-                // Inline or reference: an image leaves nothing behind either way.
+                // The image itself never survives — `img` is not in the sanitiser's allowlist. What
+                // it leaves behind depends on the source: an allowed scheme takes its alt text with
+                // it (a removed void element has no children to keep), while a source the client
+                // would refuse to open leaves the alt as PLAIN text, which is what
+                // `memo_target_policy` builds with `renderInlineAsText` — markup stripped, so an
+                // emphasised alt is not emphasised on screen.
+                if case .inline(let destination) = link.kind,
+                    !MarkdownInline.isTappableScheme(destination)
+                {
+                    out += escapedForProse(plainText(of: label.text))
+                }
                 index = link.end
                 continue
             }
             if character == "[",
+                let label = scanBracketed(chars, at: index),
                 let link = scanLink(chars, at: index, resolvableLabels: resolvableLabels),
                 case .inline(let destination) = link.kind
             {
                 if MarkdownInline.isTappableScheme(destination) {
                     out += String(chars[index..<link.end])
+                } else if MarkdownInline.isAllowedDestination(destination) {
+                    // markdown-it builds the link and `memo_target_policy` then drops the anchor,
+                    // keeping the label's own tokens — so the emphasis inside a label survives and
+                    // the destination appears nowhere. Linkify is off inside it: markdown-it never
+                    // linkifies within a link, so the label's own `example.com` stays text.
+                    out += neutralizeUnsafeInline(
+                        inProse: label.text,
+                        resolvableLabels: resolvableLabels,
+                        linkifying: false
+                    )
                 } else {
-                    // Escaping the opening bracket is what leaves the whole construct on screen as
-                    // text, which is exactly what the SPA shows.
+                    // markdown-it never builds the link, so escaping the opening bracket leaves the
+                    // whole construct on screen as text, which is exactly what the SPA shows.
                     out += "\\" + String(chars[index..<link.end])
                 }
                 index = link.end
                 continue
             }
+            if linkifying, let match = Linkify.match(chars, at: index) {
+                switch match.kind {
+                case .url, .email:
+                    // cmark-gfm's autolink extension already makes these links, and with the same
+                    // destination, so they are left character for character.
+                    out += match.text
+                case .bareDomain:
+                    // cmark has no rule for a bare host name, so the link is written into the
+                    // source — with the `http://` destination linkify-it would have built, which
+                    // `MemoRenderPolicy` still has to allow before a tap opens anything. The
+                    // destination goes in angle brackets and the label's brackets are escaped, so
+                    // a host name carrying a `)` or a `]` in its path cannot end the construct
+                    // early and leave half of it on screen.
+                    out += "[" + escapedBrackets(match.text) + "](<" + match.href + ">)"
+                }
+                index = match.end
+                continue
+            }
             out.append(character)
             index += 1
+        }
+        return out
+    }
+
+    /// An image's alt text as `renderInlineAsText` gives it: the characters, with every inline
+    /// construct reduced to what it says. A soft break inside one is a space on screen, so it is
+    /// one here too.
+    private static func plainText(of label: String) -> String {
+        String(
+            MarkdownInline.parse(label).raw.map { $0 == MarkdownInline.breakMarker ? " " : $0 }
+        )
+    }
+
+    /// Escapes what would otherwise close a link label early.
+    private static func escapedBrackets(_ text: String) -> String {
+        var out = ""
+        for character in text {
+            if character == "[" || character == "]" || character == "\\" { out.append("\\") }
+            out.append(character)
+        }
+        return out
+    }
+
+    /// Backslash-escapes every ASCII punctuation character, so text that is being put BACK into
+    /// the source cannot open a construct of its own — an alt of `# alt` is not a heading and one
+    /// of `[a](b)` is not a link. A backslash escape renders as the character alone, so nothing a
+    /// reader sees changes.
+    private static func escapedForProse(_ text: String) -> String {
+        var out = ""
+        for character in text {
+            if character.isASCII, character.isPunctuation || character.isSymbol {
+                out.append("\\")
+            }
+            out.append(character)
         }
         return out
     }
@@ -738,5 +825,194 @@ extension MemoMarkdownSource {
         guard length >= 3 else { return nil }
         let info = String(chars[index...]).trimmingCharacters(in: .whitespaces)
         return (character, length, info)
+    }
+}
+
+// MARK: - Mixed task lists
+
+extension MemoMarkdownSource {
+    /// Splits a list that mixes task items with plain ones into consecutive lists, one per run.
+    ///
+    /// The SPA's task-list plugin marks the ITEMS that carry a checkbox. cmark-gfm marks the
+    /// LIST: one `- [x]` turns the whole thing into a task list, and MarkdownUI's block model
+    /// keeps only `isCompleted` per item, so a plain sibling arrives indistinguishable from
+    /// `- [ ]` and is drawn with an empty checkbox where the SPA draws a bullet. The model has no
+    /// room for the difference, so the difference is made before the parser sees it: changing the
+    /// bullet character (or the ordered delimiter) starts a NEW list in CommonMark, so a run of
+    /// plain items and a run of task items become two lists and each is marked on its own.
+    ///
+    /// Only a MIXED list is touched, and only its markers — the text, the indentation and the
+    /// numbers are the author's. A wrongly grouped list therefore costs parity, never safety:
+    /// nothing here decides what may be opened.
+    ///
+    /// What it deliberately does not model: an item whose checkbox sits on the line after its
+    /// marker, and a lazy continuation line that is not indented to the item's content. Both end
+    /// a group early, which leaves the divergence in place rather than inventing a split.
+    static func splitMixedTaskLists(_ source: String) -> String {
+        var lines = sourceLines(source)
+        let scans = scanLines(lines)
+        let items: [ListItemLine?] = lines.indices.map { index in
+            scans[index].isCode ? nil : listItemLine(lines[index])
+        }
+        var claimed = Set<Int>()
+
+        for start in lines.indices {
+            guard !claimed.contains(start), let head = items[start] else { continue }
+            var members = [start]
+            var cursor = start + 1
+            while cursor < lines.count {
+                let line = lines[cursor]
+                if line.content.trimmingCharacters(in: .whitespaces).isEmpty, !line.isMarkerOnly {
+                    cursor += 1
+                    continue
+                }
+                if let item = items[cursor], item.key == head.key {
+                    members.append(cursor)
+                    cursor += 1
+                    continue
+                }
+                guard leadingColumns(lines[cursor].raw) >= head.contentColumn else { break }
+                cursor += 1
+            }
+            claimed.formUnion(members)
+            restyle(&lines, members: members, items: items, following: cursor)
+        }
+        return lines.map { $0.raw + $0.ending }.joined()
+    }
+
+    /// One line that opens a list item, described by what decides which list it belongs to.
+    private struct ListItemLine {
+        /// The containers this line sits in, outermost first — `> -` is not the same list as an
+        /// item indented to the same column.
+        var path: String
+        /// Where the marker starts inside `raw`, in Characters.
+        var offset: Int
+        /// The marker itself, its trailing space excluded: `1` for a bullet, digits + 1 for an
+        /// ordered marker.
+        var length: Int
+        var isOrdered: Bool
+        /// The bullet character, or the delimiter of an ordered marker — what CommonMark compares
+        /// when it decides whether this item continues the list above or starts a new one.
+        var style: Character
+        /// Columns consumed before the item's own content, which is how far a continuation line
+        /// of this item has to be indented.
+        var contentColumn: Int
+        var isTask: Bool
+
+        /// Two items are siblings when their containers, their column and their marker style all
+        /// agree — the same three things CommonMark uses.
+        var key: String { "\(path)|\(offset)|\(isOrdered)|\(style)" }
+    }
+
+    private static func listItemLine(_ line: SourceLine) -> ListItemLine? {
+        let chars = Array(line.raw)
+        var index = 0
+        var indentStart = 0
+        var marker: (offset: Int, length: Int, isOrdered: Bool, style: Character)?
+
+        while index < chars.count {
+            if chars[index] == " " || chars[index] == "\t" {
+                index += 1
+                continue
+            }
+            if columnWidth(chars, from: indentStart, to: index) >= 4 { break }
+            if chars[index] == ">" {
+                index += 1
+                if index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+                indentStart = index
+                continue
+            }
+            guard let width = listMarkerWidth(chars, at: index) else { break }
+            let start = index
+            let bullet = chars[index] == "-" || chars[index] == "+" || chars[index] == "*"
+            var length = 1
+            if !bullet {
+                length = 0
+                var scan = index
+                while scan < chars.count, ("0"..."9").contains(chars[scan]) {
+                    scan += 1
+                    length += 1
+                }
+                length += 1
+            }
+            marker = (start, length, !bullet, chars[start + length - 1])
+            index += width
+            indentStart = index
+        }
+
+        guard let marker else { return nil }
+        let body = String(line.content.drop { $0 == " " || $0 == "\t" })
+        return ListItemLine(
+            path: String(line.markers),
+            offset: marker.offset,
+            length: marker.length,
+            isOrdered: marker.isOrdered,
+            style: marker.style,
+            contentColumn: columnWidth(chars, from: 0, to: indentStart),
+            isTask: MarkdownDocument.taskPrefix(body) != nil
+        )
+    }
+
+    /// Rewrites the markers of a mixed group so that each run of one kind is a list of its own.
+    ///
+    /// The first run keeps what the author typed; every run after it takes a style that differs
+    /// from the run before, and the last one also from the list that follows the group — a
+    /// flipped marker that happened to match the next list would merge with it instead of
+    /// splitting from it.
+    private static func restyle(
+        _ lines: inout [SourceLine],
+        members: [Int],
+        items: [ListItemLine?],
+        following: Int
+    ) {
+        guard let head = items[members[0]] else { return }
+        let kinds = members.compactMap { items[$0]?.isTask }
+        guard kinds.count == members.count, kinds.contains(true), kinds.contains(false) else {
+            return
+        }
+
+        var runs: [[Int]] = []
+        for member in members {
+            if let last = runs.last, items[last[0]]?.isTask == items[member]?.isTask {
+                runs[runs.count - 1].append(member)
+            } else {
+                runs.append([member])
+            }
+        }
+        guard runs.count > 1 else { return }
+
+        let candidates: [Character] = head.isOrdered ? [".", ")"] : ["-", "*", "+"]
+        var neighbour: Character?
+        if following < lines.count, let next = items[following], next.path == head.path,
+            next.offset == head.offset, next.isOrdered == head.isOrdered
+        {
+            neighbour = next.style
+        }
+
+        var previous = head.style
+        for (index, run) in runs.enumerated() where index > 0 {
+            let isLast = index == runs.count - 1
+            let style =
+                candidates.first { candidate in
+                    candidate != previous && !(isLast && candidate == neighbour)
+                } ?? candidates.first { $0 != previous } ?? head.style
+            for member in run {
+                guard let item = items[member] else { continue }
+                var characters = Array(lines[member].raw)
+                let column = item.offset + item.length - 1
+                guard column < characters.count else { continue }
+                characters[column] = style
+                lines[member].raw = String(characters)
+            }
+            previous = style
+        }
+    }
+
+    /// Columns of whitespace this line opens with — how deep a continuation line reaches.
+    private static func leadingColumns(_ raw: String) -> Int {
+        let chars = Array(raw)
+        var end = 0
+        while end < chars.count, chars[end] == " " || chars[end] == "\t" { end += 1 }
+        return columnWidth(chars, from: 0, to: end)
     }
 }

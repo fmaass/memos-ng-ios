@@ -47,17 +47,10 @@ struct MarkdownRenderParityTests {
     ///   through `TableView` and loses nothing. What is missing is in the HTML, not on screen.
     nonisolated static let unreadableFromHTML: Set<String> = ["raw-html-literal", "table"]
 
-    /// Cases where the app and the SPA GENUINELY render differently today. Each is pinned by a
-    /// test of its own below, so the difference cannot change unnoticed, and each is a ticket
-    /// rather than something this phase invented a workaround for.
-    ///
-    /// - `task-list-basic`: cmark-gfm makes the whole list a task list as soon as ONE item is a
-    ///   task, and `TaskListView` draws a marker for every item in it, so `- plain item` after a
-    ///   `- [x] …` shows an (empty) checkbox where the SPA shows a bullet. Visual only: the
-    ///   interactive task rows on the detail screen come from `MemoPresentation.tasks`.
-    nonisolated static let divergentIds: Set<String> = ["task-list-basic"]
-
-    nonisolated static let excludedIds = unreadableFromHTML.union(divergentIds)
+    /// There is no second list. Every case the shipped renderer CAN be asked about is asserted
+    /// below — no case is excluded for rendering differently from the SPA (MEMNG-144 settled the
+    /// last one, `task-list-basic`, in favour of the SPA: a plain item beside a task is a bullet).
+    nonisolated static let excludedIds = unreadableFromHTML
 
     @Test("the vendored fixture is schema 1 and has enough cases to be worth anything")
     func fixtureShape() {
@@ -69,8 +62,11 @@ struct MarkdownRenderParityTests {
     func exclusionsAreReal() {
         let ids = Set(Self.fixture.cases.map(\.id))
         #expect(Self.excludedIds.isSubset(of: ids))
-        // Three, and no more: an exclusion is a debt, not a way to make the gate quiet.
-        #expect(Self.excludedIds.count == 3)
+        // Two, and no more, and both of them are limits of `renderHTML()` rather than of what the
+        // app draws — `MarkdownParityTests` asserts each against the block model. An exclusion is
+        // a debt, not a way to make the gate quiet.
+        #expect(Self.excludedIds == Self.unreadableFromHTML)
+        #expect(Self.excludedIds.count == 2)
     }
 
     @Test(
@@ -129,20 +125,6 @@ struct MarkdownRenderParityTests {
         )
     }
 
-    /// The `task-list-basic` divergence, pinned rather than papered over.
-    ///
-    /// cmark-gfm turns the whole list into a task list as soon as one item is a task, and
-    /// MarkdownUI draws a marker for every item of one, so the plain item comes out with an empty
-    /// checkbox where the SPA gives it a bullet. This test states what the app does TODAY: it goes
-    /// red when that is fixed (or when it gets worse), which is what keeps the exclusion above
-    /// honest.
-    @Test("a plain item in a task list is drawn as a task — today's divergence, pinned")
-    func plainItemsInATaskListAreCheckboxes() {
-        let blocks = ProductionMarkdownProjection.project("- [x] done\n- plain item")
-        #expect(blocks.map(\.type) == [.task, .task])
-        #expect(blocks.map(\.checked) == [true, false])
-        #expect(blocks.map(\.text) == ["done", "plain item"])
-    }
 }
 
 /// What a reference-style link does in the app.
@@ -354,5 +336,229 @@ struct ReferenceLinkTests {
                     Int(pixel.g) >= Int(pixel.r) + 25 && Int(pixel.g) >= Int(pixel.b) + 25
                 }
         }
+    }
+}
+
+/// The four decisions MEMNG-144 settled for both clients, one category at a time.
+///
+/// Every assertion is read off the block model the app's OWN renderer produced, so each goes red
+/// when the renderer changes rather than when a second parser does. The parity fixture pins one
+/// example of each; these hold the rule around it — what the decision does NOT do included, which
+/// is where a rewrite of the source is most likely to go too far.
+@MainActor
+@Suite("the render-time decisions for targets the app will not open")
+struct MarkdownTargetDecisionTests {
+    private func projection(_ markdown: String) -> [MarkdownBlock] {
+        ProductionMarkdownProjection.ignoringInvisibleParagraphs(
+            ProductionMarkdownProjection.project(markdown)
+        )
+    }
+
+    // MARK: - a task is a checkbox, the plain item beside it is not
+
+    @Test("a plain item beside tasks is a list item, not an empty checkbox")
+    func plainItemAfterTasks() {
+        let blocks = projection("- [ ] unchecked item\n- [x] checked item\n- plain item")
+        #expect(blocks.map(\.type) == [.task, .task, .list])
+        #expect(blocks.map(\.checked) == [false, true, nil])
+        #expect(blocks.map(\.text) == ["unchecked item", "checked item", ""])
+        #expect(blocks.last?.items == ["plain item"])
+        #expect(blocks.allSatisfy { $0.level == 0 && $0.ordered == false })
+    }
+
+    @Test("a single task between plain items splits the list on both sides of it")
+    func taskBetweenPlainItems() {
+        let blocks = projection("- plain one\n- [ ] the only task\n- plain two")
+        #expect(blocks.map(\.type) == [.list, .task, .list])
+        #expect(blocks.map(\.items) == [["plain one"], nil, ["plain two"]])
+        #expect(blocks[1].text == "the only task")
+        #expect(blocks[1].checked == false)
+    }
+
+    @Test("an ordered list splits the same way and keeps the numbers the author typed")
+    func orderedMixedList() {
+        let blocks = projection("1. plain\n2. [ ] the task\n3. plain again")
+        #expect(blocks.map(\.type) == [.list, .task, .list])
+        #expect(blocks.map(\.items) == [["plain"], nil, ["plain again"]])
+        #expect(blocks.filter { $0.type == .list }.allSatisfy { $0.ordered == true })
+    }
+
+    /// A divergence this phase did NOT invent and cannot reach: `BlockNode.taskList` carries
+    /// `isTight` and its items and nothing else, so the ordered-ness of the list a task was
+    /// written in is gone before any view or projection sees it — an ordered task item is drawn,
+    /// and projected, as an unordered one. No fixture case covers it (every task case the SPA
+    /// pins is a bullet list), and closing it means not rendering task lists through MarkdownUI
+    /// at all. Pinned so it stays visible and cannot change unnoticed.
+    @Test("a task in an ordered list loses its numbering — today's divergence, pinned")
+    func orderedTaskItemsProjectUnordered() {
+        let blocks = projection("1. [ ] the task")
+        #expect(blocks.map(\.type) == [.task])
+        #expect(blocks.first?.ordered == false)
+    }
+
+    /// The other half of the rule: a list that does not mix is left exactly as it was, so the
+    /// split cannot start breaking ordinary lists into pieces.
+    @Test(
+        "a list of one kind stays one list",
+        arguments: [
+            ("all plain", "- alpha\n- beta\n- gamma", [MarkdownBlock.Kind.list]),
+            ("all tasks", "- [x] a\n- [ ] b", [MarkdownBlock.Kind.task, .task]),
+            (
+                "already two lists", "- alpha\n* [ ] task",
+                [MarkdownBlock.Kind.list, .task]
+            ),
+        ]
+    )
+    func unmixedListsAreLeftAlone(name: String, markdown: String, kinds: [MarkdownBlock.Kind]) {
+        #expect(projection(markdown).map(\.type) == kinds, "\(name)")
+    }
+
+    /// A list written inside a fence is the author's code, not a list — restyling a marker there
+    /// would rewrite a line of someone's example.
+    @Test("a mixed list inside a fence is code, character for character")
+    func mixedListInsideAFenceIsCode() {
+        let markdown = "```\n- [x] done\n- plain item\n```"
+        let blocks = projection(markdown)
+        #expect(blocks.map(\.type) == [.code])
+        #expect(blocks.first?.text == "- [x] done\n- plain item\n")
+    }
+
+    // MARK: - a bare host name is a link, with the scheme linkify-it prepends
+
+    @Test("a bare domain becomes an http link the policy still has to allow")
+    func bareDomainIsLinkified() throws {
+        let blocks = projection("Visit example.com for the docs.")
+        #expect(blocks.map(\.text) == ["Visit example.com for the docs."])
+        let link = try #require(blocks.first?.links.first)
+        #expect(blocks.first?.links.count == 1)
+        #expect(link == MarkdownLink(href: "http://example.com", text: "example.com"))
+        // The point of the `http://` prefix: the render change is a projection, and the seam that
+        // decides what a tap opens is untouched and still says yes to this and no to the rest.
+        #expect(MemoRenderPolicy.mayOpen(destination: link.href))
+        #expect(!MemoRenderPolicy.mayOpen(destination: "ftp://example.com"))
+    }
+
+    @Test("a bare domain carries its path and query into the destination")
+    func bareDomainWithAPath() {
+        let blocks = projection("See example.com/docs?a=1 first.")
+        #expect(
+            blocks.first?.links
+                == [
+                    MarkdownLink(
+                        href: "http://example.com/docs?a=1", text: "example.com/docs?a=1"
+                    )
+                ]
+        )
+    }
+
+    @Test(
+        "what is not a bare domain stays text",
+        arguments: [
+            ("an unknown TLD", "Ask example.internal for it."),
+            ("a file name", "Open notes.txt now."),
+            ("inside a code span", "Notes in `~/trips/2026.md`."),
+            ("part of a path", "Read /var/log/example.com now."),
+            ("a version number", "Shipped 1.2.3 today."),
+        ]
+    )
+    func notALink(name: String, markdown: String) {
+        #expect(projection(markdown).allSatisfy { $0.links.isEmpty }, "\(name)")
+    }
+
+    /// markdown-it never linkifies inside a link, so a host name written in a label is text.
+    @Test("a host name inside a link label is not a second link")
+    func labelsAreNotLinkified() {
+        let blocks = projection("[see example.com](https://example.com/a)")
+        #expect(
+            blocks.first?.links
+                == [MarkdownLink(href: "https://example.com/a", text: "see example.com")]
+        )
+    }
+
+    // MARK: - an image the app will not fetch leaves its alt text behind
+
+    @Test("an image with a refused source shows its alt text as plain words")
+    func unsafeImageKeepsItsAlt() {
+        let blocks = projection(
+            "![A red square](javascript:alert(1))\n\n![The chart](data:text/html,hi)"
+        )
+        #expect(blocks.map(\.type) == [.paragraph, .paragraph])
+        #expect(blocks.map(\.text) == ["A red square", "The chart"])
+        #expect(blocks.allSatisfy { $0.links.isEmpty })
+        let html = ProductionMarkdownProjection.html("![A red square](javascript:alert(1))")
+        #expect(!html.contains("<img"), "the renderer was handed an image:\n\(html)")
+        #expect(!html.contains("javascript"), "the destination survived:\n\(html)")
+    }
+
+    /// `renderInlineAsText` is what the SPA builds the replacement from, and it reduces the alt to
+    /// what it SAYS — an emphasised alt is not emphasised on screen.
+    @Test("markup inside a refused alt is reduced to its text")
+    func unsafeImageAltIsPlain() {
+        let blocks = projection("![*bold* alt](javascript:alert(1))")
+        #expect(blocks.map(\.text) == ["bold alt"])
+        #expect(blocks.allSatisfy { $0.inline.isEmpty })
+    }
+
+    /// An alt that would open a block of its own if it were put back unescaped.
+    @Test("a refused alt cannot open a construct of its own")
+    func unsafeImageAltCannotEscapeItsParagraph() {
+        let blocks = projection("![# not a heading](javascript:alert(1))")
+        #expect(blocks.map(\.type) == [.paragraph])
+        #expect(blocks.map(\.text) == ["# not a heading"])
+    }
+
+    /// The other half: an image whose source the SPA WOULD have kept is removed with its alt, the
+    /// way a sanitiser removes a void element — and no image is ever fetched either way.
+    @Test("an image with an allowed source is dropped whole, alt included")
+    func allowedImageIsDroppedWhole() {
+        #expect(projection("![A red square](https://example.com/red.png)").isEmpty)
+        let source = URL(string: "https://example.com/red.png")
+        #expect(MemoRenderPolicy.mayLoadImage(from: source) == false)
+    }
+
+    // MARK: - a link the app will not open is its label alone
+
+    @Test("an ftp and a scheme-relative link render as their labels, with no anchor")
+    func refusedTargetsAreLabels() {
+        let markdown =
+            "[the file](ftp://example.com/pub/readme.txt) and [the host](//example.com/path)"
+            + " are not links."
+        let blocks = projection(markdown)
+        #expect(blocks.map(\.text) == ["the file and the host are not links."])
+        #expect(blocks.allSatisfy { $0.links.isEmpty })
+        let html = ProductionMarkdownProjection.html(markdown)
+        #expect(!html.contains("<a "), "an anchor survived:\n\(html)")
+        // The positive control for that 0-hit: the same shape with an allowed scheme IS an anchor.
+        #expect(ProductionMarkdownProjection.html("[site](https://example.com/)").contains("<a "))
+    }
+
+    @Test("a relative path is a label too")
+    func relativeTargetIsALabel() {
+        let blocks = projection("[the doc](/docs/readme.md) is not a link.")
+        #expect(blocks.map(\.text) == ["the doc is not a link."])
+        #expect(blocks.allSatisfy { $0.links.isEmpty })
+    }
+
+    /// `memo_target_policy` drops the anchor and keeps the label's own tokens, so what the author
+    /// emphasised is still emphasised.
+    @Test("the emphasis inside a refused label survives it")
+    func refusedLabelKeepsItsEmphasis() {
+        let blocks = projection("[**bold**](ftp://example.com/x)")
+        #expect(blocks.map(\.text) == ["bold"])
+        #expect(blocks.first?.inline == [MarkdownSpan(type: .strong, text: "bold")])
+        #expect(blocks.allSatisfy { $0.links.isEmpty })
+    }
+
+    /// The line between the two rules: markdown-it's `validateLink` refuses these before a link
+    /// exists at all, so the characters the author typed stay on screen — brackets, destination
+    /// and all. Reducing them to their label would be the wrong decision, and the fixture pins it.
+    @Test("a destination markdown-it refuses stays literal markdown")
+    func refusedDestinationsStayLiteral() {
+        let blocks = projection("[js](javascript:alert(1)) and [data](data:text/html,hi) are not.")
+        #expect(
+            blocks.map(\.text)
+                == ["[js](javascript:alert(1)) and [data](data:text/html,hi) are not."]
+        )
+        #expect(blocks.allSatisfy { $0.links.isEmpty })
     }
 }

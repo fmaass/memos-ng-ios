@@ -42,16 +42,34 @@ struct ContractTests {
         return try #require(item[method] as? [String: Any])
     }
 
-    /// The `$ref`ed schema name of a response, so a response is checked by its shape and not by
-    /// the sentence describing it.
-    private func responseSchema(_ operation: [String: Any], status: String) throws -> String {
+    /// The `$ref`ed schema names of a response, so a response is checked by its shape and not by
+    /// the sentence describing it. One status may declare ALTERNATIVES (`anyOf`) — the memo patch
+    /// answers 409 with either refusal — so this reports every name the status can carry.
+    private func responseSchemas(
+        _ operation: [String: Any],
+        status: String
+    ) throws -> Set<String> {
         let responses = try #require(operation["responses"] as? [String: Any])
         let response = try #require(responses[status] as? [String: Any])
         let content = try #require(response["content"] as? [String: Any])
         let json = try #require(content["application/json"] as? [String: Any])
         let schema = try #require(json["schema"] as? [String: Any])
-        let ref = try #require(schema["$ref"] as? String)
-        return String(ref.split(separator: "/").last ?? "")
+        if let ref = schema["$ref"] as? String { return [Self.name(of: ref)] }
+        let alternatives = try #require(schema["anyOf"] as? [[String: Any]])
+        return Set(
+            try alternatives.map { Self.name(of: try #require($0["$ref"] as? String)) }
+        )
+    }
+
+    /// The one name a response carries, for a status that declares no alternatives.
+    private func responseSchema(_ operation: [String: Any], status: String) throws -> String {
+        let names = try responseSchemas(operation, status: status)
+        #expect(names.count == 1, "\(status) declares alternatives: \(names.sorted())")
+        return names.first ?? ""
+    }
+
+    private static func name(of ref: String) -> String {
+        String(ref.split(separator: "/").last ?? "")
     }
 
     private func property(_ name: String, _ key: String) throws -> [String: Any] {
@@ -144,10 +162,14 @@ struct ContractTests {
         "the strict refusal is declared on create AND patch, with the fields the outbox reads",
         .tags(.contract))
     func unlinkableRefusal() throws {
+        // The patch also answers 409 with `EditKeyConflictError` (MEMNG-124), which the outbox
+        // never sends an edit key for — what it needs is that the refusal it DOES act on is still
+        // one of the shapes the status can carry.
         for (path, method) in [("/api/memos", "post"), ("/api/memos/{uid}", "patch")] {
             #expect(
-                try responseSchema(try operation(path, method), status: "409")
-                    == "UploadsUnlinkableError"
+                try responseSchemas(try operation(path, method), status: "409")
+                    .contains("UploadsUnlinkableError"),
+                "\(method.uppercased()) \(path)"
             )
         }
         let detail = try schema("UploadsUnlinkableDetail")

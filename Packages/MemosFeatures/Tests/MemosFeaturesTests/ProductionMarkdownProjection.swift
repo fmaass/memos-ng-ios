@@ -293,7 +293,13 @@ enum ProductionMarkdownProjection {
             case "h1", "h2", "h3", "h4", "h5", "h6", "p":
                 piece = inlineContent(of: child)
             case "pre":
-                piece.raw = child.rawText
+                // Inside a quote a code block is not a block at all: schema 1 flattens the quote,
+                // and the SPA's projection walks the subtree like any other — the `<code>` in it
+                // becomes an inline `code` span and the newlines in its text are whitespace, not
+                // the line breaks a `<br>` makes. (A TOP-LEVEL code block is still verbatim; that
+                // is `project`, not this.)
+                piece = inlineContent(of: child)
+                piece.raw = piece.raw.replacingOccurrences(of: "\n", with: " ")
             case "hr":
                 continue
             case "li":

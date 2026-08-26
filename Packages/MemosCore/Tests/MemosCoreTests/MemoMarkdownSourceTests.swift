@@ -14,7 +14,9 @@ struct MemoMarkdownSourceTests {
         #expect(MemoMarkdownSource.prepare(source) == source)
     }
 
-    @Test("neutralises a link the SPA would render as plain text")
+    /// A destination markdown-it's `validateLink` REFUSES never becomes a link at all, so the
+    /// characters the author typed stay on screen — brackets, destination and all.
+    @Test("leaves a destination markdown-it refuses as literal markdown")
     func neutralisesUnsafeLinks() {
         #expect(
             MemoMarkdownSource.prepare("[js](javascript:alert(1))")
@@ -23,7 +25,24 @@ struct MemoMarkdownSourceTests {
         #expect(
             MemoMarkdownSource.prepare("[d](data:text/html,hi)") == "\\[d](data:text/html,hi)"
         )
-        #expect(MemoMarkdownSource.prepare("[f](ftp://example.com)") == "\\[f](ftp://example.com)")
+        #expect(
+            MemoMarkdownSource.prepare("[v](vbscript:msgbox(1))")
+                == "\\[v](vbscript:msgbox(1))"
+        )
+    }
+
+    /// The other verdict (MEMNG-144): markdown-it BUILDS the link, and `memo_target_policy` then
+    /// drops the anchor and keeps the label's own tokens. So the destination disappears and the
+    /// label stays — emphasis included, and with linkify off inside it the way markdown-it has it.
+    @Test("reduces a link the SPA will not open to its label alone")
+    func refusedTargetsBecomeLabels() {
+        #expect(MemoMarkdownSource.prepare("[f](ftp://example.com)") == "f")
+        #expect(MemoMarkdownSource.prepare("[the host](//example.com/path)") == "the host")
+        #expect(MemoMarkdownSource.prepare("[the doc](/docs/readme.md)") == "the doc")
+        #expect(MemoMarkdownSource.prepare("[**bold**](ftp://example.com)") == "**bold**")
+        #expect(
+            MemoMarkdownSource.prepare("[see example.com](ftp://e.example)") == "see example.com"
+        )
     }
 
     @Test("removes an image whole, alt text included")
@@ -31,6 +50,68 @@ struct MemoMarkdownSourceTests {
         #expect(MemoMarkdownSource.prepare("![A red square](https://example.com/red.png)") == "")
         let source = "before ![alt](https://e.com/a.png) after"
         #expect(MemoMarkdownSource.prepare(source) == "before  after")
+    }
+
+    /// An image whose source is not a scheme this client will open keeps its alt as PLAIN text —
+    /// what `renderInlineAsText` builds, so markup is reduced to what it says, and escaped so the
+    /// words cannot open a construct of their own once they are back in the source.
+    @Test("an image with a refused source leaves its alt text behind")
+    func refusedImagesKeepTheirAlt() {
+        #expect(
+            MemoMarkdownSource.prepare("![A red square](javascript:alert(1))") == "A red square"
+        )
+        #expect(MemoMarkdownSource.prepare("![*bold* alt](data:text/html,hi)") == "bold alt")
+        #expect(
+            MemoMarkdownSource.prepare("![# not a heading](javascript:x)") == "\\# not a heading"
+        )
+    }
+
+    /// markdown-it runs linkify-it with its stock TLD table, so a bare host name is a link with
+    /// the `http://` linkify-it prepends — and nothing else is.
+    @Test("linkifies a bare host name, and only a real one")
+    func linkifiesBareDomains() {
+        #expect(
+            MemoMarkdownSource.prepare("Visit example.com for the docs.")
+                == "Visit [example.com](<http://example.com>) for the docs."
+        )
+        for text in [
+            "Ask example.internal for it.", "Open notes.txt now.", "Shipped 1.2.3 today.",
+            "Read /var/log/example.com now.", "Mail memo@example.com today.",
+            "Bare https://example.com/a?b=1 stays.", "`~/trips/2026.md` is code.",
+        ] {
+            #expect(MemoMarkdownSource.prepare(text) == text, "\(text)")
+        }
+    }
+
+    /// cmark-gfm makes the whole list a task list as soon as one item carries a checkbox, and
+    /// MarkdownUI's block model has no room for the difference — so a mixed list is split into
+    /// consecutive lists here, by the one thing CommonMark uses to tell two lists apart.
+    @Test("splits a list that mixes tasks with plain items")
+    func splitsMixedTaskLists() {
+        #expect(
+            MemoMarkdownSource.prepare("- [ ] a\n- [x] b\n- plain")
+                == "- [ ] a\n- [x] b\n* plain"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("- plain one\n- [ ] task\n- plain two")
+                == "- plain one\n* [ ] task\n- plain two"
+        )
+        #expect(
+            MemoMarkdownSource.prepare("1. plain\n2. [ ] task") == "1. plain\n2) [ ] task"
+        )
+    }
+
+    /// The other half: a list of one kind, a list already split by its markers, and a list written
+    /// inside a fence are all the author's characters.
+    @Test(
+        "a list that does not mix is left alone",
+        arguments: [
+            "- alpha\n- beta", "- [x] a\n- [ ] b", "- alpha\n* [ ] task",
+            "```\n- [x] done\n- plain\n```", "- [x] outer\n  - [ ] inner\n- [ ] last",
+        ]
+    )
+    func unmixedListsAreUntouched(source: String) {
+        #expect(MemoMarkdownSource.prepare(source) == source)
     }
 
     @Test("leaves link syntax inside a code span alone")
