@@ -126,13 +126,15 @@ struct SearchSheetTests {
         let loads = Box(0)
         let read = Signal()
         let searched = Box<MemoQuery?>(nil)
+        let shown = Box(false)
         let host = UIHostingController(
             rootView: SearchSheetTags(
                 load: { _ in
                     loads.value += 1
                     read.fire()
                 },
-                search: { query, _ in searched.value = query }
+                search: { query, _ in searched.value = query },
+                showResults: { shown.value = true }
             )
         )
         host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 200)
@@ -144,8 +146,10 @@ struct SearchSheetTests {
         read.wait()
 
         #expect(loads.value >= 1, "appearing did not read the tags")
-        // And opening the sheet searches for nothing by itself: a search is a tap on a chip.
+        // And opening the sheet searches for nothing by itself, nor leaves for a result screen:
+        // both are a tap on a chip.
         #expect(searched.value == nil)
+        #expect(!shown.value)
         withExtendedLifetime(window) {}
     }
 

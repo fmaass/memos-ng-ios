@@ -51,7 +51,7 @@ struct SearchSheet: View {
                 // Tags before the heatmap: a word is the commoner way back to a memo than a day,
                 // and the chips are one line where the heatmap is a card — first is where they
                 // are still on a medium detent at the larger text sizes.
-                SearchSheetTags(load: loadTags, search: runSearch)
+                SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
                 SearchSheetHeatmap(load: loadHeatmap, jump: jump)
             }
             MonthScrubberSlot()

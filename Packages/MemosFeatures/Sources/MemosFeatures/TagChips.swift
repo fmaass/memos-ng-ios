@@ -37,6 +37,38 @@ enum TagChipsPresentation {
     /// this app's way of saying which kind of thing the word is.
     static func label(for tag: MemoTag) -> String { "#\(tag.name)" }
 
+    /// What a tap on a chip amounts to — a value rather than a call, the way `HeatmapDateJump`
+    /// already answers the same question for a day.
+    ///
+    /// It names BOTH halves because the owner's report (MEMNG-177) was that the tap did only the
+    /// first: the query ran, and what it found then sat behind a second tap on "Show results". A
+    /// chip is one gesture, and it ends on the results.
+    enum Tap: Equatable {
+        /// Not a control at all: the tag would search for nothing, or — worse — for everything.
+        case none
+        /// Run this query with this text in the field, and go straight to what it found.
+        case searchAndShow(MemoQuery, showing: String)
+    }
+
+    static func tap(on tag: MemoTag) -> Tap {
+        guard let query = query(for: tag) else { return .none }
+        return .searchAndShow(query, showing: label(for: tag))
+    }
+
+    /// Carries a tap out.
+    ///
+    /// Its own function because "one gesture" IS the fix: spelled out at the call site it is a
+    /// convention, and a convention is the thing a later edit keeps half of.
+    static func act(
+        on tap: Tap,
+        search: (MemoQuery, String) -> Void,
+        showResults: () -> Void
+    ) {
+        guard case .searchAndShow(let query, let text) = tap else { return }
+        search(query, text)
+        showResults()
+    }
+
     /// What VoiceOver reads on a chip: what it searches for, and how much is under it.
     static func accessibilityLabel(for tag: MemoTag) -> String {
         let memos = tag.count == 1 ? "1 memo" : "\(tag.count) memos"
@@ -54,6 +86,8 @@ struct SearchSheetTags: View {
     let load: (TagStore) async -> Void
     /// Runs this query, with the text the field should then show.
     let search: (MemoQuery, String) -> Void
+    /// Leaves for what the query found. A chip does not stop at running the search (MEMNG-177).
+    let showResults: () -> Void
 
     @State private var tags = TagStore()
 
@@ -87,9 +121,10 @@ struct SearchSheetTags: View {
     /// days follow, so a tag that would search for everything is not a control at all.
     @ViewBuilder
     private func chip(_ tag: MemoTag) -> some View {
-        if let query = TagChipsPresentation.query(for: tag) {
+        let tap = TagChipsPresentation.tap(on: tag)
+        if case .searchAndShow = tap {
             Button {
-                search(query, TagChipsPresentation.label(for: tag))
+                TagChipsPresentation.act(on: tap, search: search, showResults: showResults)
             } label: {
                 TagChip(tag: tag)
             }
@@ -118,6 +153,6 @@ struct TagChip: View {
         .clipShape(.capsule)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(TagChipsPresentation.accessibilityLabel(for: tag))
-        .accessibilityHint("Searches for this tag")
+        .accessibilityHint("Searches for this tag and shows what it found")
     }
 }
