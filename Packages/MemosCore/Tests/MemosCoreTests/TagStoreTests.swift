@@ -14,14 +14,6 @@ struct TagStoreTests {
     private nonisolated static let travelAndFood =
         #"[{"name":"travel","count":3},{"name":"food","count":1}]"#
 
-    /// Keeps a request open until the test lets it go. `nonisolated static`, because it is called
-    /// from inside the scripted transport, which the client runs off the main actor.
-    private nonisolated static func hold(until release: LockedValue<Bool>) async throws {
-        while !release.get() {
-            try await Task.sleep(for: .milliseconds(1))
-        }
-    }
-
     @Test("a load fills the tags from the server, in the order it sent them")
     func loadPopulatesTags() async {
         let paths = LockedValue<[String]>([])
@@ -67,27 +59,25 @@ struct TagStoreTests {
     /// describes a tag list that is one memo out of date.
     @Test("a load overtaken by a later one is dropped")
     func supersededLoadIsDropped() async {
-        let entered = LockedValue<Bool>(false)
-        let release = LockedValue<Bool>(false)
+        let gate = RequestGate()
         let calls = Counter()
         let client = Stub.client { _, _, _ in
             calls.increment()
             guard calls.count == 1 else { return Stub.json(#"[{"name":"food","count":9}]"#) }
-            entered.set(true)
-            try await Self.hold(until: release)
+            await gate.enter()
             // The tags as they stood before the memo was written.
             return Stub.json(#"[{"name":"travel","count":1}]"#)
         }
         let store = TagStore()
 
         let stale = Task { await store.load(using: client) }
-        while !entered.get() {
-            await Task.yield()
-        }
+        // Both directions are the event itself, never a clock: this returns when the first request
+        // has actually reached the gate.
+        await gate.entered()
         await store.load(using: client)
         #expect(store.tags == [MemoTag(name: "food", count: 9)], "the later load did not land")
 
-        release.set(true)
+        await gate.release()
         await stale.value
 
         #expect(
@@ -96,5 +86,41 @@ struct TagStoreTests {
         )
         #expect(!store.isLoading, "the superseded load cleared a flag it does not own")
         #expect(calls.count == 2, "control: the dropped load is one this store really did make")
+    }
+}
+
+/// A request held open until the test lets it go, and the test's own wait for it to get there.
+///
+/// Both halves are continuations rather than polls. A `while !flag { sleep(1ms) }` answers the same
+/// question on an idle machine and, on a loaded one, spends the whole suite's patience finding out;
+/// here the transport's arrival RESUMES the test and the test's release RESUMES the transport, so
+/// the fence is exercised at whatever speed the host happens to be running at.
+private actor RequestGate {
+    private var arrived = false
+    private var released = false
+    private var arrivals: [CheckedContinuation<Void, Never>] = []
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    /// Called from inside the scripted transport: announces the request, then holds it.
+    func enter() async {
+        arrived = true
+        let waiting = arrivals
+        arrivals = []
+        for waiter in waiting { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    /// Called from the test: returns once the request has reached the gate.
+    func entered() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrivals.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiting = parked
+        parked = []
+        for waiter in waiting { waiter.resume() }
     }
 }
