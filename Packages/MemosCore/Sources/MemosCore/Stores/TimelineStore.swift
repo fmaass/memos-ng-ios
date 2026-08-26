@@ -102,11 +102,28 @@ public final class TimelineStore {
 
     private var lineage: Lineage { Lineage(generation: timelineGeneration, query: query) }
 
+    /// Which lineage the first page in flight belongs to, or nil when none is.
+    ///
+    /// `isLoading` alone cannot decide whether a refresh is redundant. The request a superseded
+    /// query left in flight is exactly what a person changing a filter is waiting for the end of,
+    /// so counting it turns the change into nothing at all: the old page is fenced out on arrival,
+    /// the new query was never read, and no trigger is left to try again. What is redundant is a
+    /// refresh of the lineage ALREADY being read; a refresh of a different one is the whole point.
+    private var loadingLineage: Lineage?
+
     public func refresh(using client: any APIProtocol, baseURL: URL) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
         let lineage = self.lineage
+        guard loadingLineage != lineage else { return }
+        loadingLineage = lineage
+        isLoading = true
+        // Only the newest reader clears the flag. A superseded request finishing while the current
+        // one is still out would otherwise take the spinner down over a list still being read.
+        defer {
+            if loadingLineage == lineage {
+                loadingLineage = nil
+                isLoading = false
+            }
+        }
         do {
             let page = try await Self.page(
                 client,
@@ -130,6 +147,14 @@ public final class TimelineStore {
             // This IS a different list — a new lineage, whose cursor no page in flight shares.
             timelineGeneration += 1
         } catch {
+            // A failure belongs to the request that suffered it. One from a list nobody is reading
+            // any more would put an error over a list that loaded perfectly well — and, on a 401,
+            // end the session on the word of a request that has been superseded. The current
+            // lineage asks the server the same question and is the one entitled to answer it.
+            guard lineage == self.lineage else {
+                MemosLog.api.info("GET /api/memos failed for a list that has moved on")
+                return
+            }
             await report(error)
         }
     }
@@ -180,6 +205,13 @@ public final class TimelineStore {
                 lastError = nil
                 return
             } catch {
+                // Fenced exactly as the page above it is: a failure that answers a superseded
+                // request says nothing about the list being read now, and the loop asks again for
+                // the page that follows the list as it stands.
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("GET /api/memos failed for a list that has moved on")
+                    continue
+                }
                 await report(error)
                 return
             }

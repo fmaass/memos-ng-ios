@@ -661,4 +661,117 @@ extension TimelineStoreTests {
         #expect(store.memos.map(\.uid) == ["a", "b"], "re-asking the same thing threw a page away")
         #expect(!store.hasMore)
     }
+
+    /// A new query has to be able to READ, not merely to be recorded.
+    ///
+    /// The request the old query has in flight is exactly what a person changing a filter is
+    /// waiting for the end of, so a "one refresh at a time" rule that counts it turns the change
+    /// into nothing at all: fenced, unread, and no trigger left to try again.
+    @Test("a refresh for a new query is not blocked by the old query's request")
+    func aNewQueryRefreshesWhileTheOldOneIsStillInFlight() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("q=travel") else {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.json(Stub.memoList(["unfiltered"], nextCursor: "page-2"))
+            }
+            return Stub.json(Stub.memoList(["travelled"], nextCursor: nil))
+        }
+        let store = TimelineStore(pageSize: 1)
+
+        let inFlight = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        #expect(store.memos.map(\.uid) == ["travelled"], "the new query never got to read anything")
+        #expect(!store.isLoading, "the store still says it is loading a query nobody is reading")
+
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.memos.map(\.uid) == ["travelled"], "the superseded page landed anyway")
+        #expect(!store.isLoading)
+        #expect(store.lastError == nil)
+    }
+
+    /// A failure belongs to the request that suffered it. One arriving late from a query nobody is
+    /// reading must not put an error over a list that loaded perfectly well — and a 401 from it
+    /// must not end the session, because the current query's own request asks the same question
+    /// and is the one entitled to answer it.
+    @Test("a failure from a superseded query is not reported")
+    func aFailureFromASupersededQueryIsDropped() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let unauthorizedCalled = LockedValue<Bool>(false)
+        let travelPages = Counter()
+        let client = Stub.client { request, _, _ in
+            guard (request.path ?? "").contains("q=travel") else {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.empty(.unauthorized)
+            }
+            travelPages.increment()
+            return travelPages.count == 1
+                ? Stub.json(Stub.memoList(["travelled"], nextCursor: nil))
+                : Stub.empty(.unauthorized)
+        }
+        let store = TimelineStore(
+            pageSize: 1,
+            onUnauthorized: { unauthorizedCalled.set(true) }
+        )
+
+        let inFlight = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.memos.map(\.uid) == ["travelled"])
+
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a failure nobody was waiting for was put on screen")
+        #expect(!unauthorizedCalled.get(), "a superseded request ended the session")
+        #expect(store.memos.map(\.uid) == ["travelled"], "the failed request disturbed the list")
+
+        // Control: the fence drops errors from a superseded lineage, not errors as such — the
+        // current query's own 401 still reports and still ends the session.
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.lastError != nil, "control: a current failure was swallowed too")
+        #expect(unauthorizedCalled.get(), "control: a current 401 no longer ends the session")
+    }
+
+    @Test("a superseded next page that fails leaves the current list alone")
+    func aFailedSupersededNextPageIsNotReported() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            if path.contains("cursor=page-2") {
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.empty(.internalServerError)
+            }
+            return Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
+        }
+        let store = TimelineStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        store.setQuery(MemoQuery(term: "travel"))
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a next page nobody is reading reported its failure")
+        #expect(store.memos.map(\.uid) == ["a"])
+    }
 }
