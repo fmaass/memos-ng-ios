@@ -13,12 +13,22 @@ import UIKit
 final class MediaImageStore {
     private let cache = NSCache<NSString, UIImage>()
     private let identity: MediaIdentity
+    /// The other half of the same picture: the response BYTES the media session caches, on disk
+    /// and across launches. Held here so that one movement of the clock empties both layers at
+    /// one seam — see `syncToIdentity`.
+    private let derived: any DerivedMediaCache
     private var filledFor: Int
 
-    init(countLimit: Int, totalCostLimit: Int, identity: MediaIdentity = .shared) {
+    init(
+        countLimit: Int,
+        totalCostLimit: Int,
+        identity: MediaIdentity = .shared,
+        derived: any DerivedMediaCache = MediaSession.shared.cache
+    ) {
         cache.countLimit = countLimit
         cache.totalCostLimit = totalCostLimit
         self.identity = identity
+        self.derived = derived
         self.filledFor = identity.generation
     }
 
@@ -27,10 +37,20 @@ final class MediaImageStore {
     /// identity forgets to call it — and the failure then is silent and wrong-looking: another
     /// account's photo, painted instantly, out of memory, with no request to notice in a log. A
     /// pull cannot be forgotten, and the check is an integer compare.
+    ///
+    /// BOTH layers go, through the same call the Storage screen's Clear makes. Only the decoded
+    /// pictures were being dropped, and the response bytes underneath them — up to 256 MB of
+    /// them, on disk, across launches — were left to expire with their signatures about two hours
+    /// later. Emptying one of two caches looks exactly like emptying both until a fetch for the
+    /// next account is answered out of the one that was kept, which is the same wrong picture one
+    /// layer down. This runs before the transport is consulted: `uiImage(for:url:)` reads the
+    /// store first, so by the time a request for the new account is made the bytes for the old
+    /// one are gone.
     private func syncToIdentity() {
         let current = identity.generation
         guard current != filledFor else { return }
         cache.removeAllObjects()
+        MediaCacheMaintenance.clear(derived)
         filledFor = current
     }
 

@@ -137,6 +137,67 @@ enum MediaFixture {
     }
 }
 
+/// A `URLCache` of a test's own, ON DISK, in a directory it creates and deletes again.
+///
+/// On disk because that is the half MEMNG-135 is about: the decoded pictures die with the
+/// process, and the response bytes do not. Not the media session's cache — that one belongs to
+/// the process, and a test that emptied it would be reaching into whatever else is running.
+@MainActor
+final class ScratchDerivedCache {
+    let directory: URL
+    let cache: URLCache
+
+    /// What this cache reports on disk while it holds NOTHING — measured, never assumed to be
+    /// zero. A `URLCache` with a directory keeps its SQLite database whatever is in it, and an
+    /// emptied one reports the size of that file (81920 bytes on the build host, which is not a
+    /// number worth writing down). So "the bytes are gone" is this floor, not 0.
+    let emptyDiskUsage: Int
+
+    init() {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("memos-media-\(UUID().uuidString)", isDirectory: true)
+        cache = URLCache(memoryCapacity: 1 << 20, diskCapacity: 8 << 20, directory: directory)
+        // The store is opened on first use, so the floor is read after asking it something —
+        // otherwise it is the size of a file that does not exist yet.
+        _ = cache.cachedResponse(
+            for: URLRequest(url: URL(string: "https://memos.example.invalid/nothing")!)
+        )
+        emptyDiskUsage = cache.currentDiskUsage
+    }
+
+    /// Puts one real response in and proves it landed: "the cache is empty afterwards" says
+    /// nothing about emptying it if the cache was never able to hold anything.
+    ///
+    /// A quarter of a megabyte, so that what reaches the disk is large enough for the byte count
+    /// to notice — an 8 px PNG does not move it off the floor. Nothing decodes this, so it does
+    /// not have to be a picture.
+    @discardableResult
+    func seed(_ url: URL) throws -> URLRequest {
+        let request = URLRequest(url: url)
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "image/jpeg"]
+            )
+        )
+        cache.storeCachedResponse(
+            CachedURLResponse(response: response, data: Data(repeating: 0x2f, count: 256 << 10)),
+            for: request
+        )
+        #expect(cache.cachedResponse(for: request) != nil, "the seed did not land")
+        return request
+    }
+
+    /// The entries go; the directory stays. Deleting it while the cache still holds the database
+    /// open is what makes libsqlite3 report "vnode unlinked while in use", and it buys nothing:
+    /// this is the simulator's own `tmp`, on a device the gate creates and destroys per run.
+    func tearDown() {
+        cache.removeAllCachedResponses()
+    }
+}
+
 @MainActor
 @Suite("MediaImageLoader", .serialized)
 struct MediaImageLoaderTests {
@@ -149,6 +210,11 @@ struct MediaImageLoaderTests {
     /// store installed below is this test's alone.
     let identity = MediaIdentity()
 
+    /// And its own response cache, for the same reason: rotating the clock now empties the
+    /// derived cache too, and with the process's own installed here a sign-out test would throw
+    /// away the bytes every other suite in the bundle fetches through.
+    let derived = URLCache(memoryCapacity: 1 << 20, diskCapacity: 0, directory: nil)
+
     /// The process-wide store is bound to the process-wide clock, and the sign-out suites rotate
     /// that clock for their own reasons — every rotation emptying the store. Sharing it would make
     /// these assertions depend on what another suite happened to be doing at the time. Everything
@@ -158,7 +224,8 @@ struct MediaImageLoaderTests {
         MediaImageLoader.store = MediaImageStore(
             countLimit: MediaImageLoader.countLimit,
             totalCostLimit: MediaImageLoader.totalCostLimit,
-            identity: identity
+            identity: identity,
+            derived: derived
         )
         // Reset rather than restored afterwards: a test that fails part-way through still leaves
         // the next one a real transport, instead of whatever stub it was holding.
@@ -519,6 +586,103 @@ struct MediaImageStoreTests {
 
         store.store(image, forKey: key, generation: store.generation)
         #expect(store.image(forKey: key) === image)
+    }
+
+    /// A uid is unique to ONE server, and the bytes behind it stay in the derived cache for as
+    /// long as the signature that fetched them is good for — about two hours. Dropping the
+    /// decoded pictures and keeping those is emptying one of two caches: the next account asking
+    /// for the same uid is answered out of the one that was kept, off the disk, with no request
+    /// anybody could notice.
+    @Test("a change of account empties the bytes on disk as well as the decoded pictures")
+    func aChangeOfAccountEmptiesBothLayers() throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let identity = MediaIdentity()
+        let store = MediaImageStore(
+            countLimit: 4,
+            totalCostLimit: 1 << 20,
+            identity: identity,
+            derived: scratch.cache
+        )
+        let key = MediaImageKey(uid: "shared-uid", tier: "thumb")
+        let image = try #require(UIImage(data: MediaFixture.png(.red)))
+        store.store(image, forKey: key, generation: store.generation)
+        let request = try scratch.seed(MediaFixture.signed(uid: "shared-uid"))
+        // A second entry, so the assertion below is "the cache holds nothing" rather than "this
+        // one key was evicted" — a per-key eviction would satisfy the first pair on its own.
+        let neighbour = try scratch.seed(MediaFixture.signed(uid: "another-uid"))
+        #expect(store.image(forKey: key) === image, "precondition: the picture is held")
+
+        identity.rotate()
+
+        // The first touch after the clock moved is what syncs — the same one call the loader
+        // makes before it goes anywhere near the transport.
+        #expect(store.image(forKey: key) == nil, "the previous account's picture is still painted")
+        #expect(
+            scratch.cache.cachedResponse(for: request) == nil,
+            "the previous account's bytes are still there to be served for its uid"
+        )
+        #expect(
+            scratch.cache.cachedResponse(for: neighbour) == nil,
+            "one entry went and the rest of the previous account's cache stayed"
+        )
+        // Back to what an empty one holds. An upper bound rather than an equality: what has not
+        // reached the disk yet cannot be counted there, so the pair above is what carries this
+        // test and this is the disk saying the same thing.
+        #expect(scratch.cache.currentDiskUsage <= scratch.emptyDiskUsage)
+    }
+
+    /// The control the test above is worthless without: with the account unchanged, ordinary use
+    /// keeps both layers. An unconditional purge would pass that test and re-download the
+    /// timeline on every tile.
+    @Test("with no change of account the bytes on disk are kept")
+    func ordinaryUseKeepsTheBytesOnDisk() throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let store = MediaImageStore(
+            countLimit: 4,
+            totalCostLimit: 1 << 20,
+            identity: MediaIdentity(),
+            derived: scratch.cache
+        )
+        let key = MediaImageKey(uid: "kept", tier: "thumb")
+        let image = try #require(UIImage(data: MediaFixture.png(.green)))
+        store.store(image, forKey: key, generation: store.generation)
+        let request = try scratch.seed(MediaFixture.signed(uid: "kept"))
+
+        // Every access syncs, so "no rotation" has to survive being asked repeatedly.
+        #expect(store.image(forKey: key) === image)
+        store.remove(forKey: MediaImageKey(uid: "somebody-else", tier: "thumb"))
+        #expect(store.image(forKey: key) === image)
+
+        #expect(scratch.cache.cachedResponse(for: request) != nil, "an ordinary read emptied it")
+    }
+
+    /// A sign-out on a launch that never loaded a photo takes the same path, and must be a no-op
+    /// rather than an error — and must leave a store that still works afterwards.
+    @Test("a change of account with nothing cached empties nothing and still answers")
+    func aChangeOfAccountWithAnEmptyCacheIsANoOp() throws {
+        let scratch = ScratchDerivedCache()
+        defer { scratch.tearDown() }
+        let identity = MediaIdentity()
+        let store = MediaImageStore(
+            countLimit: 4,
+            totalCostLimit: 1 << 20,
+            identity: identity,
+            derived: scratch.cache
+        )
+        let key = MediaImageKey(uid: "nothing-cached", tier: "thumb")
+        let request = URLRequest(url: MediaFixture.signed(uid: "nothing-cached"))
+
+        identity.rotate()
+
+        #expect(store.image(forKey: key) == nil)
+        #expect(scratch.cache.cachedResponse(for: request) == nil)
+        #expect(scratch.cache.currentDiskUsage == scratch.emptyDiskUsage)
+
+        let image = try #require(UIImage(data: MediaFixture.png(.blue)))
+        store.store(image, forKey: key, generation: store.generation)
+        #expect(store.image(forKey: key) === image, "the rotation left the store unusable")
     }
 }
 
