@@ -85,6 +85,12 @@ public final class MemoSearch {
     /// What is in the field, exactly as it was typed — trimming happens on the way to the wire,
     /// not on the way to the screen.
     public private(set) var term = ""
+    /// What the sheet has been narrowed to, alongside whatever the field holds.
+    ///
+    /// It is held here rather than in the sheet because the field and the filters are ONE
+    /// question: a keystroke has to keep the filters and a filter has to keep the term, and the
+    /// only way two pieces of view state manage that is by accident.
+    public private(set) var filters: SearchFilters = .empty
     public private(set) var outcome: MemoSearchOutcome = .idle
     /// The results, as their own list. Public because the results screen reads and pages it.
     public let results: TimelineStore
@@ -133,20 +139,64 @@ public final class MemoSearch {
         term = raw
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= Self.minimumTermLength else {
-            stop()
-            outcome = trimmed.isEmpty ? .idle : .tooShort(minimum: Self.minimumTermLength)
+            // Nothing the FIELD can send. What is left is whatever the filters ask on their own,
+            // which for a sheet nobody has narrowed is the empty query — the cleared field this
+            // has always handled, abandoned rather than fetched.
+            guard trimmed.isEmpty else {
+                cancelInFlight()
+                if filters.isEmpty { results.setQuery(.empty) }
+                outcome = .tooShort(minimum: Self.minimumTermLength)
+                return
+            }
+            ask(filters.query(), debounced: false)
             return
         }
-        let query = MemoQuery(term: trimmed)
+        ask(filters.query(term: trimmed), debounced: true)
+    }
+
+    /// Narrows the search to these filters, and re-asks with whatever the field already holds.
+    ///
+    /// No pause. The debounce exists because a field is typed into one character at a time; a chip
+    /// or a picker is chosen once, and a control that sat still for 300 ms would read as one that
+    /// did not work.
+    public func apply(_ filters: SearchFilters) {
+        self.filters = filters
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A term the field has not finished is not sent WITH the filters either: running the
+        // filters alone while a half-typed word sits in the field would be a list that quietly
+        // ignores what the person is looking at.
+        guard trimmed.isEmpty || trimmed.count >= Self.minimumTermLength else {
+            cancelInFlight()
+            outcome = .tooShort(minimum: Self.minimumTermLength)
+            return
+        }
+        ask(filters.query(term: trimmed.isEmpty ? nil : trimmed), debounced: false)
+    }
+
+    /// Asks the server this query — after the coalescing pause, or straight away.
+    ///
+    /// The pause and the request it becomes are ONE task, which is what makes a cleared field able
+    /// to stop either of them with the same `cancel()`.
+    ///
+    /// An EMPTY query is not sent at all: it is the whole timeline, and run as a search it would
+    /// put every memo the account can see behind "Show results" as though each one had matched. It
+    /// is the search being taken back, so it is `stop`.
+    private func ask(_ query: MemoQuery, debounced: Bool) {
+        guard !query.isEmpty else {
+            stop()
+            return
+        }
         guard query != asked else { return }
         asked = query
         outcome = .searching
         work?.cancel()
         work = Task { [self] in
-            await self.sleep(self.pause)
-            // The keystroke after this one cancelled the pause; the term it carries is the one
-            // that gets a request.
-            guard !Task.isCancelled else { return }
+            if debounced {
+                await self.sleep(self.pause)
+                // The keystroke after this one cancelled the pause; the term it carries is the
+                // one that gets a request.
+                guard !Task.isCancelled else { return }
+            }
             results.setQuery(query)
             await results.refresh(using: client, baseURL: baseURL)
             // Cancelled DURING the request — the field was cleared or retyped while it was out.
@@ -169,19 +219,16 @@ public final class MemoSearch {
         // An empty query is the WHOLE timeline. Run as a search it would put every memo the
         // account can see behind "Show results" as though each one had matched — which is exactly
         // what a blank or space-only tag becomes, because `MemoQuery` normalises it away.
+        //
+        // Refused HERE rather than in `ask`, and before the field is written: to `ask` an empty
+        // query is a search being taken back, and taking one back would leave the tag's text in a
+        // field over a sheet that had gone back to its invitation.
         guard !query.isEmpty else { return }
         term = text
-        guard query != asked else { return }
-        asked = query
-        outcome = .searching
-        work?.cancel()
-        work = Task { [self] in
-            results.setQuery(query)
-            await results.refresh(using: client, baseURL: baseURL)
-            // Cancelled during the request — the sheet was dismissed, or another chip tapped.
-            guard !Task.isCancelled else { return }
-            outcome = Self.answer(from: results)
-        }
+        // A shortcut is the whole request, so it replaces the whole request — filters included.
+        // Otherwise what the sheet says it has narrowed to drifts from what the store is reading.
+        filters = .empty
+        ask(query, debounced: false)
     }
 
     /// Waits for whatever this search has in flight: the pause, and the request it becomes.
