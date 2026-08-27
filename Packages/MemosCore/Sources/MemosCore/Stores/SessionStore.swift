@@ -101,6 +101,14 @@ public final class SessionStore {
     /// would be telling B a fact about A.
     private var sessionGeneration = 0
     private var client: (any APIProtocol)?
+    /// The credential the client presents, kept for the ONE request that cannot go through the
+    /// client: the original-tier download (see `OriginalMedia`).
+    ///
+    /// It is not a widening of what this process holds — the same closure is already captured by
+    /// the client every request goes through — and it is never handed out. `downloadOriginal` reads
+    /// it, builds the header and drops it; there is no accessor. It is cleared wherever `client` is,
+    /// which is the property it exists alongside.
+    private var bearer: (@Sendable () async -> String?)?
     /// The wait between the exchange's two attempts. Injected so a test can take it away: a
     /// suite that really slept would pay 1.5 s per retry case for nothing.
     private let sleeper: @Sendable (Duration) async throws -> Void
@@ -199,7 +207,8 @@ public final class SessionStore {
             adopt(
                 client: makeClient(configuration) { token },
                 configuration: configuration,
-                user: exchanged.user
+                user: exchanged.user,
+                token: { token }
             )
             if persistence == .storedNowhere { lastError = Self.storageWarning }
             return true
@@ -307,14 +316,19 @@ public final class SessionStore {
                 abandonSignIn(restoring: previousState)
                 return
             case .stored:
-                adopt(client: client, configuration: configuration, user: user)
+                adopt(
+                    client: client, configuration: configuration, user: user, token: { trimmed }
+                )
             case .storedNowhere:
-                adopt(client: client, configuration: configuration, user: user)
+                adopt(
+                    client: client, configuration: configuration, user: user, token: { trimmed }
+                )
                 lastError = Self.storageWarning
             }
         } catch {
             state = .signedOut
             self.client = nil
+            self.bearer = nil
             lastError = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }
     }
@@ -367,13 +381,16 @@ public final class SessionStore {
         let client = makeClient(configuration) { storedToken }
         do {
             let user = try await Self.whoami(client)
-            adopt(client: client, configuration: configuration, user: user)
+            adopt(
+                client: client, configuration: configuration, user: user, token: { storedToken }
+            )
         } catch let error as APIError where error == .unauthorized {
             await wipeCredential()
             lastError = error.errorDescription
         } catch {
             // The token was neither confirmed nor rejected. Park, keep, retry — see `unreachable`.
             self.client = nil
+            self.bearer = nil
             state = .unreachable(
                 (error as? APIError)?.errorDescription ?? error.localizedDescription
             )
@@ -453,9 +470,15 @@ public final class SessionStore {
     /// It is the LAST step of a sign-in, after the old licence was revoked and the new credential
     /// stored (see `persist`). Every interruption before this point leaves no licence at all, and
     /// no licence means the share extension refuses to enqueue — the only safe way to be wrong.
-    private func adopt(client: any APIProtocol, configuration: ServerConfiguration, user: User) {
+    private func adopt(
+        client: any APIProtocol,
+        configuration: ServerConfiguration,
+        user: User,
+        token: @escaping @Sendable () async -> String?
+    ) {
         self.configuration = configuration
         self.client = client
+        self.bearer = token
         // Whatever the last account's default was, it is not this one's until it is fetched.
         // This lifecycle is deliberately the licence's: the default is account-scoped in exactly
         // the way the published binding is, so it is reset where that is published and cleared
@@ -478,6 +501,7 @@ public final class SessionStore {
     private func failSignIn(_ error: NativeLoginError) {
         state = .signedOut
         client = nil
+        bearer = nil
         lastError = error.message
         lastFailure = error
     }
@@ -588,6 +612,7 @@ public final class SessionStore {
             )
         }
         client = nil
+        bearer = nil
         configuration = nil
         // The account's default belongs to the account. Carrying it into the next sign-in would
         // have the compose sheet promise someone else's setting. Cleared here, alongside the
@@ -742,6 +767,39 @@ public final class SessionStore {
         } catch {
             MemosLog.session.info("PATCH /api/settings was refused; the default is unchanged")
             return false
+        }
+    }
+
+    /// Downloads the file somebody actually uploaded, and answers where it was put.
+    ///
+    /// It lives on the session rather than on a media type of its own because of the credential:
+    /// the original tier is served unsigned and authenticated, so this is the only request outside
+    /// the generated client that has to present the device token — and the token stays in here
+    /// (see `bearer`) rather than being handed to the layer that wants the file.
+    ///
+    /// A 401 ends the session exactly as it does on every other path. The error is still thrown
+    /// afterwards, because the screen that asked for the file needs to know it is not coming.
+    public func downloadOriginal(
+        _ attachment: MemoAttachment,
+        transport: any MediaDownloadTransport = MediaSession.shared,
+        into directory: URL = .temporaryDirectory
+    ) async throws -> URL {
+        guard let url = attachment.downloadURL else { throw OriginalMediaError.unavailable }
+        guard let bearer, let token = await bearer(), !token.isEmpty else {
+            throw OriginalMediaError.notSignedIn
+        }
+        do {
+            return try await OriginalMedia.fetch(
+                url: url,
+                token: token,
+                uid: attachment.uid,
+                mime: attachment.mime,
+                transport: transport,
+                into: directory
+            )
+        } catch OriginalMediaError.refused(let error) {
+            if error == .unauthorized { await handle(.unauthorized) }
+            throw OriginalMediaError.refused(error)
         }
     }
 

@@ -1,0 +1,140 @@
+import Foundation
+import MemosAPI
+import UniformTypeIdentifiers
+
+/// What streams a response to a FILE rather than into memory.
+///
+/// A second seam beside `MediaTransport` rather than another method on it, because the two answer
+/// different questions. A tier is a picture a screen is about to draw, so it arrives as bytes; an
+/// original is the archive master — a 60 MP HEIC, or a clip of several gigabytes — and holding one
+/// of those in a `Data` is how an app is jetsammed for a file it only ever wanted to hand to the
+/// share sheet. `URLSession.download(for:)` writes it to disk as it arrives.
+public protocol MediaDownloadTransport: Sendable {
+    /// The URL loading system's own temporary copy, which it deletes as soon as this call returns
+    /// — so a caller that wants the file has to move it before then.
+    func download(_ request: URLRequest) async throws -> (URL, URLResponse)
+}
+
+extension MediaSession: MediaDownloadTransport {
+    public func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        try await session.download(for: request)
+    }
+}
+
+/// Why an original did not arrive.
+public enum OriginalMediaError: Error, Equatable, LocalizedError {
+    /// The payload carried no download URL for this file — nothing was asked for.
+    case unavailable
+    /// Nobody is signed in, so there is no credential to present. The original tier is not signed:
+    /// without a token there is no request to make.
+    case notSignedIn
+    /// The server answered, and the answer was not the file.
+    case refused(APIError)
+    /// It arrived and could not be kept.
+    case notStored(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unavailable: "This file has no original to download."
+        case .notSignedIn: "Sign in again to download this file."
+        case .refused(let error): error.errorDescription
+        case .notStored(let detail): "The download could not be saved: \(detail)"
+        }
+    }
+}
+
+extension OriginalMediaError: APIErrorCarrying {
+    /// Only a refusal is the server's word; the rest describe this device.
+    public var apiError: APIError? {
+        guard case .refused(let error) = self else { return nil }
+        return error
+    }
+}
+
+/// Fetching the file somebody actually uploaded.
+///
+/// Everything else in this app deliberately reads DERIVED tiers: `MemoPresentation.fullScreenTier`
+/// says so, and ADR-0008 is why — the original is the archive master and no screen is better for
+/// having it. This is the one deliberate exception, and it is an exception because it is not a
+/// screen: somebody asked for the file itself, to keep or to send on, and the derived copy is not
+/// the thing they asked for.
+///
+/// It does NOT go through the generated client. The route that serves it is declared as
+/// `application/json` with an empty schema (it returns a `FileResponse`, which FastAPI cannot
+/// describe), so a generated call would try to decode a photograph as JSON. Media bytes have always
+/// been fetched outside the client in this app — every tier a tile draws is — and this rides the
+/// same lane, with the one difference that matters: the original tier is UNSIGNED and
+/// authenticated (memos-ng `app/routers/assets.py`, the unsigned/auth branch), so the request
+/// carries the device credential instead of a signature.
+public enum OriginalMedia {
+    /// The request that fetches one. `Accept: */*` is stated rather than left to the URL loading
+    /// system's default, which asks for HTML first — this route serves whatever the file is.
+    public static func request(url: URL, token: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        // The archive master is fetched once, on purpose, and it is far too big to be worth a
+        // slot in a cache sized for thumbnails.
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        return request
+    }
+
+    /// What the file is saved as.
+    ///
+    /// The uid is the name because it is the only name there is: neither `AttachmentRef` nor
+    /// `AttachmentListItem` carries the original filename (only `AttachmentOut` does, and that is
+    /// the upload's own answer, not the memo's). The EXTENSION is the part that has to be right —
+    /// it is what tells the share sheet whether this is something Photos can take — so it comes
+    /// from the mime type the payload does carry.
+    public static func filename(uid: String, mime: String) -> String {
+        guard let suffix = UTType(mimeType: mime)?.preferredFilenameExtension else { return uid }
+        return "\(uid).\(suffix)"
+    }
+
+    /// The status the response has to have carried. Anything else is reported as the API error it
+    /// is, so a 401 here reaches the same rule a 401 anywhere else does.
+    static func accept(_ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw OriginalMediaError.refused(
+                .unexpected(description: "the download did not answer with a status")
+            )
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw OriginalMediaError.refused(.fromStatus(http.statusCode))
+        }
+    }
+
+    /// Fetches the original and leaves it in `directory` under `filename(uid:mime:)`.
+    ///
+    /// The move is the reason this is not two lines at a call site: the URL loading system deletes
+    /// its temporary copy the moment `download` returns, so the file has to be moved inside this
+    /// function or it is already gone. Any file of the same name is removed first — the same one
+    /// downloaded twice is the same bytes, and a stale copy left in the way would be silently
+    /// shared instead of the fresh one.
+    public static func fetch(
+        url: URL,
+        token: String,
+        uid: String,
+        mime: String,
+        transport: any MediaDownloadTransport,
+        into directory: URL = .temporaryDirectory,
+        fileManager: FileManager = .default
+    ) async throws -> URL {
+        let (temporary, response): (URL, URLResponse)
+        do {
+            (temporary, response) = try await transport.download(request(url: url, token: token))
+        } catch {
+            throw OriginalMediaError.refused(.transport(description: error.localizedDescription))
+        }
+        try accept(response)
+        let destination = directory.appending(path: filename(uid: uid, mime: mime))
+        do {
+            try? fileManager.removeItem(at: destination)
+            try fileManager.moveItem(at: temporary, to: destination)
+        } catch {
+            throw OriginalMediaError.notStored(error.localizedDescription)
+        }
+        return destination
+    }
+}

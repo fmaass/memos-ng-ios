@@ -31,6 +31,11 @@ struct MediaViewerView: View {
     /// The way out of a tab that cannot open a memo. Optional: a preview or a test host has no
     /// router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
+    /// Whose credential the original download presents. Optional for the same reason the router
+    /// is: this bundle's tests host the viewer with neither.
+    @Environment(SessionStore.self) private var session: SessionStore?
+    /// The download the menu's slow action starts, and the sheet it ends in.
+    @State private var saving = MediaSaveFlow()
     /// The page the pager has settled on — the identity of the page, not an index, because a
     /// paging scroll view tracks identity.
     @State private var currentPage: String?
@@ -61,6 +66,7 @@ struct MediaViewerView: View {
             closeButton
         }
         .overlay(alignment: .topTrailing) { actions }
+        .savingOriginal(saving)
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -145,12 +151,19 @@ struct MediaViewerView: View {
         if !available.isEmpty {
             Menu {
                 ForEach(available) { action in
-                    MediaTileActionItem(action: action) { uid in
-                        // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
-                        // presented by the tab being left would be a black screen over the memo.
-                        dismiss()
-                        jump?.request(uid)
-                    }
+                    MediaTileActionItem(
+                        action: action,
+                        showMemo: { uid in
+                            // Out of the cover FIRST: the jump changes tabs, and a full-screen
+                            // cover presented by the tab being left would be a black screen over
+                            // the memo.
+                            dismiss()
+                            jump?.request(uid)
+                        },
+                        saveOriginal: { attachment in
+                            Task { await save(attachment) }
+                        }
+                    )
                 }
             } label: {
                 Image(systemName: "ellipsis.circle.fill")
@@ -159,6 +172,17 @@ struct MediaViewerView: View {
                     .padding()
             }
             .accessibilityLabel("More")
+        }
+    }
+
+    /// Fetches the original of the file on screen and offers it to the share sheet.
+    ///
+    /// The session is what holds the credential; without one there is nothing to present, which is
+    /// the same refusal `SessionStore.downloadOriginal` makes for a session that has ended.
+    private func save(_ attachment: MemoAttachment) async {
+        await saving.save(attachment) { [session] attachment in
+            guard let session else { throw OriginalMediaError.notSignedIn }
+            return try await session.downloadOriginal(attachment)
         }
     }
 
@@ -197,6 +221,9 @@ struct MediaViewerView: View {
 struct MediaTileActionItem: View {
     let action: MediaTileAction
     let showMemo: (String) -> Void
+    /// What the slow one does. Defaulted so a surface that cannot download — a preview, a fitting
+    /// test — still builds the row rather than being handed a different menu.
+    var saveOriginal: (MemoAttachment) -> Void = { _ in }
 
     var body: some View {
         switch action {
@@ -208,6 +235,14 @@ struct MediaTileActionItem: View {
             }
         case .share(let url):
             ShareLink(item: url) {
+                Label(action.title, systemImage: action.symbol)
+            }
+        case .saveOriginal(let attachment):
+            // A plain Button, not a `ShareLink`: the file it will share does not exist yet, and
+            // the wait for it is the reason this action is not the same thing as `Share`.
+            Button {
+                saveOriginal(attachment)
+            } label: {
                 Label(action.title, systemImage: action.symbol)
             }
         }

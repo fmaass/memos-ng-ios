@@ -13,11 +13,18 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
     case showMemo(uid: String)
     /// The system share sheet, over the file's own URL.
     case share(URL)
+    /// Fetch the file as it was uploaded and hand it to the share sheet.
+    ///
+    /// It carries the whole attachment rather than a URL because the download needs three things
+    /// from it — where the original is, what it is, and what to call it — and a case that carried
+    /// only the URL would have the two surfaces reassembling the other two for themselves.
+    case saveOriginal(MemoAttachment)
 
     var id: String {
         switch self {
         case .showMemo(let uid): "show-memo:\(uid)"
         case .share(let url): "share:\(url.absoluteString)"
+        case .saveOriginal(let attachment): "save-original:\(attachment.uid)"
         }
     }
 
@@ -27,6 +34,9 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
         switch self {
         case .showMemo: "Show Memo"
         case .share: "Share"
+        // Named for what arrives, not for the sheet that follows it: what this fetches is the FILE
+        // somebody uploaded, at full size, rather than the screen-sized copy `Share` hands on.
+        case .saveOriginal: "Save Original"
         }
     }
 
@@ -34,6 +44,7 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
         switch self {
         case .showMemo: "note.text"
         case .share: "square.and.arrow.up"
+        case .saveOriginal: "square.and.arrow.down"
         }
     }
 }
@@ -47,10 +58,15 @@ enum MediaTileMenu {
     /// carries the same two actions, and neither of them is hidden behind a gesture nobody is told
     /// about. Nothing here is destructive, so nothing here is last for that reason.
     ///
-    /// Two files get fewer than two: an ORPHAN (an upload no memo references — a row this library
-    /// deliberately includes) has no memo to be shown, and a file whose canonical URL never
-    /// resolved has nothing to share. Neither is an error, and neither gets an action that would
-    /// do nothing.
+    /// Files get fewer than three: an ORPHAN (an upload no memo references — a row this library
+    /// deliberately includes) has no memo to be shown, a file whose canonical URL never resolved
+    /// has nothing to share, and one whose payload carries no original has nothing to fetch.
+    /// None of those is an error, and none of them gets an action that would do nothing.
+    ///
+    /// `Save Original` is LAST because it is the slow one: the other two happen at once, and this
+    /// one starts a download of the archive master. It is also the only one that needs the device
+    /// credential — the original tier is served unsigned and authenticated, unlike every derived
+    /// tier this app fetches (see `OriginalMedia`).
     static func actions(for attachment: MemoAttachment) -> [MediaTileAction] {
         var actions: [MediaTileAction] = []
         if let uid = attachment.memoUID {
@@ -58,6 +74,9 @@ enum MediaTileMenu {
         }
         if let url = attachment.webURL {
             actions.append(.share(url))
+        }
+        if attachment.downloadURL != nil {
+            actions.append(.saveOriginal(attachment))
         }
         return actions
     }

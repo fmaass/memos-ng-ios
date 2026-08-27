@@ -46,6 +46,16 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
     public var previewURL: URL?
     public var webURL: URL?
     public var posterURL: URL?
+    /// The file as it was uploaded — the archive master, not a tier derived from it.
+    ///
+    /// It is the odd one out among these URLs and it is worth saying why. The four above are
+    /// DERIVED tiers and the server signs them, so anything holding the URL can fetch them; this
+    /// one is served unsigned and behind authentication (memos-ng `app/routers/assets.py`, the
+    /// "UNSIGNED / AUTH PATH" branch — original and print take a token or a session, never a
+    /// signature). So it is not a link that can be handed to anything: fetching it means presenting
+    /// the device credential, which is why `SessionStore.downloadOriginal` is the only thing that
+    /// does.
+    public var downloadURL: URL?
     /// The memo this file hangs on, when the payload it came from says so (MEMNG-171).
     ///
     /// `nil` means two different things and deliberately reads as one: the file is an ORPHAN — the
@@ -68,6 +78,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
         previewURL: URL? = nil,
         webURL: URL? = nil,
         posterURL: URL? = nil,
+        downloadURL: URL? = nil,
         memoUID: String? = nil
     ) {
         self.uid = uid
@@ -81,6 +92,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
         self.previewURL = previewURL
         self.webURL = webURL
         self.posterURL = posterURL
+        self.downloadURL = downloadURL
         self.memoUID = memoUID
     }
 
@@ -216,7 +228,8 @@ extension MemoAttachment {
             thumbnailURL: URL(string: generated.thumbnailUrl, relativeTo: baseURL)?.absoluteURL,
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
-            posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL
+            posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL,
+            downloadURL: URL(string: generated.downloadUrl, relativeTo: baseURL)?.absoluteURL
         )
     }
 }
