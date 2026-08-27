@@ -58,8 +58,23 @@ public enum StoreFailure {
     /// Only cancellation is swallowed. Everything else — a 500, a decode, a phone with no network
     /// — is a thing that happened to a request somebody is waiting for, and a list that goes quiet
     /// instead of saying so is the worse failure by far.
+    ///
+    /// An error that WRAPS one of the API's own is unwrapped rather than described. The wrapping is
+    /// how a lane outside the generated client (a media upload, an original download) says which
+    /// step failed, and it must not cost the answer its identity: a 401 inside one is still the
+    /// server saying this credential is dead, and `.unexpected("…")` around it is a 401 that never
+    /// reaches the rule that ends the session.
     public static func reportable(_ error: any Error) -> APIError? {
         guard !isCancellation(error) else { return nil }
-        return (error as? APIError) ?? .unexpected(description: error.localizedDescription)
+        if let error = error as? APIError { return error }
+        if let carried = (error as? any APIErrorCarrying)?.apiError { return carried }
+        return .unexpected(description: error.localizedDescription)
     }
+}
+
+/// An error from outside the generated client that is really one of the API's own underneath.
+public protocol APIErrorCarrying {
+    /// The API failure this stands for, or nil when it stands for something else entirely — a file
+    /// that would not read, a download that would not save.
+    var apiError: APIError? { get }
 }

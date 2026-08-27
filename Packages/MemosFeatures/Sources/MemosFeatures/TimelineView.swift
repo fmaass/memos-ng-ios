@@ -659,6 +659,10 @@ public struct TimelineView: View {
                 createdAt: MemoDetailPresentation.editedDate(
                     chosen: submission.createdAt, original: createdAt
                 ),
+                // Files added to an EXISTING memo go up in the foreground, whole or not at all —
+                // the outbox above owns new captures, and a queued edit cannot be retried safely
+                // until an edit key exists to make the retry idempotent.
+                attaching: submission.attachments.map(\.stagedSource),
                 using: client,
                 baseURL: baseURL
             )

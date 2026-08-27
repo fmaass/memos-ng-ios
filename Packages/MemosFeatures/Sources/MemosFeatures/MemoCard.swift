@@ -164,6 +164,7 @@ struct MemoCard: View {
                 }
                 HStack(spacing: DesignTokens.Space.snug) {
                     pin
+                    archived
                     VisibilityPill(visibility: memo.visibility)
                 }
             }
@@ -174,9 +175,22 @@ struct MemoCard: View {
                 identity
                 Spacer(minLength: DesignTokens.Space.snug)
                 pin
+                archived
                 VisibilityPill(visibility: memo.visibility)
             }
             .padding(.horizontal, DesignTokens.Space.roomy)
+        }
+    }
+
+    /// Said out loud, because a card gives no other sign of it.
+    ///
+    /// An archived memo only appears at all under a search that asked for the archived ones, and
+    /// there it sits among active memos looking exactly like them — so the one fact that explains
+    /// why it is not in the timeline is the one fact the card was not saying.
+    @ViewBuilder
+    private var archived: some View {
+        if memo.isArchived {
+            ArchivedPill()
         }
     }
 
@@ -330,6 +344,31 @@ struct VisibilityPill: View {
         .foregroundStyle(.secondary)
         // The word leaves the SCREEN, not the app: a screen reader still hears which it is.
         .accessibilityLabel("Visibility: \(visibility.label)")
+    }
+}
+
+/// That this memo is in the archive, in the same small capsule the visibility uses.
+///
+/// It is a WORD and not only a glyph, at every text size: "archived" is not a state anybody can
+/// guess from a box icon, and it is the difference between a memo that is missing from the
+/// timeline for a reason and one that is missing by accident. `fixedSize` for the same reason the
+/// visibility pill has it — the word may never be shortened to an ellipsis.
+struct ArchivedPill: View {
+    var body: some View {
+        Label {
+            Text("Archived")
+        } icon: {
+            Image(systemName: "archivebox")
+        }
+        .labelStyle(.titleAndIcon)
+        .font(.caption.weight(.medium))
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, DesignTokens.Space.snug)
+        .padding(.vertical, DesignTokens.Space.hair)
+        .background(.quaternary, in: .capsule)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Archived")
     }
 }
 

@@ -22,6 +22,9 @@ public struct MemoDetailView: View {
     @State private var viewing: MediaViewerSelection?
     @State private var edit = MemoEditFlow()
     @State private var exit = MemoDetailExit()
+    /// An archive is in flight. The control is disabled while it is, so a second tap cannot ask
+    /// for the opposite of what the first one is still doing.
+    @State private var isArchiving = false
     @State private var feedback = MemoFeedbackTrigger()
     /// What the zoom transition matches the full-screen viewer to: the picture that was tapped.
     @Namespace private var mediaZoom
@@ -101,6 +104,20 @@ public struct MemoDetailView: View {
         // The only place editing is visible on the memo's own screen. Until this, changing a memo
         // meant knowing to long-press its card back in the timeline — see MemoDetailPresentation.
         .toolbar {
+            // Beside the pencil rather than inside a menu behind it: archiving is a deliberate,
+            // reversible act somebody came to this screen to perform, and a second tap to reach it
+            // is what made editing undiscoverable before the pencil existed.
+            if let action = MemoDetailPresentation.archiveAction(for: memo) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await archive(action) }
+                    } label: {
+                        Image(systemName: action.symbol)
+                    }
+                    .disabled(isArchiving)
+                    .accessibilityLabel(action.title)
+                }
+            }
             if let mode = MemoDetailPresentation.editMode(for: memo) {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -142,6 +159,25 @@ public struct MemoDetailView: View {
         if exit.editorClosed(memoDeleted: edit.memoDeleted) { dismiss() }
     }
 
+    /// Archives the memo, or takes it back out — and leaves the screen when the list this screen
+    /// reads no longer holds it.
+    ///
+    /// The leaving is decided by asking the store rather than by assuming: a memo archived out of
+    /// the plain timeline is gone from it, but the same memo archived while a search for the
+    /// archived ones is open is still right there, and popping then would take somebody off a
+    /// screen that is still true.
+    private func archive(_ action: MemoDetailPresentation.MemoArchiveAction) async {
+        guard let client = session?.api, let baseURL = session?.serverBaseURL else { return }
+        isArchiving = true
+        defer { isArchiving = false }
+        let changed = await timeline.setArchived(
+            action.archived, uid: uid, using: client, baseURL: baseURL
+        )
+        feedback.fire(changed ? .posted : .postFailed)
+        guard changed, !timeline.memos.contains(where: { $0.uid == uid }) else { return }
+        dismiss()
+    }
+
     /// The request itself. WHEN it runs — once, on the transition into `deleting`, for the memo
     /// the sheet is open on — is `MemoEditFlow.advanceDelete`'s decision, so that rule lives
     /// somewhere a test can drive rather than inside a view body.
@@ -153,6 +189,11 @@ public struct MemoDetailView: View {
     }
 
     /// The same edit the timeline submits, from the screen the memo is already open on.
+    ///
+    /// Files picked in the sheet ride along: they are uploaded in the foreground and the memo is
+    /// patched with them, whole or not at all (`TimelineStore.edit(attaching:)`). Deliberately not
+    /// the outbox, which owns new captures — a queued edit needs an edit key to be retryable, and
+    /// that is a separate piece of work.
     private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> Bool {
         guard case .edit(let uid, _, let createdAt) = mode,
             let client = session?.api,
@@ -164,6 +205,7 @@ public struct MemoDetailView: View {
             createdAt: MemoDetailPresentation.editedDate(
                 chosen: submission.createdAt, original: createdAt
             ),
+            attaching: submission.attachments.map(\.stagedSource),
             using: client,
             baseURL: baseURL
         )
@@ -186,15 +228,28 @@ public struct MemoDetailView: View {
                     OwnerAvatar(owner: memo.owner, size: avatar)
                     identity
                 }
-                VisibilityPill(visibility: memo.visibility)
+                HStack(spacing: DesignTokens.Space.snug) {
+                    archived
+                    VisibilityPill(visibility: memo.visibility)
+                }
             }
         } else {
             HStack(spacing: DesignTokens.Space.snug) {
                 OwnerAvatar(owner: memo.owner, size: avatar)
                 identity
                 Spacer(minLength: DesignTokens.Space.snug)
+                archived
                 VisibilityPill(visibility: memo.visibility)
             }
+        }
+    }
+
+    /// The same capsule the card wears, for the same reason: this screen is reachable from a
+    /// search that included the archived ones, and nothing else on it would say so.
+    @ViewBuilder
+    private var archived: some View {
+        if memo.isArchived {
+            ArchivedPill()
         }
     }
 

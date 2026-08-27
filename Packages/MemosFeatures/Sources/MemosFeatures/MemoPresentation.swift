@@ -172,6 +172,33 @@ public enum MemoDetailPresentation {
         memoDeleted && sheetClosed ? .popToOverview : .stay
     }
 
+    /// The archive affordance a memo's screen offers: what it will ask the server for, and what it
+    /// says.
+    ///
+    /// One action with a direction rather than two, because on the wire it IS one call — `archived`
+    /// is a boolean on the patch. The direction is derived from the memo, so a screen cannot offer
+    /// "Archive" on something already archived.
+    public struct MemoArchiveAction: Equatable, Sendable {
+        /// The state being asked for, which is always the opposite of the memo's own.
+        public let archived: Bool
+        public let title: String
+        public let symbol: String
+    }
+
+    /// What the archive control on this memo's screen does, or nil when there is no such control.
+    ///
+    /// Nil-gated on `mine` exactly as `editMode` is, and for the same reason: the server refuses
+    /// the write on somebody else's memo, and an affordance that leads to a 403 is worse than
+    /// none at all.
+    public static func archiveAction(for memo: Memo) -> MemoArchiveAction? {
+        guard memo.mine else { return nil }
+        return memo.isArchived
+            ? MemoArchiveAction(
+                archived: false, title: "Restore memo", symbol: "arrow.uturn.backward"
+            )
+            : MemoArchiveAction(archived: true, title: "Archive memo", symbol: "archivebox")
+    }
+
     /// The date an edit actually SENDS: only one the editor moved.
     ///
     /// An untouched date would be a rewrite of the memo's own value dressed up as an edit. It is a

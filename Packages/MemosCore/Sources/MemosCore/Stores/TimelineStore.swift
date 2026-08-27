@@ -1,5 +1,9 @@
 import Foundation
 import MemosAPI
+// For `StagedSource`: the four things an upload needs to know about a picked file. It is the
+// outbox's type because the outbox was the first lane to need it, and a second identical struct
+// here would be a second answer to "what is a file about to be uploaded".
+import MemosOutbox
 
 /// How a tie in `created_at` is settled, which is the one part of the server's ordering the app
 /// cannot read off a memo.
@@ -409,23 +413,45 @@ public final class TimelineStore {
     }
 
     /// Replaces a memo's content with what the editor produced, and — when the editor was given a
-    /// date — the display date it carries.
+    /// date — the display date it carries, and — when the editor picked files — the media that
+    /// goes on it.
     ///
     /// `createdAt` is left OUT of the request when it is nil rather than sent as the memo's
     /// current value: a PATCH is a partial update, and an edit that did not touch the date has no
     /// business rewriting it. The web app sends the date on every edit because its editor always
-    /// holds one; here the absence is what says "unchanged".
+    /// holds one; here the absence is what says "unchanged". `attaching` is absent in exactly the
+    /// same way, and it matters more: `upload_uids` on a patch ADDS attachments
+    /// (`app/routers/memos.py` links the finalized uploads onto the memo), so an empty array sent
+    /// on every edit would be a field the server has to ignore rather than a statement about this
+    /// one.
+    ///
+    /// The files go up FIRST, in the foreground, and the memo is patched only once every one of
+    /// them has landed. That order is the rollback: an upload that fails means no patch is sent at
+    /// all, so a media edit either happens whole or does not happen — the memo keeps its text, its
+    /// date and its attachments, and the sheet stays open with the words still in it. Uploads that
+    /// did land before the failure are pending sessions the server expires; nothing links them, so
+    /// nothing appears half-attached.
     @discardableResult
     public func edit(
         uid: String,
         content: String,
         createdAt: Date? = nil,
+        attaching files: [StagedSource] = [],
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
-        await patch(
+        var uploadUIDs: [String]?
+        if !files.isEmpty {
+            do {
+                uploadUIDs = try await MediaUpload.uploadAll(files, using: client)
+            } catch {
+                await report(error)
+                return false
+            }
+        }
+        return await patch(
             uid: uid,
-            .init(content: content, createdAt: createdAt),
+            .init(content: content, createdAt: createdAt, uploadUids: uploadUIDs),
             using: client,
             baseURL: baseURL
         )
@@ -442,6 +468,28 @@ public final class TimelineStore {
         await patch(
             uid: uid, .init(visibility: visibility.generated), using: client, baseURL: baseURL
         )
+    }
+
+    /// Archives a memo, or takes it back out of the archive.
+    ///
+    /// One call for both directions, because on the wire it IS one call: `archived` is a Boolean on
+    /// `MemoPatch`, and the server turns it into a timestamp or a null (`app/services/memos.py`).
+    /// A pair of methods would be two spellings of one request that could drift apart.
+    ///
+    /// Nothing moves before the server answers. Archiving is reversible, so an optimistic version
+    /// would not be the disaster an optimistic delete is — but it would still show a memo leaving a
+    /// list it is in fact still in whenever the write fails, and this store already has exactly one
+    /// optimistic write (`toggleTask`) for a reason that does not apply here. What DOES happen when
+    /// the answer arrives is that the memo leaves the loaded list if this list is no longer asking
+    /// for it: see `apply`.
+    @discardableResult
+    public func setArchived(
+        _ archived: Bool,
+        uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        await patch(uid: uid, .init(archived: archived), using: client, baseURL: baseURL)
     }
 
     /// Pins or unpins through the server's own routes rather than by patching the flag: pinning
@@ -801,15 +849,30 @@ public final class TimelineStore {
     }
 
     /// Replaces the loaded copy of a memo with the server's, if it is on screen at all — and
-    /// MOVES it when the server's copy no longer belongs where the old one sat.
+    /// MOVES it when the server's copy no longer belongs where the old one sat, or DROPS it when
+    /// this list is not asking for memos in the state the server says it is now in.
     ///
     /// A memo whose display date changed has left the day it was filed under, and the timeline is
     /// cut into days: replacing it in place would leave it printed under the old date, above
     /// memos newer than it, until something else forced a refresh. So it is re-placed — and only
     /// when an ordering key actually moved, because an ordinary content edit must not reshuffle
     /// a list whose exact order came from the server.
+    ///
+    /// The drop is the archive: a memo archived out of a plain timeline, or restored out of the
+    /// archived-only list, is a memo the request behind this list would not have returned. Keeping
+    /// it would leave a row that the next refresh removes without explanation. It happens HERE, in
+    /// the one place every server answer lands, so an archive made from a card, from the memo's own
+    /// screen, or noticed by the reconciling read all reach the same conclusion.
     public func apply(_ memo: Memo) {
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
+        guard query.admitsArchiveState(of: memo) else {
+            memos.remove(at: position)
+            // Same fence a delete raises, and for the same reason: a cursor page read while this
+            // memo still belonged here overlaps the rows around it and would put it back.
+            timelineGeneration += 1
+            newerCursor = nil
+            return
+        }
         let previous = memos[position]
         guard previous.createdAt != memo.createdAt || previous.pinned != memo.pinned else {
             memos[position] = memo

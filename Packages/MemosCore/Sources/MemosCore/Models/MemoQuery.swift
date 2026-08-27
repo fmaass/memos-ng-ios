@@ -181,6 +181,25 @@ public struct MemoQuery: Sendable, Equatable, Codable {
         )
     }
 
+    /// Whether this query still admits a memo whose ARCHIVE state has just changed.
+    ///
+    /// Only the archive dimension, and that limit is the point. A memo archived from the timeline
+    /// has left the list it was sitting in — the request said `archived_at IS NULL` — and a row
+    /// that stays behind is a row the next refresh silently removes, which reads as the app losing
+    /// a memo. So the one dimension a client write actually MOVES is judged here.
+    ///
+    /// The others are deliberately not. Whether a memo still matches `q`, a tag set or a
+    /// visibility is a question the server answers with a full-text index and a join, and
+    /// re-deriving it here would evict rows the server would have kept — a worse lie than a stale
+    /// one, because nothing brings them back until a refresh.
+    public func admitsArchiveState(of memo: Memo) -> Bool {
+        // The server's own precedence: `archived_only` wins, and `include_archived` is consulted
+        // only when it is off (`app/services/memos.py:316-319`).
+        if archivedOnly { return memo.isArchived }
+        if includeArchived { return true }
+        return !memo.isArchived
+    }
+
     /// A term of nothing but spaces is not a search, and a tag of nothing but spaces is not a tag:
     /// both are normalised away here, once, so a blank field can never reach the wire as `q=` and
     /// two queries that ask the same thing compare equal.
