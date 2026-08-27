@@ -83,10 +83,19 @@ final class SearchDaySelection {
 /// reachable.
 struct SearchDateScrubber: View {
     let grid: HeatmapGrid
-    @Binding var expanded: Bool
-    /// Takes the timeline to a day. Called on the end of a scrub and on a picked date, never
-    /// while a finger is moving.
-    let commit: (MemoQueryAnchor) -> Void
+    /// Every day the account has anything on, keyed as the server keys them — the WHOLE history,
+    /// not the twelve weeks the grid draws. The commit row's count and the picker's lower bound
+    /// are both questions the window cannot answer (`SearchDayCounts`, MEMNG-187).
+    let counts: [String: Int]
+    /// Whether `counts` is the server's answer rather than the emptiness in front of one. Not the
+    /// same question as `phase`, which a FAILED read also answers: an account that HAS no memos
+    /// and an account nobody could ask are one empty dictionary, and only this separates them
+    /// (`SearchDayCounts.loaded`).
+    var countsLoaded: Bool = false
+    /// A day was chosen, and how it was chosen. The caller takes the timeline there; for a day the
+    /// commit row settled, it also puts the sheet away (`SearchDayChoice`). Never called while a
+    /// finger is moving.
+    let chose: (SearchDayChoice) -> Void
     /// Whether the counts under the scrubber are the server's answer yet — threaded through to
     /// the card, which draws a waiting grid greyed, inert and at its final size (MEMNG-175/176).
     var phase: SearchSectionPhase = .ready
@@ -95,21 +104,44 @@ struct SearchDateScrubber: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-            SearchDateRow(day: picked)
+            SearchDateRow(
+                day: picked,
+                range: dayCounts.pickerRange(earliestDrawn: grid.cells.first?.day)
+            )
             HeatmapCard(
                 grid: grid,
-                expanded: $expanded,
                 scrubbing: HeatmapScrubbing(
                     selectedKey: selection.selectedKey,
                     move: { selection.scrub(to: $0.day) },
                     end: {
-                        if let anchor = selection.endScrub() { commit(anchor) }
+                        if let anchor = selection.endScrub() { chose(.field(anchor)) }
                     },
                     cancelled: { selection.cancelScrub() }
                 ),
                 phase: phase
             )
+            // Under the grid, because it is what the grid was for: the day is chosen above it and
+            // this is the sentence that says what choosing it will show.
+            SearchDayCommitRow(
+                row: SearchDayCommit.row(
+                    for: selection.day, count: dayCounts.count(on: selection.day)
+                ),
+                choose: chose
+            )
         }
+    }
+
+    /// What the sheet knows about the days it offers.
+    ///
+    /// Today is the grid's OWN last day rather than a fresh reading of the clock: the squares, the
+    /// field and the picker's upper bound then agree by construction, including across the midnight
+    /// a sheet can be left open over.
+    private var dayCounts: SearchDayCounts {
+        SearchDayCounts(
+            byDay: counts,
+            today: grid.cells.last?.day ?? HeatmapDateJump.anchorCalendar.startOfDay(for: .now),
+            loaded: countsLoaded
+        )
     }
 
     /// The picker writes through the selection rather than into it: the day it hands back is read
@@ -119,9 +151,43 @@ struct SearchDateScrubber: View {
         Binding(
             get: { selection.pickerDate() },
             set: { picked in
-                if let anchor = selection.pick(picked) { commit(anchor) }
+                if let anchor = selection.pick(picked) { chose(.field(anchor)) }
             }
         )
+    }
+}
+
+/// The row that closes the sheet on a day.
+///
+/// Plain rather than prominent: it is the way OUT of a sheet, not a submission, and a filled
+/// button under a grid of coloured squares would be the loudest thing on the screen. Its own view
+/// because it is the piece a test drives — activating this element is the same call the button's
+/// action gets from a finger, and nothing else proves the row does anything at all.
+struct SearchDayCommitRow: View {
+    let row: SearchDayCommit.Row
+    let choose: (SearchDayChoice) -> Void
+
+    var body: some View {
+        Button {
+            guard let anchor = row.anchor else { return }
+            choose(.shown(anchor))
+        } label: {
+            Text(row.label)
+                .font(.headline)
+                .foregroundStyle(tint)
+                .frame(maxWidth: .infinity)
+                .padding(DesignTokens.Space.regular)
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .disabled(row.anchor == nil)
+        .accessibilityHint("Shows this day in the timeline and closes the search")
+    }
+
+    private var tint: AnyShapeStyle {
+        row.anchor == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(DesignTokens.accent)
     }
 }
 
@@ -131,6 +197,11 @@ struct SearchDateScrubber: View {
 /// flexible gap reports back whatever width it is offered rather than the width the row needs.
 struct SearchDateRow: View {
     @Binding var day: Date
+    /// The days the picker may offer, already in the DEVICE's calendar — a bound read in the wrong
+    /// one is a bound on the day before or after (`SearchDayCounts.pickerRange`). Its lower end is
+    /// the account's first day: a day picked before the first memo would anchor the timeline at a
+    /// feed with nothing in it (MEMNG-187).
+    let range: ClosedRange<Date>
 
     var body: some View {
         HStack(spacing: DesignTokens.Space.snug) {
@@ -141,7 +212,7 @@ struct SearchDateRow: View {
             }
             .foregroundStyle(.secondary)
             Spacer(minLength: DesignTokens.Space.snug)
-            DatePicker("Date", selection: $day, displayedComponents: .date)
+            DatePicker("Date", selection: $day, in: range, displayedComponents: .date)
                 .labelsHidden()
                 .datePickerStyle(.compact)
         }

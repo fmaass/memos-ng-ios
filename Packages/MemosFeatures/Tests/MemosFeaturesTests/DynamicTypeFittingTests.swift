@@ -75,10 +75,10 @@ struct DynamicTypeFittingTests {
     }
 
     /// The card the search sheet's empty-query state is made of — the timeline's header until
-    /// MEMNG-126, and the same card either way. Its squares are a texture rather than type, so the
-    /// thing that has to hold is that the grid grows with the text size and then STOPS — twelve
-    /// weeks of cells at the accessibility scale factor would want a grid three times wider than
-    /// the card, and a grid wider than its card is drawn off the edge of the screen.
+    /// MEMNG-126, and the same card either way. Its squares answer the card's WIDTH now rather
+    /// than the text size (MEMNG-186, and the test below it), so what is left to hold here is
+    /// everything around them: the card's own line still grows with the type and still fits, and
+    /// the card as a whole is still taller at the accessibility sizes than at the default.
     ///
     /// The sheet's content width and the timeline row's are the same 361pt, so this measurement
     /// holds for the card in its new home without being taken twice.
@@ -89,40 +89,78 @@ struct DynamicTypeFittingTests {
             from: ["2026-08-25": 4], today: Date(timeIntervalSince1970: 1_787_702_400)
         )
 
-        let cells = HeatmapGridView(grid: grid)
-        let cellsLargest = LayoutProbe.idealWidth(cells, typeSize: .accessibility5)
-        #expect(cellsLargest <= content, "the grid wants \(cellsLargest)pt of \(content)")
-        // The days that answer to a finger are the same size as the days that do not: scrubbing
-        // is what a square DOES, not a shape wrapped around it, and a grid that grew when it
-        // became a control would run off the sheet at exactly the text sizes this test exists for.
+        let header = HeatmapHeader()
+        let headerLargest = LayoutProbe.idealWidth(header, typeSize: .accessibility5)
+        #expect(headerLargest <= content, "the card's line wants \(headerLargest)pt")
+        #expect(headerLargest > LayoutProbe.idealWidth(header, typeSize: .large))
+
+        // The whole card, at the width the list really gives it: never wider than its row, and
+        // taller at the largest text size — so it answered the size rather than ignoring it.
+        let card = HeatmapCard(grid: grid)
+        let largest = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .accessibility5)
+        let ordinary = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .large)
+        #expect(largest.width <= Self.cardWidth)
+        #expect(largest.height > ordinary.height, "the card ignored the text size")
+    }
+
+    /// MEMNG-186. The squares were sized by `@ScaledMetric`: twelve columns of 12pt cells sitting
+    /// in the left third of a 337pt card, growing to a capped 26 only at the accessibility sizes.
+    /// A grid of squares is not a function of the text size — it is a function of the width it is
+    /// given, and there is now one value that says so for both the drawing and the hit test.
+    ///
+    /// So the assertion is the geometry itself: the grid is drawn at exactly the size
+    /// `HeatmapGeometry` computes for the width the card offers, it fills that width, and it is
+    /// the same grid at every text size because the card is the same width at every text size.
+    @Test("the heatmap grid is drawn from the card's width at every text size")
+    func theHeatmapGridIsDrawnFromTheCardsWidth() {
+        let content = Self.cardWidth - 2 * DesignTokens.Space.regular
+        // A household that has been writing for the whole window, so the grid really is twelve
+        // columns wide. A young account's grid is a column or two and the 44pt cap binds instead
+        // of the card — which is correct, and proves nothing about the width.
+        let grid = HeatmapPresentation.grid(
+            from: ["2026-06-04": 1, "2026-08-25": 4],
+            today: Date(timeIntervalSince1970: 1_787_702_400)
+        )
+        #expect(grid.columns.count == 12, "the fixture is not a full twelve-week window")
+        let geometry = HeatmapGeometry(
+            availableWidth: content, of: grid, gap: HeatmapGridView.gap
+        )
+
+        let drawn = LayoutProbe.size(HeatmapGridView(grid: grid), width: content, typeSize: .large)
+        #expect(
+            drawn.width == geometry.width,
+            "the grid drew \(drawn.width)pt where the geometry says \(geometry.width)pt"
+        )
+        #expect(drawn.height == geometry.height)
+        // It fills the card it is in: what is left over is under a point a column.
+        #expect(
+            content - drawn.width < CGFloat(grid.columns.count),
+            "\(content - drawn.width)pt of the card went unused"
+        )
+
+        // The same at the largest text size. The card is no wider there, so the grid is no wider
+        // either — and no narrower: the cells are a texture, not type.
+        let largest = LayoutProbe.size(
+            HeatmapGridView(grid: grid), width: content, typeSize: .accessibility5
+        )
+        #expect(largest == drawn, "the grid answered the text size instead of the width")
+
+        // And the days that answer to a finger are the same size as the days that do not:
+        // scrubbing is what a square DOES, not a shape wrapped around it.
         let scrubbable = HeatmapGridView(
             grid: grid,
             scrubbing: HeatmapScrubbing(
                 selectedKey: "2026-08-25", move: { _ in }, end: {}, cancelled: {}
             )
         )
-        #expect(
-            LayoutProbe.idealWidth(scrubbable, typeSize: .accessibility5) == cellsLargest,
-            "the scrubbable grid is not the size of the inert one"
+        #expect(LayoutProbe.size(scrubbable, width: content, typeSize: .large) == drawn)
+
+        // Control: the measurement really does follow the width it is offered, so the equalities
+        // above are the geometry and not a grid that ignores everything.
+        let narrow = LayoutProbe.size(
+            HeatmapGridView(grid: grid), width: content / 2, typeSize: .large
         )
-        // And it fits because it is capped, not because it was pinned: a grid that ignored the
-        // text size would measure the same at both.
-        #expect(cellsLargest > LayoutProbe.idealWidth(cells, typeSize: .large))
-
-        for expanded in [true, false] {
-            let header = HeatmapHeader(expanded: expanded)
-            let headerLargest = LayoutProbe.idealWidth(header, typeSize: .accessibility5)
-            #expect(headerLargest <= content, "the disclosure wants \(headerLargest)pt")
-            #expect(headerLargest > LayoutProbe.idealWidth(header, typeSize: .large))
-        }
-
-        // The whole card, at the width the list really gives it: never wider than its row, and
-        // taller at the largest text size — so it answered the size rather than ignoring it.
-        let card = HeatmapCard(grid: grid, expanded: .constant(true))
-        let largest = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .accessibility5)
-        let ordinary = LayoutProbe.size(card, width: Self.cardWidth, typeSize: .large)
-        #expect(largest.width <= Self.cardWidth)
-        #expect(largest.height > ordinary.height, "the card ignored the text size")
+        #expect(narrow.width < drawn.width)
     }
 
     /// A tag chip is a control with a word in it, so it has to grow with the word — and still fit

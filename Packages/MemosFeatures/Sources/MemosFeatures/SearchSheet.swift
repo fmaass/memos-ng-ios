@@ -18,12 +18,18 @@ struct SearchSheet: View {
     /// because it is what makes the read the SHEET's: it happens when the sheet opens, and at no
     /// other moment.
     let loadHeatmap: (HeatmapStore) async -> Void
-    /// Takes the timeline to a day, and the sheet STAYS. The heatmap is a scrubber now
-    /// (MEMNG-178): a sheet that put itself away on every release would be a date field nobody
-    /// could correct, and the highlight a typed date moves would never be seen moving. The sheet
-    /// does not decide which days can be chosen — `HeatmapDateJump` does — and it does not do the
-    /// jumping either.
-    let jump: (MemoQueryAnchor) -> Void
+    /// Takes the timeline to a day, and says whether the sheet goes with it.
+    ///
+    /// Scrubbing and picking leave the sheet UP. The heatmap is a scrubber (MEMNG-178): a sheet
+    /// that put itself away on every release would be a date field nobody could correct, and the
+    /// highlight a typed date moves would never be seen moving. That is narrowed rather than
+    /// overturned by MEMNG-187 — what stays up is the FIELD being moved. The commit row under it
+    /// is the one verb that settles the day, and settling it is what dismisses the sheet, because
+    /// the anchored list and the notice naming the day are drawn underneath it.
+    ///
+    /// Which of the two happened is `SearchDayChoice`'s to say. The sheet does not decide which
+    /// days can be chosen — `HeatmapDateJump` does — and it does not do the jumping either.
+    let chose: (SearchDayChoice) -> Void
     /// Reads the account's tags into the store the chips draw. Same shape and same lifetime as
     /// `loadHeatmap`: one read, when the sheet opens.
     let loadTags: (TagStore) async -> Void
@@ -55,7 +61,7 @@ struct SearchSheet: View {
                 // and the chips are one line where the heatmap is a card — first is where they
                 // are still on a medium detent at the larger text sizes.
                 SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
-                SearchSheetHeatmap(load: loadHeatmap, jump: jump)
+                SearchSheetHeatmap(load: loadHeatmap, chose: chose)
             }
             MonthScrubberSlot()
         }
@@ -216,19 +222,22 @@ struct SearchOutcomeRow: View {
 /// loads it.
 struct SearchSheetHeatmap: View {
     let load: (HeatmapStore) async -> Void
-    let jump: (MemoQueryAnchor) -> Void
+    let chose: (SearchDayChoice) -> Void
 
     @State private var heatmap = HeatmapStore()
-    /// Folded away or not. Not persisted: the sheet is opened to be used, and a heatmap that
-    /// starts hidden is one nobody finds again.
-    @State private var expanded = true
     @State private var lifecycle = SearchSectionLoad()
 
     var body: some View {
         SearchDateScrubber(
             grid: HeatmapPresentation.grid(from: heatmap.counts),
-            expanded: $expanded,
-            commit: jump,
+            // The grid is a window on these; the commit row and the picker's range need the whole
+            // of them (`SearchDayCounts`).
+            counts: heatmap.counts,
+            // Whether that emptiness is an answer. `phase` below cannot say: it counts a failed
+            // read as answered, and a failed read is the one case that must not claim the
+            // household wrote nothing (`SearchDayCounts.loaded`).
+            countsLoaded: heatmap.hasLoaded,
+            chose: chose,
             phase: SearchSectionPhase.phase(
                 hasLoaded: heatmap.hasLoaded,
                 failed: heatmap.lastError != nil

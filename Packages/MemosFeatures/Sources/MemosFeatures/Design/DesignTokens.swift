@@ -59,9 +59,5 @@ public enum DesignTokens {
         public static let photoRow: CGFloat = 150
         public static let pickedThumbnail: CGFloat = 72
         public static let signInMark: CGFloat = 96
-        /// One day of the activity heatmap. Small on purpose — twelve weeks of them stand side by
-        /// side, so the square is read as a texture rather than as a control, and its growth is
-        /// capped at the card's own width (`HeatmapGridView.maxSide`).
-        public static let heatCell: CGFloat = 12
     }
 }

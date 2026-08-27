@@ -17,6 +17,7 @@ struct HeatmapScrubTests {
     /// Midnight UTC on Wednesday 26 August 2026 — the same instant the presentation and jump
     /// suites derive their windows from.
     private static let today = Date(timeIntervalSince1970: 1_787_702_400)
+    /// The square the geometry below comes out at, and the air after it.
     private static let side: CGFloat = 12
     private static let gap: CGFloat = 2
     private static var pitch: CGFloat { side + gap }
@@ -28,9 +29,18 @@ struct HeatmapScrubTests {
         HeatmapPresentation.grid(from: ["2026-08-24": 3, "2026-06-04": 1], today: today)
     }
 
+    /// The geometry these readings are taken through, built the way the card builds it — from a
+    /// width (MEMNG-186). This is the width at which the square comes out at 12pt, so every
+    /// coordinate below is still one pitch of 14 and the readings are the same ones.
+    private static func geometry(_ grid: HeatmapGrid) -> HeatmapGeometry {
+        let columns = grid.columns.count
+        let width = side * CGFloat(columns) + gap * CGFloat(max(columns - 1, 0))
+        return HeatmapGeometry(availableWidth: width, of: grid, gap: gap)
+    }
+
     private func cell(_ x: CGFloat, _ y: CGFloat, in grid: HeatmapGrid) -> HeatCell? {
         HeatmapScrub.cell(
-            at: CGPoint(x: x, y: y), in: grid, side: Self.side, gap: Self.gap
+            at: CGPoint(x: x, y: y), in: grid, geometry: Self.geometry(grid)
         )
     }
 
@@ -131,6 +141,10 @@ struct HeatmapScrubTests {
         #expect(cell(50, 50, in: empty) == nil)
         // Positive control: the same point on a real grid answers, so the nils are the emptiness.
         #expect(cell(0, 0, in: Self.full) != nil)
+        // And a real grid that has not been laid out yet is the same answer for the same reason:
+        // no square, so no day (MEMNG-186).
+        let unmeasured = HeatmapGeometry(availableWidth: 0, of: Self.full, gap: Self.gap)
+        #expect(HeatmapScrub.cell(at: .zero, in: Self.full, geometry: unmeasured) == nil)
     }
 
     @Test("a square with nothing written on it is still a day the scrubber can reach")

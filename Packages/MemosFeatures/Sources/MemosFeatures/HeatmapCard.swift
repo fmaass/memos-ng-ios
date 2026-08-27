@@ -7,15 +7,15 @@ import SwiftUI
 /// where a date is looked for, and a card the timeline was headed by put a second request in front
 /// of every pull of the list (MEMNG-166) for something a reader was not asking for.
 ///
-/// It folds away behind a disclosure, because a card that a reader cannot put away is a card that
-/// crowds whatever it is introducing.
+/// It is shown, always. It used to fold away behind a disclosure, and a card a household folded
+/// once was one it never found again: the sheet then opened as a title over a date field with
+/// nothing under it to scrub, which is the opposite of what the section is for (MEMNG-192).
 ///
 /// The squares answer to a finger only when the sheet hands it something to move: `scrubbing` is
 /// what turns the grid into the date field's scrubber (MEMNG-178). The web client's cells are
 /// inert `<span>`s, so a heatmap drawn without it is still the parity port of them.
 struct HeatmapCard: View {
     let grid: HeatmapGrid
-    @Binding var expanded: Bool
     /// What a finger on the grid moves, or nil for a heatmap that is only a picture.
     var scrubbing: HeatmapScrubbing?
     /// Whether the counts are the server's answer or the absence of one.
@@ -28,32 +28,20 @@ struct HeatmapCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-            Button {
-                withAnimation(.snappy) { expanded.toggle() }
-            } label: {
-                HeatmapHeader(expanded: expanded)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Activity")
-            .accessibilityValue(expanded ? "Shown" : "Hidden")
-            .accessibilityHint("Shows or hides the activity heatmap")
+            HeatmapHeader()
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            if expanded {
-                HeatmapGridView(
-                    grid: grid,
-                    // A placeholder day is not a control: every square is level 0 while the
-                    // counts are unknown, so a scrub would move the field to a date chosen by
-                    // the absence of data.
-                    scrubbing: phase.acceptsTaps ? scrubbing : nil,
-                    summary: HeatmapPresentation.summary(for: grid, loaded: phase == .ready)
-                )
-                .redacted(reason: phase == .loading ? .placeholder : [])
-                // The counts landing is not an animation. Keyed on the phase rather than put on
-                // the card, so the disclosure above keeps its own `withAnimation(.snappy)`.
-                .transaction(value: phase) { $0.disablesAnimations = true }
-            }
+            HeatmapGridView(
+                grid: grid,
+                // A placeholder day is not a control: every square is level 0 while the
+                // counts are unknown, so a scrub would move the field to a date chosen by
+                // the absence of data.
+                scrubbing: phase.acceptsTaps ? scrubbing : nil,
+                summary: HeatmapPresentation.summary(for: grid, loaded: phase == .ready)
+            )
+            .redacted(reason: phase == .loading ? .placeholder : [])
+            // The counts landing is not an animation.
+            .transaction(value: phase) { $0.disablesAnimations = true }
         }
         .padding(DesignTokens.Space.regular)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -62,20 +50,14 @@ struct HeatmapCard: View {
     }
 }
 
-/// The disclosure line. Chevron FIRST, so the row has an intrinsic width a fitting test can
-/// measure — a trailing `Spacer` would make it report whatever it was offered.
+/// The card's line, and a LABEL rather than a control since MEMNG-192 — there is nothing left to
+/// disclose. It stays its own view because it is measured: the fitting test asks what the line
+/// wants at the largest text size, and a line inside the card would report the card's width.
 struct HeatmapHeader: View {
-    let expanded: Bool
-
     var body: some View {
-        HStack(spacing: DesignTokens.Space.tight) {
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .rotationEffect(.degrees(expanded ? 90 : 0))
-            Text("Activity")
-                .font(.subheadline.weight(.semibold))
-        }
-        .foregroundStyle(.secondary)
+        Text("Activity")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -89,15 +71,6 @@ struct HeatmapGridView: View {
     /// which — see `HeatmapPresentation.summary(for:loaded:)`.
     var summary: String?
 
-    /// The square grows with the text size, because a fixed 12pt cell beside 50pt type is the
-    /// defect `DesignTokens.Metric` exists to prevent — but only up to `maxSide`. Eighty-four
-    /// squares at the accessibility scale factor would want a grid three times wider than any
-    /// phone, so the growth stops where the narrowest card stops rather than running off it.
-    @ScaledMetric(relativeTo: .caption2) private var side = DesignTokens.Metric.heatCell
-
-    /// The widest a cell may be and still leave twelve columns inside the narrowest card this app
-    /// draws: 393pt screen, less the list's own gutters and the card's padding.
-    static let maxSide: CGFloat = 26
     static let gap = DesignTokens.Space.hair
     /// The grid's own coordinate space, so a drag reports where it is ON THE GRID rather than
     /// somewhere in a sheet whose offset the hit-testing would then have to know about.
@@ -105,10 +78,24 @@ struct HeatmapGridView: View {
 
     @GestureState private var scrubTouch = false
 
+    /// The width the squares were last laid out in — the only input the geometry has (MEMNG-186).
+    ///
+    /// It is read back off the frame the layout RESOLVED to rather than remembered from the width
+    /// that was proposed, and the two are the same number: a layout reports its own size, and this
+    /// arithmetic is idempotent over it (`HeatmapGeometryTests`). So the pitch a finger is divided
+    /// by is the pitch the squares were drawn on, because it is the same value.
+    ///
+    /// Nothing, until the first layout pass has happened — and a geometry with no square in it
+    /// answers no finger at all rather than dividing one by a pitch made of the gap alone.
+    @State private var laidOutWidth: CGFloat = 0
+
+    private var geometry: HeatmapGeometry {
+        HeatmapGeometry(availableWidth: laidOutWidth, of: grid, gap: Self.gap)
+    }
+
     var body: some View {
-        let cellSide = min(side, Self.maxSide)
         if let scrubbing {
-            squares(cellSide)
+            squares
                 .coordinateSpace(.named(Self.space))
                 // One gesture for the whole grid rather than a control per square. A tap IS a
                 // drag of no distance, so `minimumDistance: 0` makes the two the same
@@ -119,7 +106,7 @@ struct HeatmapGridView: View {
                         .onChanged { value in
                             guard
                                 let cell = HeatmapScrub.cell(
-                                    at: value.location, in: grid, side: cellSide, gap: Self.gap
+                                    at: value.location, in: grid, geometry: geometry
                                 )
                             else { return }
                             scrubbing.move(cell)
@@ -140,15 +127,21 @@ struct HeatmapGridView: View {
                     MemoAct.dayScrubbed.feedback
                 }
                 // ONE element with a value, not eighty-four with labels. A rotor that stops on
-                // every square is one nobody can get past, and a 12pt cell is far under the 44pt
-                // a target needs — the grid IS the target, and a swipe steps the day the way it
-                // steps a picker (HIG, Charting data).
+                // every square is one nobody can get past, and a square is a day rather than a
+                // control — the grid IS the target, and a swipe steps the day the way it steps a
+                // picker (HIG, Charting data).
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Activity")
                 .accessibilityValue(
                     HeatmapScrub.spoken(scrubbing.selectedKey, in: grid) ?? summary ?? grid.summary
                 )
-                .accessibilityHint("Adjust to choose a day, then activate to open it")
+                // Activating the grid settles the DATE FIELD; the sheet stays over it (MEMNG-178),
+                // so the hint points at the row that ends the exercise rather than promising an
+                // opening this element does not perform (MEMNG-187).
+                .accessibilityHint(
+                    "Adjust to choose a day. Activating sets the date; the Show button below "
+                        + "opens that day."
+                )
                 .accessibilityAdjustableAction { direction in
                     let step: Int
                     switch direction {
@@ -165,8 +158,8 @@ struct HeatmapGridView: View {
                     scrubbing.move(cell)
                 }
                 // Activation is the release a swipe never performs. It re-chooses the day the
-                // value already names, so opening the day shown takes one action rather than an
-                // adjustment there and back.
+                // value already names, so settling on the day shown takes one action rather than
+                // an adjustment there and back.
                 .accessibilityAction {
                     guard let cell = HeatmapScrub.cell(for: scrubbing.selectedKey, in: grid)
                     else { return }
@@ -176,22 +169,37 @@ struct HeatmapGridView: View {
         } else {
             // Inert, the whole grid is one element saying what it amounts to: the web client's
             // cells are non-interactive `<span>`s and this is the parity port of them.
-            squares(cellSide)
+            squares
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(summary ?? grid.summary)
         }
     }
 
-    private func squares(_ cellSide: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: Self.gap) {
+    /// The squares, laid out from the width the card offers rather than from the text size
+    /// (MEMNG-186 — `HeatmapGeometry` says why).
+    ///
+    /// Declared row-major, because that is the order a `Layout` receives its subviews in and the
+    /// order `HeatmapSquaresLayout` places them by. EVERY slot is declared, the empty ones a short
+    /// trailing column leaves included, so a position in that flat list is a (column, row) with no
+    /// exception in it.
+    private var squares: some View {
+        HeatmapSquaresLayout(
+            columns: grid.columns.count,
+            rowsPerColumn: HeatmapPresentation.daysPerColumn,
+            gap: Self.gap
+        ) {
             ForEach(0..<HeatmapPresentation.daysPerColumn, id: \.self) { row in
-                HStack(spacing: Self.gap) {
-                    ForEach(grid.columns.indices, id: \.self) { column in
-                        square(row: row, of: grid.columns[column])
-                            .frame(width: cellSide, height: cellSide)
-                    }
+                ForEach(grid.columns.indices, id: \.self) { column in
+                    square(row: row, of: grid.columns[column])
                 }
             }
+        }
+        // What the gesture reads its geometry back from. The layout answers with its own size, so
+        // this is the grid's drawn width and not the room it was offered.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            laidOutWidth = width
         }
     }
 
