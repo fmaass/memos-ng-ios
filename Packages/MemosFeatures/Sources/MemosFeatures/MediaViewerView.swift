@@ -22,11 +22,21 @@ import UIKit
 /// (`MediaViewerPlayback`).
 struct MediaViewerView: View {
     let selection: MediaViewerSelection
+    /// Where the pages come from, and whether there are more of them behind the loaded ones. A
+    /// memo's viewer is `.fixed`; the library's is `.library`, which is what lets a swipe carry on
+    /// past the page the grid had loaded when the file was tapped (MEMNG-189).
+    let source: MediaViewerSource
 
     @Environment(\.dismiss) private var dismiss
+    /// The way out of a tab that cannot open a memo. Optional: a preview or a test host has no
+    /// router, and a missing environment value must be a missing action, not a crash.
+    @Environment(MemoJump.self) private var jump: MemoJump?
     /// The page the pager has settled on — the identity of the page, not an index, because a
     /// paging scroll view tracks identity.
     @State private var currentPage: String?
+    /// The pages this viewer has ADOPTED so far. Not what is rendered — `pages` is, and it
+    /// reconciles this against the source on every evaluation.
+    @State private var shown: [MediaPage]
     /// Which page, if any, is magnified. Paging is off while one is: a sideways drag inside a
     /// zoomed picture is a pan, and a page that turns halfway through examining a photo is the
     /// single most annoying thing a viewer can do.
@@ -36,9 +46,11 @@ struct MediaViewerView: View {
     /// decided in one (`MediaViewerPlaybackCoordinator`).
     @State private var playback: MediaViewerPlaybackCoordinator
 
-    init(selection: MediaViewerSelection) {
+    init(selection: MediaViewerSelection, source: MediaViewerSource) {
         self.selection = selection
+        self.source = source
         _currentPage = State(initialValue: selection.startPage.id)
+        _shown = State(initialValue: selection.pages)
         _playback = State(initialValue: MediaViewerPlaybackCoordinator(selection: selection))
     }
 
@@ -48,7 +60,7 @@ struct MediaViewerView: View {
             pager
             closeButton
         }
-        .overlay(alignment: .top) { counter }
+        .overlay(alignment: .topTrailing) { actions }
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -59,7 +71,23 @@ struct MediaViewerView: View {
         .onChange(of: currentPage) { _, settled in
             guard let settled else { return }
             playback.advance(.paged(to: settled))
+            Task { await advance(to: settled) }
         }
+        // The pages the grid had already loaded by the time this cover drew its first frame. A
+        // page that arrived between the tap and this moment is in `source.pages` but was never an
+        // `onChange`, because it landed BEFORE the modifier had a baseline to compare against — it
+        // simply became the baseline. `pages` reconciles on every evaluation so the frame is right
+        // whichever way that race went; this is what carries the same answer into the two places
+        // that keep state rather than read it (MEMNG-189, review round 1).
+        .onAppear { adoptFromSource() }
+        // The library grows under an open viewer, and this is where the growth is taken in. The
+        // value is READ here, which is what subscribes this view to the store behind a `.library`
+        // source; what to do with a source that is no longer the same list at all is
+        // `MediaViewerPager.extended`'s decision, not this line's.
+        // Only adoption. Reading THROUGH pages that hold nothing to show is the paging seam's
+        // job, not this view's: a page of documents changes nothing here, so no modifier on this
+        // screen could observe it (`MediaViewerSource.loadMore`).
+        .onChange(of: source.pages) { _, _ in adoptFromSource() }
         // The way out is not only the close button: the zoom transition dismisses on a drag, and
         // a video that went on playing behind a dismissed viewer would be a voice in an empty
         // room. Every exit lands here.
@@ -69,7 +97,7 @@ struct MediaViewerView: View {
     private var pager: some View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
-                ForEach(selection.pages) { page in
+                ForEach(pages) { page in
                     MediaViewerPage(
                         page: page,
                         onZoomChange: { zoomed in
@@ -101,20 +129,87 @@ struct MediaViewerView: View {
         MediaViewerCloseButton { dismiss() }
     }
 
-    /// Where in the memo this picture is. Hidden from VoiceOver because every page already says
-    /// it — "Photo 2 of 5" — and hearing the same count twice is noise.
+    /// What can be done with the file on screen — the same actions its tile offers under a long
+    /// press, in a place nobody has to know a gesture to find. A context menu must never be the
+    /// only way to reach an action, and full screen is where the tile is no longer on screen at
+    /// all.
+    ///
+    /// It is `MediaTileMenu`'s list, unchanged, which is what stops the two surfaces from offering
+    /// different things about one file. A memo's own page therefore offers Share and not "Show
+    /// Memo": its attachments carry no owner on purpose, because the only memo it could take
+    /// anybody to is the one directly behind this cover.
     @ViewBuilder
-    private var counter: some View {
-        let page = selection.pages.first { $0.id == currentPage }
-        if selection.pages.count > 1, let page {
-            Text("\(page.position) of \(page.total)")
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, DesignTokens.Space.snug)
-                .padding(.vertical, DesignTokens.Space.hair)
-                .background(.black.opacity(0.35), in: .capsule)
-                .padding(.top, DesignTokens.Space.regular)
-                .accessibilityHidden(true)
+    private var actions: some View {
+        let page = pages.first { $0.id == currentPage }
+        let available = page.map { MediaTileMenu.actions(for: $0.attachment) } ?? []
+        if !available.isEmpty {
+            Menu {
+                ForEach(available) { action in
+                    MediaTileActionItem(action: action) { uid in
+                        // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
+                        // presented by the tab being left would be a black screen over the memo.
+                        dismiss()
+                        jump?.request(uid)
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding()
+            }
+            .accessibilityLabel("More")
+        }
+    }
+
+    /// The next page, when the reader is close enough to the end of the loaded ones to need it.
+    /// Both halves of that decision belong to the source, so a swipe in the middle of a loaded run
+    /// and a swipe arriving while a page is already in flight both cost nothing.
+    private func advance(to id: String) async {
+        await source.loadMore(nearingPageWithID: id)
+    }
+
+    /// What is rendered: everything adopted so far, reconciled against what the source holds NOW.
+    ///
+    /// Computed rather than stored so there is no first-frame gap to lose a page into — see
+    /// `onAppear` above. `MediaViewerPager.extended` is what decides whether the source is this
+    /// list grown longer or a different list altogether.
+    private var pages: [MediaPage] {
+        MediaViewerPager.extended(shown, with: source.pages)
+    }
+
+    /// Locks the reconciled list in, and tells playback about it — the two pieces of state that
+    /// cannot be recomputed per frame. Idempotent, so running it on appear AND on every change is
+    /// exactly as correct as running it once.
+    private func adoptFromSource() {
+        shown = pages
+        // The player belongs to a page of THIS list; a video on a page that has just arrived has
+        // to be one the playback rules can find.
+        playback.adopt(pages: shown, startingAt: selection.startPage.id)
+    }
+}
+
+/// One row of the actions menu, on the tile and in the viewer alike.
+///
+/// A view of its own because the two surfaces must offer the same thing built the same way: a
+/// second copy written inline in a second body is how "Share" ends up sharing a different URL in
+/// one of them.
+struct MediaTileActionItem: View {
+    let action: MediaTileAction
+    let showMemo: (String) -> Void
+
+    var body: some View {
+        switch action {
+        case .showMemo(let uid):
+            Button {
+                showMemo(uid)
+            } label: {
+                Label(action.title, systemImage: action.symbol)
+            }
+        case .share(let url):
+            ShareLink(item: url) {
+                Label(action.title, systemImage: action.symbol)
+            }
         }
     }
 }

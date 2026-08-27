@@ -67,6 +67,36 @@ public enum MediaLibraryFilter: String, Sendable, Equatable, CaseIterable, Ident
     }
 }
 
+/// Which end of the library the grid starts at.
+///
+/// One key, two directions — which is the whole of what the server offers (`?order=desc|asc` on
+/// `GET /api/attachments`) and the whole of what a photo library needs. Photos calls the same pair
+/// "Newest First" and "Oldest First" on an album, and this is that control.
+public enum MediaLibraryOrder: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case newestFirst
+    case oldestFirst
+
+    public var id: String { rawValue }
+
+    /// What rides in `?order=`. It is the server's own vocabulary rather than this enum's, because
+    /// the two are answers to different questions: the reader chooses a direction in words, the
+    /// request names the sort the database does.
+    public var apiOrder: String {
+        switch self {
+        case .newestFirst: "desc"
+        case .oldestFirst: "asc"
+        }
+    }
+
+    /// The row a menu draws. Photos' words, so the two libraries read the same.
+    public var label: String {
+        switch self {
+        case .newestFirst: "Newest First"
+        case .oldestFirst: "Oldest First"
+        }
+    }
+}
+
 extension MemoAttachment {
     /// A row of the library list.
     ///
@@ -75,9 +105,9 @@ extension MemoAttachment {
     /// and a second model for the same file would be a second image-loading path.
     ///
     /// `duration` is nil because `AttachmentListItem` does not carry one — the list payload is the
-    /// memo payload minus `duration` and `captured_at`, plus `orphan`/`mine`/`hasPrint`. So a
-    /// library tile cannot print a clip's length; it says "video" with the play glyph the timeline
-    /// tiles already use. Inventing a zero here would put "0:00" under every clip.
+    /// memo payload minus `duration` and `captured_at`, plus `orphan`/`mine`/`hasPrint`/`memoUid`.
+    /// So a library tile cannot print a clip's length; it says "video" with the play glyph the
+    /// timeline tiles already use. Inventing a zero here would put "0:00" under every clip.
     public init(_ generated: Components.Schemas.AttachmentListItem, baseURL: URL) {
         self.init(
             uid: generated.uid,
@@ -90,7 +120,11 @@ extension MemoAttachment {
             thumbnailURL: URL(string: generated.thumbnailUrl, relativeTo: baseURL)?.absoluteURL,
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
-            posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL
+            posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL,
+            // The one thing this payload knows that a memo's own attachment list cannot: which
+            // memo a file in the WHOLE library belongs to. Null for an orphan, and an orphan is a
+            // row this list deliberately includes (MEMNG-171).
+            memoUID: generated.memoUid
         )
     }
 }

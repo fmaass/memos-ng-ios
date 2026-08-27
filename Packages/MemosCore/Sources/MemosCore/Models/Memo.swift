@@ -46,6 +46,13 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
     public var previewURL: URL?
     public var webURL: URL?
     public var posterURL: URL?
+    /// The memo this file hangs on, when the payload it came from says so (MEMNG-171).
+    ///
+    /// `nil` means two different things and deliberately reads as one: the file is an ORPHAN — the
+    /// library list includes uploads no memo references — or it arrived on a payload that carries
+    /// no owner at all. Either way there is no memo to open, which is the only question anything
+    /// asks this field.
+    public var memoUID: String?
 
     // A public memberwise initialiser, so previews and tests in other modules can build one
     // without a server. Structs only synthesise an internal one.
@@ -60,7 +67,8 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
         thumbnailURL: URL? = nil,
         previewURL: URL? = nil,
         webURL: URL? = nil,
-        posterURL: URL? = nil
+        posterURL: URL? = nil,
+        memoUID: String? = nil
     ) {
         self.uid = uid
         self.mime = mime
@@ -73,6 +81,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
         self.previewURL = previewURL
         self.webURL = webURL
         self.posterURL = posterURL
+        self.memoUID = memoUID
     }
 
     public var id: String { uid }
@@ -189,6 +198,12 @@ extension AttachmentStatus {
 extension MemoAttachment {
     /// Derived-tier URLs arrive relative to the server, so they are resolved against the base URL
     /// the session is talking to rather than assumed absolute.
+    ///
+    /// `memoUID` stays nil even though the memo being decoded around it is right there. The field
+    /// is what puts "Show Memo" on a tile and in the viewer overlay, and every attachment reached
+    /// through this initialiser was reached FROM the memo it belongs to — an action that navigates
+    /// to the screen it was invoked from is an action that does nothing anybody can see. The
+    /// library list is the payload that genuinely knows something the surface does not.
     public init(_ generated: Components.Schemas.AttachmentRef, baseURL: URL) {
         self.init(
             uid: generated.uid,

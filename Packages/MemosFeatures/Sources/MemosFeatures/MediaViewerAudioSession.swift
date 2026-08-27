@@ -277,7 +277,10 @@ extension MediaViewerPlayback {
 @MainActor
 @Observable
 final class MediaViewerPlaybackCoordinator {
-    private let selection: MediaViewerSelection
+    /// The pages the playback rules are measured against. It is a `var` because the library's
+    /// viewer grows: a video on a page that arrived after the viewer opened has to be a page these
+    /// rules can find, or its play control asks for a player that is never built (MEMNG-189).
+    private var selection: MediaViewerSelection
     private let audio: any AudioSessionControlling
     private let commands: any MediaViewerPlayerCommanding
 
@@ -300,6 +303,17 @@ final class MediaViewerPlaybackCoordinator {
         self.selection = selection
         self.audio = audio
         self.commands = commands
+    }
+
+    /// Takes in a longer list of pages, without disturbing the player that is running.
+    ///
+    /// Only the pages change. The current player, the session claim and the resume state are all
+    /// about what is PLAYING, and a page appearing at the far end of the list is not an event that
+    /// happened to any of them.
+    func adopt(pages: [MediaPage], startingAt id: String) {
+        guard !pages.isEmpty else { return }
+        let start = pages.firstIndex { $0.id == id } ?? 0
+        selection = MediaViewerSelection(pages: pages, startIndex: start)
     }
 
     /// The live player, and only for the page it belongs to. Every other page gets `nil` and

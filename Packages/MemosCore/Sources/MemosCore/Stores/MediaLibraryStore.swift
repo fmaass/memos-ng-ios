@@ -1,6 +1,25 @@
 import Foundation
 import MemosAPI
 
+/// What the full-screen viewer needs of the list it is paging through.
+///
+/// The viewer is opened over the library grid and swipes through the SAME rows the grid holds, so
+/// past the end of what is loaded it has to be able to ask for more. It asks through this rather
+/// than through `MediaLibraryStore` itself for one reason: the viewer lives a layer above this one
+/// and must be assertable there, and a protocol is what lets a test stand a list of a known length
+/// in front of it without a server.
+@MainActor
+public protocol MediaLibraryPaging: AnyObject {
+    var items: [MemoAttachment] { get }
+    /// How many rows one request brings back — the size the near-end lookahead is measured in.
+    var pageSize: Int { get }
+    /// Whether the server has said there is more to read. The viewer needs it for the case a page
+    /// answers with nothing it can SHOW: a page of PDFs moves the cursor and leaves the pager
+    /// exactly as long as it was, so "did the list grow" cannot be what decides to ask again.
+    var hasMore: Bool { get }
+    func shouldLoadMore(after index: Int, lookahead: Int) -> Bool
+}
+
 /// The media library: every picture and clip the household can see, one cursor page at a time.
 ///
 /// It is a sibling of `TimelineStore` rather than a reuse of it — the two read different
@@ -17,7 +36,7 @@ import MemosAPI
 ///   twice or break SwiftUI's identity.
 @MainActor
 @Observable
-public final class MediaLibraryStore {
+public final class MediaLibraryStore: MediaLibraryPaging {
     public private(set) var items: [MemoAttachment] = []
     public private(set) var isLoading = false
     public private(set) var isLoadingMore = false
@@ -26,21 +45,29 @@ public final class MediaLibraryStore {
     /// Which slice is being read. Changed only through `setFilter`, which is what resets the
     /// paging with it.
     public private(set) var filter: MediaLibraryFilter
+    /// Which end of the library is first. Changed only through `setOrder`, for the same reason
+    /// `filter` may only change through `setFilter`: the loaded rows and the cursor both describe
+    /// one direction, and neither survives the other one being chosen (MEMNG-190).
+    public private(set) var order: MediaLibraryOrder
 
     private var nextCursor: String?
     /// Which loaded list this is. Bumped wherever the list stops being the one an unanswered page
     /// was a continuation of: a refresh replacing it, and a filter change discarding it.
     private var generation = 0
-    private let pageSize: Int
+    /// Read as well as written: the viewer measures its own near-end lookahead in pages of this
+    /// size, so a store built with a different one moves the trigger with it.
+    public let pageSize: Int
     private let onUnauthorized: @MainActor @Sendable () async -> Void
 
     public init(
         pageSize: Int = 60,
         filter: MediaLibraryFilter = .all,
+        order: MediaLibraryOrder = .newestFirst,
         onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.pageSize = pageSize
         self.filter = filter
+        self.order = order
         self.onUnauthorized = onUnauthorized
     }
 
@@ -65,14 +92,35 @@ public final class MediaLibraryStore {
         generation += 1
     }
 
-    /// Which list a page in flight belongs to — the generation AND the filter, because either one
-    /// moving makes the answer a continuation of something nobody is reading any more.
+    /// Turns the library round.
+    ///
+    /// It resets exactly what a tab change resets, and for a sharper version of the same reason: a
+    /// cursor is a POSITION inside one ordering. Kept across a reversal it would page the wrong way
+    /// through the middle of the library, and the rows above it would be the newest files sitting
+    /// on top of a grid that now says "Oldest First". So the grid empties and reads its first page
+    /// again, from the other end.
+    public func setOrder(_ order: MediaLibraryOrder) {
+        guard order != self.order else { return }
+        self.order = order
+        items = []
+        nextCursor = nil
+        hasMore = true
+        lastError = nil
+        generation += 1
+    }
+
+    /// Which list a page in flight belongs to — the generation, the filter AND the direction,
+    /// because any of the three moving makes the answer a continuation of something nobody is
+    /// reading any more.
     private struct Lineage: Equatable {
         var generation: Int
         var filter: MediaLibraryFilter
+        var order: MediaLibraryOrder
     }
 
-    private var lineage: Lineage { Lineage(generation: generation, filter: filter) }
+    private var lineage: Lineage {
+        Lineage(generation: generation, filter: filter, order: order)
+    }
 
     /// Which lineage the first page in flight belongs to, or nil when none is. `isLoading` alone
     /// cannot decide whether a refresh is redundant: the request a superseded filter left in
@@ -96,6 +144,7 @@ public final class MediaLibraryStore {
             let page = try await Self.page(
                 client,
                 filter: lineage.filter,
+                order: lineage.order,
                 cursor: nil,
                 limit: pageSize,
                 baseURL: baseURL
@@ -140,6 +189,7 @@ public final class MediaLibraryStore {
                 let page = try await Self.page(
                     client,
                     filter: lineage.filter,
+                    order: lineage.order,
                     cursor: cursor,
                     limit: pageSize,
                     baseURL: baseURL
@@ -216,12 +266,23 @@ public final class MediaLibraryStore {
     static func page(
         _ client: any APIProtocol,
         filter: MediaLibraryFilter,
+        order: MediaLibraryOrder,
         cursor: String?,
         limit: Int,
         baseURL: URL
     ) async throws -> (items: [MemoAttachment], nextCursor: String?) {
         let response = try await client.listAttachmentsApiAttachmentsGet(
-            .init(query: .init(_type: filter.apiType, limit: limit, cursor: cursor))
+            .init(
+                query: .init(
+                    _type: filter.apiType,
+                    limit: limit,
+                    cursor: cursor,
+                    // Written as a member of the generated enum rather than through a name this
+                    // file spells out: what the generator calls that type is the generator's to
+                    // decide, and this call is the only place the app has to agree with it.
+                    order: order == .oldestFirst ? .asc : .desc
+                )
+            )
         )
         switch response {
         case .ok(let ok):

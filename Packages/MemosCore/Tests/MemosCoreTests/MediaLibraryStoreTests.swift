@@ -20,22 +20,27 @@ import Testing
 struct MediaLibraryStoreTests {
     /// One row of `GET /api/attachments`. It is `AttachmentListItem`, which is NOT the memo's
     /// `AttachmentRef`: no `duration`, and an `orphan` flag instead.
+    ///
+    /// `memoUid` is null by default because the interesting half of that field is the ORPHAN — a
+    /// file in the library that no memo references, which is a row this list deliberately carries.
     private nonisolated static func item(
         uid: String,
         mime: String = "image/jpeg",
-        status: String = "ready"
+        status: String = "ready",
+        memoUid: String? = nil
     ) -> String {
-        """
-        {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
-        "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-        "renditions":[],"orphan":false,\
-        "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
-        "previewUrl":"/api/attachments/\(uid)/mobile",\
-        "webUrl":"/api/attachments/\(uid)/web",\
-        "posterUrl":"/api/attachments/\(uid)/poster",\
-        "downloadUrl":"/api/attachments/\(uid)/download",\
-        "printUrl":"/api/attachments/\(uid)/print"}
-        """
+        let owner = memoUid.map { "\"\($0)\"" } ?? "null"
+        return """
+            {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
+            "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+            "renditions":[],"orphan":\(memoUid == nil),"memoUid":\(owner),\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
+            "previewUrl":"/api/attachments/\(uid)/mobile",\
+            "webUrl":"/api/attachments/\(uid)/web",\
+            "posterUrl":"/api/attachments/\(uid)/poster",\
+            "downloadUrl":"/api/attachments/\(uid)/download",\
+            "printUrl":"/api/attachments/\(uid)/print"}
+            """
     }
 
     /// A page, with its continuation token where the server puts it. `nextCursor: nil` is the last
@@ -304,6 +309,142 @@ struct MediaLibraryStoreTests {
         // `AttachmentListItem` carries no duration, so the app has none to print. A zero here
         // would put "0:00" under every clip in the library.
         #expect(row.duration == nil)
+    }
+
+    // MARK: - MEMNG-171: which memo a file belongs to
+
+    @Test("a row carries the memo it hangs on, and an orphan carries none")
+    func rowsCarryTheirMemo() async throws {
+        let client = Stub.client { _, _, _ in
+            Self.page([
+                Self.item(uid: "owned", memoUid: "memo-7"),
+                Self.item(uid: "loose"),
+            ])
+        }
+        let store = MediaLibraryStore(pageSize: 10)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        #expect(store.items.map(\.memoUID) == ["memo-7", nil])
+    }
+
+    // MARK: - MEMNG-190: which end of the library the grid starts at
+
+    @Test("the direction chosen is the direction asked for")
+    func orderRidesOnTheRequest() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            paths.set(paths.get() + [request.path ?? ""])
+            return Self.page(Self.uids(["a"]))
+        }
+        let newest = MediaLibraryStore(pageSize: 2)
+        await newest.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(paths.get().last?.contains("order=desc") == true, "newest-first did not say so")
+
+        let oldest = MediaLibraryStore(pageSize: 2, order: .oldestFirst)
+        await oldest.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(
+            paths.get().last?.contains("order=asc") == true,
+            "Oldest First did not reach the server"
+        )
+        #expect(
+            paths.get().last?.contains("order=desc") == false,
+            "the newest-first direction was sent for a store reading the other way"
+        )
+    }
+
+    @Test("turning the library round empties the grid and forgets the cursor")
+    func changingOrderResetsThePaging() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            paths.set(paths.get() + [request.path ?? ""])
+            return Self.page(Self.uids(["a"]), nextCursor: "page-2")
+        }
+        let store = MediaLibraryStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.items.map(\.uid) == ["a"])
+
+        store.setOrder(.oldestFirst)
+        #expect(store.items.isEmpty, "the old direction's rows stayed on screen under the new one")
+        #expect(store.hasMore, "a direction nobody has read yet cannot be at its end")
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let last = paths.get().last ?? ""
+        #expect(last.contains("order=asc"))
+        // The cursor is a position inside ONE ordering; carried across a reversal it pages the
+        // wrong way through the middle of the library.
+        #expect(
+            !last.contains("cursor="),
+            "the old direction's cursor was carried into the new one"
+        )
+    }
+
+    @Test("a page that answers a direction nobody is reading any more is dropped, cursor and all")
+    func supersededOrderPageIsDropped() async {
+        let entered = Signal()
+        let release = Signal()
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            if path.contains("cursor=") {
+                entered.signal()
+                await release.wait()
+                return Self.page(Self.uids(["stale"]), nextCursor: "page-3")
+            }
+            if path.contains("order=asc") {
+                return Self.page(Self.uids(["oldest"]))
+            }
+            return Self.page(Self.uids(["a"]), nextCursor: "page-2")
+        }
+        let store = MediaLibraryStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        await entered.wait()
+        store.setOrder(.oldestFirst)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        release.signal()
+        await inFlight.value
+
+        #expect(store.items.map(\.uid) == ["oldest"], "the superseded page was merged anyway")
+        #expect(!store.hasMore, "the dropped page's cursor was adopted")
+        #expect(
+            paths.get().contains { $0.contains("cursor=") },
+            "control: the page that was dropped is one this store really did ask for"
+        )
+    }
+
+    // MARK: - MEMNG-189: what the viewer asks of the same store
+
+    @Test("nothing is asked for a second time while a page is already in flight")
+    func noSecondRequestWhileOneIsOut() async {
+        let entered = Signal()
+        let release = Signal()
+        let requests = Counter()
+        let client = Stub.client { request, _, _ in
+            requests.increment()
+            if (request.path ?? "").contains("cursor=") {
+                entered.signal()
+                await release.wait()
+                return Self.page(Self.uids(["c", "d"]), nextCursor: "page-3")
+            }
+            return Self.page(Self.uids(["a", "b"]), nextCursor: "page-2")
+        }
+        let store = MediaLibraryStore(pageSize: 2)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(requests.count == 1)
+
+        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        await entered.wait()
+        // This is the swipe that lands while the fetch it triggered is still out. The trigger has
+        // to say no, or one flick through the end of a loaded run fires a request per page.
+        #expect(!store.shouldLoadMore(after: 1, lookahead: 1), "the trigger fired during a load")
+        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        #expect(requests.count == 2, "a second request went out while one was in flight")
+
+        release.signal()
+        await inFlight.value
+        #expect(store.items.map(\.uid) == ["a", "b", "c", "d"])
     }
 }
 

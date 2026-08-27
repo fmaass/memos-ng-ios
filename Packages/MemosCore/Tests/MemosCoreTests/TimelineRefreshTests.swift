@@ -93,6 +93,196 @@ struct TimelineRefreshTests {
         await store.refresh(using: client, baseURL: Stub.baseURL)
         #expect(store.lastError == nil)
     }
+
+    // MARK: - MEMNG-191: a memo this list has never loaded
+
+    /// The read a jump from the media library depends on.
+    ///
+    /// `refreshMemo` cannot serve it and the difference is the whole point: it goes through
+    /// `apply`, which drops a memo the loaded list does not already contain. A photograph a few
+    /// screens into the library routinely belongs to a memo a hundred cursor pages down, so the
+    /// value has to come BACK — that is what the detail screen opens with.
+    @Test("a memo outside the loaded window is fetched and handed back, list untouched")
+    func fetchMemoReturnsOneTheListNeverLoaded() async throws {
+        let reads = Counter()
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "loaded")]))
+            case "get_memo_api_memos__uid__get":
+                reads.increment()
+                return Stub.json(Stub.memo(uid: "far-away", content: "down the list"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = await loaded(client)
+        #expect(store.memos.map(\.uid) == ["loaded"])
+
+        // The control first: the method this one exists beside genuinely drops it.
+        let applied = await store.refreshMemo(
+            uid: "far-away", using: client, baseURL: Stub.baseURL
+        )
+        #expect(applied, "control: the server did answer")
+        #expect(store.memos.map(\.uid) == ["loaded"], "control: apply kept it out of the list")
+
+        let fetched = try #require(
+            await store.fetchMemo(uid: "far-away", using: client, baseURL: Stub.baseURL)
+        )
+
+        #expect(fetched.uid == "far-away")
+        #expect(fetched.content == "down the list")
+        #expect(reads.count == 2, "the memo was not read from the server")
+        #expect(store.memos.map(\.uid) == ["loaded"], "the fetch inserted a row into the timeline")
+    }
+
+    @Test("a memo the list DOES hold comes back as the server's copy, applied in place")
+    func fetchMemoAppliesWhenTheListHoldsIt() async throws {
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "m1", content: "stale")]))
+            case "get_memo_api_memos__uid__get":
+                return Stub.json(Stub.memo(uid: "m1", content: "fresh"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = await loaded(client)
+        #expect(store.memos.first?.content == "stale")
+
+        let fetched = try #require(
+            await store.fetchMemo(uid: "m1", using: client, baseURL: Stub.baseURL)
+        )
+
+        #expect(fetched.content == "fresh")
+        #expect(store.memos.map(\.uid) == ["m1"], "the fetch added a second copy")
+        #expect(store.memos.first?.content == "fresh", "the loaded copy was left stale")
+    }
+
+    // MARK: - MEMNG-191: the jump has to leave the store OWNING the memo
+
+    /// A UTC day calendar, so which day the memo falls on is a fact of the test rather than of the
+    /// machine's time zone.
+    private nonisolated static var utcDays: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }
+
+    /// The whole point of the jump, and the thing fetching alone cannot buy: after it, the memo is
+    /// IN the loaded list, so an edit made on the screen it opens lands here instead of being
+    /// dropped by `apply`.
+    @Test("a jump anchors the list at the memo's day, and an edit afterwards lands in the store")
+    func jumpAnchorsSoTheStoreOwnsTheMemo() async throws {
+        let far = "far-away"
+        let client = Stub.client { request, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                // The plain timeline does not reach back this far; the ANCHORED one does.
+                guard (request.path ?? "").contains("created_before") else {
+                    return Stub.json(Stub.page([Stub.memo(uid: "recent")]))
+                }
+                return Stub.json(Stub.page([Stub.memo(uid: far, content: "written then")]))
+            case "get_memo_api_memos__uid__get":
+                return Stub.json(Stub.memo(uid: far, content: "written then"))
+            case "patch_memo_api_memos__uid__patch":
+                return Stub.json(Stub.memo(uid: far, content: "edited on the detail screen"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = await loaded(client)
+        #expect(store.memos.map(\.uid) == ["recent"], "control: the memo starts outside the window")
+
+        let outcome = await store.jump(
+            to: far, calendar: Self.utcDays, using: client, baseURL: Stub.baseURL
+        )
+
+        guard case .ready(let opened) = outcome else {
+            Issue.record("the jump did not end ready")
+            return
+        }
+        #expect(opened.uid == far)
+        #expect(store.memos.contains { $0.uid == far }, "the jump left the memo outside the window")
+        #expect(store.query.anchor != nil, "the list was never anchored")
+
+        // The blocker this exists for: an edit through the store must reach the loaded row.
+        let edited = await store.edit(
+            uid: far, content: "edited on the detail screen", using: client, baseURL: Stub.baseURL
+        )
+        #expect(edited)
+        #expect(
+            store.memos.first { $0.uid == far }?.content == "edited on the detail screen",
+            "the edit was discarded — the store never owned the memo"
+        )
+    }
+
+    /// Deleted while the jump was in flight: anchoring lands on a day that no longer holds it.
+    @Test("a memo missing from the anchored window is unavailable rather than pushed")
+    func jumpRefusesWhenTheAnchoredWindowLacksIt() async {
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "someone-else")]))
+            case "get_memo_api_memos__uid__get":
+                return Stub.json(Stub.memo(uid: "gone"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = await loaded(client)
+
+        let outcome = await store.jump(
+            to: "gone", calendar: Self.utcDays, using: client, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .unavailable)
+        #expect(!store.memos.contains { $0.uid == "gone" })
+    }
+
+    @Test("a memo already on screen is ready without moving the list")
+    func jumpToALoadedMemoLeavesTheListAlone() async {
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "here")]))
+            case "get_memo_api_memos__uid__get":
+                return Stub.json(Stub.memo(uid: "here", content: "fresh"))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = await loaded(client)
+
+        let outcome = await store.jump(
+            to: "here", calendar: Self.utcDays, using: client, baseURL: Stub.baseURL
+        )
+
+        if case .unavailable = outcome { Issue.record("a loaded memo came back unavailable") }
+        #expect(store.query.anchor == nil, "a memo already on screen moved the list anyway")
+        #expect(store.memos.first?.content == "fresh")
+    }
+
+    @Test("a memo that cannot be read is a nil rather than a navigation")
+    func fetchMemoFailureIsNil() async {
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "loaded")]))
+            default:
+                return Stub.empty(.internalServerError)
+            }
+        }
+        let store = await loaded(client)
+
+        let fetched = await store.fetchMemo(
+            uid: "gone", using: client, baseURL: Stub.baseURL
+        )
+
+        #expect(fetched == nil)
+        #expect(store.lastError == nil, "a jump that failed painted an error on the timeline")
+    }
 }
 
 /// The three-way projection, on the model, where the view, the re-read and the live channel

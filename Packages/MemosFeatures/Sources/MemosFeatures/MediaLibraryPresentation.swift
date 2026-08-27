@@ -97,6 +97,14 @@ public enum MediaLibraryPresentation {
         }
     }
 
+    /// How wide the picture a long press lifts off the grid is drawn.
+    ///
+    /// Wider than a tile by a large factor, which is the whole point of a context-menu preview: it
+    /// is the moment the grid stops being a grid of thumbnails and the file is looked AT. The
+    /// height follows the picture's own proportions, so a portrait and a landscape both get their
+    /// shape rather than a common box.
+    public static let previewWidth: CGFloat = 320
+
     /// What a tile says out loud. A grid of unlabelled images is a grid VoiceOver cannot describe,
     /// and the kind is the only thing about a file that is knowable without opening it — the list
     /// payload carries no caption, no filename and no duration.

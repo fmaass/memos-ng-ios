@@ -58,11 +58,7 @@ enum HeatmapDateJump {
 
     /// The anchor a day becomes, read in the calendar the server keys its days in.
     static func anchor(for day: Date) -> MemoQueryAnchor? {
-        let parts = anchorCalendar.dateComponents([.year, .month, .day], from: day)
-        guard let year = parts.year, let month = parts.month, let dayOfMonth = parts.day else {
-            return nil
-        }
-        return .day(year: year, month: month, day: dayOfMonth)
+        MemoQueryAnchor.day(of: day, in: anchorCalendar)
     }
 
     /// A day as the server keys it — the key the grid indexes its squares by, so that a day chosen
