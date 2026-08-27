@@ -41,6 +41,33 @@ def api_key
   )
 end
 
+# MEMNG-195: a merkur-wide mutex shared with img-manager-ios's pipeline (fastlane/Fastfile there,
+# WP8 P0b fold item 7) around keychain-search-list mutation, certificate/profile preparation and
+# the archive itself -- two releases racing the same host's keychain search list or DerivedData
+# can select the wrong signing identity or exhaust disk. `flock` is cooperative: this is a real
+# mutex only because BOTH Fastfiles take the exact same default path, so the default here
+# (~/.release-lock) must not drift from img-manager-ios's. A bash 3.2 build host has no flock(1)
+# (see mac-gate.sh's own comment on that constraint), so this uses Ruby's File#flock directly.
+RELEASE_LOCK_PATH = File.expand_path("~/.release-lock") # non-overridable: an override would defeat the cross-pipeline mutex
+
+def with_release_lock
+  UI.message("release lock: waiting on #{RELEASE_LOCK_PATH} (blocks until no other release -- " \
+             "this or img-manager-ios's -- holds it)")
+  File.open(RELEASE_LOCK_PATH, File::CREAT | File::RDWR, 0o644) do |lock|
+    acquired_at = Time.now
+    lock.flock(File::LOCK_EX)
+    lock.write("pid=#{Process.pid} project=memos-ng-ios lane=archive_ipa at=#{Time.now.utc}\n")
+    lock.flush
+    UI.message("release lock: acquired after #{(Time.now - acquired_at).round(1)}s")
+    begin
+      yield
+    ensure
+      lock.flock(File::LOCK_UN)
+      UI.message("release lock: released")
+    end
+  end
+end
+
 def prepare_signing(key)
   kc_pw = ENV.fetch("CI_KEYCHAIN_PW")
   unless File.exist?(KEYPATH)
@@ -119,13 +146,15 @@ platform :ios do
   desc "Archive and package a signed app-store IPA (no upload)"
   lane :archive_ipa do
     key = api_key
-    prepare_signing(key)
-    sh("rm -rf '#{ARCHIVE}' '#{IPA}' '#{ROOT}/build/Payload'")
-    build_app(
-      project: PROJECT, scheme: SCHEME, configuration: "Release",
-      skip_package_ipa: true, clean: true,
-      archive_path: ARCHIVE, derived_data_path: "#{ROOT}/build/dd",
-    )
+    with_release_lock do
+      prepare_signing(key)
+      sh("rm -rf '#{ARCHIVE}' '#{IPA}' '#{ROOT}/build/Payload'")
+      build_app(
+        project: PROJECT, scheme: SCHEME, configuration: "Release",
+        skip_package_ipa: true, clean: true,
+        archive_path: ARCHIVE, derived_data_path: "#{ROOT}/build/dd",
+      )
+    end
     app = "#{ARCHIVE}/Products/Applications/MemosNG.app"
     sh("mkdir -p '#{ROOT}/build/Payload' && ditto '#{app}' '#{ROOT}/build/Payload/MemosNG.app' && " \
        "cd '#{ROOT}/build' && /usr/bin/zip -qry MemosNG.ipa Payload")
