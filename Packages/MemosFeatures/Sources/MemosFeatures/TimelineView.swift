@@ -40,7 +40,7 @@ public struct TimelineView: View {
     /// One conversation for the whole screen, shared with the Settings screen pushed from it —
     /// two stages would be two machines and, between them, two revokes.
     @State private var signOut = SignOutConversation()
-    /// The account's picture, decoded once here and handed to both the toolbar and Settings.
+    /// The account's picture, decoded once here and handed to Settings.
     @State private var avatar: Image?
     /// Type-erased because the stack now leads to two different places: a memo, and Settings.
     @State private var path = NavigationPath()

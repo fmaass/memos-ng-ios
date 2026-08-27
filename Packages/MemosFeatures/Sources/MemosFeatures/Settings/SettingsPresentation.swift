@@ -3,7 +3,7 @@ import MemosCore
 import SwiftUI
 import UIKit
 
-// The decisions the Settings screen and the account menu read. Pure functions over the account's
+// The decisions the Settings screen reads. Pure functions over the account's
 // settings, each one tested directly; the screens above them stay thin enough to be obvious.
 
 /// Which default visibilities the Settings screen offers, and what to say about one it does not.
