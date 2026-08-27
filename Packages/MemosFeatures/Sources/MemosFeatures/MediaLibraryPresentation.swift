@@ -23,15 +23,81 @@ public struct LibraryEmptyState: Equatable, Sendable {
     public let message: String
 }
 
+/// One file placed in the library, with the box the row solver gave it.
+public struct LibraryTile: Identifiable, Equatable, Sendable {
+    public let attachment: MemoAttachment
+    /// Where this file sits in the WHOLE loaded list, not in its row. The paging trigger is
+    /// measured in that number — a row knows nothing about how far down the library it is.
+    public let index: Int
+    public let width: Double
+    public let height: Double
+
+    public var id: String { attachment.uid }
+}
+
+/// One justified row of the library.
+public struct LibraryRow: Identifiable, Equatable, Sendable {
+    public let tiles: [LibraryTile]
+    public let height: Double
+
+    /// The first file in it. A row is identified by its contents rather than by its position,
+    /// because a page arriving at the bottom does not move the rows above it — and an index-keyed
+    /// row would make SwiftUI rebuild every one of them each time the library grew.
+    public var id: String { tiles.first?.id ?? "empty" }
+}
+
 /// Decisions the library screen needs, kept out of the view — the same split `MemoPresentation`
 /// makes, and for the same reason: a SwiftUI body is the worst place to unit-test anything.
 public enum MediaLibraryPresentation {
-    /// The narrowest a tile may be, which is what decides how many fit across.
+    /// How tall a row of the library stands. No row is ever taller than this, and the trailing
+    /// one stands exactly at it.
     ///
-    /// A grid of squares this size gives four columns on the phones this app targets and more on
-    /// an iPad, without the count being written down anywhere — the grid adapts, so a rotation or
-    /// a split view is not a layout this code has to know about.
-    public static let minimumTileWidth: CGFloat = 104
+    /// Bigger than the old square tile because a justified row spends its height on pictures
+    /// rather than on crops: a landscape photograph at this height is about a third of a phone's
+    /// width, so a row still holds two or three of them.
+    public static let targetRowHeight: Double = 132
+
+    /// The library, packed into justified rows — the arrangement the web app's Resources view uses
+    /// (`frontend/src/views/ResourcesView.vue` over `JustifiedGallery.vue`), which is the whole
+    /// point of it being the same gallery on both clients.
+    ///
+    /// It replaced a grid of square crops. A square grid is defensible for a memo's two-up strip,
+    /// where the tiles have to line up; for a LIBRARY it is the wrong trade, because every
+    /// photograph in it is cropped to a shape it was not taken in, and a panorama and a portrait
+    /// arrive looking identical. Here each file keeps its own proportions and the rows fill the
+    /// width exactly.
+    ///
+    /// The row solving itself is `JustifiedGallery` — the same port of the SPA's `justifyRows`
+    /// that the memo card uses, so the two surfaces cannot drift into packing the same photographs
+    /// differently. What this adds is the part a library needs and a card does not: the index of
+    /// each file in the whole loaded list, which is what the paging trigger is measured in.
+    public static func rows(
+        for items: [MemoAttachment],
+        width: Double,
+        targetHeight: Double = targetRowHeight,
+        gap: Double
+    ) -> [LibraryRow] {
+        JustifiedGallery.rows(
+            ratios: JustifiedGallery.ratios(of: items),
+            containerWidth: width,
+            targetHeight: targetHeight,
+            gap: gap
+        )
+        .map { row in
+            LibraryRow(
+                tiles: row.tiles.compactMap { tile in
+                    guard items.indices.contains(tile.index) else { return nil }
+                    return LibraryTile(
+                        attachment: items[tile.index],
+                        index: tile.index,
+                        width: tile.width,
+                        height: tile.height
+                    )
+                },
+                height: row.height
+            )
+        }
+    }
 
     /// What the tile at this file draws. Derived from the KIND rather than from the status: what
     /// a file still being processed looks like is `AttachmentThumbnail`'s decision (it has the

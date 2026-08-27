@@ -21,6 +21,12 @@ struct MediaLibraryView: View {
     @State private var library: MediaLibraryStore?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
+    /// How wide the rows are solved for — the scroll's own width, less the padding. Measured
+    /// rather than assumed, so a rotation or a split view re-packs the library rather than
+    /// running it off the edge.
+    @State private var contentWidth: CGFloat = 0
+    /// The download a tile's menu starts, and the sheet it ends in.
+    @State private var saving = MediaSaveFlow()
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
     /// Which direction this device reads the library in, across launches. Read once, when the
@@ -45,6 +51,10 @@ struct MediaLibraryView: View {
                     ToolbarItem(placement: .topBarTrailing) { sortMenu(library) }
                 }
             }
+            // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
+            // on one view is how one of them silently stops appearing, and this screen now has
+            // both a cover and a sheet.
+            .savingOriginal(saving)
         }
         // Outside the stack, for the reason the timeline's cover is: two presentations on one view
         // is how one of them silently stops appearing.
@@ -94,7 +104,7 @@ struct MediaLibraryView: View {
                     NoticeCard(text: error, tone: .error)
                         .padding(.horizontal, DesignTokens.Space.roomy)
                 }
-                grid(library)
+                gallery(library)
                 // The next page is on its way; this is what says so at the bottom of the scroll.
                 if library.isLoadingMore {
                     ProgressView().padding(DesignTokens.Space.roomy)
@@ -174,27 +184,52 @@ struct MediaLibraryView: View {
         )
     }
 
-    private func grid(_ library: MediaLibraryStore) -> some View {
-        LazyVGrid(
-            columns: [
-                GridItem(
-                    .adaptive(minimum: MediaLibraryPresentation.minimumTileWidth),
-                    spacing: DesignTokens.Space.tight
-                )
-            ],
-            spacing: DesignTokens.Space.tight
-        ) {
-            ForEach(Array(library.items.enumerated()), id: \.element.id) { pair in
-                tile(pair.element)
-                    // The trigger is the store's, not this view's: how close to the end is close
-                    // enough is a rule with its own vectors, not a number in a view body.
-                    .onAppear {
-                        guard library.shouldLoadMore(after: pair.offset) else { return }
-                        Task { await loadMore() }
+    /// The library as justified rows: every file in its own proportions, rows that fill the width.
+    ///
+    /// A `LazyVStack` of rows rather than one layout over every tile, and that is the reason the
+    /// solving happens in `MediaLibraryPresentation` instead of inside a `Layout`: a `Layout`
+    /// places all of its subviews, and this grid is a thousand files long. Solved into rows first,
+    /// the stack stays lazy — only the rows near the screen are ever built — while each row is a
+    /// plain `HStack` of boxes the solver has already sized.
+    private func gallery(_ library: MediaLibraryStore) -> some View {
+        LazyVStack(spacing: DesignTokens.Space.tight) {
+            ForEach(rows(of: library)) { row in
+                HStack(spacing: DesignTokens.Space.tight) {
+                    ForEach(row.tiles) { placed in
+                        tile(placed.attachment)
+                            .frame(width: placed.width, height: placed.height)
+                            // The trigger is the store's, not this view's: how close to the end is
+                            // close enough is a rule with its own vectors, not a number in a view
+                            // body. It is measured in the file's place in the WHOLE list.
+                            .onAppear {
+                                guard library.shouldLoadMore(after: placed.index) else { return }
+                                Task { await loadMore() }
+                            }
                     }
+                    // Rows are packed from the left; the trailing one is short by design and must
+                    // not be stretched across the width (`JustifiedGallery`).
+                    Spacer(minLength: 0)
+                }
             }
         }
+        // Stated so the stack reports the width it was OFFERED even while it is empty. Without it
+        // an empty library measures zero, and a zero width solves to no rows at all — which is a
+        // grid that can never draw its first page.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            contentWidth = width
+        }
         .padding(.horizontal, DesignTokens.Space.tight)
+    }
+
+    private func rows(of library: MediaLibraryStore) -> [LibraryRow] {
+        MediaLibraryPresentation.rows(
+            for: library.items,
+            width: Double(contentWidth),
+            gap: Double(DesignTokens.Space.tight)
+        )
     }
 
     @ViewBuilder
@@ -204,7 +239,9 @@ struct MediaLibraryView: View {
             AttachmentThumbnail(
                 attachment: attachment,
                 tier: .thumb,
-                slot: MemoPresentation.gridSlot
+                // The box IS the picture's own shape now, so nothing is cropped into it — the
+                // same slot the memo card's justified rows use.
+                slot: MemoPresentation.justifiedSlot(for: attachment)
             )
             .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
             .contentShape(.rect)
@@ -214,7 +251,13 @@ struct MediaLibraryView: View {
             .accessibilityHint(kind == .video ? "Plays full screen" : "Opens full screen")
             .contextMenu {
                 ForEach(MediaTileMenu.actions(for: attachment)) { action in
-                    MediaTileActionItem(action: action) { jump?.request($0) }
+                    MediaTileActionItem(
+                        action: action,
+                        showMemo: { jump?.request($0) },
+                        saveOriginal: { file in
+                            Task { await save(file) }
+                        }
+                    )
                 }
             } preview: {
                 tilePreview(attachment)
@@ -242,6 +285,14 @@ struct MediaLibraryView: View {
     private func open(_ attachment: MemoAttachment) {
         guard let library else { return }
         viewing = MediaViewerPresentation.viewer(for: library.items, startingAt: attachment.uid)
+    }
+
+    /// Fetches the original of a tile's file and offers it to the share sheet. The credential the
+    /// original tier needs is the session's, and it stays there (see `OriginalMedia`).
+    private func save(_ attachment: MemoAttachment) async {
+        await saving.save(attachment) { [session] file in
+            try await session.downloadOriginal(file)
+        }
     }
 
     private func load() async {
