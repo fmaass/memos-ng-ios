@@ -48,7 +48,7 @@ end
 # mutex only because BOTH Fastfiles take the exact same default path, so the default here
 # (~/.release-lock) must not drift from img-manager-ios's. A bash 3.2 build host has no flock(1)
 # (see mac-gate.sh's own comment on that constraint), so this uses Ruby's File#flock directly.
-RELEASE_LOCK_PATH = ENV.fetch("RELEASE_LOCK_PATH", File.expand_path("~/.release-lock"))
+RELEASE_LOCK_PATH = File.expand_path("~/.release-lock") # non-overridable: an override would defeat the cross-pipeline mutex
 
 def with_release_lock
   UI.message("release lock: waiting on #{RELEASE_LOCK_PATH} (blocks until no other release -- " \
