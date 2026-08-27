@@ -3,9 +3,11 @@
 # (the login keychain is unreachable over SSH -> errSecInternalComponent; that is the whole
 # reason this pipeline exists rather than `xcodebuild archive` over ssh).
 
+require "shellwords"
 require "spaceship"
 require File.expand_path("lib/asc_readback", __dir__)
 require File.expand_path("lib/dsym_store", __dir__)
+require File.expand_path("lib/timed_probe", __dir__)
 
 default_platform(:ios)
 
@@ -27,6 +29,8 @@ DSYM_STORES     = [["janus", "/Users/Shared/nas/janus"], ["lexosaurus", "/Volume
 DSYM_SUBPATH    = "memos-ng-ios/dSYMs"
 ATTACH_TIMEOUT  = 300
 ATTACH_INTERVAL = 20
+# A store probe answers in milliseconds when the mount is healthy; anything past this is a hang.
+DSYM_PROBE_TIMEOUT = 10
 
 def api_key
   app_store_connect_api_key(
@@ -83,11 +87,12 @@ def archive_version(archive)
 end
 
 # Listing is what triggers janus's autofs mount, so probe by listing rather than by File.exist?.
+# The listing runs OUT OF PROCESS (see TimedProbe): both of these calls are the ones that block
+# forever on a hung NFS hard mount, and a release lane that stalls on a dead NAS never reaches the
+# fallback that exists precisely for that case.
 def dsym_store_reachable?(root)
-  Dir.entries(root)
-  File.writable?(root)
-rescue SystemCallError
-  false
+  quoted = Shellwords.escape(root)
+  TimedProbe.ok?("/bin/ls #{quoted} && /bin/test -w #{quoted}", seconds: DSYM_PROBE_TIMEOUT)
 end
 
 # The Spaceship half of the read-back: fetch, hand the facts to the pure verdict, return it.
@@ -139,9 +144,16 @@ platform :ios do
     bundles = Dir.glob(File.join(archive, "dSYMs", "*.dSYM")).sort
     UI.user_error!("preserve_dsyms: #{archive}/dSYMs holds no .dSYM bundle") if bundles.empty?
 
-    version = options[:version].to_s
-    build_number = options[:build].to_s
-    version, build_number = archive_version(archive) if version.empty? || build_number.empty?
+    supplied_version = options[:version].to_s
+    supplied_build = options[:build].to_s
+    archive_v = ""
+    archive_b = ""
+    archive_v, archive_b = archive_version(archive) if supplied_version.empty? || supplied_build.empty?
+    version, build_number = DsymStore.release_label(
+      version: supplied_version, build: supplied_build,
+      archive_version: archive_v, archive_build: archive_b,
+    )
+    UI.user_error!("preserve_dsyms: could not resolve a version/build to file under") if version.empty? || build_number.empty?
 
     status, root, message = DsymStore.choose(DSYM_STORES) { |candidate| dsym_store_reachable?(candidate) }
     UI.user_error!("preserve_dsyms: #{message}") if status == :none
@@ -175,8 +187,14 @@ platform :ios do
 
     api_key # also installs the Spaceship token this read-back queries with
     deadline = Time.now + ATTACH_TIMEOUT
+    message = "no read-back was attempted"
 
     loop do
+      unless AscReadback.may_request?(now: Time.now, deadline: deadline)
+        UI.user_error!("ASC read-back TIMED OUT after #{ATTACH_TIMEOUT}s for " \
+                       "#{version} (#{build_number}): #{message}")
+      end
+
       status, message = asc_attach_status(version: version, build_number: build_number)
       UI.user_error!("ASC read-back FAILED for #{version} (#{build_number}): #{message}") if status == :fail
 
@@ -185,12 +203,13 @@ platform :ios do
         break
       end
 
-      if Time.now >= deadline
+      wait = AscReadback.next_wait(now: Time.now, deadline: deadline, interval: ATTACH_INTERVAL)
+      if wait.nil?
         UI.user_error!("ASC read-back TIMED OUT after #{ATTACH_TIMEOUT}s for " \
                        "#{version} (#{build_number}): #{message}")
       end
-      UI.message("ASC read-back not settled yet: #{message} - retrying in #{ATTACH_INTERVAL}s")
-      sleep(ATTACH_INTERVAL)
+      UI.message("ASC read-back not settled yet: #{message} - retrying in #{wait}s")
+      sleep(wait)
     end
   end
 

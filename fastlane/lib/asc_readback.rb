@@ -52,4 +52,34 @@ module AscReadback
               "expected #{InternalState::IN_BETA_TESTING.inspect}"]
     end
   end
+
+  # The wall-clock budget for the READY_FOR_BETA_TESTING poll. Returns the seconds to wait before
+  # the next read-back, or nil when the budget is spent and the lane must give up.
+  #
+  # nil the moment a further cadence step would not finish inside the deadline. Checking only
+  # "has the deadline passed?" after the sleep is not a bound: a :wait observed one second before
+  # it still sleeps a full interval and issues another request, so a 300s budget quietly becomes
+  # 320s plus a round trip. Here the last iteration skips the sleep and times out instead, and no
+  # request is ever issued at or after the deadline.
+  def self.next_wait(now:, deadline:, interval:)
+    remaining = deadline - now
+    return nil if remaining <= interval
+
+    interval
+  end
+
+
+  # Whether another read-back may be STARTED right now.
+  #
+  # Re-checked immediately before every request, not only after the previous one: a sleep can
+  # overshoot -- a loaded build host or a slow round trip wakes up later than asked -- and the
+  # budget must not be spent by a request that began after it had already run out.
+  #
+  # Scope, deliberately: this bounds when a request STARTS. A request already in flight can still
+  # FINISH after the deadline, which is inherent to any network call and is not what this guard
+  # is for; bounding that would mean cancelling an in-flight HTTP request, which Spaceship does
+  # not expose and which would not make the read-back any more truthful.
+  def self.may_request?(now:, deadline:)
+    now < deadline
+  end
 end

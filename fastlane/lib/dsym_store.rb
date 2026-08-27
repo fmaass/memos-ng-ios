@@ -23,4 +23,22 @@ module DsymStore
     tried = candidates.map { |name, root| "#{name} #{root}" }.join(", ")
     [:none, nil, "no dSYM store is reachable (tried #{tried}) - the symbols for this build would be lost"]
   end
+
+  # Which release the symbols get filed under. Each field defaults ON ITS OWN.
+  #
+  # Defaulting them as a pair is a data-loss bug wearing a convenience hat: `version:1.0.4` with no
+  # `build:` would take the archive's version too, filing 1.0.4's symbols under whatever the
+  # archive happened to say, so the crash that needs them later finds an empty directory. Missing
+  # means nil or blank -- an empty string arrives from `options[:version].to_s` on every run.
+  def self.release_label(version:, build:, archive_version:, archive_build:)
+    [
+      (blank?(version) ? archive_version : version).to_s,
+      (blank?(build) ? archive_build : build).to_s,
+    ]
+  end
+
+  def self.blank?(value)
+    value.nil? || value.to_s.strip.empty?
+  end
+  private_class_method :blank?
 end
