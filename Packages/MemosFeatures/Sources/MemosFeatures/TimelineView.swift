@@ -578,6 +578,13 @@ public struct TimelineView: View {
     /// The reconciling read belongs to the CONNECTION, not to this call, so `consume` owns it and
     /// runs it at every open — see `MediaChannel.uidsToReconcile` for what a per-channel pass
     /// would miss. Everything this function does is hand over what a connection needs.
+    ///
+    /// The search's list is handed over as a CLOSURE, not as a second store, and deliberately not
+    /// as part of the task's key: a search is opened and left far more often than the app is put
+    /// away, and keying on it would close and reopen the connection every time. Read at each event
+    /// instead, so the results screen is patched from the moment it exists and the connection
+    /// never notices. It is the search's store rather than a screen's, because that store IS what
+    /// the results screen shows and what the sheet fills before it — the same rows either way.
     private func runMediaChannel() async {
         guard mediaChannelRuns,
             let timeline,
@@ -587,6 +594,9 @@ public struct TimelineView: View {
         await MediaChannel.consume(
             MediaEventClient.device().stream(),
             into: timeline,
+            alongside: { [searchPresentation] in
+                searchPresentation.search.map { [$0.results] } ?? []
+            },
             using: client,
             baseURL: baseURL
         )

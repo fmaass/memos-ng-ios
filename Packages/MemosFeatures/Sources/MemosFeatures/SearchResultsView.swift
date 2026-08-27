@@ -27,11 +27,17 @@ enum SearchResultsTitle {
 /// So the results are their own list over a timeline that has not moved, built from the same cards
 /// and the same day sections, off the search's own `TimelineStore`.
 ///
-/// The live media channel patches exactly ONE store — the timeline's (`MediaChannel.consume`) —
-/// and it carries no memo the stream can add or remove. A results list therefore gets no tier
-/// updates at all while it is up, which is what the existing remedy is for: one
-/// `MediaChannel.reconcile` when the screen appears re-reads only the attachments still showing a
-/// waiting tile, and costs nothing when none is.
+/// The device has ONE live media connection, and while this screen is up it patches this list
+/// beside the timeline's (`MediaChannel.consume`, `alongside:`): a photo that finishes while
+/// somebody is reading their results flips where it sits, without the screen being left and come
+/// back to. An event for a memo only the timeline holds changes nothing here — an attachment uid
+/// names one memo, and a search is mostly memos the home list has never loaded.
+///
+/// What no stream can report is an attachment that was already finished when the connection took
+/// its snapshot, and a results list is read after that snapshot every time. So appearing re-reads
+/// the memos still showing a waiting tile, once — `MemoSearch.resultsAppeared`, which waits for
+/// the search itself first, because the push that opens this screen routinely lands while the
+/// answer is still out.
 struct SearchResultsView: View {
     @Environment(SessionStore.self) private var session
     let search: MemoSearch
@@ -51,7 +57,7 @@ struct SearchResultsView: View {
             .navigationTitle(SearchResultsTitle.text(term: search.term, filters: search.filters))
             .navigationBarTitleDisplayMode(.inline)
             .overlay { empty }
-            .task { await reconcile() }
+            .task { await search.resultsAppeared() }
     }
 
     @ViewBuilder
@@ -110,10 +116,5 @@ struct SearchResultsView: View {
                 Text(MemoSearchOutcome.noMatches.detail ?? "")
             }
         }
-    }
-
-    private func reconcile() async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        await MediaChannel.reconcile(search.results, using: client, baseURL: baseURL)
     }
 }
