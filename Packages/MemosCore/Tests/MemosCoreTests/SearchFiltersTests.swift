@@ -289,6 +289,66 @@ struct SearchFiltersTests {
         #expect(typed[2]["tag"] == ["trip"], "typing threw the filter away")
     }
 
+    /// The re-ask that had nowhere to land.
+    ///
+    /// A filtered search is in flight. One character is typed, which sends nothing and CANCELS it;
+    /// the field is cleared again before that cancellation has unwound, and the filter is re-asked
+    /// — the identical query, because the filter never changed.
+    ///
+    /// Identical is the whole problem. `TimelineStore.setQuery` returns early for a query it is
+    /// already reading, so the lineage does not move; and `refresh` refuses a lineage that is
+    /// already being loaded (`TimelineStore.swift:135`), which the cancelled request still holds
+    /// because its `defer` has not run yet. The re-ask therefore issued NO request at all, and
+    /// then answered from whatever rows happened to be on hand. Nothing was left to try again: no
+    /// request in flight, no trigger, a filtered sheet sitting on a lie.
+    ///
+    /// The first request is held open by a gate that ignores cancellation, so the window the
+    /// defect lives in is held open with it rather than raced for.
+    @Test("a cleared field re-asks its filter, and the re-ask reaches the network")
+    func aReAskAfterACancelledRequestStillReachesTheNetwork() async {
+        let gate = HeldRequest()
+        let calls = Counter()
+        let paths = LockedValue<[String]>([])
+        let search = MemoSearch(
+            client: Stub.client { request, _, _ in
+                paths.set(paths.get() + [request.path ?? ""])
+                calls.increment()
+                guard calls.count > 1 else {
+                    // The one that gets cancelled. It answers with nothing, so rows from it could
+                    // never be mistaken for the re-ask's.
+                    await gate.enter()
+                    return Stub.json(Stub.page([], nextCursor: nil))
+                }
+                return Stub.json(Stub.memoList(["found"], nextCursor: nil))
+            },
+            baseURL: Stub.baseURL
+        )
+
+        search.apply(SearchFilters.empty.toggling("trip"))
+        // Control: the first request really is in flight and parked, so what follows cancels
+        // something rather than arriving before anything started.
+        await gate.entered()
+
+        // One character, then straight back out — both before the cancelled request can unwind.
+        search.typed("t")
+        search.typed("")
+
+        await gate.release()
+        await search.settled()
+
+        let sent = paths.get()
+        #expect(
+            sent.count == 2,
+            "the re-asked filter never reached the network: \(sent.count) request(s) in all"
+        )
+        let uids: [String] = search.results.memos.map(\.uid)
+        #expect(uids == ["found"], "the list is not what the re-ask brought back")
+        #expect(
+            search.outcome == .matched,
+            "the sheet answered from rows no request of its own had fetched"
+        )
+    }
+
     /// Clearing the field with a filter still set is not the end of the search — the filter IS a
     /// search, and what has to come back is the filter on its own. With nothing set at all it is
     /// exactly the cleared field this sheet has always had: nothing sent, and back to the
@@ -332,5 +392,42 @@ struct SearchFiltersTests {
         #expect(paths.get().count == 3, "the plain timeline was fetched as a search")
         #expect(search.outcome == .idle)
         #expect(search.results.query.isEmpty, "the abandoned filter is still what the list asks")
+    }
+}
+
+/// One request held open until the test lets it go, and the test's own wait for it to get there.
+///
+/// Deliberately NOT cancellation-aware, which is the point of it. The defect this suite pins lives
+/// in the window between a request being cancelled and its `defer` running, and a gate that let go
+/// when the task was cancelled would close that window before a test could look through it. Both
+/// halves are continuations rather than polls: the request's arrival resumes the test, and the
+/// test's release resumes the request.
+private actor HeldRequest {
+    private var arrived = false
+    private var released = false
+    private var arrivals: [CheckedContinuation<Void, Never>] = []
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    /// Called from inside the scripted transport: announces the request, then holds it.
+    func enter() async {
+        arrived = true
+        let waiting = arrivals
+        arrivals = []
+        for waiter in waiting { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    /// Called from the test: returns once the request has reached the gate.
+    func entered() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrivals.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiting = parked
+        parked = []
+        for waiter in waiting { waiter.resume() }
     }
 }

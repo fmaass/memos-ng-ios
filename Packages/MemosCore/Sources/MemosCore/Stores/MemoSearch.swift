@@ -181,6 +181,9 @@ public final class MemoSearch {
     /// An EMPTY query is not sent at all: it is the whole timeline, and run as a search it would
     /// put every memo the account can see behind "Show results" as though each one had matched. It
     /// is the search being taken back, so it is `stop`.
+    ///
+    /// The one it replaces is cancelled here and WAITED FOR below, because cancelling a request is
+    /// not the same as it being finished.
     private func ask(_ query: MemoQuery, debounced: Bool) {
         guard !query.isEmpty else {
             stop()
@@ -189,7 +192,8 @@ public final class MemoSearch {
         guard query != asked else { return }
         asked = query
         outcome = .searching
-        work?.cancel()
+        let previous = work
+        previous?.cancel()
         work = Task { [self] in
             if debounced {
                 await self.sleep(self.pause)
@@ -197,6 +201,22 @@ public final class MemoSearch {
                 // one that gets a request.
                 guard !Task.isCancelled else { return }
             }
+            // The one before this one is cancelled, but it unwinds on its own schedule, and until
+            // it has, `TimelineStore` is still holding the loading flag for the lineage this task
+            // is about to ask for. `refresh` refuses a lineage already being loaded and says
+            // nothing about it, so re-asking the IDENTICAL query — a filter cleared and restored,
+            // a term deleted and retyped — would issue NO request at all: `setQuery` returns early
+            // for the query the store already reads, so the lineage never moves out of the way.
+            // The answer would then be read off whatever rows happened to be there, with nothing
+            // in flight and nothing left to try again (MEMNG-120 review).
+            //
+            // Waited for AFTER the pause and never before it. A task parked in the debounce is
+            // cancelled the moment the next keystroke lands and returns at the guard above without
+            // ever reaching here, so a typed word still coalesces into one request instead of
+            // queueing one per key.
+            _ = await previous?.value
+            // Superseded while waiting for the one before it.
+            guard !Task.isCancelled else { return }
             results.setQuery(query)
             await results.refresh(using: client, baseURL: baseURL)
             // Cancelled DURING the request — the field was cleared or retyped while it was out.
