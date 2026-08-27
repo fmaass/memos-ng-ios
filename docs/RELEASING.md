@@ -23,6 +23,12 @@ number), the generated project inherits them, and the gate enforces agreement.
 2. Merge; on merkur: `git pull && ./bin/generate.sh`, then Any iOS Device → Product → Archive →
    Distribute → Upload. Auto-distribution is off: attach the build to the `household` group in
    App Store Connect (or let the observed auto-attach do it, but verify).
+   The headless path for this step is `fastlane beta` ([`TESTFLIGHT.md`](TESTFLIGHT.md) §8b): it
+   preserves the archive's dSYMs to `janus:/memos-ng-ios/dSYMs/<marketing>-<build>/` before
+   anything reaps `build/`, and it ends by reading App Store Connect back to prove the build is
+   attached to the `household` group — so "uploaded" cannot be mistaken for "the household can see
+   it". Both are verifiable on their own afterwards with `fastlane verify_attach version:<v>
+   build:<n>` and `fastlane preserve_dsyms archive:<path>`.
 3. Verify on a device — sign-in included on a fresh install.
 4. Tag: `git tag -a v<version> -m "<version> (build <n>): <one line on what shipped>"` on the
    merged commit, `git push origin v<version>`.
