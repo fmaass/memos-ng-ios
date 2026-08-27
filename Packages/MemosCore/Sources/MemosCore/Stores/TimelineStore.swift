@@ -529,29 +529,32 @@ public final class TimelineStore {
     /// over a timeline that is working. A 401 is different — it ends the session wherever it
     /// happens — so that one is still handed on.
     ///
-    /// It is also DROPPED when the stream overtook it. The answer describes the memo as it was
-    /// when the request went out, so an event applied to that memo in the meantime is the newer
-    /// truth and this one would revert it (`liveApplications`). `false` says so: this read is not
-    /// what the list now holds. Only this lane is fenced — `fetchMemo` answers a caller that
-    /// needs the memo it asked for, and an ordinary edit or refresh is a reader's own action
-    /// rather than a background snapshot, so a re-transcode that honestly returns an attachment
-    /// to waiting still reaches the list through those.
+    /// It is also MERGED around whatever the stream said while it was in the air. The answer
+    /// describes the memo as it was when the request went out, so an attachment an event moved in
+    /// the meantime is kept as the stream left it while the rest of the answer — including the
+    /// attachments no event will ever mention, which are the reason this pass exists — still
+    /// lands. `reconciled(_:issuedWith:)` is that rule; `true` therefore still means what it
+    /// always did, that the read reached the list.
+    ///
+    /// Only this lane is merged: `fetchMemo` answers a caller that needs the memo it asked for,
+    /// and an ordinary edit or refresh is a reader's own action rather than a background snapshot,
+    /// so a re-transcode that honestly returns an attachment to waiting still reaches the list
+    /// through those.
     @discardableResult
     public func refreshMemo(
         uid: String,
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
-        // Read BEFORE the request goes out. The question this answers is whether the stream said
-        // anything about this memo while the answer was in the air.
-        let appliedWhenIssued = liveApplications[uid] ?? 0
+        // Read BEFORE the request goes out. What it is compared against on the way back is which
+        // attachments the stream spoke about while the answer was in the air.
+        let appliedWhenIssued = liveApplications
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
-                let memo = Memo(try ok.body.json, baseURL: baseURL)
-                guard liveApplications[uid] ?? 0 == appliedWhenIssued else { return false }
-                apply(memo)
+                let read = Memo(try ok.body.json, baseURL: baseURL)
+                apply(reconciled(read, issuedWith: appliedWhenIssued))
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -562,6 +565,31 @@ public final class TimelineStore {
             if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
             return false
         }
+    }
+
+    /// One reconciling read, merged around whatever the stream said while it was in the air.
+    ///
+    /// Attachment by attachment, because neither wholesale answer is right. Taking the read whole
+    /// talks an attachment the stream has already finished back out of that state, and nothing
+    /// says it again. Dropping the read whole strands the attachments the stream CANNOT speak
+    /// about — the ones that finished before the connection took its snapshot, which is the entire
+    /// reason this pass exists — and dropping is not a delay but a loss: while a sibling is
+    /// mid-transcode its events keep arriving, so every retry lands in the same window.
+    ///
+    /// So each attachment comes from whichever source spoke about it LAST: the loaded list, for
+    /// the ones an event moved since this read went out, and the read for all the rest. Everything
+    /// no event can carry — the content, the visibility, the dates, an attachment added or removed
+    /// since — is the read's, because on those the read is the only word there is.
+    private func reconciled(_ read: Memo, issuedWith applications: [String: Int]) -> Memo {
+        guard let loaded = memos.first(where: { $0.uid == read.uid }) else { return read }
+        var merged = read
+        merged.attachments = read.attachments.map { attachment in
+            guard liveApplications[attachment.uid] != applications[attachment.uid],
+                let moved = loaded.attachments.first(where: { $0.uid == attachment.uid })
+            else { return attachment }
+            return moved
+        }
+        return merged
     }
 
     /// Reads ONE memo from the server and hands it back, whether or not this list holds it.
@@ -654,15 +682,14 @@ public final class TimelineStore {
     public func apply(_ event: MediaEvent) {
         let next = applyMediaEvent(event, to: memos)
         guard next != memos else { return }
-        // Which memos the stream actually moved. A reconciling read that was already in the air
-        // for one of them is now describing a state this list has left — see `liveApplications`.
-        for (updated, previous) in zip(next, memos) where updated != previous {
-            liveApplications[updated.uid, default: 0] += 1
-        }
+        // The one attachment this event named, and only because it really moved: a read already
+        // in the air is now the older word on THIS file and still the newer word on every other
+        // one — see `reconciled(_:issuedWith:)`.
+        liveApplications[event.uid, default: 0] += 1
         memos = next
     }
 
-    /// How many live media events this list has APPLIED to each memo.
+    /// How many live media events this list has APPLIED to each ATTACHMENT.
     ///
     /// A read is a snapshot of the moment it was ISSUED, and the stream is faster than a round
     /// trip. A reconciling pass asks for a memo whose attachment is still pending; the terminal
@@ -672,11 +699,15 @@ public final class TimelineStore {
     /// dropping out of the connection's snapshot (memos-ng `app/routers/assets.py:757-761`), and
     /// that has already happened.
     ///
-    /// Counted PER MEMO rather than once for the list: during a transcode events arrive for one
-    /// attachment every second and a half, and a single counter would drop every reconciling read
-    /// taken anywhere near an upload — which is precisely when the pass earns its keep. It grows
-    /// by one entry per memo the stream has ever moved, which is bounded by the uploads a session
-    /// sees.
+    /// Keyed per ATTACHMENT and not per memo, because a memo's files are in different situations
+    /// at the same moment: one finished before the connection took its snapshot — no event will
+    /// ever mention it, and the read is the only thing that can bring it in — while another is
+    /// mid-transcode, emitting an event every second and a half. A per-memo key would let the
+    /// second one's chatter throw away the first one's news, and every retry would land in the
+    /// same window, so the finished file would never arrive at all.
+    ///
+    /// It grows by one entry per attachment the stream has ever moved, which is bounded by the
+    /// uploads a session sees.
     private var liveApplications: [String: Int] = [:]
 
     /// Ticks or unticks the Nth rendered checkbox of a memo.

@@ -41,6 +41,18 @@ struct SearchResultsLiveTests {
         Stub.memo(uid: uid, attachments: [Stub.attachment(uid: attachment, status: status)])
     }
 
+    /// A memo carrying more than one file, because the interesting state of a memo is the one
+    /// where its files are in different situations at the same moment.
+    private nonisolated static func memo(
+        _ uid: String,
+        attachments: [(uid: String, status: String)]
+    ) -> String {
+        Stub.memo(
+            uid: uid,
+            attachments: attachments.map { Stub.attachment(uid: $0.uid, status: $0.status) }
+        )
+    }
+
     /// Keeps a scripted request open until the test lets it go. `nonisolated`, because the
     /// transport runs off the main actor.
     private nonisolated static func hold(until release: LockedValue<Bool>) async throws {
@@ -361,6 +373,100 @@ struct SearchResultsLiveTests {
         #expect(tile?.readiness == .ready, "a stale re-read put a finished tile back to waiting")
         #expect(tile?.width == 4032, "a stale re-read overwrote the layout the worker wrote")
         #expect(tile?.height == 3024)
+    }
+
+    /// The memo a read is FOR usually carries more than one file, and its files are in different
+    /// situations at the same moment.
+    ///
+    /// The quiet one finished BEFORE the connection took its snapshot, so no event will ever
+    /// mention it and this read is the only thing that can bring it in — which is the whole reason
+    /// the reconciling pass exists. The other is mid-transcode and emitting an event every second
+    /// and a half. Taking the whole answer would talk the second one back out of a state the
+    /// stream had already reached; DROPPING the whole answer strands the first for as long as the
+    /// second keeps chattering, because every retry lands in the same window.
+    ///
+    /// So the answer is merged: each attachment comes from whichever source spoke about it last.
+    @Test("a reconcile brings in what no event could carry, and keeps what the events did")
+    func aReconcileMergesAroundTheEventsThatOvertookIt() async {
+        let quiet = "a-quiet"
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(
+                    Stub.page([
+                        Self.memo(
+                            Self.found,
+                            attachments: [
+                                (uid: quiet, status: "pending"),
+                                (uid: Self.foundAttachment, status: "pending"),
+                            ]
+                        )
+                    ])
+                )
+            case "get_memo_api_memos__uid__get":
+                entered.set(true)
+                try await Self.hold(until: release)
+                // The server as it was when this read was ISSUED: the quiet one has finished —
+                // news no event will ever carry — and the other is still being worked on.
+                return Stub.json(
+                    Self.memo(
+                        Self.found,
+                        attachments: [
+                            (uid: quiet, status: "ready"),
+                            (uid: Self.foundAttachment, status: "pending"),
+                        ]
+                    )
+                )
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let search = MemoSearch(
+            client: client,
+            baseURL: Stub.baseURL,
+            coalescing: .milliseconds(1)
+        )
+        search.typed("travel")
+        await search.settled()
+        let presentation = SearchPresentation()
+        presentation.open(search)
+        presentation.close()
+        presentation.resultsPushed(atDepth: 1)
+
+        let appearing = Task { await search.resultsAppeared() }
+        while !entered.get() {
+            await Task.yield()
+        }
+        // The OTHER attachment finishes while that read is in the air.
+        await MediaChannel.consume(
+            channel([.event(envelope(Self.foundReady))]),
+            into: TimelineStore(),
+            alongside: { presentation.liveResults },
+            using: client,
+            baseURL: Stub.baseURL,
+            identity: MediaIdentity()
+        )
+        #expect(
+            search.results.memos.first?.attachments
+                .first { $0.uid == Self.foundAttachment }?.readiness == .ready,
+            "the event never reached the results list, so this proves nothing"
+        )
+
+        release.set(true)
+        await appearing.value
+
+        let attachments = search.results.memos.first?.attachments ?? []
+        #expect(attachments.count == 2)
+        #expect(
+            attachments.first { $0.uid == quiet }?.readiness == .ready,
+            "the read's own news was thrown away because a sibling attachment moved"
+        )
+        let moved = attachments.first { $0.uid == Self.foundAttachment }
+        #expect(moved?.readiness == .ready, "the stale half of the read undid the event")
+        #expect(moved?.width == 4032, "the stale half of the read undid the event's layout")
+        #expect(moved?.height == 3024)
     }
 
     // MARK: - only while somebody is reading it
