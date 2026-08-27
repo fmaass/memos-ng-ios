@@ -31,15 +31,15 @@ struct MediaViewerView: View {
     /// zoomed picture is a pan, and a page that turns halfway through examining a photo is the
     /// single most annoying thing a viewer can do.
     @State private var zoomedPage: String?
-    /// What the player SHOULD be. Decided by `MediaViewerPlayback` from what the pager did, never
-    /// in a view body — see `advance(_:)`.
-    @State private var playback: MediaViewerPlayback.Player?
-    /// The player itself, and there is only ever this one.
-    @State private var player: AVPlayer?
+    /// Everything playback DOES: the policy's answer, the one `AVPlayer`, and the audio session
+    /// the sound needs — none of which a view body can be asked about, so none of which is
+    /// decided in one (`MediaViewerPlaybackCoordinator`).
+    @State private var playback: MediaViewerPlaybackCoordinator
 
     init(selection: MediaViewerSelection) {
         self.selection = selection
         _currentPage = State(initialValue: selection.startPage.id)
+        _playback = State(initialValue: MediaViewerPlaybackCoordinator(selection: selection))
     }
 
     var body: some View {
@@ -55,40 +55,15 @@ struct MediaViewerView: View {
         // A tapped video is playing before the zoom transition has finished growing out of its
         // tile. A poster with a play button on it, waiting for a second tap, is what this
         // replaced.
-        .onAppear { advance(.opened) }
+        .onAppear { playback.advance(.opened) }
         .onChange(of: currentPage) { _, settled in
             guard let settled else { return }
-            advance(.paged(to: settled))
+            playback.advance(.paged(to: settled))
         }
         // The way out is not only the close button: the zoom transition dismisses on a drag, and
         // a video that went on playing behind a dismissed viewer would be a voice in an empty
         // room. Every exit lands here.
-        .onDisappear { advance(.dismissed) }
-    }
-
-    /// One event in, one desired player out of `MediaViewerPlayback`, and the real `AVPlayer` made
-    /// to match it.
-    ///
-    /// The teardown is the load-bearing half. A player that belongs to a different page than the
-    /// one wanted is released rather than paused and kept, and its item is detached first so the
-    /// stream stops being read at once — otherwise every clip visited in a long memo leaves an
-    /// `AVPlayer` behind, each still holding a signed URL open.
-    private func advance(_ event: MediaViewerPlayback.Event) {
-        let next = MediaViewerPlayback.player(after: event, player: playback, in: selection)
-        if playback?.page != next?.page {
-            player?.pause()
-            player?.replaceCurrentItem(with: nil)
-            player = nil
-        }
-        playback = next
-        guard let next else { return }
-        let live = player ?? AVPlayer(url: next.url)
-        player = live
-        if next.isPlaying {
-            live.play()
-        } else {
-            live.pause()
-        }
+        .onDisappear { playback.advance(.dismissed) }
     }
 
     private var pager: some View {
@@ -106,8 +81,8 @@ struct MediaViewerView: View {
                         },
                         // Handed to exactly one page: the one the single player belongs to. Every
                         // other page gets `nil` and draws its poster.
-                        player: playback?.page == page.id ? player : nil,
-                        play: { advance(.played(page: page.id)) }
+                        player: playback.player(for: page.id),
+                        play: { playback.advance(.played(page: page.id)) }
                     )
                     .containerRelativeFrame(.horizontal)
                     .id(page.id)

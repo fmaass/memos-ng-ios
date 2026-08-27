@@ -172,3 +172,175 @@ struct MediaViewerPlaybackTests {
         )
     }
 }
+
+/// What the viewer's playback asks of the device's audio session, as a rule about TRANSITIONS.
+///
+/// The defect these exist for is one the owner confirmed on a real phone: with the ringer switch
+/// off, a memo's video played silently, because nothing ever told the system that this sound was
+/// deliberate (MEMNG-183). The fix is a claim — and a claim is an event other apps hear, so the
+/// interesting cases are all about when it must NOT be sent again: a video that keeps playing
+/// while the pager moves under it, a paused player torn down, a picture looked at.
+@Suite("Viewer audio session policy")
+struct MediaViewerSessionCommandTests {
+    private func player(_ page: String = "v1", playing: Bool) -> MediaViewerPlayback.Player {
+        MediaViewerPlayback.Player(
+            page: page,
+            url: MediaViewerPageTests.url(page, "stream"),
+            isPlaying: playing
+        )
+    }
+
+    @Test("the first play takes the session")
+    func firstPlayClaims() {
+        #expect(
+            MediaViewerPlayback.sessionCommand(from: nil, to: player(playing: true)) == .claim
+        )
+    }
+
+    @Test("a player that goes on playing does not take it again")
+    func playingOnAsksNothing() {
+        let playing = player(playing: true)
+        #expect(MediaViewerPlayback.sessionCommand(from: playing, to: playing) == nil)
+        #expect(
+            MediaViewerPlayback.sessionCommand(from: playing, to: player("v2", playing: true))
+                == nil,
+            "changing which video plays told every other app on the phone to stop, twice"
+        )
+    }
+
+    @Test("pausing on the page next door gives it back")
+    func pauseReleases() {
+        let playing = player(playing: true)
+        let paused = player(playing: false)
+        #expect(MediaViewerPlayback.sessionCommand(from: playing, to: paused) == .release)
+    }
+
+    @Test("swiping back onto it takes it again")
+    func resumeReclaims() {
+        let paused = player(playing: false)
+        let playing = player(playing: true)
+        #expect(MediaViewerPlayback.sessionCommand(from: paused, to: playing) == .claim)
+    }
+
+    @Test("tearing a playing player down gives it back")
+    func teardownReleases() {
+        let playing = player(playing: true)
+        #expect(MediaViewerPlayback.sessionCommand(from: playing, to: nil) == .release)
+    }
+
+    @Test("a paused player asks nothing on the way out — it gave the session back when it paused")
+    func pausedTeardownAsksNothing() {
+        #expect(MediaViewerPlayback.sessionCommand(from: player(playing: false), to: nil) == nil)
+    }
+
+    @Test("looking at pictures never touches the session")
+    func picturesAskNothing() {
+        #expect(MediaViewerPlayback.sessionCommand(from: nil, to: nil) == nil)
+    }
+}
+
+/// A call, an alarm, or another app taking the session: what the viewer's player does about it.
+///
+/// The whole difficulty is the RESUME. The system's `.ended` says only "you may start again", and
+/// a viewer that took that literally would start talking out of a page the pager left minutes ago
+/// — so what a `.began` remembers is whether the player it paused was actually running.
+@Suite("Viewer interruption policy")
+struct MediaViewerInterruptionTests {
+    private func player(playing: Bool) -> MediaViewerPlayback.Player {
+        MediaViewerPlayback.Player(
+            page: "v1",
+            url: MediaViewerPageTests.url("v1", "stream"),
+            isPlaying: playing
+        )
+    }
+
+    @Test("a call pauses a running video and remembers that it was running")
+    func beganPauses() {
+        let outcome = MediaViewerPlayback.interrupted(
+            .began,
+            player: player(playing: true),
+            resumable: false
+        )
+        #expect(outcome.player?.isPlaying == false)
+        #expect(outcome.player?.page == "v1", "the interruption threw the player away")
+        #expect(outcome.resumable)
+    }
+
+    @Test("a call over a paused video remembers nothing to resume")
+    func beganOnPausedRemembersNothing() {
+        let outcome = MediaViewerPlayback.interrupted(
+            .began,
+            player: player(playing: false),
+            resumable: false
+        )
+        #expect(outcome.player?.isPlaying == false)
+        #expect(!outcome.resumable)
+    }
+
+    @Test("the call ending resumes what it interrupted")
+    func endedResumes() {
+        let outcome = MediaViewerPlayback.interrupted(
+            .ended(shouldResume: true),
+            player: player(playing: false),
+            resumable: true
+        )
+        #expect(outcome.player?.isPlaying == true)
+        #expect(!outcome.resumable, "the memory outlived the interruption it belonged to")
+    }
+
+    @Test("a call ending without the system's blessing resumes nothing")
+    func endedWithoutBlessing() {
+        let outcome = MediaViewerPlayback.interrupted(
+            .ended(shouldResume: false),
+            player: player(playing: false),
+            resumable: true
+        )
+        #expect(outcome.player?.isPlaying == false)
+    }
+
+    @Test("a call ending over a video the pager had already left resumes nothing")
+    func endedOverAPausedPageResumesNothing() {
+        let outcome = MediaViewerPlayback.interrupted(
+            .ended(shouldResume: true),
+            player: player(playing: false),
+            resumable: false
+        )
+        #expect(
+            outcome.player?.isPlaying == false,
+            "a video started talking out of a page nobody was on"
+        )
+    }
+
+    @Test("an interruption with no player at all is nothing")
+    func noPlayer() {
+        let outcome = MediaViewerPlayback.interrupted(.began, player: nil, resumable: false)
+        #expect(outcome.player == nil)
+        #expect(!outcome.resumable)
+    }
+}
+
+/// Which clips restart themselves at their end (MEMNG-184).
+@Suite("Viewer auto-loop threshold")
+struct MediaViewerAutoLoopTests {
+    @Test("the threshold is two minutes")
+    func threshold() {
+        #expect(MediaViewerPlayback.autoLoopMaximumDuration == .seconds(120))
+    }
+
+    @Test("a clip at the threshold loops and one a second past it does not")
+    func atAndPastTheThreshold() {
+        #expect(MediaViewerPlayback.shouldLoop(duration: .seconds(120)))
+        #expect(MediaViewerPlayback.shouldLoop(duration: .seconds(3)))
+        #expect(!MediaViewerPlayback.shouldLoop(duration: .seconds(121)))
+        #expect(!MediaViewerPlayback.shouldLoop(duration: .seconds(600)))
+    }
+
+    @Test("a length nobody knows never loops")
+    func unknownLength() {
+        #expect(!MediaViewerPlayback.shouldLoop(duration: nil))
+        #expect(
+            !MediaViewerPlayback.shouldLoop(duration: .zero),
+            "an item reporting nothing at all was treated as a very short clip"
+        )
+    }
+}
