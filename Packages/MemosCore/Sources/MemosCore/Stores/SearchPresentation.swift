@@ -57,6 +57,46 @@ public final class SearchPresentation {
     public func close() {
         session = nil
     }
+
+    // MARK: - who is reading the results
+
+    /// The navigation depth the results screen sits at, or nil when it is not on the stack.
+    ///
+    /// A DEPTH rather than a visibility flag, because the two differ exactly where it matters: a
+    /// memo opened from the results is pushed ON TOP of them, and the list underneath is what that
+    /// detail screen reads and edits through (`TimelineView.holder(of:)`). A rule keyed on the
+    /// results being visible would drop the list at that moment; a stack that still holds the
+    /// screen does not.
+    public private(set) var resultsDepth: Int?
+
+    /// The results screen has been pushed onto a stack that is now this deep.
+    public func resultsPushed(atDepth depth: Int) {
+        resultsDepth = depth
+    }
+
+    /// The stack changed depth. Anything deeper than the results screen was pushed FROM it, so
+    /// only a stack that has come back ABOVE it means the screen has gone.
+    public func stackChanged(toDepth depth: Int) {
+        guard let resultsDepth, depth < resultsDepth else { return }
+        self.resultsDepth = nil
+    }
+
+    /// Whether the results screen is on the stack.
+    public var isShowingResults: Bool { resultsDepth != nil }
+
+    /// The loaded lists one live media event has to reach beside the timeline.
+    ///
+    /// The store OUTLIVES its screen deliberately — it is never emptied or cancelled when the
+    /// reader walks back, because the rows and the cursor are exactly what they would walk into
+    /// again (MEMNG-177) — so "there is a search" is not "somebody is reading it". What must not
+    /// outlive the screen is the channel's interest: a search paged a long way down leaves a big
+    /// array behind, and every event would map and compare the whole of it on the main actor,
+    /// once every second and a half during somebody else's transcode, for a list nobody can see.
+    /// The no-write guard in `TimelineStore.apply` skips the assignment, not the scan.
+    public var liveResults: [TimelineStore] {
+        guard isShowingResults, let search else { return [] }
+        return [search.results]
+    }
 }
 
 extension SearchPresentation {

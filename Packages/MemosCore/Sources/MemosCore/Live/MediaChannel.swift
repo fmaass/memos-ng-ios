@@ -102,7 +102,8 @@ public enum MediaChannel {
 
     // MARK: - consuming the stream
 
-    /// Applies the channel to the timeline until it stops or the consuming task is cancelled.
+    /// Applies the channel to the lists on screen until it stops or the consuming task is
+    /// cancelled.
     ///
     /// Leaving this loop is what closes the connection — `MediaEventClient.stream()` cancels its
     /// run on termination — so returning IS the teardown, and there is nothing else to unwind.
@@ -133,21 +134,45 @@ public enum MediaChannel {
     /// "this one cannot be applied in place", and the read that replaces it needs the client and
     /// the base URL that only a connection has. `now` is injected for the same reason it is a
     /// parameter there — the rule is a boundary in time.
+    ///
+    /// ## More than one list
+    ///
+    /// The device has ONE connection, and the timeline is no longer the only loaded list: a search
+    /// pushes its results as a screen with a store of its own (`MemoSearch.results`), and while
+    /// that screen is up a photo finishing belongs on it exactly as much as on the timeline
+    /// underneath. So the event reaches every list named here, each judged separately — an
+    /// attachment uid means one memo, and the list that does not hold it is left untouched, which
+    /// is what `applyMediaEvent` answers for a list the uid is not in.
+    ///
+    /// `alongside` is a CLOSURE, and read at every item rather than taken once. The channel runs
+    /// under a `.task(id:)` whose key is whether it should run at all, so a list that arrives or
+    /// leaves mid-connection must not be part of that key: a search opened and closed twice would
+    /// otherwise tear the connection down and build it up again four times, which is exactly the
+    /// churn `shouldRun` keeps `inactive` out of. Reading it here means a screen pushed a moment
+    /// ago is patched from the next event onwards, with nothing having to notice it appeared.
     @MainActor
     public static func consume(
         _ stream: AsyncStream<MediaEventStreamItem>,
         into store: TimelineStore,
+        alongside alsoOnScreen: @MainActor () -> [TimelineStore] = { [] },
         using client: any APIProtocol,
         baseURL: URL,
         identity: MediaIdentity = .shared,
         now: @Sendable () -> Date = { Date() }
     ) async {
         for await item in stream {
+            let lists = [store] + alsoOnScreen()
             switch item {
             case .state(let state):
                 switch state {
                 case .open:
-                    await reconcile(store, using: client, baseURL: baseURL)
+                    // Every list, for the reason `uidsToReconcile` gives — and the results list
+                    // meets that case more often than the timeline does, because it is read AFTER
+                    // this connection took its snapshot and pages further rows in as somebody
+                    // scrolls. A list with nothing waiting costs nothing.
+                    for list in lists {
+                        await reconcile(list, using: client, baseURL: baseURL)
+                    }
                 case .stopped:
                     return
                 case .connecting, .waiting:
@@ -155,19 +180,22 @@ public enum MediaChannel {
                 }
             case .event(let envelope):
                 guard let event = envelope.eventIfCurrent(for: identity) else { continue }
-                // Read on this actor, at the moment the answer is used — the list cannot move
-                // between the decision and what it decides, because neither awaits.
-                switch mediaEventOutcome(event, for: store.memos, at: now()) {
-                case .unchanged:
-                    break
-                case .applied:
-                    store.apply(event)
-                case .refresh(let uid):
-                    // The tile is about to be flipped onto a URL that has outlived its
-                    // signature, so it is the MEMO that is re-read: the answer carries freshly
-                    // minted URLs, and the same in-place `apply` the reconcile uses puts it into
-                    // the card already on screen.
-                    await store.refreshMemo(uid: uid, using: client, baseURL: baseURL)
+                for list in lists {
+                    // Read on this actor, at the moment the answer is used — the list cannot move
+                    // between the decision and what it decides, because neither awaits.
+                    switch mediaEventOutcome(event, for: list.memos, at: now()) {
+                    case .unchanged:
+                        break
+                    case .applied:
+                        list.apply(event)
+                    case .refresh(let uid):
+                        // The tile is about to be flipped onto a URL that has outlived its
+                        // signature, so it is the MEMO that is re-read: the answer carries freshly
+                        // minted URLs, and the same in-place `apply` the reconcile uses puts it
+                        // into the card already on screen. Decided per list, because the same
+                        // memo can have been read into two of them at different times.
+                        await list.refreshMemo(uid: uid, using: client, baseURL: baseURL)
+                    }
                 }
             }
         }

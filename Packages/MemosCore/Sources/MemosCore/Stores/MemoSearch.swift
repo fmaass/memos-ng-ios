@@ -259,6 +259,26 @@ public final class MemoSearch {
         await work?.value
     }
 
+    /// The results screen has appeared: whatever it is still waiting on is re-read, once.
+    ///
+    /// It waits for the search FIRST, and that is the whole of why this is a method here rather
+    /// than a line in the screen. The push that opens the results is a hand-off, and a hand-off
+    /// deliberately leaves an answer in flight — cancelling it left the reader on a spinner over
+    /// nothing whenever the network was slower than the dismissal animation (MEMNG-177) — so the
+    /// screen routinely appears over a list nothing has been read into yet. A reconciling pass
+    /// taken at that moment finds nothing awaiting tiers and re-reads nothing, and the rows that
+    /// land a moment later keep their waiting treatment for as long as the screen is up: no event
+    /// will mention them either, because an attachment that finished before the live connection
+    /// took its snapshot is in no snapshot to drop out of (`MediaChannel.uidsToReconcile`).
+    ///
+    /// The pass itself is the channel's, run over this search's own store — this is the one thing
+    /// about a results list that the stream cannot say. It costs nothing when nothing is waiting,
+    /// which is what makes it safe to take at every appearance.
+    public func resultsAppeared() async {
+        await settled()
+        await MediaChannel.reconcile(results, using: client, baseURL: baseURL)
+    }
+
     /// Cancels the pause and the request it had become, and forgets what it was for — but
     /// leaves the loaded rows where they are.
     ///
