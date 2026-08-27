@@ -8,10 +8,10 @@ import MemosCore
 /// registered — landed on that row and revoked a live credential.
 ///
 /// So the tap that opens the conversation and the tap that ends the session are different events,
-/// and only one of them reaches the server. `menuTapped` can be delivered any number of times and
+/// and only one of them reaches the server. `requested` can be delivered any number of times and
 /// never revokes anything; nothing is sent until `confirmed` arrives from an alert that is not
-/// under the anchor. `SignOutFlowTests` asserts exactly that, which is the part a screenshot of a
-/// menu could never show.
+/// under the control that asked. `SignOutFlowTests` asserts exactly that, which is the part a
+/// screenshot could never show.
 ///
 /// The second decision the flow can demand is older and unchanged: a revoke that could NOT be
 /// delivered is a real choice, because throwing the token away anyway leaves the server honouring
@@ -32,8 +32,10 @@ public enum SignOutFlow {
     }
 
     public enum Event: Equatable, Sendable {
-        /// The destructive row in the overflow menu was tapped. Deliberately harmless.
-        case menuTapped
+        /// Somebody asked to sign out — today from the row at the bottom of Settings, and the
+        /// name says nothing about which surface, because the machine's promise does not depend
+        /// on that. Deliberately harmless.
+        case requested
         /// The question was answered yes — in the alert, or "Try again" after a failed revoke.
         case confirmed
         /// The question was dismissed, whether by Cancel or by the sheet going away.
@@ -43,7 +45,7 @@ public enum SignOutFlow {
 
     public static func next(_ stage: Stage, on event: Event) -> Stage {
         switch event {
-        case .menuTapped:
+        case .requested:
             // Idempotent on purpose. A double-tap is one question, asked once, and it cannot
             // reach past `asking` — nor restart a revoke that is already in flight.
             return stage == .idle ? .asking : stage

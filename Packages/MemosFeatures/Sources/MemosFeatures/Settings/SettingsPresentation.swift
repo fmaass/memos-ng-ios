@@ -3,7 +3,7 @@ import MemosCore
 import SwiftUI
 import UIKit
 
-// The decisions the Settings screen and the account menu read. Pure functions over the account's
+// The decisions the Settings screen reads. Pure functions over the account's
 // settings, each one tested directly; the screens above them stay thin enough to be obvious.
 
 /// Which default visibilities the Settings screen offers, and what to say about one it does not.
@@ -137,41 +137,10 @@ enum MediaCacheClearing {
     }
 }
 
-/// What the account menu holds, in order.
-///
-/// A list rather than a view body, because the ORDER carries a safety property that a view body
-/// would only imply. A menu opens with its first row directly under the anchor that opened it, and
-/// when that row was the destructive one a second tap on the anchor — the ordinary human reflex
-/// when a tap seems not to have registered — revoked a live credential (MEMNG-119). The heading
-/// takes that position. It is not decoration: it is what stands between the anchor and the
-/// destructive row, and `AccountMenuTests` holds it there.
-///
-/// There is deliberately no appearance row. Appearance is a setting, it lives on the Settings
-/// screen with the other settings, and a menu that offered a second way to change one of them
-/// would be two answers to the same question.
-enum AccountMenu {
-    enum Row: Equatable, Hashable {
-        /// Who this device is signed in as. Never actionable — see above.
-        case heading(String)
-        case settings
-        case signOut
-
-        /// Whether choosing this row would take something away. Only one row ever can.
-        var isDestructive: Bool {
-            if case .signOut = self { return true }
-            return false
-        }
-    }
-
-    static func rows(name: String?) -> [Row] {
-        [.heading(SignOutFlow.accountHeading(name: name)), .settings, .signOut]
-    }
-}
-
 /// The Settings screen's sections, in the order they are read.
 ///
-/// An explicit list rather than whatever the view body happens to contain, so that "these six and
-/// no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
+/// An explicit list rather than whatever the view body happens to contain, so that "these seven
+/// and no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
 /// a section rendered as a disabled row or a "coming soon" line is a promise the app has not kept,
 /// and it costs a reader a tap to find that out. They arrive when they work.
 enum SettingsScreen {
@@ -184,8 +153,14 @@ enum SettingsScreen {
         case appearance
         case storage
         case about
+        /// Last, and alone. Signing out was the FIRST thing this screen offered until MEMNG-185 —
+        /// a row in the Account section, beside the name it would sign out of, and a second copy
+        /// of the one in the toolbar's menu. It ends the session; it is done rarely and on
+        /// purpose; so it sits where a rare, deliberate thing is looked for, and nowhere else.
+        case signOut
 
-        var title: String {
+        /// `nil` for a section that prints no heading of its own.
+        var title: String? {
             switch self {
             case .account: "Account"
             case .defaults: "Defaults"
@@ -193,6 +168,9 @@ enum SettingsScreen {
             case .appearance: "Appearance"
             case .storage: "Storage"
             case .about: "About"
+            // The row underneath already says the word, and a heading repeating it would put back
+            // exactly the prominence this section was made to take away.
+            case .signOut: nil
             }
         }
     }

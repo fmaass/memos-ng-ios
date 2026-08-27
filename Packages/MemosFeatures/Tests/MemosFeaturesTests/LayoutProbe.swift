@@ -205,3 +205,59 @@ enum MemoFixture {
         )
     }
 }
+
+/// Hosting a view on a real screen and pressing a control in it, by the label VoiceOver reads.
+///
+/// Separate from `ScreenProbe` because that one spins the run loop for four tenths of a second: a
+/// toolbar item arrives on a later turn than the first layout, so a screen with one has to be
+/// waited for. What this presses has none. It lays out, looks, and drains only what is ALREADY ready,
+/// giving up the moment the element exists — so it is over as soon as the row is there rather than
+/// after a fixed time.
+///
+/// The element is handed to the caller while the window is still up: activating a button whose
+/// window has already been torn down does nothing at all, which would look exactly like a wiring
+/// that was never connected.
+@MainActor
+enum PressProbe {
+    static func withElement<T>(
+        labelled label: String,
+        in view: some View,
+        _ body: (NSObject?) -> T
+    ) -> T {
+        let host = UIHostingController(rootView: view)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 200))
+        window.rootViewController = host
+        window.isHidden = false
+
+        var found: NSObject?
+        for _ in 0..<50 {
+            window.layoutIfNeeded()
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            found = element(labelled: label, in: window)
+            if found != nil { break }
+            RunLoop.current.run(mode: .default, before: Date())
+        }
+
+        let result = body(found)
+        window.isHidden = true
+        window.rootViewController = nil
+        return result
+    }
+
+    private static func element(labelled label: String, in node: Any) -> NSObject? {
+        guard let object = node as? NSObject else { return nil }
+        if object.accessibilityLabel == label, object.accessibilityTraits.contains(.button) {
+            return object
+        }
+        for child in object.accessibilityElements ?? [] {
+            if let found = element(labelled: label, in: child) { return found }
+        }
+        if let view = object as? UIView {
+            for subview in view.subviews {
+                if let found = element(labelled: label, in: subview) { return found }
+            }
+        }
+        return nil
+    }
+}
