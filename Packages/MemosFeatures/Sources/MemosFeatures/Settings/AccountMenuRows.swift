@@ -13,7 +13,6 @@ import SwiftUI
 struct AccountMenuRows: View {
     let rows: [AccountMenu.Row]
     let openSettings: () -> Void
-    let signOut: () -> Void
 
     var body: some View {
         ForEach(rows, id: \.self) { row in
@@ -26,14 +25,6 @@ struct AccountMenuRows: View {
                 Button(action: openSettings) {
                     Label("Settings", systemImage: "gearshape")
                 }
-            case .signOut:
-                Button(role: .destructive, action: signOut) {
-                    Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
-                }
-                // The destructive role reddens the WORDS; the glyph beside them is drawn in the
-                // inherited tint, which is the app's green — so the one row that should read as
-                // dangerous had a friendly icon on it.
-                .tint(.red)
             }
         }
     }

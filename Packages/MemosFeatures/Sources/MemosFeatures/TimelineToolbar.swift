@@ -11,7 +11,7 @@ import SwiftUI
 ///
 /// The arrangement, settled 2026-08-26:
 ///
-/// - LEADING: the account's own face, the anchor of the menu holding Settings and Sign out. It
+/// - LEADING: the account's own face, the anchor of the menu holding the heading and Settings. It
 ///   sat beside New memo until now, and a face pressed against the screen's primary button read
 ///   as a second button rather than as who you are. The corner opposite the action is where the
 ///   web app and every other app on the household's phones keep the account, so that is where it
@@ -28,9 +28,9 @@ import SwiftUI
 /// The menu itself is driven by `AccountMenu.rows`, which is where the ORDER lives — because the
 /// order carries a safety property. A menu opens with its first row directly under the anchor
 /// that opened it, and when that row was the destructive one a second tap on the anchor revoked a
-/// live credential (MEMNG-119). The heading occupies that position, the destructive row is last,
-/// and the tap itself only ever asks (`SignOutFlow`) — none of which the move to the other corner
-/// touches. The rows are built by walking that list rather than written out here, so the tests
+/// live credential (MEMNG-119). The heading occupies that position, and since MEMNG-185 there is
+/// no destructive row here to stand in front of: signing out is the last row on the Settings
+/// screen. The rows are built by walking that list rather than written out here, so the tests
 /// that hold the order are holding THIS menu, and `AccountMenuRows` is the same view the
 /// screenshot render draws.
 struct TimelineToolbar: ToolbarContent {
@@ -44,7 +44,6 @@ struct TimelineToolbar: ToolbarContent {
     /// the rest of the trigger.
     let composed: Int
     let openSettings: () -> Void
-    let signOut: () -> Void
     let search: () -> Void
     let newMemo: () -> Void
 
@@ -53,8 +52,7 @@ struct TimelineToolbar: ToolbarContent {
             Menu {
                 AccountMenuRows(
                     rows: AccountMenu.rows(name: name),
-                    openSettings: openSettings,
-                    signOut: signOut
+                    openSettings: openSettings
                 )
             } label: {
                 AccountAvatarView(image: avatar, name: name ?? "")

@@ -10,15 +10,18 @@ import Testing
 /// when a tap seems not to have registered — revoked a live credential. The heading is what stands
 /// in that position now. These hold it there, which is the part a screenshot of a menu could never
 /// show.
+///
+/// MEMNG-185: the destructive row has left this menu altogether — signing out is one unprominent
+/// row at the very bottom of the Settings screen (`SettingsScreenTests`). The heading-first
+/// assertions stay, because what stands under the anchor is still a decision; what the menu can no
+/// longer do is now stated outright rather than implied by the list.
 @MainActor
 @Suite("The account menu")
 struct AccountMenuTests {
-    @Test("the menu is a heading, Settings, and Sign out — in that order")
+    @Test("the menu is a heading and Settings — in that order")
     func rowsAndOrder() {
         #expect(
-            AccountMenu.rows(name: "Fabian") == [
-                .heading("Signed in as Fabian"), .settings, .signOut,
-            ]
+            AccountMenu.rows(name: "Fabian") == [.heading("Signed in as Fabian"), .settings]
         )
     }
 
@@ -39,11 +42,18 @@ struct AccountMenuTests {
         }
     }
 
-    @Test("exactly one row is destructive, and it is the last")
-    func oneDestructiveRowAtTheEnd() {
-        let rows = AccountMenu.rows(name: "Fabian")
-        #expect(rows.filter(\.isDestructive) == [.signOut])
-        #expect(rows.last == .signOut)
+    /// The stronger form of the same promise, and the point of MEMNG-185: there is no row here
+    /// that a mis-aimed tap could regret, whoever is signed in. `Row.isDestructive` switches over
+    /// every case, so a row added later has to answer this question rather than inherit an answer.
+    @Test("no row in the menu can take anything away")
+    func nothingInTheMenuIsDestructive() {
+        for name in ["Fabian", "laura", "", "   ", nil] {
+            let rows = AccountMenu.rows(name: name)
+            #expect(rows.filter(\.isDestructive).isEmpty)
+            // Positive control: the menu really was built, so the emptiness above is about
+            // destructiveness rather than about there being no rows to look at.
+            #expect(rows.count == 2)
+        }
     }
 
     /// Appearance is a setting and lives with the settings. A menu offering a second way to change
@@ -51,10 +61,10 @@ struct AccountMenuTests {
     @Test("the menu offers no appearance row")
     func noAppearanceRow() {
         let rows = AccountMenu.rows(name: "Fabian")
-        #expect(rows.count == 3)
+        #expect(rows.count == 2)
         // Stated as the whole set rather than as an absence, so a row added without a decision
         // fails here rather than quietly appearing.
-        #expect(Set(rows) == Set([.heading("Signed in as Fabian"), .settings, .signOut]))
+        #expect(Set(rows) == Set([.heading("Signed in as Fabian"), .settings]))
     }
 
     /// The heading is not invented here — it is the same sentence the Settings screen's Account
@@ -70,16 +80,16 @@ struct AccountMenuTests {
     }
 }
 
-/// Which sections the Settings screen has, held as a list so "these six and no others" is an
+/// Which sections the Settings screen has, held as a list so "these seven and no others" is an
 /// assertion rather than a reading of a view body.
 @MainActor
 @Suite("The Settings screen's sections")
 struct SettingsScreenTests {
-    @Test("six sections, in the order they are read")
+    @Test("seven sections, in the order they are read")
     func sectionsAndOrder() {
         #expect(
             SettingsScreen.sections == [
-                .account, .defaults, .uploads, .appearance, .storage, .about,
+                .account, .defaults, .uploads, .appearance, .storage, .about, .signOut,
             ]
         )
     }
@@ -88,9 +98,23 @@ struct SettingsScreenTests {
     func titles() {
         #expect(
             SettingsScreen.sections.map(\.title) == [
-                "Account", "Defaults", "Uploads", "Appearance", "Storage", "About",
+                "Account", "Defaults", "Uploads", "Appearance", "Storage", "About", nil,
             ]
         )
+    }
+
+    /// MEMNG-185. Signing out is a rare, deliberate act and it now reads as one: last on the
+    /// screen rather than first, and under no heading — the row already says the word, and a
+    /// heading over it would say it twice. `nil` is what the screen reads to draw nothing
+    /// (`SettingsView`), so that is the thing worth pinning; whether a header view appears is
+    /// otherwise a property of a body no test in this bundle can construct.
+    @Test("the sign-out section is last, and carries no heading")
+    func signOutSectionIsLastAndUnheaded() {
+        #expect(SettingsScreen.sections.last == .signOut)
+        #expect(SettingsScreen.Section.signOut.title == nil)
+        // Positive control: every other section does print one, so the `nil` above is this
+        // section's decision rather than a screen that lost its headings.
+        #expect(SettingsScreen.sections.dropLast().allSatisfy { $0.title != nil })
     }
 
     /// Tokens and notifications are coming and are deliberately absent. A section rendered as a
@@ -98,7 +122,7 @@ struct SettingsScreenTests {
     /// reader a tap to find that out — so this fails the moment one is stubbed in.
     @Test("nothing is stubbed in ahead of working")
     func noStubbedSections() {
-        let titles = SettingsScreen.sections.map { $0.title.lowercased() }
+        let titles = SettingsScreen.sections.compactMap { $0.title?.lowercased() }
         for absent in ["tokens", "notifications", "coming soon"] {
             #expect(!titles.contains { $0.contains(absent) })
         }

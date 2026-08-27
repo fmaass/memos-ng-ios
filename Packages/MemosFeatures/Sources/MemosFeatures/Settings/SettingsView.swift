@@ -48,7 +48,11 @@ struct SettingsView: View {
                 Section {
                     card(section)
                 } header: {
-                    SectionHeading(title: section.title)
+                    // Not every section prints one: the sign-out section's row already says the
+                    // word, and a heading over it would say it twice (`SettingsScreen.Section`).
+                    if let title = section.title {
+                        SectionHeading(title: title)
+                    }
                 }
             }
         }
@@ -75,6 +79,7 @@ struct SettingsView: View {
             case .appearance: appearance
             case .storage: storage
             case .about: about
+            case .signOut: signOutRow
             }
         }
         .padding(DesignTokens.Space.regular)
@@ -99,17 +104,6 @@ struct SettingsView: View {
             }
             Spacer(minLength: 0)
         }
-        Divider()
-        // The same conversation the menu starts, reached from the account it would end. A row on a
-        // pushed screen has no anchor over it, so nothing here needs the menu's heading trick.
-        Button {
-            signOut.send(.menuTapped, to: session)
-        } label: {
-            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
-                .foregroundStyle(.red)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityLabel("Sign out")
     }
 
     @ViewBuilder
@@ -174,6 +168,28 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .disabled(!MediaCacheMaintenance.isClearable(cache))
+    }
+
+    /// Signing out, at the bottom of the screen and nowhere else.
+    ///
+    /// MEMNG-185. It sat in the Account section at the TOP and in the toolbar's account menu, so
+    /// the first thing the screen offered — and one of two things the menu did — was the one
+    /// action that ends the session. It is a rare, deliberate act, and it now reads as one: last
+    /// on the screen, a plain word rather than a labelled button, and no heading over it.
+    ///
+    /// The tint is stated rather than left to the role: these cards are hand-built rather than
+    /// system list rows, and inside them a button takes the app's accent (`DesignTokens.accent`,
+    /// applied at the root) — which is the green the whole app is drawn in. The one control here
+    /// that takes something away must not read like the rest.
+    @ViewBuilder
+    private var signOutRow: some View {
+        Button(role: .destructive) {
+            signOut.send(.requested, to: session)
+        } label: {
+            Text("Sign out")
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     @ViewBuilder

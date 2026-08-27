@@ -143,8 +143,12 @@ enum MediaCacheClearing {
 /// would only imply. A menu opens with its first row directly under the anchor that opened it, and
 /// when that row was the destructive one a second tap on the anchor — the ordinary human reflex
 /// when a tap seems not to have registered — revoked a live credential (MEMNG-119). The heading
-/// takes that position. It is not decoration: it is what stands between the anchor and the
-/// destructive row, and `AccountMenuTests` holds it there.
+/// takes that position, and `AccountMenuTests` holds it there.
+///
+/// MEMNG-185 went further: the destructive row is not in this menu at all any more. Signing out
+/// ends the session, it is done rarely and on purpose, and offering it as one of the two things a
+/// menu did made it look like neither. It is the last row on the Settings screen now
+/// (`SettingsScreen`), and nothing this menu can do takes anything away.
 ///
 /// There is deliberately no appearance row. Appearance is a setting, it lives on the Settings
 /// screen with the other settings, and a menu that offered a second way to change one of them
@@ -154,24 +158,26 @@ enum AccountMenu {
         /// Who this device is signed in as. Never actionable — see above.
         case heading(String)
         case settings
-        case signOut
 
-        /// Whether choosing this row would take something away. Only one row ever can.
+        /// Whether choosing this row would take something away. None of them does — and the
+        /// switch is exhaustive on purpose, so a row added later has to answer the question
+        /// rather than inherit an answer.
         var isDestructive: Bool {
-            if case .signOut = self { return true }
-            return false
+            switch self {
+            case .heading, .settings: false
+            }
         }
     }
 
     static func rows(name: String?) -> [Row] {
-        [.heading(SignOutFlow.accountHeading(name: name)), .settings, .signOut]
+        [.heading(SignOutFlow.accountHeading(name: name)), .settings]
     }
 }
 
 /// The Settings screen's sections, in the order they are read.
 ///
-/// An explicit list rather than whatever the view body happens to contain, so that "these six and
-/// no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
+/// An explicit list rather than whatever the view body happens to contain, so that "these seven
+/// and no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
 /// a section rendered as a disabled row or a "coming soon" line is a promise the app has not kept,
 /// and it costs a reader a tap to find that out. They arrive when they work.
 enum SettingsScreen {
@@ -184,8 +190,14 @@ enum SettingsScreen {
         case appearance
         case storage
         case about
+        /// Last, and alone. Signing out was the FIRST thing this screen offered until MEMNG-185 —
+        /// a row in the Account section, beside the name it would sign out of, and a second copy
+        /// of the one in the toolbar's menu. It ends the session; it is done rarely and on
+        /// purpose; so it sits where a rare, deliberate thing is looked for, and nowhere else.
+        case signOut
 
-        var title: String {
+        /// `nil` for a section that prints no heading of its own.
+        var title: String? {
             switch self {
             case .account: "Account"
             case .defaults: "Defaults"
@@ -193,6 +205,9 @@ enum SettingsScreen {
             case .appearance: "Appearance"
             case .storage: "Storage"
             case .about: "About"
+            // The row underneath already says the word, and a heading repeating it would put back
+            // exactly the prominence this section was made to take away.
+            case .signOut: nil
             }
         }
     }

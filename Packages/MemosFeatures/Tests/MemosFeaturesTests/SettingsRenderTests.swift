@@ -101,8 +101,7 @@ struct SettingsRenderTests {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
             AccountMenuRows(
                 rows: AccountMenu.rows(name: name),
-                openSettings: {},
-                signOut: {}
+                openSettings: {}
             )
         }
         .padding(DesignTokens.Space.roomy)
@@ -154,9 +153,9 @@ struct SettingsRenderTests {
         capture(image, named: "account-menu")
     }
 
-    /// The same rows for an account with no name — the heading still has to draw something, and a
-    /// menu whose first row collapsed to nothing would put the destructive row back under the
-    /// anchor (`AccountMenu`).
+    /// The same rows for an account with no name — the heading still has to draw something. A
+    /// first row that collapsed to nothing would leave the anchor sitting directly over Settings,
+    /// which is the position `AccountMenu` reserves for a row that cannot be regretted.
     @Test("an unnamed account still draws a heading row")
     func unnamedAccountStillDrawsAHeading() throws {
         let size = CGSize(width: 393, height: 260)

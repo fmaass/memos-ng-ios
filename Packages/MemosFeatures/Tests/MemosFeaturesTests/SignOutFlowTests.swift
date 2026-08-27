@@ -30,26 +30,28 @@ struct SignOutFlowTests {
 /// not to have registered, revoked a live credential during a screenshot tour.
 ///
 /// These are the assertions that make that impossible, and they are about the MACHINE rather than
-/// the menu because menu geometry is not something a test can hold. What a test can hold is that
-/// the tap which opens the conversation never reaches the server, however many times it arrives.
+/// any one surface, because where a control sits is not something a test can hold. What a test can
+/// hold is that the tap which opens the conversation never reaches the server, however many times
+/// it arrives — which is why they did not have to change when MEMNG-185 moved the control out of
+/// the menu and down to the bottom of Settings.
 @Suite("Sign-out cannot happen by accident")
 struct SignOutConfirmationTests {
     private let failure = SignOutOutcome.revokeFailed(.server(status: 502))
 
-    @Test("tapping the menu item asks, and asking is not signing out")
+    @Test("tapping the row asks, and asking is not signing out")
     func oneTapOnlyAsks() {
-        let asked = SignOutFlow.next(.idle, on: .menuTapped)
+        let asked = SignOutFlow.next(.idle, on: .requested)
         #expect(asked == .asking)
         #expect(!SignOutFlow.revokes(asked))
         #expect(SignOutFlow.revokes(.revoking))
     }
 
     /// The incident itself: the same tap, twice, because the first seemed to do nothing.
-    @Test("a double tap on the anchor is one question, not a sign-out")
+    @Test("a double tap is one question, not a sign-out")
     func aDoubleTapIsHarmless() {
         var stage = SignOutFlow.Stage.idle
         for _ in 0..<5 {
-            stage = SignOutFlow.next(stage, on: .menuTapped)
+            stage = SignOutFlow.next(stage, on: .requested)
             #expect(!SignOutFlow.revokes(stage))
         }
         #expect(stage == .asking)
@@ -66,7 +68,7 @@ struct SignOutConfirmationTests {
     func onlyAnAnswerRevokes() {
         let failure = SignOutOutcome.revokeFailed(.server(status: 502))
         let unauthorised: [SignOutFlow.Event] = [
-            .menuTapped,
+            .requested,
             .cancelled,
             .revokeReturned(.revoked),
             .revokeReturned(.alreadyRevoked),
@@ -132,8 +134,8 @@ struct SignOutConfirmationTests {
         let revoking = SignOutFlow.next(.asking, on: .confirmed)
         #expect(revoking == .revoking)
         #expect(SignOutFlow.next(revoking, on: .cancelled) == .revoking)
-        // Nor can another tap on the anchor start a second one.
-        #expect(SignOutFlow.next(revoking, on: .menuTapped) == .revoking)
+        // Nor can another tap on the row start a second one.
+        #expect(SignOutFlow.next(revoking, on: .requested) == .revoking)
     }
 
     @Test("a settled revoke ends the conversation, a failed one explains itself")
@@ -159,7 +161,7 @@ struct SignOutConfirmationTests {
         #expect(SignOutFlow.next(.explaining(decision), on: .cancelled) == .idle)
     }
 
-    @Test("the menu names the account it would sign out of")
+    @Test("the heading names the account that would be signed out of")
     func accountHeading() {
         #expect(SignOutFlow.accountHeading(name: "fabian") == "Signed in as fabian")
         #expect(SignOutFlow.accountHeading(name: nil) == "Signed in")

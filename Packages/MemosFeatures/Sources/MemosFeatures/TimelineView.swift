@@ -124,7 +124,6 @@ public struct TimelineView: View {
                     name: session.state.user?.name,
                     composed: feedback.count,
                     openSettings: { path.append(SettingsRoute()) },
-                    signOut: { signOut.send(.menuTapped, to: session) },
                     search: { openSearch() },
                     newMemo: { composing = .create }
                 )

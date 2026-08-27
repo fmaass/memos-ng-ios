@@ -60,7 +60,6 @@ struct TimelineToolbarTests {
             name: name,
             composed: 0,
             openSettings: {},
-            signOut: {},
             search: {},
             newMemo: {}
         )
