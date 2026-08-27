@@ -15,11 +15,18 @@ import SwiftUI
 /// not become.
 struct MediaLibraryView: View {
     @Environment(SessionStore.self) private var session
+    /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
+    /// no router, and a missing environment value must be a missing action, not a crash.
+    @Environment(MemoJump.self) private var jump: MemoJump?
     @State private var library: MediaLibraryStore?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
+    /// Which direction this device reads the library in, across launches. Read once, when the
+    /// store is built, and written whenever the menu is used — the store is what the screen reads
+    /// the current direction FROM, so there is only ever one answer on screen.
+    private let preferences = LibraryPreferences.shared
 
     var body: some View {
         NavigationStack {
@@ -33,22 +40,40 @@ struct MediaLibraryView: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let library {
+                    ToolbarItem(placement: .topBarTrailing) { sortMenu(library) }
+                }
+            }
         }
         // Outside the stack, for the reason the timeline's cover is: two presentations on one view
         // is how one of them silently stops appearing.
         .fullScreenCover(item: $viewing) { selection in
-            MediaViewerView(selection: selection)
+            // The viewer pages over the STORE, not over the rows that happened to be loaded when
+            // the tile was tapped: swiping to the end of them is where the swiping used to stop,
+            // on a library of over a thousand files (MEMNG-189).
+            MediaViewerView(selection: selection, source: viewerSource)
                 .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
         .task {
             if library == nil {
-                library = MediaLibraryStore(onUnauthorized: { [session] in
-                    await session.handle(.unauthorized)
-                })
+                library = MediaLibraryStore(
+                    order: preferences.order,
+                    onUnauthorized: { [session] in
+                        await session.handle(.unauthorized)
+                    }
+                )
             }
             await load()
         }
+    }
+
+    /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a
+    /// state no tap can be made in — the grid it would be tapped on does not exist either.
+    private var viewerSource: MediaViewerSource {
+        guard let library else { return .fixed([]) }
+        return .library(library) { await loadMore() }
     }
 
     @ViewBuilder
@@ -107,6 +132,38 @@ struct MediaLibraryView: View {
         .background(.bar)
     }
 
+    /// Which end of the library the grid starts at — a menu of checkmark rows, which is the shape
+    /// Photos gives a single sort key on an album. A segmented control beside the filter would put
+    /// two different questions on one bar and spend the width of the screen on the one that is
+    /// answered once a year (MEMNG-190).
+    private func sortMenu(_ library: MediaLibraryStore) -> some View {
+        Menu {
+            Picker("Sort", selection: sortBinding(library)) {
+                ForEach(MediaLibraryOrder.allCases) { order in
+                    Text(order.label).tag(order)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+        }
+        .accessibilityLabel("Sort")
+    }
+
+    /// Choosing a direction persists it and reloads the grid from the other end — the store treats
+    /// it exactly as it treats a tab change, because a cursor is a position inside one ordering.
+    private func sortBinding(_ library: MediaLibraryStore) -> Binding<MediaLibraryOrder> {
+        Binding(
+            get: { library.order },
+            set: { chosen in
+                guard chosen != library.order else { return }
+                preferences.select(chosen)
+                library.setOrder(chosen)
+                Task { await load() }
+            }
+        )
+    }
+
     private func grid(_ library: MediaLibraryStore) -> some View {
         LazyVGrid(
             columns: [
@@ -145,17 +202,33 @@ struct MediaLibraryView: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: kind))
             .accessibilityHint(kind == .video ? "Plays full screen" : "Opens full screen")
+            .contextMenu {
+                ForEach(MediaTileMenu.actions(for: attachment)) { action in
+                    MediaTileActionItem(action: action) { jump?.request($0) }
+                }
+            } preview: {
+                tilePreview(attachment)
+            }
         } else {
             DocumentTile(mime: attachment.mime)
         }
     }
 
-    /// Opens the viewer over the WHOLE loaded library, at the tile that was tapped — so a swipe
-    /// carries on through the grid the way it carries on through a memo's photos.
-    ///
-    /// The list payload carries no memo uid (`AttachmentListItem` has `orphan`, not an owner), so
-    /// there is no memo to open instead; and an attachment with no memo at all — which this list
-    /// deliberately includes — would have nowhere to go even if there were.
+    /// The picture a long press lifts off the grid: the same file at the tier the viewer opens at,
+    /// in its own proportions rather than the tile's square. A preview that showed the cropped
+    /// thumbnail again would be a bigger version of what is already under the finger.
+    private func tilePreview(_ attachment: MemoAttachment) -> some View {
+        AttachmentThumbnail(
+            attachment: attachment,
+            tier: .mobile,
+            slot: MemoPresentation.detailSlot(for: attachment)
+        )
+        .frame(width: MediaLibraryPresentation.previewWidth)
+    }
+
+    /// Opens the viewer over the WHOLE library, at the tile that was tapped — and, because the
+    /// viewer reads the store rather than a snapshot of it, a swipe carries on past the rows that
+    /// were loaded at the moment of the tap.
     private func open(_ attachment: MemoAttachment) {
         guard let library else { return }
         viewing = MediaViewerPresentation.viewer(for: library.items, startingAt: attachment.uid)

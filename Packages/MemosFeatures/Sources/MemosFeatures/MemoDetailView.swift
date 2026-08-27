@@ -87,7 +87,9 @@ public struct MemoDetailView: View {
             .padding(DesignTokens.Space.roomy)
         }
         .fullScreenCover(item: $viewing) { selection in
-            MediaViewerView(selection: selection)
+            // A memo's media is all there when the screen opens and never grows, so the viewer
+            // over it pages through a value rather than through a store.
+            MediaViewerView(selection: selection, source: .fixed(selection.pages))
                 .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .background(Color(.systemGroupedBackground))

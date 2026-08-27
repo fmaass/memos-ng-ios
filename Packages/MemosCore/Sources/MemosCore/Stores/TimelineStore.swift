@@ -551,6 +551,42 @@ public final class TimelineStore {
         }
     }
 
+    /// Reads ONE memo from the server and hands it back, whether or not this list holds it.
+    ///
+    /// It is the companion `refreshMemo` cannot be. That one exists to update a card already on
+    /// screen and goes through `apply`, which DISCARDS a memo the list does not contain — correct
+    /// for a reconciling read, and exactly wrong for the case this answers: a memo reached from the
+    /// media library is very often a hundred cursor pages down a list that has never loaded it, and
+    /// the detail screen needs a `Memo` value to open with. So the server's answer is returned
+    /// rather than swallowed, and the loaded list is left as it is (MEMNG-191).
+    ///
+    /// Applied on the way past when the list DOES hold it, because a screen about to show this memo
+    /// should show the same copy the card behind it does.
+    public func fetchMemo(
+        uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Memo? {
+        do {
+            let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
+            switch response {
+            case .ok(let ok):
+                let memo = Memo(try ok.body.json, baseURL: baseURL)
+                apply(memo)
+                return memo
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                throw APIError.fromStatus(statusCode)
+            }
+        } catch {
+            // A memo that cannot be read is a navigation that does not happen, which the caller can
+            // see from the nil. A 401 still ends the session wherever it happens.
+            if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
+            return nil
+        }
+    }
+
     /// Applies one live media event to the loaded timeline.
     ///
     /// The transform itself is `applyMediaEvent`, which is pure and shared in spirit with the SPA's

@@ -59,17 +59,18 @@ struct MediaViewerPageTests {
         )
     }
 
-    @Test("a memo's pictures and videos become its pages, in order and counted")
+    @Test("a memo's pictures and videos become its pages, in order")
     func projection() {
         let pages = MediaViewerPresentation.pages(for: [
             Self.image("a1"), Self.video("v1"), Self.image("a2"),
         ])
         #expect(pages.map(\.id) == ["a1", "v1", "a2"])
         #expect(pages.map(\.kind) == [.image, .video, .image])
-        #expect(pages.map(\.position) == [1, 2, 3])
-        #expect(pages.allSatisfy { $0.total == 3 })
+        // No count, on the page or in what it says out loud: the library's viewer pages through a
+        // list that GROWS as it is swiped, so any number here would be a number of what happened
+        // to be loaded (MEMNG-189).
         let labels = pages.map(\.accessibilityLabel)
-        #expect(labels == ["Photo 1 of 3", "Video 2 of 3", "Photo 3 of 3"])
+        #expect(labels == ["Photo", "Video", "Photo"])
     }
 
     /// One case per input CATEGORY, because a filter with only a happy path is a filter that
@@ -84,7 +85,7 @@ struct MediaViewerPageTests {
             Self.other("z1", mime: ""),
         ])
         #expect(pages.map(\.id) == ["a1", "v1"])
-        #expect(pages.map(\.total) == [2, 2])
+        #expect(pages.count == 2)
     }
 
     @Test("an attachment with nothing to render is not a page")

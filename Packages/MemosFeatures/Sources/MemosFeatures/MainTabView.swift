@@ -35,6 +35,13 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
 /// and forth between them cost nothing.
 struct MainTabView: View {
     @State private var selection: MainTab = .timeline
+    /// A memo asked for from a tab that cannot open one.
+    ///
+    /// It lives HERE because the move it describes is a move between tabs: the Library says which
+    /// memo a photograph belongs to, the Timeline is the only tab that can show a memo, and the
+    /// tab bar is the only thing that can put the app on the other one. Both ends read it out of
+    /// the environment (MEMNG-191).
+    @State private var jump = MemoJump()
 
     var body: some View {
         TabView(selection: $selection) {
@@ -52,6 +59,12 @@ struct MainTabView: View {
             ) {
                 MediaLibraryView()
             }
+        }
+        .environment(jump)
+        // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
+        // Timeline is what reads that and pushes it, because it owns both the list and the stack.
+        .onChange(of: jump.pending) { _, pending in
+            selection = MemoJumpRouting.tab(showing: selection, whenJumping: pending)
         }
     }
 }

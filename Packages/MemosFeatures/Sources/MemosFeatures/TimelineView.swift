@@ -21,7 +21,14 @@ public struct TimelineView: View {
     // be a crash on the app's main screen.
     @Environment(Outbox.self) private var outbox: Outbox?
     @Environment(\.scenePhase) private var scenePhase
+    /// A memo the Library asked this tab to open. Optional for the same reason the outbox is: a
+    /// preview or a test host has no router.
+    @Environment(MemoJump.self) private var jump: MemoJump?
     @State private var timeline: TimelineStore?
+    /// A memo read from the server because a jump named one this list has never loaded. It is what
+    /// the detail screen opens WITH — the loaded list is left alone, so nothing is inserted into a
+    /// timeline nobody scrolled to (MEMNG-191).
+    @State private var jumped: Memo?
     /// Whether the list has been away from its top since the last time it was there — the whole
     /// of the upward-paging trigger, kept as a value so the sequence can be asserted
     /// (`TimelineTopWatch`).
@@ -168,7 +175,9 @@ public struct TimelineView: View {
         // from the one presenting the compose sheet — two presentations on one view is how one of
         // them silently stops appearing.
         .fullScreenCover(item: $viewing) { selection in
-            MediaViewerView(selection: selection)
+            // A memo's media is all there when the card is drawn and never grows, so the viewer
+            // over it pages through a value rather than through a store.
+            MediaViewerView(selection: selection, source: .fixed(selection.pages))
                 .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
@@ -227,6 +236,38 @@ public struct TimelineView: View {
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
             Task { await load() }
         }
+        // A memo asked for from the Library. Keyed on the request rather than run from an
+        // `onChange`, because satisfying it can mean reading the memo from the server first and
+        // that read must be cancellable with the screen.
+        .task(id: jump?.pending) { await consumeJump() }
+    }
+
+    /// Opens the memo a jump named, reading it first when this list has never loaded it.
+    ///
+    /// The read is not optional and not an optimisation. A photograph a few screens into the
+    /// library routinely belongs to a memo a hundred cursor pages down this list, and
+    /// `TimelineStore.apply` — which `refreshMemo` goes through — DISCARDS a memo the list does not
+    /// hold. So the memo is fetched and carried to the detail screen as its `initial`, which is
+    /// exactly what that screen falls back to when the list has no copy of its own.
+    private func consumeJump() async {
+        guard let jump, let uid = jump.pending, let timeline else { return }
+        switch MemoJumpRouting.resolution(uid: uid, loaded: timeline.memos.map(\.uid)) {
+        case .push:
+            break
+        case .fetchThenPush:
+            guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+            guard
+                let memo = await timeline.fetchMemo(uid: uid, using: client, baseURL: baseURL)
+            else {
+                // A memo that cannot be read is a jump that does not happen — cleared so it does
+                // not sit pending and re-fire on the next redraw.
+                jump.clear()
+                return
+            }
+            jumped = memo
+        }
+        path.append(MemoRoute(uid: uid))
+        jump.clear()
     }
 
     /// The screen's scroll, and the one thing that moves it on its own.
@@ -438,11 +479,17 @@ public struct TimelineView: View {
 
     /// The list a memo was read from, and the memo. The timeline first: it is the canonical list,
     /// and a memo in both is the same memo.
+    ///
+    /// The third case is a memo in NEITHER list: one reached by a jump from the Library, read from
+    /// the server for exactly this push. It is last because it is the only copy that is not part of
+    /// a list anything else is reading — the detail screen still edits through the timeline store,
+    /// and this value only stands in until that store has one of its own.
     private func holder(of uid: String) -> (memo: Memo, store: TimelineStore)? {
         if let timeline, let memo = memo(uid, in: timeline) { return (memo, timeline) }
         if let results = searchPresentation.search?.results, let memo = memo(uid, in: results) {
             return (memo, results)
         }
+        if let timeline, let jumped, jumped.uid == uid { return (jumped, timeline) }
         return nil
     }
 
