@@ -43,29 +43,65 @@ enum MediaViewerSource {
         max(1, pageSize / 2)
     }
 
-    /// Whether the reader standing on page `index` should already have the next page on its way.
+    /// Whether the server still has rows this source has not read.
+    var hasMore: Bool {
+        switch self {
+        case .fixed: false
+        case .library(let pager, _): pager.hasMore
+        }
+    }
+
+    /// Whether the reader standing on the page with this id should already have the next page on
+    /// its way.
+    ///
+    /// The page is looked up by UID in the store's OWN rows, and that is the load-bearing detail.
+    /// The viewer's pages are a PROJECTION of those rows — documents are dropped, because a PDF is
+    /// a black rectangle nobody can leave — so page 40 of the viewer can be row 55 of the store. A
+    /// projected offset handed to `shouldLoadMore`, which measures against `items.count`, reads as
+    /// further from the end than the reader actually is, by exactly the number of documents behind
+    /// them; on a library with many attachments that are not pictures the next page is asked for
+    /// too late or never (MEMNG-189, review round 1).
     ///
     /// A fixed source never wants more — there is nothing to want. Everything else is the STORE's
-    /// decision, unchanged and undivided: it is the one that knows whether the list has an end,
-    /// whether a request is already out, and whether there is a cursor to send. Asking it here
-    /// rather than re-deriving the rule is what stops the viewer and the grid from disagreeing
-    /// about when a page is due.
-    func wantsMore(at index: Int) -> Bool {
+    /// decision, unchanged and undivided: it knows whether the list has an end, whether a request
+    /// is already out, and whether there is a cursor to send.
+    func wantsMore(atPageWithID id: String) -> Bool {
         guard case .library(let pager, _) = self else { return false }
+        guard let raw = pager.items.firstIndex(where: { $0.uid == id }) else { return false }
         return pager.shouldLoadMore(
-            after: index,
+            after: raw,
             lookahead: Self.lookahead(pageSize: pager.pageSize)
         )
     }
 
-    /// Asks for the next page, if one is due.
+    /// How many pages that showed this viewer NOTHING will be read through in one ask.
     ///
-    /// Both halves are here so that no caller can perform one without the other: the guard is what
-    /// makes a swipe in the middle of a loaded run cost nothing, and what makes a swipe that
-    /// arrives while a page is already in flight cost nothing either.
-    func loadMore(nearing index: Int) async {
-        guard case .library(_, let more) = self, wantsMore(at: index) else { return }
-        await more()
+    /// A bound rather than "until something appears", because the tail of a library can be any
+    /// length of documents and a reader who swiped once must not set a request loop running that
+    /// only the end of the list can stop. Eight pages is several hundred rows — far past any real
+    /// run of PDFs — and if it is not enough the next swipe asks again.
+    static let maximumBlankContinuations = 8
+
+    /// Asks for the next page, and keeps asking while the pages that come back hold nothing this
+    /// viewer can show.
+    ///
+    /// The continuation lives HERE rather than in the view, and that is the fix rather than a
+    /// tidying. A page of documents grows the store's rows and leaves the viewer's projection the
+    /// same length, so nothing the view observes changes — no `onChange` fires, and the view gets
+    /// no second chance to ask. Worse, by then the raw list HAS grown, so the near-end guard is no
+    /// longer true and a second ask would be refused anyway. The only place that knows a page
+    /// arrived and yielded nothing is the code that awaited it (MEMNG-189, review round 2).
+    ///
+    /// The near-end guard is deliberately checked ONCE, on entry: after the first page it has
+    /// already done its job, and re-testing it is what would end the run early.
+    func loadMore(nearingPageWithID id: String) async {
+        guard case .library(let pager, let more) = self, wantsMore(atPageWithID: id) else { return }
+        for _ in 0..<Self.maximumBlankContinuations {
+            let shown = pages.count
+            await more()
+            // Something to look at arrived, or the server says there is nothing left to ask for.
+            if pages.count > shown || !pager.hasMore { return }
+        }
     }
 }
 

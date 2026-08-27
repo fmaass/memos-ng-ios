@@ -34,9 +34,9 @@ struct MediaViewerView: View {
     /// The page the pager has settled on — the identity of the page, not an index, because a
     /// paging scroll view tracks identity.
     @State private var currentPage: String?
-    /// The pages ON SCREEN, which is not the same list as the source's once the library has moved
-    /// underneath an open viewer. `MediaViewerPager` owns the difference.
-    @State private var pages: [MediaPage]
+    /// The pages this viewer has ADOPTED so far. Not what is rendered — `pages` is, and it
+    /// reconciles this against the source on every evaluation.
+    @State private var shown: [MediaPage]
     /// Which page, if any, is magnified. Paging is off while one is: a sideways drag inside a
     /// zoomed picture is a pan, and a page that turns halfway through examining a photo is the
     /// single most annoying thing a viewer can do.
@@ -50,7 +50,7 @@ struct MediaViewerView: View {
         self.selection = selection
         self.source = source
         _currentPage = State(initialValue: selection.startPage.id)
-        _pages = State(initialValue: selection.pages)
+        _shown = State(initialValue: selection.pages)
         _playback = State(initialValue: MediaViewerPlaybackCoordinator(selection: selection))
     }
 
@@ -73,16 +73,21 @@ struct MediaViewerView: View {
             playback.advance(.paged(to: settled))
             Task { await advance(to: settled) }
         }
+        // The pages the grid had already loaded by the time this cover drew its first frame. A
+        // page that arrived between the tap and this moment is in `source.pages` but was never an
+        // `onChange`, because it landed BEFORE the modifier had a baseline to compare against — it
+        // simply became the baseline. `pages` reconciles on every evaluation so the frame is right
+        // whichever way that race went; this is what carries the same answer into the two places
+        // that keep state rather than read it (MEMNG-189, review round 1).
+        .onAppear { adoptFromSource() }
         // The library grows under an open viewer, and this is where the growth is taken in. The
         // value is READ here, which is what subscribes this view to the store behind a `.library`
         // source; what to do with a source that is no longer the same list at all is
         // `MediaViewerPager.extended`'s decision, not this line's.
-        .onChange(of: source.pages) { _, latest in
-            pages = MediaViewerPager.extended(pages, with: latest)
-            // The player belongs to a page of THIS list; a video on a page that has just arrived
-            // has to be one the playback rules can find.
-            playback.adopt(pages: pages, startingAt: selection.startPage.id)
-        }
+        // Only adoption. Reading THROUGH pages that hold nothing to show is the paging seam's
+        // job, not this view's: a page of documents changes nothing here, so no modifier on this
+        // screen could observe it (`MediaViewerSource.loadMore`).
+        .onChange(of: source.pages) { _, _ in adoptFromSource() }
         // The way out is not only the close button: the zoom transition dismisses on a drag, and
         // a video that went on playing behind a dismissed viewer would be a voice in an empty
         // room. Every exit lands here.
@@ -161,8 +166,26 @@ struct MediaViewerView: View {
     /// Both halves of that decision belong to the source, so a swipe in the middle of a loaded run
     /// and a swipe arriving while a page is already in flight both cost nothing.
     private func advance(to id: String) async {
-        guard let index = pages.firstIndex(where: { $0.id == id }) else { return }
-        await source.loadMore(nearing: index)
+        await source.loadMore(nearingPageWithID: id)
+    }
+
+    /// What is rendered: everything adopted so far, reconciled against what the source holds NOW.
+    ///
+    /// Computed rather than stored so there is no first-frame gap to lose a page into — see
+    /// `onAppear` above. `MediaViewerPager.extended` is what decides whether the source is this
+    /// list grown longer or a different list altogether.
+    private var pages: [MediaPage] {
+        MediaViewerPager.extended(shown, with: source.pages)
+    }
+
+    /// Locks the reconciled list in, and tells playback about it — the two pieces of state that
+    /// cannot be recomputed per frame. Idempotent, so running it on appear AND on every change is
+    /// exactly as correct as running it once.
+    private func adoptFromSource() {
+        shown = pages
+        // The player belongs to a page of THIS list; a video on a page that has just arrived has
+        // to be one the playback rules can find.
+        playback.adopt(pages: shown, startingAt: selection.startPage.id)
     }
 }
 

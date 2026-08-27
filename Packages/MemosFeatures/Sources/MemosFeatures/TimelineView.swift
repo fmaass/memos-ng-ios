@@ -29,6 +29,8 @@ public struct TimelineView: View {
     /// the detail screen opens WITH — the loaded list is left alone, so nothing is inserted into a
     /// timeline nobody scrolled to (MEMNG-191).
     @State private var jumped: Memo?
+    /// Why a jump from the Library ended on this screen with nothing opening.
+    @State private var jumpNotice: String?
     /// Whether the list has been away from its top since the last time it was there — the whole
     /// of the upward-paging trigger, kept as a value so the sequence can be asserted
     /// (`TimelineTopWatch`).
@@ -251,23 +253,39 @@ public struct TimelineView: View {
     /// exactly what that screen falls back to when the list has no copy of its own.
     private func consumeJump() async {
         guard let jump, let uid = jump.pending, let timeline else { return }
+        // Cleared on every path: a request nobody can satisfy must not sit pending and re-fire.
+        defer { jump.clear() }
+        // A new jump is a new answer; last time's notice is not this jump's.
+        jumpNotice = nil
         switch MemoJumpRouting.resolution(uid: uid, loaded: timeline.memos.map(\.uid)) {
         case .push:
-            break
+            path.append(MemoRoute(uid: uid))
         case .fetchThenPush:
             guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-            guard
-                let memo = await timeline.fetchMemo(uid: uid, using: client, baseURL: baseURL)
-            else {
-                // A memo that cannot be read is a jump that does not happen — cleared so it does
-                // not sit pending and re-fire on the next redraw.
-                jump.clear()
-                return
+            let outcome = await timeline.jump(
+                to: uid,
+                calendar: HeatmapDateJump.anchorCalendar,
+                using: client,
+                baseURL: baseURL
+            )
+            switch outcome {
+            case .ready(let memo):
+                // The store now HOLDS it, so the screen about to open edits through this list. The
+                // fetched value is only what the push opens WITH, for the instant before the row
+                // is read out of `memos`.
+                jumped = memo
+                // The list came back anchored at that memo's day, which is a different list from
+                // the one that was on screen — the same landing a day chosen on the heatmap gets.
+                topWatch.settled()
+                restoreTop = nil
+                jumps += 1
+                path.append(MemoRoute(uid: uid))
+            case .unavailable:
+                // Switching tabs and then doing nothing reads as the app losing the tap. Say what
+                // happened instead: the memo is gone, or it is not in the list this screen shows.
+                jumpNotice = "That memo is no longer here."
             }
-            jumped = memo
         }
-        path.append(MemoRoute(uid: uid))
-        jump.clear()
     }
 
     /// The screen's scroll, and the one thing that moves it on its own.
@@ -355,6 +373,10 @@ public struct TimelineView: View {
             }
             if let error = timeline.lastError {
                 NoticeCard(text: error, tone: .error).cardRow()
+            }
+            // A jump that arrived from the Library and had nowhere to land.
+            if let jumpNotice {
+                NoticeCard(text: jumpNotice, tone: .warning).cardRow()
             }
             // A capture the outbox REFUSED never becomes a pending row, so this is the only place
             // it can be seen at all. Without it, Post closed nothing, queued nothing, sent nothing

@@ -72,8 +72,18 @@ struct MediaLibraryView: View {
     /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a
     /// state no tap can be made in — the grid it would be tapped on does not exist either.
     private var viewerSource: MediaViewerSource {
+        Self.viewerSource(for: library) { await loadMore() }
+    }
+
+    /// The same decision, as a function, so what this screen hands the viewer is a thing a test can
+    /// hold rather than infer from a view body: the source must be `.library` over the very store
+    /// the grid is reading, or the viewer pages through a copy and stops at its end.
+    static func viewerSource(
+        for library: MediaLibraryStore?,
+        more: @MainActor @escaping () async -> Void
+    ) -> MediaViewerSource {
         guard let library else { return .fixed([]) }
-        return .library(library) { await loadMore() }
+        return .library(library, more: more)
     }
 
     @ViewBuilder

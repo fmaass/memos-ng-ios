@@ -13,6 +13,10 @@ public protocol MediaLibraryPaging: AnyObject {
     var items: [MemoAttachment] { get }
     /// How many rows one request brings back — the size the near-end lookahead is measured in.
     var pageSize: Int { get }
+    /// Whether the server has said there is more to read. The viewer needs it for the case a page
+    /// answers with nothing it can SHOW: a page of PDFs moves the cursor and leaves the pager
+    /// exactly as long as it was, so "did the list grow" cannot be what decides to ask again.
+    var hasMore: Bool { get }
     func shouldLoadMore(after index: Int, lookahead: Int) -> Bool
 }
 

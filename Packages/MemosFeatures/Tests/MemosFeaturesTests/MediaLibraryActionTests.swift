@@ -9,13 +9,14 @@ import Testing
 /// It is a stand-in for a DEPENDENCY, not for the unit under test: what a real `MediaLibraryStore`
 /// does with a cursor, a lineage and an `X-Next-Cursor` header is asserted against the real
 /// generated client in `MediaLibraryStoreTests`, where the network can be scripted. What is
-/// asserted HERE is the other half of the same wire — that the viewer asks at the right moment and that
-/// asking actually reaches the store — and holding a list of a known length in front of it is the
-/// only way to say "the reader is now twelve pages from the end" without a server.
+/// asserted HERE is the other half of the same wire — that the viewer asks at the right moment,
+/// and that asking actually reaches the store — and holding a list of a known length in front of
+/// it is the only way to say "the reader is now twelve rows from the end" without a server.
 @MainActor
 private final class PagerProbe: MediaLibraryPaging {
     var items: [MemoAttachment]
     let pageSize: Int
+    var hasMore = true
     /// What the real store's own guard answers. Set false to stand for "a page is already in
     /// flight" or "this list has ended".
     var answers = true
@@ -34,9 +35,19 @@ private final class PagerProbe: MediaLibraryPaging {
         return index >= items.count - lookahead
     }
 
-    /// The closure the library screen hands the viewer, recorded.
+    /// Pages the server will hand back, in order — one per `more()`. Empty means the list ends.
+    var script: [[MemoAttachment]] = []
+
+    /// The closure the library screen hands the viewer, recorded — and, unlike a bare counter, it
+    /// actually MOVES the list, which is what lets a run of pages that show nothing be driven.
     func more() async {
         loads += 1
+        guard !script.isEmpty else {
+            hasMore = false
+            return
+        }
+        items += script.removeFirst()
+        hasMore = !script.isEmpty
     }
 }
 
@@ -58,6 +69,25 @@ private func photo(_ uid: String, memoUID: String? = nil) -> MemoAttachment {
 @MainActor
 private func photos(_ count: Int, from: Int = 0) -> [MemoAttachment] {
     (from..<(from + count)).map { photo("p\($0)") }
+}
+
+/// A page of nothing this viewer can show.
+@MainActor
+private func documents(_ count: Int, from: Int) -> [MemoAttachment] {
+    (from..<(from + count)).map {
+        MemoAttachment(uid: "d\($0)", mime: "application/pdf", status: .ready)
+    }
+}
+
+/// Library rows as they really arrive: pictures with documents among them. Every third row is a
+/// PDF, which the viewer drops — which is exactly why a page offset is not a row index.
+@MainActor
+private func mixedRows(_ count: Int) -> [MemoAttachment] {
+    (0..<count).map { index in
+        index % 3 == 2
+            ? MemoAttachment(uid: "d\(index)", mime: "application/pdf", status: .ready)
+            : photo("p\(index)")
+    }
 }
 
 /// What a long press on a tile — and the viewer over the same file — offers.
@@ -98,15 +128,18 @@ struct MediaTileMenuTests {
 
     /// The viewer's overlay is built from the same list, over the page's own attachment — which is
     /// what stops the two surfaces from offering different things about one file.
-    @Test("the viewer's overlay offers a library page the same actions its tile does")
-    func overlayMatchesTheTile() throws {
-        let page = try #require(
-            MediaViewerPresentation.pages(for: [photo("a", memoUID: "m7")]).first
-        )
+    /// The expectation is written out by hand rather than taken from the function being tested —
+    /// comparing `actions(for:)` to `actions(for:)` asserts only that it is deterministic.
+    @Test("the viewer's overlay offers a library page exactly Show Memo then Share")
+    func overlayOffersTheWholeActionSet() throws {
+        let attachment = photo("a", memoUID: "m7")
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+        let webURL = try #require(attachment.webURL)
+
         #expect(page.memoUID == "m7")
         #expect(
             MediaTileMenu.actions(for: page.attachment)
-                == MediaTileMenu.actions(for: photo("a", memoUID: "m7"))
+                == [.showMemo(uid: "m7"), .share(webURL)]
         )
     }
 
@@ -124,9 +157,11 @@ struct MediaTileMenuTests {
 struct MediaViewerPagingTests {
     @Test("a memo's viewer never asks for more, because there is no more")
     func fixedSourceNeverPages() async {
-        let source = MediaViewerSource.fixed(MediaViewerPresentation.pages(for: photos(3)))
-        #expect(!source.wantsMore(at: 2))
-        await source.loadMore(nearing: 2)
+        let pages = MediaViewerPresentation.pages(for: photos(3))
+        let source = MediaViewerSource.fixed(pages)
+        #expect(!source.wantsMore(atPageWithID: pages[2].id))
+        #expect(!source.hasMore)
+        await source.loadMore(nearingPageWithID: pages[2].id)
     }
 
     /// Half a page ahead, measured in the store's own page size — so a store built with a different
@@ -138,19 +173,81 @@ struct MediaViewerPagingTests {
         #expect(MediaViewerSource.lookahead(pageSize: 1) == 1, "a lookahead of zero never fires")
     }
 
-    @Test("swiping to within half a page of the end reaches the store's load-more")
-    func nearTheEndLoads() async {
+    /// The rows are MIXED: every third one is a PDF, which the viewer drops. So the page a reader
+    /// is standing on sits far later in the store than in the pager, and the near-end rule has to
+    /// be measured where the store measures it. Handing the projected offset over instead reads as
+    /// 20 rows earlier here, which is inside the lookahead and never fires.
+    @Test("the near-end trigger is measured against the store's own rows, not the viewer's pages")
+    func nearTheEndUsesRawRows() async {
+        let pager = PagerProbe(items: mixedRows(60))
+        let source = MediaViewerSource.library(pager) { await pager.more() }
+        let deep = pager.items[31].uid
+        let shallow = pager.items[29].uid
+        // The projection really does renumber: this is what makes the two indices different.
+        let projected = MediaViewerPresentation.pages(for: pager.items).map(\.id)
+        #expect(projected.count < pager.items.count, "control: documents were dropped")
+        #expect(projected.firstIndex(of: deep) != 31, "control: page offset differs from row index")
+
+        await source.loadMore(nearingPageWithID: shallow)
+        #expect(pager.loads == 0, "a swipe in the middle of a loaded run asked for a page")
+        #expect(pager.asked == [29], "control: the store was consulted, with the ROW index")
+
+        await source.loadMore(nearingPageWithID: deep)
+        #expect(pager.loads == 1, "the next page was never asked for")
+        #expect(pager.asked == [29, 31], "the store was asked about the wrong index")
+    }
+
+    /// The dead end this seam exists to remove. Two consecutive pages of documents grow the
+    /// store's rows and leave the viewer's projection exactly as long as it was — so nothing the
+    /// SCREEN can observe changes, and by the time a second ask could be made the raw list has
+    /// grown past the near-end guard. One swipe therefore has to read through to the next picture
+    /// by itself.
+    @Test("a run of pages with nothing to show is read through to the next picture, in one ask")
+    func documentsOnlyPagesAreReadThrough() async {
         let pager = PagerProbe(items: photos(60))
+        pager.script = [
+            documents(5, from: 100),
+            documents(5, from: 200),
+            [photo("after-the-paperwork")],
+        ]
+        let source = MediaViewerSource.library(pager) { await pager.more() }
+        let before = source.pages.count
+
+        await source.loadMore(nearingPageWithID: pager.items[59].uid)
+
+        #expect(pager.loads == 3, "the blank pages were not read through")
+        #expect(source.pages.count == before + 1, "the picture past the documents never arrived")
+        #expect(
+            source.pages.map(\.id).contains("after-the-paperwork"),
+            "the viewer dead-ended on a run of documents"
+        )
+    }
+
+    /// Bounded, because the tail of a library can be any length of documents and one swipe must
+    /// not set a request loop running that only the end of the list can stop.
+    @Test("reading through pages that show nothing stops at the bound")
+    func readingThroughIsBounded() async {
+        let pager = PagerProbe(items: photos(60))
+        pager.script = (0..<50).map { documents(2, from: 1000 + $0 * 2) }
         let source = MediaViewerSource.library(pager) { await pager.more() }
 
-        // Page 10 of 60, with a 30-page lookahead: nowhere near.
-        await source.loadMore(nearing: 10)
-        #expect(pager.loads == 0, "a swipe in the middle of a loaded run asked for a page")
-        #expect(pager.asked == [10], "control: the store was consulted")
+        await source.loadMore(nearingPageWithID: pager.items[59].uid)
 
-        // Page 31: the first one inside the lookahead.
-        await source.loadMore(nearing: 31)
-        #expect(pager.loads == 1, "the next page was never asked for")
+        #expect(pager.loads == MediaViewerSource.maximumBlankContinuations)
+        #expect(pager.hasMore, "control: the list had not ended, so the bound is what stopped it")
+    }
+
+    /// The wire the library screen owns: the viewer must read the very store the grid is reading.
+    @Test("the library screen hands the viewer its own live store")
+    func libraryScreenWiresTheRealStore() async {
+        let store = MediaLibraryStore(pageSize: 60)
+        let source = MediaLibraryView.viewerSource(for: store) {}
+        guard case .library(let wired, _) = source else {
+            Issue.record("the library screen handed the viewer a fixed snapshot")
+            return
+        }
+        #expect(wired === store, "the viewer pages through a copy, not the grid's own store")
+        #expect(MediaLibraryView.viewerSource(for: nil) {}.hasMore == false)
     }
 
     /// The store's own guard is what refuses, and the viewer asks THROUGH it rather than deciding
@@ -161,13 +258,14 @@ struct MediaViewerPagingTests {
         let pager = PagerProbe(items: photos(60))
         let source = MediaViewerSource.library(pager) { await pager.more() }
 
+        let last = pager.items[59].uid
         pager.answers = false
-        await source.loadMore(nearing: 59)
+        await source.loadMore(nearingPageWithID: last)
         #expect(pager.loads == 0, "a second page was asked for while one was in flight")
         #expect(pager.asked == [59], "control: the store really was consulted")
 
         pager.answers = true
-        await source.loadMore(nearing: 59)
+        await source.loadMore(nearingPageWithID: last)
         #expect(pager.loads == 1, "control: the same swipe loads once the store says yes")
     }
 
@@ -222,6 +320,20 @@ struct MediaViewerPagerTests {
         )
         // A shorter list cannot be this list plus more, whatever it begins with.
         #expect(MediaViewerPager.extended(shown, with: pages(["p0", "p1"])).map(\.id).count == 3)
+    }
+
+    /// The race the viewer used to lose: the grid finished a page between the tap and the cover's
+    /// first frame, so the longer list was never an `onChange` — it simply WAS the baseline. The
+    /// rendered pages are reconciled on every evaluation, which is this computation.
+    @Test("pages the grid loaded before the first frame are adopted, not lost")
+    func pagesLoadedBeforeFirstRenderAreAdopted() {
+        let opened = pages(["p0", "p1"])
+        let pager = PagerProbe(items: photos(5))
+        let source = MediaViewerSource.library(pager) {}
+
+        let rendered = MediaViewerPager.extended(opened, with: source.pages)
+        #expect(rendered.map(\.id) == ["p0", "p1", "p2", "p3", "p4"])
+        #expect(rendered.count > opened.count, "the first frame showed the stale snapshot")
     }
 
     @Test("an unchanged list changes nothing")

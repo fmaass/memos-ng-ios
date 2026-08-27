@@ -587,6 +587,46 @@ public final class TimelineStore {
         }
     }
 
+    /// What a jump to a memo ended as.
+    public enum MemoJumpOutcome: Equatable, Sendable {
+        /// The loaded window now HOLDS it, so this store owns it and an edit made on it lands here.
+        case ready(Memo)
+        /// It could not be read, or it is not in the window even after anchoring — deleted while
+        /// the jump was in flight, or filtered out of the list this screen is showing.
+        case unavailable
+    }
+
+    /// Takes this timeline to a memo, and does not come back until the LOADED WINDOW contains it.
+    ///
+    /// Fetching the memo is not enough and that is the whole point of this function. A value handed
+    /// to the detail screen with no copy in `memos` is a read-only memo: `apply` drops any memo the
+    /// list does not hold (see `apply` above), so an edit, a pin, or a checklist tap made on it is
+    /// discarded on the way back and the screen silently reverts. So the list is ANCHORED at the
+    /// memo's own day — the same landing a day chosen on the heatmap gets — and the window that
+    /// comes back is what owns it from then on (MEMNG-191).
+    public func jump(
+        to uid: String,
+        calendar: Calendar,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> MemoJumpOutcome {
+        guard let memo = await fetchMemo(uid: uid, using: client, baseURL: baseURL) else {
+            return .unavailable
+        }
+        // Already on screen: `fetchMemo` applied the server's copy into it, and nothing needs
+        // moving.
+        if memos.contains(where: { $0.uid == uid }) { return .ready(memo) }
+        guard let anchor = MemoQueryAnchor.day(of: memo.createdAt, in: calendar) else {
+            return .unavailable
+        }
+        setQuery(MemoQuery(anchor: anchor))
+        await refresh(using: client, baseURL: baseURL)
+        // Anchored and still absent. Pushing now would open a screen whose edits go nowhere, so
+        // the caller is told instead.
+        guard memos.contains(where: { $0.uid == uid }) else { return .unavailable }
+        return .ready(memo)
+    }
+
     /// Applies one live media event to the loaded timeline.
     ///
     /// The transform itself is `applyMediaEvent`, which is pure and shared in spirit with the SPA's

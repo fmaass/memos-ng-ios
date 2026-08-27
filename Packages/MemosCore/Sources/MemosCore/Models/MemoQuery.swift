@@ -38,6 +38,20 @@ public enum MemoQueryAnchor: Sendable, Equatable, Codable {
         }
     }
 
+    /// The day an instant falls on, as an anchor.
+    ///
+    /// One rule, stated once: the timeline is anchored at a DAY, and which day an instant belongs
+    /// to is a question only a calendar can answer. Both callers — a day chosen on the heatmap and
+    /// a memo jumped to from the library — read it from here rather than each deriving components
+    /// of their own (MEMNG-191).
+    public static func day(of date: Date, in calendar: Calendar) -> MemoQueryAnchor? {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else {
+            return nil
+        }
+        return .day(year: year, month: month, day: day)
+    }
+
     /// The start of the local day one `period` after the day those components name.
     ///
     /// `startOfDay` is taken twice on purpose. Once before adding, because a component-built date
