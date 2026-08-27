@@ -6,6 +6,20 @@ import SwiftUI
 /// and searching again two different lists of the same thing.
 struct SearchResultsRoute: Hashable {}
 
+/// What the results screen is called.
+///
+/// The field's own text, when there is any — including the "#travel" a tag shortcut writes into it.
+/// A search narrowed by FILTERS alone puts nothing in the field, though, and a screen pushed from
+/// one would otherwise arrive with an empty navigation bar over a list nobody can name. So the
+/// filters say what it is instead, in the same words the sheet's collapsed row uses.
+enum SearchResultsTitle {
+    static func text(term: String, filters: SearchFilters) -> String {
+        let typed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { return typed }
+        return SearchFilterSummary.text(for: filters) ?? "Results"
+    }
+}
+
 /// What the search found, as a screen of its own.
 ///
 /// PUSHED rather than applied to the timeline. The home list is scrolled, often a long way, and
@@ -34,7 +48,7 @@ struct SearchResultsView: View {
             .listRowSpacing(DesignTokens.Space.regular)
             .scrollContentBackground(.hidden)
             .background(Color(.systemGroupedBackground))
-            .navigationTitle(search.term)
+            .navigationTitle(SearchResultsTitle.text(term: search.term, filters: search.filters))
             .navigationBarTitleDisplayMode(.inline)
             .overlay { empty }
             .task { await reconcile() }

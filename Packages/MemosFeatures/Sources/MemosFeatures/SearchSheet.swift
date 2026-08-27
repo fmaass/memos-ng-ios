@@ -41,6 +41,10 @@ struct SearchSheet: View {
     let showResults: () -> Void
 
     @FocusState private var focused: Bool
+    /// Whether the filters are open. Held here rather than inside the section because the shortcut
+    /// tag row's presence depends on it, and two views that have to agree about one fact should
+    /// not each keep their own copy of it.
+    @State private var filtersExpanded = false
 
     /// The field writes through `typed`, which is where the minimum and the pause live — a
     /// two-way binding straight onto the term would put a request behind every keystroke.
@@ -53,6 +57,16 @@ struct SearchSheet: View {
             SearchSheetHeader(close: close)
             field
             SearchOutcomeRow(outcome: search.outcome, showResults: showResults)
+            // Always drawn, and NOT gated on the outcome like the two rows below it. Narrowing is
+            // the one thing a person does to a search that is already running — a second tag, a
+            // visibility — so the row that carries it has to survive the search it started. It
+            // stays collapsed until it is opened, so a sheet nobody narrows looks as it always did.
+            SearchFiltersSection(
+                filters: search.filters,
+                load: loadTags,
+                apply: { self.search.apply($0) },
+                expanded: $filtersExpanded
+            )
             // Nothing typed yet: the way in is a date rather than a word. Once there is a term the
             // sheet is about that term, and a heatmap under it would be answering a question
             // nobody is asking any more.
@@ -60,7 +74,14 @@ struct SearchSheet: View {
                 // Tags before the heatmap: a word is the commoner way back to a memo than a day,
                 // and the chips are one line where the heatmap is a card — first is where they
                 // are still on a medium detent at the larger text sizes.
-                SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
+                //
+                // Withdrawn once the filters hold anything, because the two rows then mean
+                // opposite things about the same tags: this one's tap is a whole gesture that
+                // ends on the results, and the filters' is a choice being composed. Only ever one
+                // of them is on screen.
+                if search.filters.isEmpty, !filtersExpanded {
+                    SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
+                }
                 SearchSheetHeatmap(load: loadHeatmap, chose: chose)
             }
             MonthScrubberSlot()
