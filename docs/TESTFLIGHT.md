@@ -213,9 +213,32 @@ GUI, no Mac login password:
   fails on this app and kills the lane between processing and the attach). There is still no
   review queue and no per-tester step; the export-compliance key in `project.yml` keeps the
   compliance prompt away.
+- **The lane proves the attach instead of assuming it.** `upload_to_testflight` exits 0 on its own
+  success, which is not the same thing as the household being able to see the build — 1.0.2 (8) and
+  1.0.3 (9) were both found processed-but-unattached by hand, days later. So `fastlane beta` ends
+  with an App Store Connect read-back, also runnable on its own as
+  `fastlane verify_attach version:<marketing> build:<n>`, asserting three separate things: the
+  build's `processingState` is `VALID`; the `household` group itself lists the build (the group
+  side of the relationship — that is the direction a tester's TestFlight reads); and its
+  `buildBetaDetail.internalBuildState` is `IN_BETA_TESTING`, polling for up to 5 minutes while it
+  is still the transient `READY_FOR_BETA_TESTING`. Anything else fails the lane and names the state
+  it saw. The verdict is a pure function in `fastlane/lib/asc_readback.rb` so each of those
+  assertions is unit-tested without talking to Apple:
+  `ruby -Ifastlane/lib fastlane/test/asc_readback_test.rb`.
 
 Secrets live only on merkur: `~/.config/memosng-ci.env` (0600, holds the key id / issuer / `.p8`
 path / CI keychain password) and the `.p8` itself (0600). Nothing signing-related is committed.
+
+**Crash symbols.** `fastlane beta` copies the archive's `dSYMs/` to the NAS the moment the archive
+exists, into `janus:/memos-ng-ios/dSYMs/<marketing>-<build>/` (`/Users/Shared/nas/janus/…` as merkur
+sees it), and prints every bundle's `dwarfdump --uuid` line. Off-host on purpose: `build/` is reaped
+for disk and merkur's disk is a single point of failure. `/Volumes/lexosaurus` is the fallback and
+announces itself with a loud `WARN`; when neither store is reachable the lane FAILS rather than
+skipping, because a silent skip is how **builds 7, 8 and 9 shipped with no preserved symbols at
+all** — nothing copied them and nothing complained, so their crash reports could never be
+symbolicated. 7 was recovered afterwards from a surviving local archive; 8 and 9 are gone for good.
+Standalone: `fastlane preserve_dsyms archive:<path> [version:<v> build:<n>]`, where the numbers
+default to what the archive's own `Info.plist` carries.
 
 ---
 

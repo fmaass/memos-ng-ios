@@ -3,6 +3,12 @@
 # (the login keychain is unreachable over SSH -> errSecInternalComponent; that is the whole
 # reason this pipeline exists rather than `xcodebuild archive` over ssh).
 
+require "shellwords"
+require "spaceship"
+require File.expand_path("lib/asc_readback", __dir__)
+require File.expand_path("lib/dsym_store", __dir__)
+require File.expand_path("lib/timed_probe", __dir__)
+
 default_platform(:ios)
 
 APP_ID   = "live.discomarder.memosng"
@@ -15,6 +21,16 @@ KEYPATH  = File.expand_path("~/Library/Keychains/#{KEYCHAIN}")
 ROOT     = File.expand_path("..", __dir__)
 ARCHIVE  = "#{ROOT}/build/MemosNG.xcarchive"
 IPA      = "#{ROOT}/build/MemosNG.ipa"
+GROUP    = "household"
+
+# Off-host first: merkur's build dirs are reaped for disk and its disk is the single point of
+# failure, so the primary store is the NAS. lexosaurus is the local fallback and says so loudly.
+DSYM_STORES     = [["janus", "/Users/Shared/nas/janus"], ["lexosaurus", "/Volumes/lexosaurus"]].freeze
+DSYM_SUBPATH    = "memos-ng-ios/dSYMs"
+ATTACH_TIMEOUT  = 300
+ATTACH_INTERVAL = 20
+# A store probe answers in milliseconds when the mount is healthy; anything past this is a hang.
+DSYM_PROBE_TIMEOUT = 10
 
 def api_key
   app_store_connect_api_key(
@@ -59,6 +75,43 @@ def prepare_signing(key)
   )
 end
 
+# The shipped numbers are read off the archive rather than off project.yml: that is what was
+# actually built, so the dSYM folder name and the ASC read-back cannot drift from the upload.
+def archive_version(archive)
+  plist = "#{archive}/Products/Applications/#{SCHEME}.app/Info.plist"
+  UI.user_error!("no Info.plist at #{plist}") unless File.exist?(plist)
+  version = sh("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' '#{plist}'", log: false).strip
+  build_number = sh("/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' '#{plist}'", log: false).strip
+  UI.user_error!("could not read version/build from #{plist}") if version.empty? || build_number.empty?
+  [version, build_number]
+end
+
+# Listing is what triggers janus's autofs mount, so probe by listing rather than by File.exist?.
+# The listing runs OUT OF PROCESS (see TimedProbe): both of these calls are the ones that block
+# forever on a hung NFS hard mount, and a release lane that stalls on a dead NAS never reaches the
+# fallback that exists precisely for that case.
+def dsym_store_reachable?(root)
+  quoted = Shellwords.escape(root)
+  TimedProbe.ok?("/bin/ls #{quoted} && /bin/test -w #{quoted}", seconds: DSYM_PROBE_TIMEOUT)
+end
+
+# The Spaceship half of the read-back: fetch, hand the facts to the pure verdict, return it.
+def asc_attach_status(version:, build_number:)
+  app = Spaceship::ConnectAPI::App.find(APP_ID)
+  return [:fail, "App Store Connect has no app #{APP_ID}"] if app.nil?
+
+  group = app.get_beta_groups.find { |candidate| candidate.name == GROUP }
+  return [:fail, "App Store Connect has no beta group #{GROUP.inspect}"] if group.nil?
+
+  build = Spaceship::ConnectAPI::Build.all(app_id: app.id, version: version, build_number: build_number).first
+  AscReadback.verdict(
+    build: build,
+    group_build_ids: group.fetch_builds.map(&:id),
+    beta_detail: build && build.build_beta_detail,
+    group_name: GROUP,
+  )
+end
+
 platform :ios do
   # Xcode 26.6's `-exportArchive` CreateIPA step fails with an opaque "Copy failed" (the app
   # itself copies fine with ditto), so we archive only and assemble the IPA by hand from the
@@ -80,9 +133,91 @@ platform :ios do
     IPA
   end
 
+  # Builds 7, 8 and 9 shipped with no preserved symbols: build/ is reaped for disk and nothing
+  # ever copied the dSYMs out, so their crash reports can never be symbolicated. This lane fails
+  # loudly rather than skipping -- a silent skip is the whole defect.
+  desc "Copy an archive's dSYMs into the off-host store and print their UUIDs"
+  lane :preserve_dsyms do |options|
+    archive = (options[:archive] || ARCHIVE).to_s
+    UI.user_error!("preserve_dsyms: no archive at #{archive}") unless Dir.exist?(archive)
+
+    bundles = Dir.glob(File.join(archive, "dSYMs", "*.dSYM")).sort
+    UI.user_error!("preserve_dsyms: #{archive}/dSYMs holds no .dSYM bundle") if bundles.empty?
+
+    supplied_version = options[:version].to_s
+    supplied_build = options[:build].to_s
+    archive_v = ""
+    archive_b = ""
+    archive_v, archive_b = archive_version(archive) if supplied_version.empty? || supplied_build.empty?
+    version, build_number = DsymStore.release_label(
+      version: supplied_version, build: supplied_build,
+      archive_version: archive_v, archive_build: archive_b,
+    )
+    UI.user_error!("preserve_dsyms: could not resolve a version/build to file under") if version.empty? || build_number.empty?
+
+    status, root, message = DsymStore.choose(DSYM_STORES) { |candidate| dsym_store_reachable?(candidate) }
+    UI.user_error!("preserve_dsyms: #{message}") if status == :none
+    status == :fallback ? UI.important(message) : UI.message(message)
+
+    dest = File.join(root, DSYM_SUBPATH, "#{version}-#{build_number}")
+    sh("mkdir -p '#{dest}'")
+    bundles.each { |bundle| sh("ditto '#{bundle}' '#{dest}/#{File.basename(bundle)}'") }
+
+    copied = Dir.glob(File.join(dest, "*.dSYM")).sort
+    UI.user_error!("preserve_dsyms: nothing landed in #{dest}") if copied.empty?
+
+    copied.each do |bundle|
+      sh("dwarfdump --uuid '#{bundle}'", log: false).each_line do |line|
+        UI.important(line.rstrip) unless line.strip.empty?
+      end
+    end
+    UI.success("dSYMs preserved for #{version} (#{build_number}): #{copied.size} bundle(s) in #{dest}")
+    dest
+  end
+
+  # `upload_to_testflight` exits 0 on its own success, which is not the same thing as the
+  # household being able to see the build -- so the release reads App Store Connect back and
+  # fails when the attach did not land. 1.0.2 (8) and 1.0.3 (9) were both found unattached by
+  # hand, days later.
+  desc "Read App Store Connect back: the build is VALID, attached to household, and in testing"
+  lane :verify_attach do |options|
+    version = options[:version].to_s
+    build_number = options[:build].to_s
+    UI.user_error!("verify_attach needs version:<marketing> build:<number>") if version.empty? || build_number.empty?
+
+    api_key # also installs the Spaceship token this read-back queries with
+    deadline = Time.now + ATTACH_TIMEOUT
+    message = "no read-back was attempted"
+
+    loop do
+      unless AscReadback.may_request?(now: Time.now, deadline: deadline)
+        UI.user_error!("ASC read-back TIMED OUT after #{ATTACH_TIMEOUT}s for " \
+                       "#{version} (#{build_number}): #{message}")
+      end
+
+      status, message = asc_attach_status(version: version, build_number: build_number)
+      UI.user_error!("ASC read-back FAILED for #{version} (#{build_number}): #{message}") if status == :fail
+
+      if status == :ok
+        UI.success("ASC read-back OK for #{version} (#{build_number}): #{message}")
+        break
+      end
+
+      wait = AscReadback.next_wait(now: Time.now, deadline: deadline, interval: ATTACH_INTERVAL)
+      if wait.nil?
+        UI.user_error!("ASC read-back TIMED OUT after #{ATTACH_TIMEOUT}s for " \
+                       "#{version} (#{build_number}): #{message}")
+      end
+      UI.message("ASC read-back not settled yet: #{message} - retrying in #{wait}s")
+      sleep(wait)
+    end
+  end
+
   desc "Build and upload to TestFlight (headless)"
   lane :beta do
     archive_ipa
+    version, build_number = archive_version(ARCHIVE)
+    preserve_dsyms(archive: ARCHIVE, version: version, build: build_number)
     # No skip_waiting here: leaving before ASC finishes processing means the groups:
     # assignment silently never runs, and with an internal group that cannot be
     # hasAccessToAllBuilds (the API refuses to enable it post-creation), an unattached
@@ -93,8 +228,9 @@ platform :ios do
     # (no beta description is filled in), so the lane died there AFTER processing and BEFORE
     # the group assign, leaving 1.0.3 (9) processed and unattached until a manual API attach.
     upload_to_testflight(
-      api_key: api_key, ipa: IPA, groups: ["household"],
+      api_key: api_key, ipa: IPA, groups: [GROUP],
       distribute_external: false, submit_beta_review: false,
     )
+    verify_attach(version: version, build: build_number)
   end
 end
