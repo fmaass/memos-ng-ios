@@ -137,43 +137,6 @@ enum MediaCacheClearing {
     }
 }
 
-/// What the account menu holds, in order.
-///
-/// A list rather than a view body, because the ORDER carries a safety property that a view body
-/// would only imply. A menu opens with its first row directly under the anchor that opened it, and
-/// when that row was the destructive one a second tap on the anchor — the ordinary human reflex
-/// when a tap seems not to have registered — revoked a live credential (MEMNG-119). The heading
-/// takes that position, and `AccountMenuTests` holds it there.
-///
-/// MEMNG-185 went further: the destructive row is not in this menu at all any more. Signing out
-/// ends the session, it is done rarely and on purpose, and offering it as one of the two things a
-/// menu did made it look like neither. It is the last row on the Settings screen now
-/// (`SettingsScreen`), and nothing this menu can do takes anything away.
-///
-/// There is deliberately no appearance row. Appearance is a setting, it lives on the Settings
-/// screen with the other settings, and a menu that offered a second way to change one of them
-/// would be two answers to the same question.
-enum AccountMenu {
-    enum Row: Equatable, Hashable {
-        /// Who this device is signed in as. Never actionable — see above.
-        case heading(String)
-        case settings
-
-        /// Whether choosing this row would take something away. None of them does — and the
-        /// switch is exhaustive on purpose, so a row added later has to answer the question
-        /// rather than inherit an answer.
-        var isDestructive: Bool {
-            switch self {
-            case .heading, .settings: false
-            }
-        }
-    }
-
-    static func rows(name: String?) -> [Row] {
-        [.heading(SignOutFlow.accountHeading(name: name)), .settings]
-    }
-}
-
 /// The Settings screen's sections, in the order they are read.
 ///
 /// An explicit list rather than whatever the view body happens to contain, so that "these seven

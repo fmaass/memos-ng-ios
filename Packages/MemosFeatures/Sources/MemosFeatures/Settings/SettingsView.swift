@@ -79,7 +79,7 @@ struct SettingsView: View {
             case .appearance: appearance
             case .storage: storage
             case .about: about
-            case .signOut: signOutRow
+            case .signOut: SignOutSection(conversation: signOut, session: session)
             }
         }
         .padding(DesignTokens.Space.regular)
@@ -170,28 +170,6 @@ struct SettingsView: View {
         .disabled(!MediaCacheMaintenance.isClearable(cache))
     }
 
-    /// Signing out, at the bottom of the screen and nowhere else.
-    ///
-    /// MEMNG-185. It sat in the Account section at the TOP and in the toolbar's account menu, so
-    /// the first thing the screen offered — and one of two things the menu did — was the one
-    /// action that ends the session. It is a rare, deliberate act, and it now reads as one: last
-    /// on the screen, a plain word rather than a labelled button, and no heading over it.
-    ///
-    /// The tint is stated rather than left to the role: these cards are hand-built rather than
-    /// system list rows, and inside them a button takes the app's accent (`DesignTokens.accent`,
-    /// applied at the root) — which is the green the whole app is drawn in. The one control here
-    /// that takes something away must not read like the rest.
-    @ViewBuilder
-    private var signOutRow: some View {
-        Button(role: .destructive) {
-            signOut.send(.requested, to: session)
-        } label: {
-            Text("Sign out")
-                .foregroundStyle(.red)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
     @ViewBuilder
     private var about: some View {
         HStack {
@@ -240,6 +218,39 @@ struct SettingsView: View {
     }
 }
 
+/// Signing out, at the bottom of the screen and nowhere else.
+///
+/// MEMNG-185. It sat in the Account section at the TOP and in the toolbar's account menu, so the
+/// first thing the screen offered — and one of the two things the menu did — was the one action
+/// that ends the session. It is a rare, deliberate act and it now reads as one: last on the
+/// screen, a plain word rather than a labelled button, and no heading over it.
+///
+/// A view of its own, holding the conversation and the session rather than a closure handed down
+/// from the screen, and that is the point rather than tidiness: `SettingsView` cannot be hosted in
+/// a test (it reads a `SessionStore`, which the Features test bundle cannot construct — see
+/// `SettingsRenderTests`), so a row written inline in that body, or one whose action arrived from
+/// there, would be the app's ONLY way to sign out with no test able to reach it. Here the tap and
+/// what the tap does are both inside something a test can put on a screen and press
+/// (`SignOutSectionTests`).
+///
+/// The red is stated rather than left to the destructive role: these cards are hand-built rather
+/// than system list rows, and inside them a button takes the app's accent — the green the whole
+/// app is drawn in. The one control here that takes something away must not read like the rest.
+struct SignOutSection: View {
+    let conversation: SignOutConversation
+    let session: any SignOutRevoking
+
+    var body: some View {
+        Button(role: .destructive) {
+            conversation.send(.requested, to: session)
+        } label: {
+            Text("Sign out")
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 /// The Uploads section's contents, and the only control on this screen that decides whether bytes
 /// leave the phone.
 ///
@@ -280,9 +291,10 @@ struct SettingsCaption: View {
 /// The monogram is not a placeholder waiting for a picture: an account without an avatar has no
 /// picture coming, and an empty grey circle reads as one that failed to load.
 ///
-/// `scale` is a multiple of the shared avatar metric rather than a free size, so the one in the
-/// toolbar and the one on the Settings screen cannot drift apart — and it is read through
-/// `@ScaledMetric`, so both grow with the type size.
+/// `scale` is a multiple of the shared avatar metric rather than a free size, and it is read
+/// through `@ScaledMetric`, so the picture grows with the type size. The toolbar drew one of
+/// these too until MEMNG-185 replaced the account anchor with a gear; the metric stays shared
+/// because the size of a face is a token, not a number this screen invented.
 struct AccountAvatarView: View {
     let image: Image?
     let name: String

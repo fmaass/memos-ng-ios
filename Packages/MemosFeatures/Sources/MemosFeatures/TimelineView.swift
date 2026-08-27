@@ -120,8 +120,6 @@ public struct TimelineView: View {
             // This screen's job is only to say what the bar is showing and what its controls do.
             .toolbar {
                 TimelineToolbar(
-                    avatar: avatar,
-                    name: session.state.user?.name,
                     composed: feedback.count,
                     openSettings: { path.append(SettingsRoute()) },
                     search: { openSearch() },

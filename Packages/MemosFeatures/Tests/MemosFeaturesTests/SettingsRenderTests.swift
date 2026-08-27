@@ -6,32 +6,28 @@ import UIKit
 
 @testable import MemosFeatures
 
-/// Drawing the account menu's rows on a real device, and proving they drew something.
+/// Drawing a piece of the Settings screen on a real device, and proving it drew something.
 ///
 /// This repo's habit is that a screenshot is what a test CANNOT check, so the assertion here is
-/// the one a picture could not make: that the rows render at all, and that the result is not a
+/// the one a picture could not make: that the view renders at all, and that the result is not a
 /// blank rectangle. The image itself is emitted for whoever wants to look.
 ///
-/// It renders `AccountMenuRows` — the very view the `Menu` in the toolbar presents. A `UIMenu`
-/// popover is presented by the system and nothing in process can render it, so a capture of "the
-/// menu open" can only ever be a capture of its contents; sharing the view is what stops that
-/// capture from being a picture of a second, hand-written copy of rows the app does not have.
+/// One SECTION of the Settings screen is rendered here — the Uploads one, which is the only
+/// control on that screen that decides whether bytes leave the phone. It needs no session, so it
+/// can be drawn; and unless it is drawn, nothing in this bundle can tell whether the screen has a
+/// switch on it at all.
 ///
-/// One SECTION of the Settings screen is rendered here as well — the Uploads one, which is the
-/// only control on that screen that decides whether bytes leave the phone. It needs no session,
-/// so it can be drawn; and unless it is drawn, nothing in this bundle can tell whether the screen
-/// has a switch on it at all.
-///
-/// The SETTINGS SCREEN is deliberately not rendered here, and the reason is structural rather
-/// than incidental: `SettingsView` reads `SessionStore` from the environment, and constructing one
-/// inlines `APIClientFactory.make` from the API layer — which this bundle does not link, because
-/// Features reaches the API through Core and never directly. Making the screen's session optional
-/// to get around that would be defensive code written for a test, and adding the API layer to this
-/// bundle would be the dependency rule bent for a screenshot. What the screen is made of is held
-/// instead by `SettingsScreenTests` (which sections, in what order, and that none is stubbed) and
-/// by the suites over every function it draws from.
+/// The SETTINGS SCREEN itself is deliberately not rendered here, and the reason is structural
+/// rather than incidental: `SettingsView` reads `SessionStore` from the environment, and
+/// constructing one inlines `APIClientFactory.make` from the API layer — which this bundle does
+/// not link, because Features reaches the API through Core and never directly. Making the screen's
+/// session optional to get around that would be defensive code written for a test, and adding the
+/// API layer to this bundle would be the dependency rule bent for a screenshot. What the screen is
+/// made of is held instead by `SettingsScreenTests` (which sections, in what order, and that none
+/// is stubbed), by `SignOutSectionTests` (the one row that ends the session), and by the suites
+/// over every function it draws from.
 @MainActor
-@Suite("The account menu draws")
+@Suite("The Settings screen draws")
 struct SettingsRenderTests {
     /// Hosted in a real window and drawn from the hierarchy rather than through `ImageRenderer`:
     /// the rows are UIKit-backed once SwiftUI lays them out, and `ImageRenderer` sees only the
@@ -81,38 +77,6 @@ struct SettingsRenderTests {
         return false
     }
 
-    private func capture(_ image: UIImage, named name: String) {
-        guard let png = image.pngData() else {
-            Issue.record("\(name) produced no PNG data")
-            return
-        }
-        // Emitted as base64 because the gate deletes its per-run simulator on every exit path, so
-        // a file written inside the device does not outlive the run, and the result bundle's
-        // attachments cannot be read back on the Linux machine this repo is developed on. It is
-        // one long line of roughly 50 KB in the gate log; extract it by matching these markers.
-        // Kept rather than removed after the capture round: without it there is no way to get the
-        // picture again, and a capture path that has to be re-invented is one nobody uses.
-        print("MEMOSNG_CAPTURE_BEGIN \(name) \(png.count)")
-        print(png.base64EncodedString())
-        print("MEMOSNG_CAPTURE_END \(name)")
-    }
-
-    private func menu(name: String?) -> some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
-            AccountMenuRows(
-                rows: AccountMenu.rows(name: name),
-                openSettings: {}
-            )
-        }
-        .padding(DesignTokens.Space.roomy)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
-        .padding(DesignTokens.Space.roomy)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color(.systemGroupedBackground))
-    }
-
     private func uploadsCard(isOn: Bool) -> some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
             UploadsSection(allowsMobileData: .constant(isOn))
@@ -143,24 +107,104 @@ struct SettingsRenderTests {
         #expect(isNotBlank(on))
         #expect(off.pngData() != on.pngData(), "the switch is drawn from the value it carries")
     }
+}
 
-    @Test("the account menu's rows draw, in their order")
-    func accountMenuRowsRender() throws {
-        let size = CGSize(width: 393, height: 260)
-        let image = try #require(render(menu(name: "Fabian"), size: size))
+/// A session that records what was asked of it and nothing more.
+///
+/// The narrow protocol (`SignOutRevoking`) exists so this can stand in for a `SessionStore`, which
+/// this bundle cannot construct.
+@MainActor
+private final class SignOutSpy: SignOutRevoking {
+    private(set) var revokes = 0
+    private(set) var discards = 0
+    var outcome = SignOutOutcome.revoked
 
-        #expect(isNotBlank(image))
-        capture(image, named: "account-menu")
+    func signOut() async -> SignOutOutcome {
+        revokes += 1
+        return outcome
     }
 
-    /// The same rows for an account with no name — the heading still has to draw something. A
-    /// first row that collapsed to nothing would leave the anchor sitting directly over Settings,
-    /// which is the position `AccountMenu` reserves for a row that cannot be regretted.
-    @Test("an unnamed account still draws a heading row")
-    func unnamedAccountStillDrawsAHeading() throws {
-        let size = CGSize(width: 393, height: 260)
-        let image = try #require(render(menu(name: nil), size: size))
+    func signOutWithoutRevoking() async { discards += 1 }
 
-        #expect(isNotBlank(image))
+    /// Returns once a revoke has actually been asked for, and gives up rather than hanging if one
+    /// never is. A fence on the thing under test rather than a wait of a chosen length: the test
+    /// cannot pass by having slept long enough, and it does not slow down when the machine is
+    /// fast.
+    func revokeAsked() async {
+        for _ in 0..<200 where revokes == 0 { await Task.yield() }
+    }
+}
+
+/// The row at the bottom of the Settings screen, which since MEMNG-185 is the app's ONLY way to
+/// sign out.
+///
+/// Held here rather than by an assertion about `SettingsScreen.sections`, because a section that is
+/// listed and a row that works are different claims: `SettingsView` cannot be hosted in this bundle
+/// (it reads a `SessionStore`), so before `SignOutSection` was a view of its own, emptying the row
+/// or cutting the line inside it left every test in the suite green while the app had no way out
+/// of the account at all.
+@MainActor
+@Suite("The sign-out row on the Settings screen")
+struct SignOutSectionTests {
+    private func row(_ conversation: SignOutConversation, _ session: SignOutSpy) -> SignOutSection {
+        SignOutSection(conversation: conversation, session: session)
+    }
+
+    @Test("the row puts a Sign out button on the screen")
+    func theRowDraws() {
+        let drawn = PressProbe.withElement(
+            labelled: "Sign out",
+            in: row(SignOutConversation(), SignOutSpy())
+        ) { $0 != nil }
+
+        #expect(drawn, "no Sign out button on the screen")
+    }
+
+    /// The probe's own control. Without this, "it found Sign out" would be worth nothing — a probe
+    /// that answered yes to anything would say the same.
+    @Test("the probe answers no to a label the row does not have")
+    func theProbeCanAnswerNo() {
+        let drawn = PressProbe.withElement(
+            labelled: "Sign in",
+            in: row(SignOutConversation(), SignOutSpy())
+        ) { $0 != nil }
+
+        #expect(!drawn)
+    }
+
+    /// The wiring, pressed rather than inspected: the button the screen ships, activated the way a
+    /// screen reader activates it, moving the shared conversation the alerts are attached to.
+    @Test("pressing the row asks the shared conversation, and asking revokes nothing")
+    func pressingTheRowAsks() {
+        let conversation = SignOutConversation()
+        let session = SignOutSpy()
+        #expect(conversation.stage == .idle)
+
+        let pressed = PressProbe.withElement(labelled: "Sign out", in: row(conversation, session)) {
+            $0?.accessibilityActivate() ?? false
+        }
+
+        #expect(pressed, "the Sign out button did not accept an activation")
+        #expect(conversation.stage == .asking)
+        // The whole point of the machine: the question is a question, and nothing has been sent.
+        #expect(session.revokes == 0)
+    }
+
+    /// And the answer to that question does reach the server — asked through the conversation the
+    /// row itself started, so this is the row's own path rather than a machine driven from
+    /// nowhere.
+    @Test("answering yes to the row's question revokes exactly once")
+    func answeringYesRevokes() async {
+        let conversation = SignOutConversation()
+        let session = SignOutSpy()
+        PressProbe.withElement(labelled: "Sign out", in: row(conversation, session)) {
+            $0?.accessibilityActivate()
+        }
+
+        conversation.send(.confirmed, to: session)
+        await session.revokeAsked()
+
+        #expect(session.revokes == 1)
+        #expect(session.discards == 0)
     }
 }

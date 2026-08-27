@@ -161,7 +161,9 @@ struct SignOutConfirmationTests {
         #expect(SignOutFlow.next(.explaining(decision), on: .cancelled) == .idle)
     }
 
-    @Test("the heading names the account that would be signed out of")
+    /// Still in use after MEMNG-185: the Settings screen's account section prints this sentence
+    /// at the top, over the avatar. Nothing else does — the menu that also showed it is gone.
+    @Test("the account heading names who is signed in")
     func accountHeading() {
         #expect(SignOutFlow.accountHeading(name: "fabian") == "Signed in as fabian")
         #expect(SignOutFlow.accountHeading(name: nil) == "Signed in")

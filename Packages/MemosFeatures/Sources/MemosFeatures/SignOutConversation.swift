@@ -1,13 +1,29 @@
 import MemosCore
 import SwiftUI
 
+/// What signing out needs from the session, and nothing besides.
+///
+/// A protocol rather than `SessionStore` itself, so the conversation can be DRIVEN in a test: this
+/// module's test bundle cannot construct a `SessionStore` (its defaults reach into MemosAPI, which
+/// Features does not link — see `SettingsRenderTests`), and since MEMNG-185 the row on the
+/// Settings screen is the only way to sign out at all. A wiring no test can drive is a wiring that
+/// can be cut without anything going red, and this is not the one to leave in that state.
+@MainActor
+protocol SignOutRevoking {
+    func signOut() async -> SignOutOutcome
+    func signOutWithoutRevoking() async
+}
+
+extension SessionStore: SignOutRevoking {}
+
 /// The sign-out conversation, owned once and startable from anywhere.
 ///
-/// Two surfaces can begin it — the account menu in the timeline's toolbar, and the Account section
-/// of the Settings screen pushed from it — and both have to be the SAME conversation. Not for
-/// tidiness: `SignOutFlow` guarantees that exactly one revoke leaves the device however many times
-/// a tap arrives, and that guarantee is about ONE machine. Two screens each keeping a stage of
-/// their own would be two machines, each correct, and between them two revokes.
+/// One conversation, not one per screen. `SignOutFlow` guarantees that exactly one revoke leaves
+/// the device however many times a tap arrives, and that guarantee is about ONE machine: two
+/// screens each keeping a stage of their own would be two machines, each correct, and between them
+/// two revokes. Signing out is started from the row at the bottom of Settings and nowhere else
+/// (MEMNG-185), but the alerts are raised by the navigation stack that screen is pushed inside, so
+/// the stage still has to outlive the screen — which is what this object is for.
 ///
 /// So the stage lives here, the alerts are attached once at the navigation stack (`signOutAlerts`),
 /// and the screens only send events.
@@ -25,7 +41,7 @@ final class SignOutConversation {
 
     /// The single place a sign-out can start. The revoke is fired on the TRANSITION into
     /// `revoking`, never on an event, so no repeat of any tap can send a second one.
-    func send(_ event: SignOutFlow.Event, to session: SessionStore) {
+    func send(_ event: SignOutFlow.Event, to session: any SignOutRevoking) {
         let previous = stage
         stage = SignOutFlow.next(previous, on: event)
         guard SignOutFlow.revokes(stage), !SignOutFlow.revokes(previous) else { return }
@@ -47,10 +63,13 @@ extension View {
     /// to "Sign out?" was "Sign out". An alert dims, shows both answers, and hands both to
     /// VoiceOver.
     ///
-    /// Attached to the navigation STACK, so neither the question nor its answer is drawn under the
-    /// anchor that opened the menu, and so the Settings screen pushed inside that stack shares the
-    /// one conversation instead of starting a second.
-    func signOutAlerts(_ conversation: SignOutConversation, session: SessionStore) -> some View {
+    /// Attached to the navigation STACK rather than to the screen that asks, so the Settings
+    /// screen pushed inside that stack shares the one conversation instead of starting a second —
+    /// and so the question survives the screen being popped out from under it.
+    func signOutAlerts(
+        _ conversation: SignOutConversation,
+        session: any SignOutRevoking
+    ) -> some View {
         self
             .alert(
                 "Sign out?",
