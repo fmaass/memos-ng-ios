@@ -528,17 +528,30 @@ public final class TimelineStore {
     /// behind a screen nobody asked to refresh, and a blip on it must not paint an error banner
     /// over a timeline that is working. A 401 is different — it ends the session wherever it
     /// happens — so that one is still handed on.
+    ///
+    /// It is also DROPPED when the stream overtook it. The answer describes the memo as it was
+    /// when the request went out, so an event applied to that memo in the meantime is the newer
+    /// truth and this one would revert it (`liveApplications`). `false` says so: this read is not
+    /// what the list now holds. Only this lane is fenced — `fetchMemo` answers a caller that
+    /// needs the memo it asked for, and an ordinary edit or refresh is a reader's own action
+    /// rather than a background snapshot, so a re-transcode that honestly returns an attachment
+    /// to waiting still reaches the list through those.
     @discardableResult
     public func refreshMemo(
         uid: String,
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Read BEFORE the request goes out. The question this answers is whether the stream said
+        // anything about this memo while the answer was in the air.
+        let appliedWhenIssued = liveApplications[uid] ?? 0
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
-                apply(Memo(try ok.body.json, baseURL: baseURL))
+                let memo = Memo(try ok.body.json, baseURL: baseURL)
+                guard liveApplications[uid] ?? 0 == appliedWhenIssued else { return false }
+                apply(memo)
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -641,8 +654,30 @@ public final class TimelineStore {
     public func apply(_ event: MediaEvent) {
         let next = applyMediaEvent(event, to: memos)
         guard next != memos else { return }
+        // Which memos the stream actually moved. A reconciling read that was already in the air
+        // for one of them is now describing a state this list has left — see `liveApplications`.
+        for (updated, previous) in zip(next, memos) where updated != previous {
+            liveApplications[updated.uid, default: 0] += 1
+        }
         memos = next
     }
+
+    /// How many live media events this list has APPLIED to each memo.
+    ///
+    /// A read is a snapshot of the moment it was ISSUED, and the stream is faster than a round
+    /// trip. A reconciling pass asks for a memo whose attachment is still pending; the terminal
+    /// event for that attachment lands while the answer is in the air; the answer then arrives
+    /// still saying `pending`. Applied, it puts a finished tile back under the waiting treatment —
+    /// and nothing takes it out again, because the stream synthesises `ready` once, from a uid
+    /// dropping out of the connection's snapshot (memos-ng `app/routers/assets.py:757-761`), and
+    /// that has already happened.
+    ///
+    /// Counted PER MEMO rather than once for the list: during a transcode events arrive for one
+    /// attachment every second and a half, and a single counter would drop every reconciling read
+    /// taken anywhere near an upload — which is precisely when the pass earns its keep. It grows
+    /// by one entry per memo the stream has ever moved, which is bounded by the uploads a session
+    /// sees.
+    private var liveApplications: [String: Int] = [:]
 
     /// Ticks or unticks the Nth rendered checkbox of a memo.
     ///

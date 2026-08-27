@@ -59,21 +59,32 @@ struct SearchResultsLiveTests {
     private struct Loaded {
         let timeline: TimelineStore
         let search: MemoSearch
+        /// The presentation the app actually reads the extra list out of, so these tests exercise
+        /// the production rule rather than a closure written to agree with them.
+        let presentation: SearchPresentation
         let client: any APIProtocol
         /// The paths every re-read asked for, so "only what is waiting" is a claim about requests.
         let asked: Box<[String]>
+        /// A re-read has reached the server and is being held there.
+        let entered: LockedValue<Bool>
+        /// Let the held re-read answer.
+        let release: LockedValue<Bool>
     }
 
-    /// A home timeline and a search, each read through the same scripted server.
+    /// A home timeline and a search, each read through the same scripted server, with the results
+    /// screen pushed — the state the app is in while somebody reads what a search found.
     ///
     /// The search's request is the one carrying `q=`, which is how the script tells the two lists
     /// apart — the same fact the server uses.
     private func loaded(
         home homeStatus: String,
         found foundStatus: String,
-        reReadsAs: String = "ready"
+        reReadsAs: String = "ready",
+        holdingReads: Bool = false
     ) async -> Loaded {
         let asked = Box<[String]>([])
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(!holdingReads)
         let client = Stub.client { request, _, operation in
             let path = request.path ?? ""
             switch operation {
@@ -85,6 +96,8 @@ struct SearchResultsLiveTests {
                 return Stub.json(Stub.page([row]))
             case "get_memo_api_memos__uid__get":
                 asked.value.append(path)
+                entered.set(true)
+                try await Self.hold(until: release)
                 let isFound = path.contains(Self.found)
                 return Stub.json(
                     Self.memo(
@@ -106,16 +119,30 @@ struct SearchResultsLiveTests {
         )
         search.typed("travel")
         await search.settled()
-        return Loaded(timeline: timeline, search: search, client: client, asked: asked)
+        // Exactly what the app does: the sheet raises the search, hands off, and the results
+        // screen is pushed onto a stack that is then one deep.
+        let presentation = SearchPresentation()
+        presentation.open(search)
+        presentation.close()
+        presentation.resultsPushed(atDepth: 1)
+        return Loaded(
+            timeline: timeline,
+            search: search,
+            presentation: presentation,
+            client: client,
+            asked: asked,
+            entered: entered,
+            release: release
+        )
     }
 
-    /// The channel, running into the timeline with the results list beside it — the wiring the
-    /// app has while that screen is pushed.
+    /// The channel, running into the timeline with whatever else is being read beside it — and
+    /// `liveResults` is the production rule, not a stand-in for it.
     private func consume(_ items: [MediaEventStreamItem], _ fixture: Loaded) async {
         await MediaChannel.consume(
             channel(items),
             into: fixture.timeline,
-            alongside: { [fixture.search.results] },
+            alongside: { fixture.presentation.liveResults },
             using: fixture.client,
             baseURL: Stub.baseURL,
             identity: MediaIdentity()
@@ -291,5 +318,125 @@ struct SearchResultsLiveTests {
         // The timeline had nothing waiting, so the open cost it nothing — the count above is the
         // whole of what this connection asked for.
         #expect(fixture.timeline.memos.first?.isAwaitingTiers == false)
+    }
+
+    // MARK: - a read is a snapshot of the moment it was ISSUED
+
+    /// The stream is faster than a round trip, and a reconciling read does not know it.
+    ///
+    /// The pass issues its GET while the attachment is still pending; the terminal event for that
+    /// same uid lands a moment later and takes the tile out of the waiting treatment; then the
+    /// answer to the older read arrives, still describing a pending attachment. Applied, it puts a
+    /// finished tile straight back under the spinner — and nothing takes it out again, because the
+    /// stream synthesises `ready` ONCE, from a uid dropping out of the connection's snapshot, and
+    /// that has already happened.
+    ///
+    /// So a reconciling read a live event overtook is dropped: it is the older truth. Both
+    /// surfaces are fixed by this, because both reconcile through `TimelineStore.refreshMemo`.
+    @Test("a reconcile that answers after a live event leaves the finished tile alone")
+    func aStaleReconcileDoesNotRevertALiveEvent() async {
+        // The re-read answers "pending" — the state the server was in when it was issued.
+        let fixture = await loaded(
+            home: "ready",
+            found: "pending",
+            reReadsAs: "pending",
+            holdingReads: true
+        )
+
+        let appearing = Task { await fixture.search.resultsAppeared() }
+        while !fixture.entered.get() {
+            await Task.yield()
+        }
+        // The worker finished while that read was in the air.
+        await consume([.event(envelope(Self.foundReady))], fixture)
+        #expect(
+            fixture.search.results.memos.first?.attachments.first?.readiness == .ready,
+            "the event never reached the results list, so this proves nothing"
+        )
+
+        fixture.release.set(true)
+        await appearing.value
+
+        let tile = fixture.search.results.memos.first?.attachments.first
+        #expect(tile?.readiness == .ready, "a stale re-read put a finished tile back to waiting")
+        #expect(tile?.width == 4032, "a stale re-read overwrote the layout the worker wrote")
+        #expect(tile?.height == 3024)
+    }
+
+    // MARK: - only while somebody is reading it
+
+    /// A retained list is not a list on screen.
+    ///
+    /// The store outlives its screen deliberately: it is never emptied or cancelled when the
+    /// reader walks back, because the rows and the cursor are exactly what they would walk into
+    /// again (MEMNG-177). What must NOT outlive the screen is the channel's interest in it. A
+    /// search paged a long way down leaves a big array behind, and every event would map and
+    /// compare the whole of it on the main actor — once every second and a half during somebody
+    /// else's transcode, for a list nobody can see. The no-write guard skips the assignment, not
+    /// the scan.
+    @Test("a results list nobody is reading any more is off the channel entirely")
+    func aPoppedResultsListIsOffTheChannel() async {
+        let fixture = await loaded(home: "ready", found: "pending")
+        let before = fixture.search.results.memos
+        #expect(!before.isEmpty, "the retained list was empty, so this proves nothing")
+
+        // The reader walked back to the timeline.
+        fixture.presentation.stackChanged(toDepth: 0)
+        #expect(
+            fixture.presentation.liveResults.isEmpty,
+            "a list nobody is reading is still on the channel"
+        )
+
+        await consume([.event(envelope(Self.foundReady)), .state(.open)], fixture)
+
+        #expect(fixture.search.results.memos == before, "an unread list was patched")
+        #expect(fixture.asked.value.isEmpty, "an unread list was re-read at the connection open")
+        #expect(
+            !fixture.search.results.memos.isEmpty,
+            "the rows a reader could walk back into were emptied"
+        )
+
+        // Control: the same event, on the same fixture, with the screen back on the stack. Without
+        // it, the silence above could be a channel that reaches this list under no condition.
+        fixture.presentation.resultsPushed(atDepth: 1)
+        await consume([.event(envelope(Self.foundReady))], fixture)
+        #expect(
+            fixture.search.results.memos.first?.attachments.first?.readiness == .ready,
+            "the event cannot move this list at all, so the silence above proves nothing"
+        )
+    }
+
+    /// Depth, not visibility. A memo opened FROM the results is pushed on TOP of them, and the
+    /// list underneath is exactly what that detail screen reads and edits through
+    /// (`TimelineView.holder(of:)`). A rule keyed on the results screen being visible would take
+    /// the list off the channel at that moment; a rule keyed on the stack still holding it does
+    /// not.
+    @Test("the results list joins the channel when its screen is pushed and leaves when it goes")
+    func theResultsListFollowsItsScreenOnTheStack() async {
+        let presentation = await loaded(home: "ready", found: "pending").presentation
+        #expect(presentation.liveResults.count == 1, "the pushed screen is not on the channel")
+
+        // A memo opened from the results: deeper, and the list is still being read.
+        presentation.stackChanged(toDepth: 2)
+        #expect(
+            presentation.liveResults.count == 1,
+            "a detail screen pushed over the results took their list off the channel"
+        )
+
+        // Back to the results themselves, then back to the timeline.
+        presentation.stackChanged(toDepth: 1)
+        #expect(presentation.liveResults.count == 1)
+        presentation.stackChanged(toDepth: 0)
+        #expect(presentation.liveResults.isEmpty)
+        #expect(!presentation.isShowingResults)
+
+        // A stack that goes deep again for something else — Settings, from the root — is not the
+        // results screen coming back.
+        presentation.stackChanged(toDepth: 1)
+        #expect(presentation.liveResults.isEmpty, "an unrelated push put the old results back on")
+
+        // Searching again pushes a results screen that IS read.
+        presentation.resultsPushed(atDepth: 1)
+        #expect(presentation.liveResults.count == 1)
     }
 }

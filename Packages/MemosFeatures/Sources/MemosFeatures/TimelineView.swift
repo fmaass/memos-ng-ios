@@ -169,6 +169,9 @@ public struct TimelineView: View {
                         handingOff = true
                         searchPresentation.close()
                         path.append(SearchResultsRoute())
+                        // The depth it now sits at, so the live channel can tell a list somebody
+                        // is reading from one that is merely still in memory.
+                        searchPresentation.resultsPushed(atDepth: path.count)
                     }
                 )
             }
@@ -233,6 +236,13 @@ public struct TimelineView: View {
         // going false IS the teardown, and its going true again — foregrounded, signed in, and the
         // store now built by the task above — IS the restart.
         .task(id: mediaChannelRuns) { await runMediaChannel() }
+        // Every way back out of the results — Back, an interactive swipe, a pop to the root —
+        // shows up here as the stack getting shallower, which is the only signal any of them
+        // share. `stackChanged` decides what that means for the results screen; it is a depth
+        // and not an appearance for the reason `resultsDepth` gives.
+        .onChange(of: path.count) { _, depth in
+            searchPresentation.stackChanged(toDepth: depth)
+        }
         // A capture that leaves the queue has become a memo on the server; the list it belongs in
         // is reloaded so it does not appear to have vanished.
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
@@ -583,8 +593,13 @@ public struct TimelineView: View {
     /// as part of the task's key: a search is opened and left far more often than the app is put
     /// away, and keying on it would close and reopen the connection every time. Read at each event
     /// instead, so the results screen is patched from the moment it exists and the connection
-    /// never notices. It is the search's store rather than a screen's, because that store IS what
-    /// the results screen shows and what the sheet fills before it — the same rows either way.
+    /// never notices.
+    ///
+    /// WHICH lists those are is `SearchPresentation.liveResults`, and the answer is empty unless
+    /// its screen is on the stack: the store is kept after the reader walks back — emptying it
+    /// would cost them the rows and the cursor they walk into next time — so a channel that
+    /// followed the store rather than the screen would go on scanning a list nobody can see for
+    /// the rest of the session.
     private func runMediaChannel() async {
         guard mediaChannelRuns,
             let timeline,
@@ -594,9 +609,7 @@ public struct TimelineView: View {
         await MediaChannel.consume(
             MediaEventClient.device().stream(),
             into: timeline,
-            alongside: { [searchPresentation] in
-                searchPresentation.search.map { [$0.results] } ?? []
-            },
+            alongside: { [searchPresentation] in searchPresentation.liveResults },
             using: client,
             baseURL: baseURL
         )
