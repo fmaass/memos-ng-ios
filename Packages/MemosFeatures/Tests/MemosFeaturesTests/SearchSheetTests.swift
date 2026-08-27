@@ -89,14 +89,14 @@ struct SearchSheetTests {
     func theEmptyStateReadsTheHeatmapWhenItAppears() {
         let loads = Box(0)
         let read = Signal()
-        let jumped = Box<MemoQueryAnchor?>(nil)
+        let chosen = Box<SearchDayChoice?>(nil)
         let host = UIHostingController(
             rootView: SearchSheetHeatmap(
                 load: { _ in
                     loads.value += 1
                     read.fire()
                 },
-                jump: { jumped.value = $0 }
+                chose: { chosen.value = $0 }
             )
         )
         host.view.frame = CGRect(x: 0, y: 0, width: Self.contentWidth, height: 400)
@@ -112,8 +112,8 @@ struct SearchSheetTests {
         read.wait()
 
         #expect(loads.value >= 1, "appearing did not read the heatmap")
-        // And opening the sheet jumps nowhere by itself: a jump is a tap on a day.
-        #expect(jumped.value == nil)
+        // And opening the sheet jumps nowhere by itself: a jump is a day chosen on it.
+        #expect(chosen.value == nil)
         // The window is held to the end: a hosted view whose window has gone is a view whose task
         // was cancelled, and the count would then be a reading of the timing rather than of this.
         withExtendedLifetime(window) {}

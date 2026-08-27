@@ -62,6 +62,29 @@ struct SearchPresentationTests {
         #expect(presentation.session == nil, "the sheet stayed up")
         #expect(presentation.search === search, "closing the sheet took the results' list with it")
     }
+
+    /// The wiring itself, and the reason it is here rather than beside the row that produces the
+    /// choice: the sheet's two ways of choosing a day were asserted on one side (`dismisses`) and
+    /// the presentation's `close()` on the other, with one line in a screen closure joining them —
+    /// a line that could be deleted with every suite still green (MEMNG-187, review round 1). This
+    /// drives a real presentation with a real choice, so the join is what is asserted.
+    @Test("a settled day takes the sheet away; a day moved in the field leaves it up")
+    func onlyASettledDayClosesTheSheet() {
+        let presentation = SearchPresentation()
+        let search = Self.search()
+        let anchor = MemoQueryAnchor.day(year: 2026, month: 6, day: 12)
+        presentation.open(search)
+
+        // MEMNG-178's half: the grid is a scrubber and the field is correctable, so choosing there
+        // must leave the sheet where it is.
+        presentation.chose(.field(anchor))
+        #expect(presentation.session != nil, "moving the date field put the sheet away")
+
+        presentation.chose(.shown(anchor))
+        #expect(presentation.session == nil, "the sheet stayed up over the day it was told to show")
+        // And it closes the way every other close does: the results screen keeps its store.
+        #expect(presentation.search === search, "settling a day took the results' list with it")
+    }
 }
 
 extension SearchPresentationTests {

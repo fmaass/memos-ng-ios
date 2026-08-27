@@ -30,14 +30,19 @@ enum HeatmapScrub {
     /// The short trailing column is the one case that is genuinely empty: the last week of the
     /// window stops on today, so its lower slots stand for days that have not happened. A point
     /// there answers with that column's last real day rather than with nothing.
+    /// The geometry is the one the squares were DRAWN from (MEMNG-186), not a side and a gap
+    /// repeated at the call site: the pitch a finger is divided by and the pitch the grid was
+    /// laid out on are the same number because they are the same value.
+    ///
+    /// A geometry with no square in it — a grid that has not been laid out yet, or one with no
+    /// columns — answers nothing rather than dividing by a pitch made of gap alone.
     static func cell(
         at point: CGPoint,
         in grid: HeatmapGrid,
-        side: CGFloat,
-        gap: CGFloat
+        geometry: HeatmapGeometry
     ) -> HeatCell? {
-        let pitch = side + gap
-        guard pitch > 0, !grid.columns.isEmpty else { return nil }
+        guard geometry.side > 0, !grid.columns.isEmpty else { return nil }
+        let pitch = geometry.pitch
         let column = index(for: point.x, pitch: pitch, count: grid.columns.count)
         let days = grid.columns[column]
         guard !days.isEmpty else { return nil }
@@ -57,8 +62,8 @@ enum HeatmapScrub {
     /// What VoiceOver reads as the grid's VALUE: the day it is on and what was written that day.
     ///
     /// The grid is one element with a value, not eighty-four elements with labels (HIG, Charting
-    /// data): a rotor that stops on every square is a rotor nobody can get past, and each square
-    /// is far under the 44pt a target needs anyway — the whole grid is the target.
+    /// data): a rotor that stops on every square is a rotor nobody can get past, and a square is a
+    /// day rather than a control — the whole grid is the target.
     static func spoken(_ key: String?, in grid: HeatmapGrid, locale: Locale = .current) -> String? {
         guard let cell = cell(for: key, in: grid) else { return nil }
         return HeatmapDateJump.label(for: cell, locale: locale)

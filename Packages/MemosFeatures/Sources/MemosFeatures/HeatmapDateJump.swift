@@ -102,6 +102,22 @@ enum HeatmapDateJump {
         }
     }
 
+    /// A day in the short form the sheet's commit row names it by: the month and the day, and no
+    /// year at all.
+    ///
+    /// The row is about a day inside the twelve weeks the grid draws — a destination a few screens
+    /// down the list the reader is already looking at — and a year on it reads as an anniversary
+    /// rather than as somewhere to go. Cut in the same calendar as everything else here, for the
+    /// same reason: a date formatted in the device's zone under a square cut in UTC is off by one
+    /// for half the day, for everybody who is not on Greenwich.
+    static func shortText(for day: Date, locale: Locale = .current) -> String {
+        let calendar = anchorCalendar
+        var style = Date.FormatStyle().month(.abbreviated).day()
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        return day.formatted(style.locale(locale))
+    }
+
     /// A day (or a month) written out, in the calendar the heatmap's keys are cut in — a date
     /// formatted in the device's zone under a square cut in UTC is the same off-by-one twice.
     private static func text(for day: Date, month: Bool = false, locale: Locale) -> String {

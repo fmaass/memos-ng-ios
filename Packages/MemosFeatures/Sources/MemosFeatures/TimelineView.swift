@@ -140,7 +140,16 @@ public struct TimelineView: View {
                         guard let client = session.api else { return }
                         await store.load(using: client)
                     },
-                    jump: { jump(to: $0) },
+                    chose: { choice in
+                        jump(to: choice.anchor)
+                        // The commit row is the sheet's one verb (MEMNG-187): the day is settled,
+                        // so the sheet goes and what is left on screen is the anchored list with
+                        // the notice on top of it naming the day. A scrub or a picked date is a
+                        // field being moved, and the sheet stays for the next correction. Which
+                        // of the two it is, is `SearchPresentation.chose` — decided where the
+                        // presentation lives, so it is a decision a test can drive.
+                        searchPresentation.chose(choice)
+                    },
                     loadTags: { store in
                         guard let client = session.api else { return }
                         await store.load(using: client)
@@ -578,13 +587,14 @@ public struct TimelineView: View {
         await timeline?.refresh(using: client, baseURL: baseURL)
     }
 
-    /// A day chosen on the sheet's scrubber: the list comes back anchored at that day, behind a
-    /// sheet that stays up.
+    /// A day chosen on the sheet: the list comes back anchored at that day.
     ///
-    /// It used to close the sheet. It does not any more (MEMNG-178): the heatmap is a scrubber
-    /// now, and a scrubber that dismissed itself the moment a finger came off would be usable
-    /// exactly once per opening — an accidental lift mid-drag would be a jump nobody asked for,
-    /// with no way back but reopening the sheet. Done is what closes it.
+    /// Whether the sheet stays up over it is the CHOICE's to say, not this function's. A scrub
+    /// release or a picked date leaves it up (MEMNG-178): a scrubber that dismissed itself the
+    /// moment a finger came off would be usable exactly once per opening, and an accidental lift
+    /// mid-drag would be a jump nobody asked for with no way back but reopening the sheet. The
+    /// commit row settles the day and takes the sheet with it (MEMNG-187), which is what puts the
+    /// landing this produces in front of the reader.
     ///
     /// Anchored, not scrolled. The memo written on 4 June is a hundred cursor pages down a list
     /// that is still being paged, so scrolling to it would mean fetching everything in between;
