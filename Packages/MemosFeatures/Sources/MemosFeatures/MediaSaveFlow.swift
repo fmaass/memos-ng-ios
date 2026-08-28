@@ -6,13 +6,16 @@ import UIKit
 ///
 /// It carries the URL rather than the bytes: the share sheet takes a file, and a file is what
 /// makes "Save Image" and "Save to Files" appear at all — a `Data` of unknown type gets neither.
-public struct SavedOriginal: Identifiable, Equatable, Sendable {
+/// The URL is a LOCAL one, always — `file:` under this app's temporary directory. A remote URL
+/// here would be the MEMNG-207 defect back again, since this value is exactly what the share
+/// sheet is presented on.
+public struct FetchedFile: Identifiable, Equatable, Sendable {
     public let url: URL
 
     public var id: String { url.absoluteString }
 }
 
-/// Getting the original of a photo or clip onto the phone, and then out of the app.
+/// Getting a photo or a clip onto the phone, and then out of the app.
 ///
 /// It is a two-step act and both steps have to be visible, which is why this is a model rather
 /// than a closure in a menu. The download is not instant — an original is the archive master, and
@@ -30,14 +33,15 @@ public final class MediaSaveFlow {
     /// twice, which on a video is a second few hundred megabytes for nothing.
     public private(set) var isSaving = false
     /// The file, once it is here. The share sheet is presented on this and on nothing else, so a
-    /// failed download can never raise an empty one.
-    public private(set) var saved: SavedOriginal?
+    /// failed download can never raise an empty one — and so the only thing that sheet can ever be
+    /// handed is a file this flow fetched.
+    public private(set) var saved: FetchedFile?
     /// Why the last attempt did not produce a file, or nil.
     public private(set) var lastError: String?
 
     public init() {}
 
-    /// Fetches the original and, if it arrives, offers it.
+    /// Fetches the file and, if it arrives, offers it.
     ///
     /// - Returns: whether this call actually ran a download — false for the tap that arrived while
     ///   another was already in flight.
@@ -51,7 +55,7 @@ public final class MediaSaveFlow {
         lastError = nil
         defer { isSaving = false }
         do {
-            saved = SavedOriginal(url: try await download(attachment))
+            saved = FetchedFile(url: try await download(attachment))
             return true
         } catch {
             // Nothing is offered: the sheet is bound to `saved`, so a failure cannot raise one
@@ -89,21 +93,32 @@ public final class MediaSaveFlow {
 struct ShareSheet: UIViewControllerRepresentable {
     let url: URL
 
+    /// What the activity controller is handed, as a value something other than UIKit can read.
+    ///
+    /// A function rather than a literal inside `makeUIViewController` because the contents of that
+    /// array are the whole of MEMNG-207: the one thing this app may hand a share sheet is the
+    /// FILE. A `Context` cannot be built outside SwiftUI, so with the array written inline there
+    /// was nothing any test could look at — and what was silently in it, on the other share row,
+    /// was a signed URL into the household server.
+    static func activityItems(for file: URL) -> [URL] { [file] }
+
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        UIActivityViewController(
+            activityItems: Self.activityItems(for: url), applicationActivities: nil
+        )
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 extension View {
-    /// The three things a screen that can save an original has to show: that a download is running,
-    /// the sheet when the file arrives, and the reason when it does not.
+    /// The three things a screen that fetches a file has to show: that a download is running, the
+    /// sheet when the file arrives, and the reason when it does not.
     ///
     /// One modifier rather than three lines on each of the two screens that offer it — the tile
-    /// menu and the full-screen viewer offer the same action, and a second copy written into a
+    /// menu and the full-screen viewer offer the same actions, and a second copy written into a
     /// second body is how one of them ends up silently missing the failure.
-    func savingOriginal(_ flow: MediaSaveFlow) -> some View {
+    func fetchingFile(_ flow: MediaSaveFlow) -> some View {
         self
             .overlay {
                 if flow.isSaving {
@@ -114,7 +129,7 @@ extension View {
                             .regularMaterial,
                             in: .rect(cornerRadius: DesignTokens.Radius.card)
                         )
-                        .accessibilityLabel("Downloading the original")
+                        .accessibilityLabel("Downloading the file")
                 }
             }
             .sheet(

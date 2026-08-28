@@ -16,6 +16,28 @@ private func photo(_ uid: String, original: URL?) -> MemoAttachment {
     )
 }
 
+/// A clip: the one kind of file whose shared copy is NOT its own original.
+@MainActor
+private func clip(_ uid: String = "v1") -> MemoAttachment {
+    MemoAttachment(
+        uid: uid,
+        mime: "video/quicktime",
+        status: .ready,
+        webURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/web"),
+        posterURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/poster"),
+        downloadURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/original")
+    )
+}
+
+/// What the closures a menu row is handed were actually called with.
+///
+/// Not isolated to an actor and not locked: every call it records is made synchronously inside
+/// `tapped()`, on the test's own thread, before the next line of the test runs.
+private final class TapRecorder: @unchecked Sendable {
+    var fetched: [(uid: String, rendition: AttachmentRendition)] = []
+    var shown: [String] = []
+}
+
 /// Counts calls from a closure the test hands over.
 @MainActor
 private final class Calls {
@@ -23,13 +45,15 @@ private final class Calls {
     func record() { count += 1 }
 }
 
-/// Saving the file somebody actually uploaded.
+/// Handing a file to somebody else.
 ///
-/// Two things are being held. That the action is OFFERED only where it can work — a file whose
-/// payload carries no original has nothing to fetch — and that the wait it starts is visible,
-/// bounded to one at a time, and cannot end in a share sheet over a file that never arrived.
+/// Three things are being held. That an action is OFFERED only where it can work — a file whose
+/// payload names no original has nothing to fetch, and two rows that would fetch the same bytes
+/// are one row. That the wait it starts is visible, bounded to one at a time, and cannot end in a
+/// share sheet over a file that never arrived. And that what the sheet is handed is that file
+/// (MEMNG-207).
 @MainActor
-@Suite("Saving an original")
+@Suite("Handing a file on")
 struct MediaSaveFlowTests {
     private let attachment = MemoAttachment(uid: "a1", mime: "image/jpeg", status: .ready)
     private let file = URL(fileURLWithPath: "/tmp/a1.jpeg")
@@ -41,7 +65,7 @@ struct MediaSaveFlowTests {
         let ran = await flow.save(attachment) { _ in self.file }
 
         #expect(ran)
-        #expect(flow.saved == SavedOriginal(url: file))
+        #expect(flow.saved == FetchedFile(url: file))
         #expect(flow.lastError == nil)
         #expect(!flow.isSaving)
     }
@@ -87,7 +111,7 @@ struct MediaSaveFlowTests {
         }
 
         #expect(calls.count == 1)
-        #expect(flow.saved == SavedOriginal(url: file))
+        #expect(flow.saved == FetchedFile(url: file))
     }
 
     @Test("the share sheet closing stops the file being offered again")
@@ -127,31 +151,29 @@ struct MediaSaveFlowTests {
 
     // MARK: - what the menu offers
 
+    /// A clip is the one file that gets both rows, because it is the one whose shared copy and
+    /// whose master are different files.
     @Test("Save Original is offered last, after the two that happen at once")
     func theMenuOffersItLast() {
-        let full = photo("a", original: URL(string: "https://memos.example.invalid/x/original"))
-        var owned = full
+        var owned = clip()
         owned.memoUID = "m7"
 
         #expect(
             MediaTileMenu.actions(for: owned).map(\.title)
                 == ["Show Memo", "Share", "Save Original"]
         )
-        #expect(MediaTileMenu.actions(for: full).map(\.title) == ["Share", "Save Original"])
+        #expect(MediaTileMenu.actions(for: clip()).map(\.title) == ["Share", "Save Original"])
     }
 
-    @Test("a file with no original is not offered a download that would fetch nothing")
-    func nothingToDownload() {
-        let bare = photo("a", original: nil)
+    @Test("a clip with no mp4 yet is offered one row, not two that would fetch the same file")
+    func noSecondRowForTheSameFile() {
+        var pending = clip()
+        pending.webURL = nil
 
-        #expect(MediaTileMenu.actions(for: bare).map(\.title) == ["Share"])
-        // The control: the same file WITH an original does get the row, so the absence above is
-        // about the missing URL and not about an empty menu.
-        #expect(
-            MediaTileMenu.actions(
-                for: photo("a", original: URL(string: "https://memos.example.invalid/x/original"))
-            ).count == 2
-        )
+        #expect(MediaTileMenu.actions(for: pending).map(\.title) == ["Share"])
+        // The control: with the derived mp4 in the payload the two rows are two different files,
+        // which is the only thing that earns the second row.
+        #expect(MediaTileMenu.actions(for: clip()).map(\.title) == ["Share", "Save Original"])
     }
 
     /// The gap this closes: the library's document branch drew a tile and offered nothing at all,
@@ -161,9 +183,9 @@ struct MediaSaveFlowTests {
     func documentsAreOfferedTheSameActions() {
         let pdf = document()
 
-        #expect(
-            MediaTileMenu.actions(for: pdf).map(\.title) == ["Show Memo", "Share", "Save Original"]
-        )
+        // Two, not three: a PDF is handed on as its own file, so a second row fetching that same
+        // file under another name would be a choice with nothing behind it.
+        #expect(MediaTileMenu.actions(for: pdf).map(\.title) == ["Show Memo", "Share"])
         // Both halves of the invariant, together: this file has no page in the viewer AND has
         // things that can be done with it. Either one alone is what the library got wrong.
         #expect(MediaLibraryPresentation.tileKind(for: pdf) == .document)
@@ -204,25 +226,125 @@ struct MediaSaveFlowTests {
         return pdf
     }
 
-    @Test("the action carries the whole file, because a download needs more than a URL")
-    func theActionCarriesTheAttachment() throws {
-        let original = URL(string: "https://memos.example.invalid/x/original")
-        let file = photo("a1", original: original)
+    @Test("both fetching actions carry the whole file, because a download needs more than a URL")
+    func theActionsCarryTheAttachment() throws {
+        let video = clip("v1")
 
-        let action = try #require(
-            MediaTileMenu.actions(for: file).first {
-                if case .saveOriginal = $0 { return true }
-                return false
+        for action in MediaTileMenu.actions(for: video) {
+            let carried: MemoAttachment
+            switch action {
+            case .share(let attachment), .saveOriginal(let attachment): carried = attachment
+            case .showMemo: continue
             }
-        )
-        guard case .saveOriginal(let carried) = action else {
-            Issue.record("the action did not carry the file")
-            return
+            // Where each file is, what it is, and what to call it — all of it comes off the
+            // attachment, so neither surface has to reassemble any of it for itself.
+            #expect(carried.uid == "v1")
+            #expect(carried.mime == "video/quicktime")
+            #expect(carried.downloadURL == video.downloadURL)
+            #expect(carried.webURL == video.webURL)
         }
-        // Where the original is, what it is, and what to call it — all three come off the
-        // attachment, so neither surface has to reassemble them for itself.
-        #expect(carried.downloadURL == original)
-        #expect(carried.mime == "image/jpeg")
-        #expect(carried.uid == "a1")
+        // The control: there were two of them to check.
+        #expect(MediaTileMenu.actions(for: video).count == 2)
+    }
+
+    // MARK: - what Share hands over (MEMNG-207)
+
+    /// The bug: Share handed the activity sheet the file's `webUrl` — a signed derived-tier link.
+    /// It expires with its signature, it only resolves for somebody who can reach the household
+    /// server, and it says that server's name out loud. Whoever it was sent to had nothing to open.
+    @Test("Share names the file it will fetch, never a link to the server")
+    func shareNamesTheFileNotALink() throws {
+        let file = photo("a1", original: URL(string: "https://memos.example.invalid/x/original"))
+
+        for action in MediaTileMenu.actions(for: file) {
+            #expect(!action.id.contains("://"), "an action carries a server URL: \(action.id)")
+        }
+        let share = try #require(MediaTileMenu.actions(for: file).first { $0.title == "Share" })
+        #expect(share.id == "share:a1")
+    }
+
+    /// Share fetches a file now, so it is offered on the same terms as every other action that
+    /// fetches one: only where there is something to fetch. A payload naming no original names
+    /// nothing this app could hand anybody, and an action that would download nothing is worse
+    /// than no action at all.
+    @Test("a file with no original is offered no Share, because there is nothing to hand over")
+    func nothingToHandOver() {
+        #expect(MediaTileMenu.actions(for: photo("a", original: nil)).map(\.title) == [])
+        // The control: the same file WITH an original is offered one, so the absence above is
+        // about the missing file and not about an empty menu.
+        #expect(
+            MediaTileMenu.actions(
+                for: photo("a", original: URL(string: "https://memos.example.invalid/x/original"))
+            ).map(\.title) == ["Share"]
+        )
+    }
+
+    /// What a tap on each row actually asks for.
+    ///
+    /// `MediaTileMenu.actions` says what is OFFERED and `SessionStore.download` says what a
+    /// rendition costs on the wire; between them sits the row, and until this test nothing crossed
+    /// it. The rendition is the whole question — `.shared` is a file, and the thing this ticket
+    /// replaced was a row that handed over a link instead.
+    @Test("tapping Share asks for the shared file; tapping Save Original asks for the master")
+    func eachRowAsksForItsOwnFile() {
+        let video = clip("v1")
+        let recorder = TapRecorder()
+
+        for action in MediaTileMenu.actions(for: video) {
+            MediaTileActionItem(
+                action: action,
+                showMemo: { recorder.shown.append($0) },
+                fetch: { recorder.fetched.append(($0.uid, $1)) }
+            ).tapped()
+        }
+
+        let uids = recorder.fetched.map(\.uid)
+        let renditions = recorder.fetched.map(\.rendition)
+        // Two rows, in the order the menu shows them, each asking for its own file.
+        #expect(uids == ["v1", "v1"])
+        #expect(renditions == [.shared, .original])
+        #expect(recorder.shown.isEmpty)
+    }
+
+    /// The third row, because a routing rule needs a case per input and not only the happy one:
+    /// the row that navigates must not start a download.
+    @Test("tapping Show Memo goes to the memo and fetches nothing")
+    func theMemoRowFetchesNothing() {
+        let recorder = TapRecorder()
+
+        MediaTileActionItem(
+            action: .showMemo(uid: "m7"),
+            showMemo: { recorder.shown.append($0) },
+            fetch: { recorder.fetched.append(($0.uid, $1)) }
+        ).tapped()
+
+        #expect(recorder.shown == ["m7"])
+        #expect(recorder.fetched.isEmpty)
+    }
+
+    /// The other end of the same rule: what the activity sheet is actually handed.
+    ///
+    /// The sheet is presented on `saved` and on nothing else, so this is the whole payload — one
+    /// item, a file on this phone. It is emphatically not the server URL the payload carries,
+    /// which is what a recipient used to be sent.
+    @Test("the share sheet is handed the file that arrived, and no URL")
+    func theSheetIsHandedTheFile() async throws {
+        let flow = MediaSaveFlow()
+        let carried = photo("a1", original: URL(string: "https://memos.example.invalid/x/original"))
+
+        await flow.save(carried) { _ in self.file }
+
+        let offered = try #require(flow.saved)
+        let items = ShareSheet.activityItems(for: offered.url)
+        // Read outside the macro: `#expect` expands its argument into a `rethrows` position, so a
+        // closure-taking call inside one is a compile error rather than an assertion.
+        let allLocal = items.allSatisfy(\.isFileURL)
+        let carriesTheDerivedLink = items.contains { $0 == carried.webURL }
+        let carriesTheOriginalLink = items.contains { $0 == carried.downloadURL }
+
+        #expect(items == [file])
+        #expect(allLocal, "the share sheet was handed a remote URL: \(items)")
+        #expect(!carriesTheDerivedLink, "the share sheet was handed the derived-tier link")
+        #expect(!carriesTheOriginalLink, "the share sheet was handed the server's own URL")
     }
 }

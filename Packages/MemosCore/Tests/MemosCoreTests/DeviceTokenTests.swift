@@ -658,7 +658,7 @@ struct DeviceTokenTests {
         }
 
         await #expect(throws: OriginalMediaError.superseded) {
-            try await store.downloadOriginal(
+            try await store.download(
                 MemoAttachment(
                     uid: "a1",
                     mime: "image/jpeg",

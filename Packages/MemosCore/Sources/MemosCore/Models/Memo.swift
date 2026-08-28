@@ -53,7 +53,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
     /// one is served unsigned and behind authentication (memos-ng `app/routers/assets.py`, the
     /// "UNSIGNED / AUTH PATH" branch — original and print take a token or a session, never a
     /// signature). So it is not a link that can be handed to anything: fetching it means presenting
-    /// the device credential, which is why `SessionStore.downloadOriginal` is the only thing that
+    /// the device credential, which is why `SessionStore.download` is the only thing that
     /// does.
     public var downloadURL: URL?
     /// The memo this file hangs on, when the payload it came from says so (MEMNG-171).

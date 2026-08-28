@@ -66,7 +66,7 @@ struct MediaViewerView: View {
             closeButton
         }
         .overlay(alignment: .topTrailing) { actions }
-        .savingOriginal(saving)
+        .fetchingFile(saving)
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -160,8 +160,8 @@ struct MediaViewerView: View {
                             dismiss()
                             jump?.request(uid)
                         },
-                        saveOriginal: { attachment in
-                            Task { await save(attachment) }
+                        fetch: { attachment, rendition in
+                            Task { await fetch(attachment, rendition) }
                         }
                     )
                 }
@@ -175,14 +175,14 @@ struct MediaViewerView: View {
         }
     }
 
-    /// Fetches the original of the file on screen and offers it to the share sheet.
+    /// Fetches the named file of the picture or clip on screen and offers it to the share sheet.
     ///
     /// The session is what holds the credential; without one there is nothing to present, which is
-    /// the same refusal `SessionStore.downloadOriginal` makes for a session that has ended.
-    private func save(_ attachment: MemoAttachment) async {
+    /// the same refusal `SessionStore.download` makes for a session that has ended.
+    private func fetch(_ attachment: MemoAttachment, _ rendition: AttachmentRendition) async {
         await saving.save(attachment) { [session] attachment in
             guard let session else { throw OriginalMediaError.notSignedIn }
-            return try await session.downloadOriginal(attachment)
+            return try await session.download(attachment, rendition)
         }
     }
 
@@ -221,30 +221,39 @@ struct MediaViewerView: View {
 struct MediaTileActionItem: View {
     let action: MediaTileAction
     let showMemo: (String) -> Void
-    /// What the slow one does. Defaulted so a surface that cannot download — a preview, a fitting
-    /// test — still builds the row rather than being handed a different menu.
-    var saveOriginal: (MemoAttachment) -> Void = { _ in }
+    /// What the two slow ones do: fetch the named file and offer it. Defaulted so a surface that
+    /// cannot download — a preview, a fitting test — still builds the row rather than being handed
+    /// a different menu.
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
 
-    var body: some View {
+    /// Everything a tap on this row does — the button's whole action, and the only thing it does.
+    ///
+    /// It is a method rather than three closures written into three branches of `body`, and the
+    /// reason is that a `Button`'s action is unreachable from a test: SwiftUI hands out no way to
+    /// invoke one, and the probe this bundle has reads accessibility LABELS, which are identical
+    /// whatever the control turns out to be. Written inline, the one thing that decides whether a
+    /// recipient is handed a file or a link — which rendition each row asks for — was asserted by
+    /// nothing at all, and the row could go back to being a `ShareLink` over `webURL` with every
+    /// test still green (MEMNG-207, review round 1).
+    func tapped() {
         switch action {
-        case .showMemo(let uid):
-            Button {
-                showMemo(uid)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
-        case .share(let url):
-            ShareLink(item: url) {
-                Label(action.title, systemImage: action.symbol)
-            }
-        case .saveOriginal(let attachment):
-            // A plain Button, not a `ShareLink`: the file it will share does not exist yet, and
-            // the wait for it is the reason this action is not the same thing as `Share`.
-            Button {
-                saveOriginal(attachment)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
+        case .showMemo(let uid): showMemo(uid)
+        // Neither of these is a `ShareLink`, and it is the same reason for both: a `ShareLink`
+        // hands over a value it is already holding, and neither of these files is on the phone
+        // until somebody has waited for it. A `ShareLink` is what the Share row used to be, which
+        // is exactly how the value it was holding came to be a URL.
+        case .share(let attachment): fetch(attachment, .shared)
+        case .saveOriginal(let attachment): fetch(attachment, .original)
+        }
+    }
+
+    /// One button, whatever the row is. There is no per-case branch here on purpose: a branch is
+    /// where a row that hands over a URL grew last time, and where the next one would.
+    var body: some View {
+        Button {
+            tapped()
+        } label: {
+            Label(action.title, systemImage: action.symbol)
         }
     }
 }
