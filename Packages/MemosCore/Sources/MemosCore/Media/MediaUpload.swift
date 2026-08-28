@@ -60,7 +60,8 @@ public enum MediaUpload {
     public static func upload(
         _ source: StagedSource,
         using client: any APIProtocol,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        offsetDeadline deadline: Duration = offsetDeadline
     ) async throws -> String {
         let size = try byteSize(of: source.url, fileManager: fileManager)
         let started = try await start(source, size: size, using: client)
@@ -102,13 +103,22 @@ public enum MediaUpload {
                 // `theOffsetRouteCannotBeReadAsPublished`, which fails on the real shape and
                 // succeeds on the same response with a body, naming the cause exactly.
                 //
+                // The ask is on a DEADLINE for that reason. The failure it meets is not always
+                // prompt: a bodyless answer fails as soon as it is parsed, but a session that
+                // simply does not answer is bounded only by the URL loading system's own request
+                // timeout — a minute of a Save sitting frozen on a screen somebody is waiting at.
+                // A few seconds is the whole of what a resume is worth here.
+                //
                 // So a gap ends the upload instead, which is safe: no memo patch is sent, nothing
                 // is half-attached, and the retry the person makes carries the same edit key
                 // (`TimelineStore.edit`). Fixing the contract in memos-ng is what makes this
                 // branch resume on its own — and that test is what will say so when it does,
                 // rather than this comment quietly going stale.
                 resyncs += 1
-                guard let synced = try? await self.offset(of: started.uploadUid, using: client)
+                guard
+                    let synced = try? await self.offset(
+                        of: started.uploadUid, using: client, within: deadline
+                    )
                 else { throw MediaUploadError.refused(.server(status: 409)) }
                 // Two ways this stops instead of spinning: a server that reports the very offset
                 // it just refused is not converging, and a run of gaps on a session nothing else
@@ -121,6 +131,14 @@ public enum MediaUpload {
         }
         return started.uploadUid
     }
+
+    /// How long the session gets to say where it stands before the gap is given up on.
+    ///
+    /// Short, because of what is waiting on it: somebody is looking at a Save that has not come
+    /// back yet. The alternative is not "the resume eventually works" — it is the URL loading
+    /// system's request timeout, about a minute, at the end of which the upload is abandoned
+    /// anyway. A few seconds buys every re-sync that was ever going to succeed.
+    public static let offsetDeadline = Duration.seconds(3)
 
     /// How many offset gaps one upload will answer before giving up.
     ///
@@ -218,8 +236,30 @@ public enum MediaUpload {
     /// published in the contract (`upload_offset_api_uploads__upload_uid__head`), so it is asked
     /// through the generated client like everything else here; the outbox builds the same request
     /// by hand only because its own requests must go on a background `URLSession`.
+    /// The ask, given only `deadline` to answer in.
+    ///
+    /// A race rather than a timeout on the request, because the request is the generated client's
+    /// to build and it has no timeout of its own to set — and because the losing side is
+    /// cancelled, so a session that answers a second too late is not left running.
     static func offset(
         of uploadUID: String,
+        using client: any APIProtocol,
+        within deadline: Duration = offsetDeadline
+    ) async throws -> Int64 {
+        try await withThrowingTaskGroup(of: Int64.self) { group in
+            group.addTask { try await read(offsetOf: uploadUID, using: client) }
+            group.addTask {
+                try await Task.sleep(for: deadline)
+                throw MediaUploadError.stalled
+            }
+            defer { group.cancelAll() }
+            guard let answer = try await group.next() else { throw MediaUploadError.stalled }
+            return answer
+        }
+    }
+
+    private static func read(
+        offsetOf uploadUID: String,
         using client: any APIProtocol
     ) async throws -> Int64 {
         let response = try await client.uploadOffsetApiUploadsUploadUidHead(

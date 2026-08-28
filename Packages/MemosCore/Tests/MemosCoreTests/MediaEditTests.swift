@@ -34,6 +34,14 @@ private func offsetGap() -> (HTTPResponse, HTTPBody?) {
     Stub.json(#"{"detail":"Offset gap; re-sync via HEAD"}"#, status: .conflict)
 }
 
+/// Keeps a request open until the test lets it go. `nonisolated`, because it is called from inside
+/// the scripted transport, which the client runs off the main actor.
+private func hold(until release: LockedValue<Bool>) async throws {
+    while !release.get() {
+        try await Task.sleep(for: .milliseconds(1))
+    }
+}
+
 /// The offset a chunk request declared, as the server reads it.
 private func sentOffset(_ request: HTTPRequest) -> Int {
     let field = request.headerFields.first { $0.name.canonicalName == "upload-offset" }
@@ -324,6 +332,66 @@ struct MediaEditTests {
         }
     }
 
+    /// The window a save closing carelessly opens.
+    ///
+    /// A save is not the only thing that can happen while a save is in flight — a second one can
+    /// be submitted before the first one's answer arrives, and this store may not lean on a screen
+    /// to prevent that. The first save then finishes and tidies up, and what it clears is the key
+    /// belonging to the edit that is STILL RUNNING. If that one's response is lost, its retry finds
+    /// nothing, mints a fresh key, and applies the same edit again — the same files attached twice,
+    /// which is the exact harm the key exists to prevent.
+    @Test("a save that lands does not throw away the key of one still in flight")
+    func aFinishedSaveKeepsAnotherSavesKey() async throws {
+        let store = TimelineStore()
+        let seen = LockedValue<[String: [String]]>([:])
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            let fields = try await Stub.body(body)
+            let content = fields["content"] as? String ?? ""
+            let key = fields["edit_key"] as? String ?? ""
+            var recorded = seen.get()
+            recorded[content, default: []].append(key)
+            seen.set(recorded)
+            guard content == "first" else { return Stub.empty(.internalServerError) }
+            // The first save is held open, so the second one is submitted while it flies.
+            entered.set(true)
+            try await hold(until: release)
+            return Stub.json(Stub.memo(uid: "a", content: "first"))
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let first = Task {
+            await store.edit(uid: "a", content: "first", using: client, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        // Submitted while the first is still out: it mints its own key into the slot.
+        let second = await store.edit(
+            uid: "a", content: "second", using: client, baseURL: Stub.baseURL
+        )
+        #expect(!second, "control: the second save failed, so it is the one with a retry to make")
+        release.set(true)
+        #expect(await first.value, "control: the first save landed, which is what tidies up")
+
+        // The retry of the SECOND save — the one whose response was lost.
+        await store.edit(uid: "a", content: "second", using: client, baseURL: Stub.baseURL)
+
+        let secondKeys = seen.get()["second"] ?? []
+        #expect(secondKeys.count == 2)
+        #expect(
+            secondKeys[0] == secondKeys[1],
+            "a save landing threw away the key of the one still running, so its retry re-applied"
+        )
+        // Controls: the keys are real, and the two saves never shared one.
+        #expect(!secondKeys[0].isEmpty)
+        #expect(seen.get()["first"]?.first != secondKeys[0])
+    }
+
     @Test("the same words typed again after a save that worked are a new edit, not a replay")
     func aSuccessfulSaveEndsItsKey() async throws {
         let store = TimelineStore()
@@ -374,6 +442,48 @@ struct MediaEditTests {
         }
         let read = try await MediaUpload.offset(of: "u1", using: asPublished)
         #expect(read == 4, "the offset is unreadable even WITH the body the contract promises")
+    }
+
+    /// A session that does not answer is bounded by the DEADLINE, not by the URL loading system.
+    ///
+    /// The unreadable answer above fails as soon as it is parsed. A session that simply says
+    /// nothing is the other half of the same case, and it used to be bounded only by the request
+    /// timeout — around a minute of a Save frozen on a screen somebody is waiting at, at the end of
+    /// which the upload is abandoned anyway. The stub answers eventually so this test cannot hang;
+    /// what is asserted is that nothing waited for it.
+    @Test("a session that will not say where it stands is given up on within the deadline")
+    func theOffsetAskIsBounded() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let asks = LockedValue<Int>(0)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case uploadOffsetOperation:
+                asks.set(asks.get() + 1)
+                // Far longer than any deadline worth waiting: the answer that never comes in time.
+                try await Task.sleep(for: .seconds(10))
+                return offsetAnswer(4, body: true)
+            default:
+                return offsetGap()
+            }
+        }
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        await #expect(throws: MediaUploadError.refused(.server(status: 409))) {
+            try await MediaUpload.upload(
+                file, using: client, offsetDeadline: .milliseconds(50)
+            )
+        }
+        let elapsed = clock.now - started
+
+        #expect(asks.get() == 1, "control: the session really was asked")
+        // Generous, and still nowhere near the ten seconds the stub would have taken, let alone
+        // the request timeout that used to be the only bound.
+        #expect(elapsed < .seconds(3), "the upload waited for an answer that was not coming")
     }
 
     /// So the gap ends the edit — and ends it whole, which is what makes it safe.

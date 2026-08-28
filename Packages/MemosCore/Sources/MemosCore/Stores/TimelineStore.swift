@@ -465,7 +465,15 @@ public final class TimelineStore {
         // The key has done its work. Kept, the very same edit made again later — the same words
         // typed back into a memo somebody has since changed — would be answered as a REPLAY and
         // silently not applied.
-        if saved { lastEdit = nil }
+        //
+        // Only if the slot is still THIS edit's, though. A save is not the only thing that can
+        // happen while a save is in flight: a second one can be submitted and mint its own key
+        // into the slot before the first one's answer arrives. Clearing unconditionally then
+        // throws away the key belonging to the edit still running — and if that one's response is
+        // lost, its retry finds an empty slot, mints a third key, and applies the same edit a
+        // second time, attaching the same files twice. Which is precisely what the key exists to
+        // prevent, arrived at by tidying up after somebody else.
+        if saved, lastEdit?.key == key { lastEdit = nil }
         return saved
     }
 
