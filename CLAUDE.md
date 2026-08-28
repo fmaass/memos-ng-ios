@@ -89,6 +89,28 @@ build to fail. A canary that survives is the failure. The verdict is two exit co
 build logs come back as `.gate-artifacts/MemosFeatures-warnings-build.log` and
 `.gate-artifacts/MemosFeatures-canary-build.log`. The manifest grep survives as an early hint.
 
+## Invariants every change carries
+
+Paste this block verbatim into every implementation brief and review-gate prompt for this
+repo. Each line was bought by external review re-catching the same class on multiple
+slices in one session (2026-08-28, session-32 postmortem); the gate must not be the only
+memory of them.
+
+- **A store serializes its own mutations.** A disabled button is never the guard: two
+  overlapping invocations of the same operation must be one request on the wire (join or
+  refuse — state which), and a state the operation left must not be resurrectable by a
+  response that outlived it. Precedents: the edit-key slot, renewal joining,
+  ManageTokensStore's work gate.
+- **Every credential- or identity-scoped read is epoch-fenced.** A response is judged
+  against the identity/generation that ISSUED its request, never the current one: a stale
+  401 must not end a renewed session, a stale file must not be handed over, a stale list
+  must not repopulate a forgotten state. Precedents: PresentedCredential epochs, the
+  session-generation download fence, the media fetch generation.
+- **A one-shot answer is deduplicated at the callback site, synchronously.** When a
+  framework can answer through more than one callback (success + terminal-failure pairs),
+  exactly one delivery wins, claimed BEFORE any actor hop — hop ordering is not guaranteed.
+  Precedent: PhotoDelegate's oneAnswer claim.
+
 ## Tests
 
 Swift Testing (`import Testing`), never XCTest for new tests. Every new or changed function gets a
