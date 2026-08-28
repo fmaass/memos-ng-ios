@@ -55,6 +55,21 @@ enum Stub {
         )
     }
 
+    /// The session's own client, which reads a credential that can MOVE underneath it. Overloaded
+    /// on the same label so that every `makeClient: { _, token in Stub.client(token: token, …) }`
+    /// in these suites keeps building the client the app actually builds — including the epoch
+    /// fence, which a token closure has no way to carry.
+    static func client(
+        token: PresentedCredential,
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        APIClientFactory.make(
+            configuration: ServerConfiguration(baseURL: baseURL),
+            credential: token,
+            transport: StubTransport(handler: handler)
+        )
+    }
+
     static let user = """
         {"subject":"fabian","display_name":"Fabian","email":"f@example.invalid",\
         "role":"admin","auth_kind":"oidc"}

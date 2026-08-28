@@ -10,6 +10,11 @@ private let tokenReadOperation = "native_token_api_auth_native_token_get"
 private let tokenRenameOperation = "rename_native_token_api_auth_native_token_patch"
 private let tokenRenewOperation = "native_renew_api_auth_native_renew_post"
 private let whoamiOperation = "whoami_api_auth_user_get"
+private let settingsOperation = "get_settings_api_settings_get"
+
+private let settingsBody = """
+    {"default_visibility":"PUBLIC","theme":"d","avatar":null}
+    """
 
 /// One request as the transport saw it: which operation, and what credential it presented.
 ///
@@ -407,6 +412,162 @@ struct DeviceTokenTests {
         #expect(credentials.isEmpty, "the successor must not be written into an empty slot")
     }
 
+    // MARK: - a refusal of the token this device has already replaced
+
+    /// Waits until the transport has been handed `operation`, so a test can act on a request that
+    /// is genuinely on the wire rather than on one it hopes has started.
+    private func onTheWire(_ operation: String, _ seen: LockedValue<[SeenRequest]>) async {
+        for _ in 0..<10_000 where !seen.get().contains(where: { $0.operation == operation }) {
+            await Task.yield()
+        }
+    }
+
+    /// The renewal's own window. A request that left with the PREDECESSOR token can be answered
+    /// 401 after the swap — the server destroyed that token, so of course it refuses it — and that
+    /// refusal says nothing whatever about the successor this device is now holding. Obeying it
+    /// signs somebody out of a session that is perfectly alive, moments after they renewed it.
+    @Test("a 401 for the token a renewal replaced does not end the renewed session")
+    func staleUnauthorizedDoesNotEndTheSession() async throws {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let release = Box(false)
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: return .json(Stub.user)
+            case settingsOperation:
+                // Parked: still unanswered while the renewal runs, then refused.
+                while !release.value { await Task.yield() }
+                return .status(.unauthorized)
+            case tokenRenewOperation: return .json(Stub.exchange(token: "memos_pat_next"))
+            default: return .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+
+        let parked = Task { await store.loadSettings() }
+        await onTheWire(settingsOperation, seen)
+        let outcome = await store.renewDeviceToken()
+        release.value = true
+        await parked.value
+
+        #expect(outcome == .renewed)
+        #expect(store.state.user != nil, "the stale 401 ended a session that had just been renewed")
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_next")
+        // And the successor is still what goes out, so the session did not merely survive on paper.
+        let client = try #require(store.api)
+        _ = try? await SessionStore.whoami(client)
+        #expect(seen.get().last?.authorization == "Bearer memos_pat_next")
+    }
+
+    /// The control, and the reason the test above is a fence rather than a hole: the SAME parked
+    /// request, refused the same way, with no renewal in between. That 401 is about the credential
+    /// this device is holding, and it still ends the session.
+    @Test("a 401 for the token this device IS holding still ends the session")
+    func currentUnauthorizedStillEndsTheSession() async {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let release = Box(false)
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: return .json(Stub.user)
+            case settingsOperation:
+                while !release.value { await Task.yield() }
+                return .status(.unauthorized)
+            default: return .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+
+        let parked = Task { await store.loadSettings() }
+        await onTheWire(settingsOperation, seen)
+        release.value = true
+        await parked.value
+
+        #expect(store.state == .signedOut)
+        #expect(credentials.isEmpty)
+    }
+
+    // MARK: - a renewal whose outcome the device cannot see
+
+    /// A 5xx or a lost connection is not "the renewal did not happen" — the server may have
+    /// committed the rotation and failed to say so, in which case the token this device is still
+    /// presenting is already destroyed. So the device asks, with the token it has.
+    @Test("an unanswered renewal is probed, and a probe that succeeds means nothing rotated")
+    func ambiguousRenewalProbesAndKeepsTheOldToken() async throws {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .status(.internalServerError)
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+        let beforeRenewal = seen.get().filter { $0.operation == whoamiOperation }.count
+
+        let outcome = await store.renewDeviceToken()
+
+        #expect(outcome == .failed)
+        let probes = seen.get().filter { $0.operation == whoamiOperation }.count - beforeRenewal
+        #expect(probes == 1, "an ambiguous renewal has to ask whether the rotation happened")
+        #expect(store.state.user != nil)
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_first")
+        #expect(store.deviceTokenNotice != nil)
+    }
+
+    /// The other answer, and the one that cannot be papered over: the probe is refused, so the
+    /// rotation DID happen and the successor was in the reply that never arrived. There is no
+    /// credential left on this device that works, and saying "the old token still works" would be
+    /// a lie the next request would expose.
+    @Test("a probe that is refused means the successor is lost, and the session ends honestly")
+    func ambiguousRenewalThatLostTheSuccessorEndsTheSession() async {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let whoamis = Counter()
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation:
+                whoamis.increment()
+                // The sign-in's own whoami succeeds; the probe afterwards is refused.
+                return whoamis.count == 1 ? .json(Stub.user) : .status(.unauthorized)
+            case tokenRenewOperation: return .status(.internalServerError)
+            default: return .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+
+        let outcome = await store.renewDeviceToken()
+
+        #expect(outcome == .failed)
+        #expect(store.state == .signedOut, "the device kept a session on a destroyed token")
+        #expect(credentials.isEmpty)
+        // And it says the true thing rather than the generic refusal sentence.
+        #expect(
+            store.lastError?.contains("sign in again") == true,
+            "a lost successor has to tell the person to sign in again"
+        )
+    }
+
+    /// A refusal the server ANSWERED is a decision, not a lost reply: nothing rotated, so there is
+    /// nothing to ask about and no request to spend.
+    @Test("a refusal the server answered is not probed")
+    func definitiveRefusalIsNotProbed() async {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .status(.forbidden)
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+        let beforeRenewal = seen.get().filter { $0.operation == whoamiOperation }.count
+
+        let outcome = await store.renewDeviceToken()
+
+        #expect(outcome == .failed)
+        #expect(seen.get().filter { $0.operation == whoamiOperation }.count == beforeRenewal)
+        #expect(store.state.user != nil)
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_first")
+    }
+
     // MARK: - the row's lifetime
 
     @Test("signing out forgets the row along with the credential it described")
@@ -447,6 +608,29 @@ struct DeviceTokenNameTests {
         #expect(DeviceTokenName.sanitized(String(repeating: "n", count: 256)) == nil)
         // Measured after trimming, so trailing spaces cannot push a legal name over the edge.
         #expect(DeviceTokenName.sanitized(String(repeating: "n", count: 255) + "   ") != nil)
+    }
+
+    /// The unit has to be the SERVER's unit. `String.count` counts grapheme clusters and Python's
+    /// `len` — which is what `max_length=255` is checked with — counts code points, so a name made
+    /// of multi-scalar graphemes can be well under 255 to Swift and well over it to the server:
+    /// the app would send it, and the server would answer 422 for a bound the app believed it had
+    /// already enforced.
+    @Test("the length is counted the way the server counts it")
+    func countsCodePointsRatherThanGraphemes() {
+        // A regional-indicator pair is ONE grapheme and TWO code points.
+        let flag = "🇩🇪"
+        #expect(flag.count == 1 && flag.unicodeScalars.count == 2, "the premise of this test")
+
+        let overLong = String(repeating: flag, count: 200)
+        #expect(overLong.count == 200, "well inside 255 graphemes")
+        #expect(overLong.unicodeScalars.count == 400, "and well outside 255 code points")
+        #expect(DeviceTokenName.sanitized(overLong) == nil)
+
+        // The control, so the rule is a bound rather than a ban on emoji: 254 code points of
+        // flags plus one letter is 255 to the server, and it goes.
+        let fits = String(repeating: flag, count: 127) + "n"
+        #expect(fits.unicodeScalars.count == 255)
+        #expect(DeviceTokenName.sanitized(fits) != nil)
     }
 }
 

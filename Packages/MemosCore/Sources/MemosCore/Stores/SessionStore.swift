@@ -55,7 +55,10 @@ public enum DeviceTokenRenewal: Sendable, Equatable {
     /// The server refused because this token carries no expiry (`token_not_renewable`). The
     /// credential is untouched and still works.
     case notRenewable
-    /// It did not happen. The credential is untouched and still works.
+    /// The successor is not in hand. That is usually because nothing rotated — but where the
+    /// device could not tell, it asked (`resolveAmbiguousRenewal`), so by the time this is
+    /// returned the session state is the truthful part: still signed in means the old token is
+    /// still good, and signed out means the rotation happened and its successor was lost.
     case failed
 }
 
@@ -97,8 +100,10 @@ public final class SessionStore {
     public private(set) var deviceTokenNotice: String?
 
     private let credentials: any CredentialStore
-    private let makeClient:
-        @Sendable (ServerConfiguration, @escaping @Sendable () async -> String?) -> any APIProtocol
+    /// Takes the credential rather than a token closure, because the client has to keep reading it:
+    /// a renewal moves the value and every client already built must present the successor on its
+    /// next request (`PresentedCredential`).
+    private let makeClient: @Sendable (ServerConfiguration, PresentedCredential) -> any APIProtocol
     /// Where the signed-in account is published for the processes that have no session of their
     /// own — the share extension. Nil unless the app composes one, so a test never writes into
     /// the real app group container.
@@ -147,9 +152,9 @@ public final class SessionStore {
         credentials: any CredentialStore = DeviceCredentials.keychain(),
         makeClient:
             @escaping @Sendable (
-                ServerConfiguration, @escaping @Sendable () async -> String?
-            ) -> any APIProtocol = { configuration, token in
-                APIClientFactory.make(configuration: configuration, token: token)
+                ServerConfiguration, PresentedCredential
+            ) -> any APIProtocol = { configuration, credential in
+                APIClientFactory.make(configuration: configuration, credential: credential)
             },
         sleeper: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
@@ -221,7 +226,7 @@ public final class SessionStore {
             // Anonymous by construction: the exchange is how a device gets its FIRST credential,
             // so presenting one here would be circular.
             let exchanged = try await exchangeWithRetry(
-                makeClient(configuration) { nil }, code: code, verifier: verifier
+                makeClient(configuration, .anonymous), code: code, verifier: verifier
             )
             let token = exchanged.token
             let persistence = await persist(token: token, configuration: configuration)
@@ -231,7 +236,7 @@ public final class SessionStore {
             }
             let credential = PresentedCredential(token)
             adopt(
-                client: makeClient(configuration) { () -> String? in credential.current },
+                client: makeClient(configuration, credential),
                 configuration: configuration,
                 user: exchanged.user,
                 credential: credential
@@ -335,7 +340,7 @@ public final class SessionStore {
         lastError = nil
         lastFailure = nil
         let credential = PresentedCredential(trimmed)
-        let client = makeClient(configuration) { () -> String? in credential.current }
+        let client = makeClient(configuration, credential)
         do {
             let user = try await Self.whoami(client)
             switch await persist(token: trimmed, configuration: configuration) {
@@ -412,7 +417,7 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         let credential = PresentedCredential(storedToken)
-        let client = makeClient(configuration) { () -> String? in credential.current }
+        let client = makeClient(configuration, credential)
         do {
             let user = try await Self.whoami(client)
             adopt(
@@ -920,8 +925,13 @@ public final class SessionStore {
             return .notRenewable
         } catch {
             guard generation == sessionGeneration else { return .failed }
-            deviceTokenNotice = Self.tokenRenewalFailed
-            return .failed
+            // "It failed" is not the same claim as "nothing happened", and only one of them is
+            // safe to make. See `isAmbiguous`.
+            guard Self.isAmbiguous(error) else {
+                deviceTokenNotice = Self.tokenRenewalFailed
+                return .failed
+            }
+            return await resolveAmbiguousRenewal(generation: generation)
         }
         guard generation == sessionGeneration else {
             MemosLog.session.info("a renewal answered for a session that has ended; it is dropped")
@@ -954,6 +964,57 @@ public final class SessionStore {
         return .renewed
     }
 
+    /// Whether a failed renewal leaves this device unable to say WHETHER the rotation happened.
+    ///
+    /// The distinction is the difference between a true statement and a false one. The server
+    /// rotates in a single statement and then answers; if the answer is lost, the token this device
+    /// is still presenting has ALREADY been destroyed, and "the renewal failed, your old token
+    /// still works" is a lie the next request would expose.
+    ///
+    /// A status the server chose is a decision: it judged the request and did not rotate. A 5xx, a
+    /// dropped connection, or a 200 whose body would not decode are all the same shape — the write
+    /// may have been committed and the reply lost — so all of them have to be asked about.
+    static func isAmbiguous(_ error: any Error) -> Bool {
+        guard let api = error as? APIError else { return true }
+        switch api {
+        case .unauthorized, .forbidden, .notFound: return false
+        case .server(let status): return status >= 500
+        case .transport, .decoding, .unexpected: return true
+        }
+    }
+
+    /// Asks, with the token this device is still holding, whether the rotation happened.
+    ///
+    /// One cheap authenticated read settles it. If the old token still authenticates then nothing
+    /// rotated and the device carries on with it. If it is refused then the rotation DID happen,
+    /// the successor was in the reply that never arrived, and there is no credential left on this
+    /// device that works — so the session ends, deliberately and with a sentence that says why,
+    /// rather than by the generic 401 rule tripping over it later in the middle of something else.
+    private func resolveAmbiguousRenewal(generation: Int) async -> DeviceTokenRenewal {
+        guard let client else { return .failed }
+        do {
+            _ = try await Self.whoami(client)
+            guard generation == sessionGeneration else { return .failed }
+            deviceTokenNotice = Self.tokenRenewalFailed
+            return .failed
+        } catch let error as APIError where error == .unauthorized {
+            guard generation == sessionGeneration else { return .failed }
+            MemosLog.session.error(
+                "a renewal rotated and its successor was lost; this device has to sign in again"
+            )
+            await wipeCredential()
+            lastError = Self.renewalLostCredential
+            return .failed
+        } catch {
+            guard generation == sessionGeneration else { return .failed }
+            // Still unanswerable. The device keeps what it has, which is right either way: if the
+            // rotation did happen, the next ordinary request is refused and the usual rule ends the
+            // session then, with the credential correctly treated as dead.
+            deviceTokenNotice = Self.tokenRenewalUnconfirmed
+            return .failed
+        }
+    }
+
     /// What a read that failed says. Deliberately not a sign-out and not a blank row.
     public static let tokenUnreadable =
         "This device's access could not be read just now."
@@ -971,6 +1032,18 @@ public final class SessionStore {
 
     public static let tokenRenewalFailed =
         "The access could not be renewed. This device still works with the token it has."
+
+    /// The renewal was neither confirmed nor denied — said as exactly that, because claiming the
+    /// old token is fine would be a guess about a rotation that may well have happened.
+    public static let tokenRenewalUnconfirmed =
+        "The renewal could not be confirmed. This device is still using the token it had; "
+        + "if that stops working, sign in again."
+
+    /// The rotation happened and its answer was lost, so the successor is unrecoverable and the
+    /// token it replaced is destroyed. There is nothing left on this device that works.
+    public static let renewalLostCredential =
+        "This device's access was renewed, but the new credential never arrived and the old one "
+        + "is gone. You have to sign in again on this device."
 
     /// The successor works and could not be written down — the renewal's own `storageWarning`.
     public static let renewalStorageWarning =
@@ -1066,14 +1139,20 @@ public final class SessionStore {
         into directory: URL = .temporaryDirectory
     ) async throws -> URL {
         guard let url = attachment.downloadURL else { throw OriginalMediaError.unavailable }
-        guard let server = configuration?.baseURL, let token = credential?.current,
-            !token.isEmpty
-        else { throw OriginalMediaError.notSignedIn }
+        guard let server = configuration?.baseURL, let credential else {
+            throw OriginalMediaError.notSignedIn
+        }
+        // This is the ONE request that does not go through the middleware, so the epoch fence it
+        // applies has to be applied by hand here. A download is also the longest-lived request the
+        // app makes, which makes it the likeliest of all to be answered after a renewal replaced
+        // the token it presented.
+        let presented = credential.presented()
+        guard !presented.token.isEmpty else { throw OriginalMediaError.notSignedIn }
         let generation = sessionGeneration
         do {
             let file = try await OriginalMedia.fetch(
                 url: url,
-                token: token,
+                token: presented.token,
                 uid: attachment.uid,
                 mime: attachment.mime,
                 server: server,
@@ -1096,7 +1175,13 @@ public final class SessionStore {
                 MemosLog.session.info("a download failed for a session that has ended")
                 throw OriginalMediaError.superseded
             }
-            if error == .unauthorized { await handle(.unauthorized) }
+            if error == .unauthorized, credential.isCurrent(presented.epoch) {
+                await handle(.unauthorized)
+            } else if error == .unauthorized {
+                MemosLog.session.info(
+                    "a download was refused for a credential this device replaced; not a sign-out"
+                )
+            }
             throw OriginalMediaError.refused(error)
         }
     }

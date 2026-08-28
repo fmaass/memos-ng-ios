@@ -50,9 +50,16 @@ public enum DeviceTokenName {
     ///
     /// Trimmed first and measured afterwards, so trailing spaces can neither pass as a name nor
     /// push a legal one over the edge.
+    ///
+    /// Measured in CODE POINTS, which is the unit the server measures in: pydantic's `max_length`
+    /// is checked with Python's `len`, and Python counts code points. Swift's `String.count` counts
+    /// grapheme clusters, and the two disagree by a lot on exactly the characters people put in
+    /// device names — one flag emoji is one grapheme and two code points, one family emoji is one
+    /// grapheme and seven. Counting graphemes here would let a name through that the server then
+    /// refuses, for a bound this function exists to have already enforced.
     public static func sanitized(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= maxLength else { return nil }
+        guard !trimmed.isEmpty, trimmed.unicodeScalars.count <= maxLength else { return nil }
         return trimmed
     }
 }
