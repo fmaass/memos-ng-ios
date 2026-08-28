@@ -9,8 +9,8 @@
 # exit code unmasked.
 #
 # The ordered checks are: the gate's own classifier test, generate the project, lint, test, rebuild
-# every package with warnings as errors, check the dependency rule, read the SHIPPING bundles back,
-# and count the tests that actually ran.
+# every package with warnings as errors, check the dependency rule and the share-link rule, read
+# the SHIPPING bundles back, and count the tests that actually ran.
 #
 # A change set of documentation and repository metadata only takes a FAST PATH. What the branch
 # changed against origin/main (merge-base, renames not followed, so a rename is judged by both of
@@ -1729,6 +1729,26 @@ s_deps() {
   return $rc
 }
 
+s_sharelink() {
+  # SwiftUI's built-in share-link control shares a value it is already holding, so a row built from
+  # one can only ever hand over something that exists before the tap — which is how a signed
+  # household URL was handed to a recipient instead of the file (MEMNG-207). No test in the
+  # Features bundle can tell that control from a Button: SwiftUI exposes no view tree, and the
+  # accessibility probe reads the same label either way. So it is held the way the dependency rule
+  # and the keychain rule are held, by a literal grep with a positive control in the same run. The
+  # arithmetic lives in a script of its own because that script's text must carry the literal, and
+  # anything under the checked package may not.
+  echo "--- share-link rule (no share-link control in the Features layer) ---"
+  local sharelink_rule="$GATE_TARGET/scripts/sharelink-rule.sh"
+  if [ -x "$sharelink_rule" ]; then
+    "$sharelink_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "SHARELINK FAIL: $sharelink_rule is missing or not executable, so the Features layer was"
+  echo "                never checked and this step proves nothing"
+  return 1
+}
+
 s_testcount() {
   # Swift Testing does not emit XCTest's "Executed N tests" line (a correct Swift Testing bundle
   # reads 0 there), so the per-bundle counts come from the result bundle, which is authoritative
@@ -1776,6 +1796,7 @@ step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck
 step warnaserr  s_warnings
 step deps       s_deps
+step sharelink  s_sharelink
 step testcount  s_testcount
 
 echo "MAC_GATE_REMOTE_SUMMARY:$summary | exit=$first_fail"

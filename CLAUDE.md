@@ -24,7 +24,9 @@ check (below) → `xcodebuild test` (all five test bundles) → a read-back of t
 .appex (each one's `PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
 a rebuild of every package with its warnings fatal (`swift build -warnings-as-errors` for the four
 that declare macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes
-from its own manifest) → the dependency-rule greps → a
+from its own manifest) → the dependency-rule greps → the share-link rule
+(`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
+`Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → a
 per-bundle test-count check. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
