@@ -23,10 +23,40 @@ final class StubCameraDevice: CameraDeviceControlling {
     private var photo: (@MainActor (Result<Data, CameraFailure>) -> Void)?
     private var movie: (@MainActor (Result<URL, CameraFailure>) -> Void)?
 
+    // Real hardware takes its time coming up, and the window between "start was asked for" and
+    // "frames are flowing" is where a shutter must not be pressable. These two let a test hold
+    // `start` open and stand inside that window.
+    private var holdsStart = false
+    private var hasEnteredStart = false
+    private var startGate: CheckedContinuation<Void, Never>?
+    private var startEntered: CheckedContinuation<Void, Never>?
+
     var previewSession: AVCaptureSession? { nil }
+
+    /// `start` will not finish until `releaseStart()`.
+    func holdStart() { holdsStart = true }
+
+    func releaseStart() {
+        holdsStart = false
+        startGate?.resume()
+        startGate = nil
+    }
+
+    /// Returns once `start` has been ENTERED — so a test can assert what is true while the device
+    /// is still coming up, rather than racing it.
+    func waitUntilStarting() async {
+        if hasEnteredStart { return }
+        await withCheckedContinuation { startEntered = $0 }
+    }
 
     func start(_ configuration: Camera.Configuration) async throws {
         if let refusal { throw refusal }
+        hasEnteredStart = true
+        startEntered?.resume()
+        startEntered = nil
+        if holdsStart {
+            await withCheckedContinuation { startGate = $0 }
+        }
         configurations.append(configuration)
     }
 
@@ -168,6 +198,105 @@ struct CameraCaptureTests {
         #expect(rig.capture.state == .ready)
     }
 
+    /// The window a camera is at its most dangerous in: asked for, not yet running.
+    ///
+    /// `AVCaptureSession.startRunning()` blocks until frames are flowing, so the device's `start`
+    /// is the only thing that knows when the camera is live. Publishing `.ready` off anything else
+    /// — the call having been MADE rather than ANSWERED — puts a working-looking shutter in front
+    /// of a session with nothing in it, and the photo silently never happens.
+    @Test("the camera is not ready until the device says it is running")
+    func readyWaitsForTheDeviceToFinishStarting() async throws {
+        let rig = try Self.rig()
+        defer { CapturedMediaTests.discard(rig.directory) }
+        rig.device.holdStart()
+
+        let starting = Task { await rig.capture.begin() }
+        await rig.device.waitUntilStarting()
+
+        #expect(
+            rig.capture.state == .starting,
+            "ready was published before the session was running"
+        )
+        // And the shutter really is inert in that window, rather than merely looking it.
+        rig.capture.shutter()
+        #expect(rig.device.photosAsked == 0, "the shutter fired into a session not yet running")
+
+        rig.device.releaseStart()
+        await starting.value
+
+        #expect(rig.capture.state == .ready)
+        // The control: the shutter works the moment the device has answered, so the assertion
+        // above measured the window and not a camera that never becomes usable.
+        rig.capture.shutter()
+        #expect(rig.device.photosAsked == 1)
+    }
+
+    /// A mode switch reconfigures the session, so it must not happen under a capture that has not
+    /// been answered: the answer would arrive against hardware that had moved on.
+    @Test("the mode cannot be switched out from under a capture in flight")
+    func theModeHoldsWhileACaptureIsInFlight() async throws {
+        let rig = try Self.rig()
+        defer { CapturedMediaTests.discard(rig.directory) }
+        await rig.capture.begin()
+        rig.capture.shutter()
+
+        await rig.capture.choose(.video)
+
+        #expect(rig.capture.mode == .photo, "the session was reconfigured under a capture")
+        #expect(rig.device.configurations.count == 1)
+    }
+
+    // MARK: - one tap, one photograph
+
+    /// The defect this holds shut: the shutter called `capturePhoto()` without leaving `.ready`,
+    /// so a second tap before the photo output answered took a SECOND photograph. The screen
+    /// closes on the first capture it stages, so that second one arrives after the screen is gone
+    /// — attached to a memo nobody is looking at, and impossible to notice.
+    @Test("a second tap before the first photo is answered does not take a second photograph")
+    func theShutterTakesOnePhotographPerAnswer() async throws {
+        let rig = try Self.rig()
+        defer { CapturedMediaTests.discard(rig.directory) }
+        await rig.capture.begin()
+
+        rig.capture.shutter()
+        rig.capture.shutter()
+        rig.capture.shutter()
+
+        #expect(rig.device.photosAsked == 1, "\(rig.device.photosAsked) photographs for one answer")
+        #expect(rig.capture.state == .capturing)
+
+        rig.device.deliver(photo: .success(CapturedMediaTests.heif()))
+
+        #expect(rig.capture.stagedCount == 1)
+        #expect(rig.staged.value.count == 1)
+        // And the camera is usable again afterwards — the state left `.capturing` rather than
+        // trading one defect for a shutter that only ever works once.
+        #expect(rig.capture.state == .ready)
+        rig.capture.shutter()
+        #expect(rig.device.photosAsked == 2)
+    }
+
+    /// The other half of the same fix. A photograph the device could not deliver must not leave the
+    /// shutter stuck down: the session is still running, and the obvious next thing to do is take
+    /// another one.
+    @Test("a still that fails to arrive leaves a camera somebody can press again")
+    func aFailedStillReturnsTheShutter() async throws {
+        let rig = try Self.rig()
+        defer { CapturedMediaTests.discard(rig.directory) }
+        await rig.capture.begin()
+        rig.capture.shutter()
+
+        rig.device.deliver(photo: .failure(CameraFailure("The camera was interrupted.")))
+
+        #expect(rig.capture.state == .ready, "the shutter never came back")
+        #expect(rig.capture.problem == "The camera was interrupted.")
+        #expect(rig.staged.value.isEmpty)
+        rig.capture.shutter()
+        #expect(rig.device.photosAsked == 2)
+        // Asking for a new one clears what was said about the last.
+        #expect(rig.capture.problem == nil)
+    }
+
     // MARK: - what the hardware is asked for
 
     @Test("the camera asks for HEVC, and for the microphone only when it is recording video")
@@ -279,11 +408,11 @@ struct CameraCaptureTests {
 
         #expect(rig.staged.value.isEmpty, "bytes nobody could identify were attached anyway")
         #expect(rig.capture.stagedCount == 0)
-        if case .failed(let reason) = rig.capture.state {
-            #expect(reason.contains("re-encoded"), "the reason given was: \(reason)")
-        } else {
-            Issue.record("unrecognised bytes left the camera in \(rig.capture.state)")
-        }
+        let reason = try #require(rig.capture.problem)
+        #expect(reason.contains("re-encoded"), "the reason given was: \(reason)")
+        // Refusing one photograph is not a broken camera: the session is still running, so the
+        // shutter comes back rather than the screen becoming a dead end.
+        #expect(rig.capture.state == .ready)
     }
 
     @Test("a recording that fails leaves a camera somebody can still use")
@@ -297,7 +426,11 @@ struct CameraCaptureTests {
 
         rig.device.deliver(movie: .failure(CameraFailure("The disk is full.")))
 
-        #expect(rig.capture.state == .failed("The disk is full."))
+        // Usable, and honest about the recording that was lost — the same rule the still path
+        // follows, because they are the same seam and a camera that bricks on one bad delivery is
+        // the defect either way.
+        #expect(rig.capture.state == .ready)
+        #expect(rig.capture.problem == "The disk is full.")
         #expect(rig.staged.value.isEmpty)
     }
 

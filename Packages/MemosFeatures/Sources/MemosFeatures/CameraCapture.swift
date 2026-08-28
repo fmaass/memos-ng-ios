@@ -24,11 +24,21 @@ nonisolated public enum Camera {
 
     /// What the screen is doing, as the one value it draws from.
     public enum State: Equatable {
-        /// Asking for permission, or configuring the device.
+        /// Asking for permission, or configuring the device — and, until the session is actually
+        /// RUNNING, still this. A camera that says it is ready before frames are flowing is a
+        /// shutter somebody can press into nothing.
         case starting
         case ready
+        /// A still has been asked for and the photo output has not answered yet. It is its own
+        /// state because the shutter must not fire twice into one answer: the screen closes on the
+        /// first capture it stages, so a second one lands after the screen is gone — attached to a
+        /// memo nobody is looking at any more.
+        case capturing
         case recording
         case denied(Denial)
+        /// The camera could not be brought up at all. Nothing here is retryable, which is what
+        /// separates it from `problem`: one photograph that did not come off leaves a working
+        /// camera, and this does not.
         case failed(String)
     }
 
@@ -176,9 +186,17 @@ protocol CameraDeviceControlling: AnyObject {
 final class CameraCapture {
     private(set) var mode: Camera.Mode
     private(set) var state: Camera.State = .starting
-    /// Something true the screen has to say that is not a failure — today, that a recording will
-    /// have no sound.
+    /// A standing condition of this session that the screen has to say out loud — today, that a
+    /// recording will have no sound. It lasts as long as the session does.
     private(set) var notice: String?
+    /// What went wrong with the LAST capture, if anything.
+    ///
+    /// Kept apart from both of its neighbours because it is neither of them. It is not `notice`,
+    /// which is true of the whole session; and it is not `.failed`, which is a camera that never
+    /// came up and stays unusable. A photo the device could not deliver, or bytes in a container
+    /// this app will not rename, leaves the session running and the obvious next thing to do is
+    /// take another one — so the shutter comes back and this says what happened to the last try.
+    private(set) var problem: String?
     /// The session the preview draws, mirrored off the device once it is running so that the view
     /// redraws when it appears.
     private(set) var preview: AVCaptureSession?
@@ -228,16 +246,21 @@ final class CameraCapture {
     /// The person chose the other mode. It is a restart, because the two modes are different
     /// sessions — video needs the microphone, stills do not, and asking for the microphone before
     /// anyone has asked for video is a permission prompt nobody understands.
+    /// Never while something is in flight: reconfiguring the session under a capture that has not
+    /// been answered yet is how the answer arrives against hardware that has moved on.
     func choose(_ mode: Camera.Mode) async {
-        guard mode != self.mode, state != .recording else { return }
+        guard mode != self.mode, state != .recording, state != .capturing else { return }
         await start(in: mode)
     }
 
-    /// The shutter. In photo it takes one; in video the first tap starts and the next stops.
+    /// The shutter. In photo it takes one — one, however many times it is pressed before the photo
+    /// output answers — and in video the first tap starts and the next stops.
     func shutter() {
+        problem = nil
         switch state {
         case .ready where mode == .photo:
             device.capturePhoto()
+            state = .capturing
         case .ready:
             device.startRecording(
                 to: directory.appending(path: "recording-\(UUID().uuidString).mov")
@@ -245,7 +268,7 @@ final class CameraCapture {
             state = .recording
         case .recording:
             device.stopRecording()
-        case .starting, .denied, .failed:
+        case .starting, .capturing, .denied, .failed:
             break
         }
     }
@@ -254,6 +277,7 @@ final class CameraCapture {
         self.mode = mode
         state = .starting
         notice = nil
+        problem = nil
         preview = nil
         guard await permission.ensure(.video) else {
             state = .denied(.camera)
@@ -278,38 +302,42 @@ final class CameraCapture {
     }
 
     /// The still's own bytes, staged. Nothing between the photo output and the file.
+    ///
+    /// The state leaves `.capturing` on BOTH outcomes, first thing: a delivery that failed must
+    /// leave a camera somebody can press again, not one whose shutter never comes back.
     private func deliver(photo result: Result<Data, CameraFailure>) {
+        state = .ready
         switch result {
         case .success(let data):
             keep { try PickedMedia.captured(photo: data, at: clock(), into: directory) }
         case .failure(let error):
-            state = .failed(Camera.Words.failure(error))
+            problem = Camera.Words.failure(error)
         }
     }
 
     /// The recording, staged by moving the file the movie output closed.
     ///
-    /// The state goes back to `.ready` on BOTH outcomes before anything else: a recording that
-    /// failed to stage must still leave a camera somebody can use, not one stuck on "recording"
-    /// with a stop button that does nothing.
+    /// Same discipline as the still, for the same reason: a recording that failed must not leave a
+    /// camera stuck on "recording" with a stop button that does nothing.
     private func deliver(movie result: Result<URL, CameraFailure>) {
         state = .ready
         switch result {
         case .success(let url):
             keep { try PickedMedia.captured(movie: url, at: clock(), into: directory) }
         case .failure(let error):
-            state = .failed(Camera.Words.failure(error))
+            problem = Camera.Words.failure(error)
         }
     }
 
+    /// Both callers have already returned the state to `.ready`; this only decides whether a
+    /// capture was added or a reason was given.
     private func keep(_ staging: () throws -> PickedMedia) {
         do {
             let media = try staging()
-            state = .ready
             stagedCount += 1
             stage(media)
         } catch {
-            state = .failed(Camera.Words.failure(error))
+            problem = Camera.Words.failure(error)
         }
     }
 }

@@ -42,9 +42,24 @@ private nonisolated final class CaptureSessionBox: @unchecked Sendable {
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "live.discomarder.memosng.camera")
 
-    func start() {
-        queue.async { [self] in
-            if !session.isRunning { session.startRunning() }
+    /// Starts the session and returns WHEN IT IS RUNNING.
+    ///
+    /// The waiting is the point. `startRunning()` blocks until the session is live, which is why it
+    /// is on this queue rather than the main actor — but a fire-and-forget `queue.async` then hands
+    /// control back immediately, and the screen above published itself as ready while the session
+    /// was still coming up. The shutter was tappable for that window, against a session with
+    /// nothing flowing through it, which is a photo that silently never happens.
+    ///
+    /// A session that is already running takes the same trip through the queue rather than
+    /// returning early: after a reconfigure the caller has to wait for whatever this queue is still
+    /// doing, and "it was already running" is not the same as "it is running the thing you just
+    /// asked for".
+    func start() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                if !session.isRunning { session.startRunning() }
+                continuation.resume()
+            }
         }
     }
 
@@ -111,7 +126,9 @@ final class AVCameraDevice: CameraDeviceControlling {
         session.commitConfiguration()
         self.configuration = configuration
         applyMovieCodec(configuration)
-        box.start()
+        // Awaited, so this method answers only once the session is actually running: everything
+        // above treats a returned `start` as "the camera is live", and it has to be true.
+        await box.start()
     }
 
     func stop() {

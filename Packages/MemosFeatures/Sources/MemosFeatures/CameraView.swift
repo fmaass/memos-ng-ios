@@ -64,8 +64,9 @@ struct CameraView: View {
         .foregroundStyle(.white)
     }
 
-    /// What the screen has to say: a refusal, a failure, or the one true thing that is neither —
-    /// that a recording will be silent.
+    /// What the screen has to say: a refusal, a camera that never came up, or — on one that is
+    /// working — the last capture that did not come off, and otherwise the standing condition of
+    /// the session. The last try comes first: it is the thing that just happened.
     @ViewBuilder
     private var message: some View {
         switch capture.state {
@@ -73,8 +74,8 @@ struct CameraView: View {
             note(Camera.Words.denial(denial))
         case .failed(let reason):
             note(reason)
-        case .starting, .ready, .recording:
-            if let notice = capture.notice { note(notice) }
+        case .starting, .ready, .capturing, .recording:
+            if let said = capture.problem ?? capture.notice { note(said) }
         }
     }
 
