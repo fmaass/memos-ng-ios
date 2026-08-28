@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import Foundation
 import os
 
@@ -96,6 +97,25 @@ final class AVCameraDevice: CameraDeviceControlling {
     // between the shutter and the photo and the capture is delivered to nothing at all.
     private var photoDelegate: PhotoDelegate?
     private var movieDelegate: MovieDelegate?
+    /// How the phone is being held, as the system works it out from the accelerometer and the
+    /// camera's own mounting. Rebuilt with the session, because it answers for ONE device and a
+    /// mode change puts a new input in.
+    ///
+    /// Built with no preview layer on purpose. The layer lives in the view, and it is only the
+    /// coordinator's PREVIEW answer that is measured against one; the capture answer — the one
+    /// stamped on a file — is a property of the device and the way the phone is held. The preview
+    /// was never what was wrong here.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    /// The rule about which connection is stamped and when. It reads the coordinator through this
+    /// closure at the moment of each capture, which is why nothing here observes it: there is no
+    /// notification that could reach a movie connection in the middle of a file.
+    private lazy var rotation = CaptureRotationStamp { [weak self] in
+        guard let coordinator = self?.rotationCoordinator else { return nil }
+        return CaptureRotation(
+            preview: coordinator.videoRotationAngleForHorizonLevelPreview,
+            capture: coordinator.videoRotationAngleForHorizonLevelCapture
+        )
+    }
 
     var previewSession: AVCaptureSession? { box?.session }
 
@@ -109,8 +129,9 @@ final class AVCameraDevice: CameraDeviceControlling {
         for input in session.inputs { session.removeInput(input) }
         for output in session.outputs { session.removeOutput(output) }
         session.sessionPreset = configuration.mode == .photo ? .photo : .high
+        let camera: AVCaptureDevice
         do {
-            try add(.video, to: session)
+            camera = try add(.video, to: session)
             if configuration.includesAudio { try add(.audio, to: session) }
             let output: AVCaptureOutput =
                 configuration.mode == .photo ? photoOutput : movieOutput
@@ -126,6 +147,9 @@ final class AVCameraDevice: CameraDeviceControlling {
         }
         session.commitConfiguration()
         self.configuration = configuration
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(
+            device: camera, previewLayer: nil
+        )
         applyMovieCodec(configuration)
         // Awaited, so this method answers only once the session is actually running: everything
         // above treats a returned `start` as "the camera is live", and it has to be true.
@@ -137,12 +161,21 @@ final class AVCameraDevice: CameraDeviceControlling {
     }
 
     func capturePhoto() {
+        // Before the shutter, not at configuration time: the phone may have been turned over since
+        // the session came up, and the angle a still keeps is the one it was taken at.
+        rotation.stampStill(on: rotatable(photoOutput))
         let delegate = PhotoDelegate { [weak self] result in self?.photoHandler?(result) }
         photoDelegate = delegate
         photoOutput.capturePhoto(with: stillSettings(), delegate: delegate)
     }
 
     func startRecording(to url: URL) {
+        // At the start of the file and nowhere else. `isRecording` is the output's own answer
+        // rather than a flag kept here, so a recording the hardware ended by itself cannot leave
+        // this thinking a file is still open.
+        rotation.stampRecording(
+            on: rotatable(movieOutput), alreadyRecording: movieOutput.isRecording
+        )
         let delegate = MovieDelegate { [weak self] result in self?.movieHandler?(result) }
         movieDelegate = delegate
         movieOutput.startRecording(to: url, recordingDelegate: delegate)
@@ -161,7 +194,17 @@ final class AVCameraDevice: CameraDeviceControlling {
         movieHandler = handler
     }
 
-    private func add(_ media: AVMediaType, to session: AVCaptureSession) throws {
+    /// The output's video connection, behind the seam the rotation rule is written against. Nil
+    /// before the session has committed a configuration, which is a capture nobody asked for yet.
+    private func rotatable(_ output: AVCaptureOutput) -> (any CaptureConnection)? {
+        guard let connection = output.connection(with: .video) else { return nil }
+        return AVConnection(connection)
+    }
+
+    /// Returns the device it added, so the caller can build a rotation coordinator for the camera
+    /// this session is actually using.
+    @discardableResult
+    private func add(_ media: AVMediaType, to session: AVCaptureSession) throws -> AVCaptureDevice {
         guard let device = AVCaptureDevice.default(for: media) else {
             throw CameraFailure(
                 media == .video
@@ -173,6 +216,7 @@ final class AVCameraDevice: CameraDeviceControlling {
             throw CameraFailure("The camera could not be opened.")
         }
         session.addInput(input)
+        return device
     }
 
     /// HEVC for the recording, asked for only where the device offers it — a phone that cannot
@@ -196,6 +240,30 @@ final class AVCameraDevice: CameraDeviceControlling {
             photoOutput.availablePhotoCodecTypes.contains(codec)
         else { return AVCapturePhotoSettings() }
         return AVCapturePhotoSettings(format: [AVVideoCodecKey: codec])
+    }
+}
+
+/// A real capture connection, behind `CaptureConnection`.
+///
+/// The whole AVFoundation half of the orientation fix, and it is three forwarding lines: this is
+/// the only place in the app that names `videoRotationAngle`, and what to write there is decided
+/// above it, where the gate can run it. Nothing here re-encodes anything — the angle is a
+/// property of the connection the file is written THROUGH, so it reaches the file as container
+/// metadata and the encoder's own bytes are untouched.
+private final class AVConnection: CaptureConnection {
+    private let connection: AVCaptureConnection
+
+    init(_ connection: AVCaptureConnection) {
+        self.connection = connection
+    }
+
+    func accepts(rotationAngle angle: CGFloat) -> Bool {
+        connection.isVideoRotationAngleSupported(angle)
+    }
+
+    var rotationAngle: CGFloat {
+        get { connection.videoRotationAngle }
+        set { connection.videoRotationAngle = newValue }
     }
 }
 
