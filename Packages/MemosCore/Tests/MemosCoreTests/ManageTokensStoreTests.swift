@@ -661,3 +661,225 @@ private final class ReentrantPresenter: NativeLoginPresenter {
         return url
     }
 }
+
+/// Holds one response open on the wire, so a second call can be made while the first is still in
+/// the air.
+///
+/// It is the only way to ask what two overlapping taps do. A test that calls twice in sequence
+/// asks a different question entirely — the interesting one is what happens while the first
+/// request is still out there, which is exactly the window a double tap lands in.
+private actor RequestGate {
+    /// EVERY held request, not the latest one. A gate that kept a single continuation turned the
+    /// exact bug these tests are about into a hang: with two requests in the air the second
+    /// overwrote the first's continuation, the first was never resumed, and the suite stopped
+    /// instead of failing. A test that hangs when the behaviour breaks reports nothing.
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var arrival: CheckedContinuation<Void, Never>?
+    private var arrivals = 0
+    private var released = false
+
+    /// Called from inside the transport: says the request is on the wire, then waits to be let go.
+    ///
+    /// Only the FIRST arrival is held, and that is what keeps these tests honest in both worlds.
+    /// A test asks "what does a second call do while the first is in the air", so it has to make
+    /// that second call and read its answer before it can let the first go — and if the second
+    /// were held too, a store that failed to serialise would block the test rather than fail it.
+    /// Holding one and waving the rest through means a store that serialises is proved by a
+    /// refusal, and one that does not is proved by the extra request in the log. Neither hangs.
+    func hold() async {
+        arrivals += 1
+        arrival?.resume()
+        arrival = nil
+        guard !released, arrivals == 1 else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    /// The test waits here until a request has actually reached the transport, rather than
+    /// guessing with a yield.
+    func waitForArrival() async {
+        guard arrivals == 0 else { return }
+        await withCheckedContinuation { arrival = $0 }
+    }
+
+    func release() {
+        released = true
+        let held = waiting
+        waiting.removeAll()
+        for continuation in held { continuation.resume() }
+    }
+
+    /// How many requests reached this gate at all.
+    var count: Int { arrivals }
+}
+
+/// What happens when two of these run at once, and what happens to work that lands after the
+/// session it belonged to is over.
+///
+/// The store is where one-at-a-time is decided, not the screen. A disabled button is a hint: a
+/// redraw, an accessibility activation or a restored scene can all put a second tap past it, and
+/// on THIS screen a second tap that reaches the server mints a second full-access token whose
+/// plaintext nobody ever sees.
+extension ManageTokensStoreTests {
+    @Test("two taps on Create mint one token, not two")
+    func createIsSerialised() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            if operation == createOperation {
+                await gate.hold()
+                return .created(
+                    Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_brand_new")
+                )
+            }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[]")
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+
+        async let first = store.create(name: "Laptop")
+        await gate.waitForArrival()
+        let second = await store.create(name: "Laptop")
+        await gate.release()
+        let firstFinished = await first
+
+        #expect(firstFinished)
+        #expect(!second, "the second tap should have been refused rather than sent")
+        #expect(seen.get().filter { $0.operation == createOperation }.count == 1)
+        #expect(store.minted?.secret == "memos_pat_brand_new")
+    }
+
+    @Test("two overlapping reads put one request on the wire, not two")
+    func readsAreSerialised() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let armed = LockedValue(false)
+        let store = makeStore(seen: seen) { operation in
+            if operation == listOperation, armed.get() { await gate.hold() }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+        armed.set(true)
+
+        async let reading: Void = store.refresh()
+        await gate.waitForArrival()
+        await store.refresh()
+        await gate.release()
+        await reading
+
+        // One for the sign-on's own read, one for the read that was held. The second refresh is
+        // refused rather than queued behind it.
+        #expect(seen.get().filter { $0.operation == listOperation }.count == 2)
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// Work that was in the air when the app was put away belongs to a session that is over. It
+    /// may not write the screen, and it must not leave the store holding a gate nothing will ever
+    /// release — a screen that can never ask for anything again is the same bug as a stuck spinner.
+    @Test("a read that lands after the app was put away cannot bring the session back")
+    func aStaleReadCannotResurrectTheSession() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let armed = LockedValue(false)
+        let store = makeStore(seen: seen) { operation in
+            if operation == listOperation, armed.get() { await gate.hold() }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+        armed.set(true)
+
+        async let reading: Void = store.refresh()
+        await gate.waitForArrival()
+        store.forget()
+        await gate.release()
+        await reading
+
+        #expect(store.state == .locked(.discarded))
+        #expect(!store.isBusy)
+        let signedOnAgain = await signOn(store)
+        #expect(signedOnAgain, "the store was left unable to start anything")
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// The token was MINTED. The screen that asked for it is gone and its plaintext with it, so
+    /// dropping the response silently leaves a full-access token on the account that nobody knows
+    /// exists. It is recoverable — sign on again, find it in the list, revoke it — but only if the
+    /// app says it happened.
+    @Test("a token created for a session that has ended is reported, never silently dropped")
+    func aStaleCreateReportsTheLoss() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            if operation == createOperation {
+                await gate.hold()
+                return .created(
+                    Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_brand_new")
+                )
+            }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[]")
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+
+        async let creating = store.create(name: "Laptop")
+        await gate.waitForArrival()
+        store.forget()
+        await gate.release()
+        let created = await creating
+
+        #expect(!created)
+        #expect(store.state == .locked(.discarded))
+        #expect(store.minted == nil, "there is no session left to show it on")
+        #expect(store.mintedSecretLost, "a minted token was dropped without saying so")
+    }
+
+    /// A plaintext still on screen has not been read yet. Minting over it replaces the only copy
+    /// of a live token's secret with another one, and the first token goes on existing with
+    /// full access and no way to identify it beyond its name.
+    @Test("a second create cannot mint over a plaintext nobody has read yet")
+    func aSecondCreateCannotOrphanTheFirst() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let secrets = Pages([
+            Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_first"),
+            Stub.patCreated(id: 3, name: "Desktop", token: "memos_pat_second"),
+        ])
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[]")
+            case createOperation: return .created(secrets.next())
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+
+        let first = await store.create(name: "Laptop")
+        let second = await store.create(name: "Desktop")
+
+        #expect(first)
+        #expect(!second, "a create over an unread plaintext must be refused")
+        #expect(store.minted?.secret == "memos_pat_first")
+        #expect(store.notice == ManageTokensStore.secretStillShowing)
+        #expect(seen.get().filter { $0.operation == createOperation }.count == 1)
+
+        // Once it HAS been read and put away, another one is perfectly fine.
+        store.dismissMinted()
+        let third = await store.create(name: "Desktop")
+
+        #expect(third)
+        #expect(store.minted?.secret == "memos_pat_second")
+    }
+}

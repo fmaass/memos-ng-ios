@@ -80,10 +80,16 @@ public final class ManageTokensStore {
     private let client: any APIProtocol
     /// Injected so a test can decide that a deadline has passed without waiting for it.
     private let now: @Sendable () -> Date
-    /// Which management session this is. Bumped by every sign-on and by every discard, because
-    /// both change whose grant the answers still in the air belong to. A reply can outlive the
-    /// question here as easily as anywhere else in the app.
+    /// Which management session this is. Bumped by every sign-on, every discard and every lapse,
+    /// because each of them changes whose grant the answers still in the air belong to. A reply
+    /// can outlive the question here as easily as anywhere else in the app.
     private var generation = 0
+    /// The operation in flight, if there is one. `nil` means the store is free to start another.
+    private var runningWork: Int?
+    /// Only ever goes up, so one piece of work can never be mistaken for a later one — which is
+    /// what lets an abandoned operation tell that the gate it is about to hand back is no longer
+    /// the one it took.
+    private var workSequence = 0
 
     public init(
         configuration: ServerConfiguration,
@@ -144,6 +150,10 @@ public final class ManageTokensStore {
         // The grant being replaced does not outlive the tap that replaced it.
         dropGrant()
         generation += 1
+        // Any operation still in the air belongs to the session just ended. Its gate is handed
+        // back here rather than when it lands, or the read this sign-on finishes with would be
+        // refused by a dead operation and the screen would sit on its spinner.
+        runningWork = nil
         let mine = generation
         state = .authenticating
         notice = nil
@@ -184,15 +194,24 @@ public final class ManageTokensStore {
 
     /// Re-reads the account's tokens. The one place a list on screen comes from.
     public func refresh() async {
-        guard let mine = beginWork() else { return }
-        defer { endWork(mine) }
+        guard let work = beginWork() else { return }
+        await reload(work)
+        endWork(work)
+    }
+
+    /// The list read every path shares, under work its caller already holds.
+    ///
+    /// Apart from `refresh()` because a create's read-back must not have to take the gate its own
+    /// create is still holding — and because only a caller that still owns its work may write the
+    /// screen with what comes back.
+    private func reload(_ work: Work) async {
         do {
             let rows = try await Self.list(client)
-            guard mine == generation else { return }
+            guard isCurrent(work) else { return }
             state = .listed(rows)
             notice = nil
         } catch {
-            guard mine == generation else { return }
+            guard isCurrent(work) else { return }
             report(error)
         }
     }
@@ -204,6 +223,15 @@ public final class ManageTokensStore {
     /// also what proves the new token is really there for the person now holding its only copy.
     @discardableResult
     public func create(name: String, expiresInDays: Int? = nil) async -> Bool {
+        // A plaintext still on screen has not been read yet, and there will never be another copy
+        // of it. Minting over it would take a live token's only secret away from somebody who has
+        // not written it down, and leave that token on the account with nothing but its name to
+        // identify it by. So a create waits for the panel to be put away — decided HERE, because
+        // a control that merely looked disabled would be a hint rather than a rule.
+        guard minted == nil else {
+            notice = Self.secretStillShowing
+            return false
+        }
         // Checked here rather than by the field alone, so the one rule is the one the request is
         // built from. It is `/api/pats`' own bound, which is the same one a device token is
         // renamed under.
@@ -211,26 +239,40 @@ public final class ManageTokensStore {
             notice = Self.nameRefused
             return false
         }
-        guard let mine = beginWork() else { return false }
+        guard let work = beginWork() else { return false }
         do {
             let created = try await Self.create(
                 client, name: sanitized, expiresInDays: expiresInDays
             )
-            guard mine == generation else {
-                endWork(mine)
+            guard isCurrent(work) else {
+                // The token was MINTED. This management session ended while the answer was in the
+                // air and the plaintext went with it — so dropping the answer quietly would leave
+                // a full-access token on the account that nobody knows was ever created. It IS
+                // recoverable: sign on again, find it in the list, revoke it. Only if the app says
+                // it happened.
+                MemosLog.session.error(
+                    "a token was created for a management session that had already ended"
+                )
+                mintedSecretLost = true
+                endWork(work)
                 return false
             }
             minted = created
             mintedSecretLost = false
             notice = nil
         } catch {
-            endWork(mine)
-            guard mine == generation else { return false }
+            guard isCurrent(work) else {
+                endWork(work)
+                return false
+            }
             report(error)
+            endWork(work)
             return false
         }
-        endWork(mine)
-        await refresh()
+        // The read-back runs under the SAME piece of work as the mint, so a second tap while it is
+        // out is refused as well: one intention is one create, not a create and then a window.
+        await reload(work)
+        endWork(work)
         return true
     }
 
@@ -239,32 +281,35 @@ public final class ManageTokensStore {
     /// device token may do, and a fresh authentication may do more.
     @discardableResult
     public func revoke(_ id: Int) async -> Bool {
-        guard let mine = beginWork() else { return false }
+        guard let work = beginWork() else { return false }
         do {
             try await Self.revoke(client, id: id)
-            guard mine == generation else {
-                endWork(mine)
+            guard isCurrent(work) else {
+                endWork(work)
                 return false
             }
             notice = nil
         } catch {
-            endWork(mine)
-            guard mine == generation else { return false }
+            guard isCurrent(work) else {
+                endWork(work)
+                return false
+            }
             // A 404 from `/api/pats/{id}` is a token that is already gone or was never this
             // account's — NOT a missing route, which is why this branch is here and not in
             // `report`. The list is re-read either way, so the screen ends up showing what is
             // really there rather than the row somebody just pressed.
             if StoreFailure.reportable(error) == .notFound {
-                await refresh()
-                guard mine == generation else { return false }
-                notice = Self.alreadyGone
+                await reload(work)
+                if isCurrent(work) { notice = Self.alreadyGone }
+                endWork(work)
                 return false
             }
             report(error)
+            endWork(work)
             return false
         }
-        endWork(mine)
-        await refresh()
+        await reload(work)
+        endWork(work)
         return true
     }
 
@@ -275,6 +320,11 @@ public final class ManageTokensStore {
     public func forget() {
         let hadSomething = grant.current != nil || minted != nil
         generation += 1
+        // The operation in flight belonged to the session this ends. Its gate is handed back HERE
+        // rather than when it lands: a screen coming back from the background could otherwise
+        // never ask for anything again, because the work holding the gate is one nothing will
+        // resume. Its own answer is fenced off by the generation above.
+        runningWork = nil
         dropGrant()
         isBusy = false
         notice = nil
@@ -297,23 +347,52 @@ public final class ManageTokensStore {
 
     static let nameRefused = "A token needs a name, and no more than 255 characters of one."
     static let alreadyGone = "That token was already gone. The list below is what is there now."
+    /// Why a create is refused while a plaintext is still on screen. Not a scolding: the token
+    /// above is the only copy there will ever be of that secret, and minting over it would take it
+    /// away from somebody who has not read it yet.
+    static let secretStillShowing =
+        "Copy the new token above and press Done before creating another - its text cannot be "
+        + "shown again."
 
-    /// The gate every `/api/pats` call passes: there has to be a live grant, and the deadline that
-    /// decides is the server's own.
+    /// One piece of work: which operation it is, and which management session it belongs to.
+    private struct Work {
+        let id: Int
+        let generation: Int
+    }
+
+    /// The gate every `/api/pats` call passes: ONE operation at a time, with a live grant behind
+    /// it.
     ///
-    /// Checked before the request rather than after the 401, because the app already knows the
-    /// answer — asking anyway would spend a round trip to be told something it was holding.
-    private func beginWork() -> Int? {
+    /// One at a time is decided here rather than by a disabled control, and on this screen that
+    /// distinction is not academic. A disabled button is a hint — a redraw, an accessibility
+    /// activation, a restored scene can each put a second tap past it — and a second tap that
+    /// reaches the server mints a SECOND full-access token whose plaintext nobody will ever see.
+    /// A refusal costs a tap; the alternative cannot be undone by the person who caused it.
+    ///
+    /// The grant is checked before the request rather than after the 401, because the app already
+    /// knows the answer — asking anyway would spend a round trip to be told something it holds.
+    private func beginWork() -> Work? {
+        guard runningWork == nil else { return nil }
         guard grant.isLive(at: now()) else {
             lapse()
             return nil
         }
+        workSequence += 1
+        runningWork = workSequence
         isBusy = true
-        return generation
+        return Work(id: workSequence, generation: generation)
     }
 
-    private func endWork(_ mine: Int) {
-        guard mine == generation else { return }
+    /// Whether this work still speaks for the session on screen. False means its answer is about a
+    /// management session that has ended, and nothing it learned may be written anywhere.
+    private func isCurrent(_ work: Work) -> Bool { work.generation == generation }
+
+    /// Hands the gate back — but only if this work still holds it. `forget()` and `lapse()` both
+    /// release the gate as they happen, so by the time an abandoned operation lands the gate may
+    /// belong to another one, and taking it from THAT would let a third start alongside it.
+    private func endWork(_ work: Work) {
+        guard runningWork == work.id else { return }
+        runningWork = nil
         isBusy = false
     }
 
@@ -321,6 +400,11 @@ public final class ManageTokensStore {
     /// the only thing that can fix it — not to an error somebody has to interpret.
     private func lapse() {
         dropGrant()
+        // Advanced here as well as in `forget()`, and that is the point of it: anything still in
+        // the air belonged to the session this ends, and a reply landing afterwards would
+        // otherwise be free to put `.listed` back on a screen whose grant is already gone.
+        generation += 1
+        runningWork = nil
         isBusy = false
         state = .locked(.expired)
     }
