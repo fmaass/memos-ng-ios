@@ -450,6 +450,8 @@ public final class TimelineStore {
             do {
                 uploadUIDs = try await MediaUpload.uploadAll(files, using: client)
             } catch {
+                // This invocation is over, and it failed: the key stays behind for the retry.
+                finishEdit(key: key, saved: false)
                 await report(error)
                 return false
             }
@@ -462,18 +464,7 @@ public final class TimelineStore {
             using: client,
             baseURL: baseURL
         )
-        // The key has done its work. Kept, the very same edit made again later — the same words
-        // typed back into a memo somebody has since changed — would be answered as a REPLAY and
-        // silently not applied.
-        //
-        // Only if the slot is still THIS edit's, though. A save is not the only thing that can
-        // happen while a save is in flight: a second one can be submitted and mint its own key
-        // into the slot before the first one's answer arrives. Clearing unconditionally then
-        // throws away the key belonging to the edit still running — and if that one's response is
-        // lost, its retry finds an empty slot, mints a third key, and applies the same edit a
-        // second time, attaching the same files twice. Which is precisely what the key exists to
-        // prevent, arrived at by tidying up after somebody else.
-        if saved, lastEdit?.key == key { lastEdit = nil }
+        finishEdit(key: key, saved: saved)
         return saved
     }
 
@@ -492,12 +483,21 @@ public final class TimelineStore {
         var files: [StagedSource]
     }
 
-    /// The attempt a key has been minted for, and that key. One slot, because a person is editing
-    /// one memo in one sheet: the moment a different edit is submitted, the previous key is of no
-    /// further use — the edit it named either landed or was abandoned.
-    private var lastEdit: (attempt: MemoEditAttempt, key: String)?
+    /// The edit a key was minted for, that key, and how many invocations are USING it right now.
+    ///
+    /// One slot, because a person is editing one memo in one sheet: the moment a different edit is
+    /// submitted, the previous key is of no further use — the edit it named either landed or was
+    /// abandoned. The count is the part that cannot be inferred from the slot alone, and it is what
+    /// stops one invocation tidying up while an identical one is still on the wire.
+    private struct EditKeySlot {
+        var attempt: MemoEditAttempt
+        var key: String
+        var inFlight: Int
+    }
 
-    /// The retry token this attempt sends.
+    private var lastEdit: EditKeySlot?
+
+    /// The retry token this attempt sends, and a note that one more invocation is using it.
     ///
     /// It is what makes a media edit repeatable at all. Without a key the server refuses a retried
     /// media edit outright (409 `uploads_unlinkable`, because the first attempt consumed the
@@ -507,10 +507,44 @@ public final class TimelineStore {
     ///
     /// A UUID satisfies the contract's `^[A-Za-z0-9_-]{8,64}$` as it stands, hyphens included.
     private func editKey(for attempt: MemoEditAttempt) -> String {
-        if let lastEdit, lastEdit.attempt == attempt { return lastEdit.key }
-        let key = UUID().uuidString
-        lastEdit = (attempt, key)
-        return key
+        if var slot = lastEdit, slot.attempt == attempt {
+            slot.inFlight += 1
+            lastEdit = slot
+            return slot.key
+        }
+        // A different edit. Whatever is still running under the old key keeps it — it is holding
+        // it in a local — and `finishEdit` will find the slot renamed and leave it alone.
+        let slot = EditKeySlot(attempt: attempt, key: UUID().uuidString, inFlight: 1)
+        lastEdit = slot
+        return slot.key
+    }
+
+    /// One invocation has finished with its key.
+    ///
+    /// The key is released when it has done its work, because keeping it would make the very same
+    /// edit submitted again later — the same words typed back into a memo somebody has since
+    /// changed — answerable as a REPLAY: 200, and nothing applied.
+    ///
+    /// Two conditions, and each closes a way of losing an edit somebody made.
+    ///
+    /// The slot must still be THIS edit's. A save is not the only thing that can happen while a
+    /// save is in flight: a second one with different words can be submitted and mint its own key
+    /// into the slot first. Clearing then throws away the key of the edit still running, and if
+    /// that one's response is lost its retry mints a fresh key and applies the same edit twice.
+    ///
+    /// And this must be the LAST invocation using the key. Two saves of identical fields share one
+    /// key — correctly, because they are one logical edit and the second is answered as a replay of
+    /// the first. But then the first one's answer arriving would release a key the second is still
+    /// presenting; if the second's response is then lost, its retry mints a fresh one and the same
+    /// files are attached a second time. Same harm as above, reached by the other door.
+    ///
+    /// A failure never releases: the retry is the whole point of the key. And once nothing is in
+    /// flight and one of them landed, the key IS spent — a later tap on Save is a new edit by
+    /// design, which is what `aSuccessfulSaveEndsItsKey` holds.
+    private func finishEdit(key: String, saved: Bool) {
+        guard var slot = lastEdit, slot.key == key else { return }
+        slot.inFlight = max(0, slot.inFlight - 1)
+        lastEdit = saved && slot.inFlight == 0 ? nil : slot
     }
 
     /// Changes who can see a memo.

@@ -43,6 +43,24 @@ private struct FailingDownloads: MediaDownloadTransport {
     func download(_ request: URLRequest) async throws -> (URL, URLResponse) { throw Offline() }
 }
 
+/// A download that answers with a file that is not there.
+///
+/// The shape of the one failure that can strike AFTER the enclosure has been made: the URL loading
+/// system's temporary copy is its own, and it deletes it the moment `download` returns — so a
+/// caller that is a moment too late finds nothing to move.
+private struct VanishingDownloads: MediaDownloadTransport {
+    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://example.invalid")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (url, response)
+    }
+}
+
 /// A download held open until the test lets it go, so the account can be changed underneath it.
 ///
 /// The wait polls rather than blocks, which is how every other held request in this bundle is
@@ -185,6 +203,35 @@ struct OriginalMediaTests {
         // And the name a person sees is the same for both — the disjointness is in the enclosure,
         // which is exactly where it belongs.
         #expect(first.lastPathComponent == second.lastPathComponent)
+    }
+
+    /// A download that fails after its directory exists must not leave the directory.
+    ///
+    /// It is the one window where the enclosure outlives its reason: made, and then nothing to put
+    /// in it. Rare, and a leak per occurrence in a place nothing else ever tidies.
+    @Test("a download that cannot be stored leaves no empty directory behind")
+    func aFailedMoveLeavesNothing() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        await #expect(throws: OriginalMediaError.self) {
+            try await OriginalMedia.fetch(
+                url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
+                transport: VanishingDownloads(), into: directory
+            )
+        }
+
+        let left = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(left.isEmpty, "a failed download left its directory behind: \(left)")
+        // The control: a download that WORKS does leave one, so the emptiness above is the failure
+        // path cleaning up rather than nothing ever being created.
+        _ = try await OriginalMedia.fetch(
+            url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
+            transport: StubDownloads(), into: directory
+        )
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
     }
 
     /// The other half of the enclosure: throwing one download away leaves the other alone.

@@ -392,6 +392,73 @@ struct MediaEditTests {
         #expect(seen.get()["first"]?.first != secondKeys[0])
     }
 
+    /// The other door into the same harm.
+    ///
+    /// Two saves of identical fields share one key, and that is correct — they are one logical
+    /// edit, and the second is answered as a replay of the first rather than applied twice. But
+    /// then the FIRST one's answer arriving would release a key the second is still presenting; if
+    /// the second's response is lost, its retry mints a fresh key and the same files are attached
+    /// a second time. So the key is released only once nothing is still using it.
+    @Test("a save landing while an identical one is still in flight keeps their shared key")
+    func anIdenticalSaveStillInFlightKeepsTheKey() async throws {
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let calls = LockedValue<Int>(0)
+        let releaseFirst = LockedValue<Bool>(false)
+        let releaseSecond = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            keys.set(keys.get() + [(try await Stub.body(body))["edit_key"] as? String ?? ""])
+            let call = calls.get() + 1
+            calls.set(call)
+            switch call {
+            case 1:
+                try await hold(until: releaseFirst)
+                return Stub.json(Stub.memo(uid: "a", content: "same"))
+            case 2:
+                // Held so it is STILL in flight when the first one lands, then lost.
+                try await hold(until: releaseSecond)
+                return Stub.empty(.internalServerError)
+            default:
+                return Stub.json(Stub.memo(uid: "a", content: "same"))
+            }
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let first = Task {
+            await store.edit(uid: "a", content: "same", using: client, baseURL: Stub.baseURL)
+        }
+        while calls.get() < 1 {
+            await Task.yield()
+        }
+        // Identical fields, so this one shares the first one's key rather than minting another.
+        let second = Task {
+            await store.edit(uid: "a", content: "same", using: client, baseURL: Stub.baseURL)
+        }
+        while calls.get() < 2 {
+            await Task.yield()
+        }
+
+        releaseFirst.set(true)
+        #expect(await first.value, "control: the first save landed, which is what tidies up")
+        releaseSecond.set(true)
+        #expect(await second.value == false, "control: the second save is the one with a retry")
+
+        // The retry of the save whose response was lost.
+        await store.edit(uid: "a", content: "same", using: client, baseURL: Stub.baseURL)
+
+        let sent = keys.get()
+        #expect(sent.count == 3)
+        #expect(!sent[0].isEmpty, "the patch carried no edit key at all")
+        #expect(sent[0] == sent[1], "control: identical saves share one key, which is the point")
+        #expect(
+            sent[2] == sent[0],
+            "a save landing released a key an identical one was still presenting"
+        )
+    }
+
     @Test("the same words typed again after a save that worked are a new edit, not a replay")
     func aSuccessfulSaveEndsItsKey() async throws {
         let store = TimelineStore()

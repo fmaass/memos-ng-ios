@@ -202,6 +202,11 @@ public enum OriginalMedia {
             try fileManager.createDirectory(at: enclosure, withIntermediateDirectories: true)
             try fileManager.moveItem(at: temporary, to: destination)
         } catch {
+            // The directory was made for THIS download and nothing else will ever look in it, so a
+            // move that fails after it exists would leave an empty one behind for good. Rare —
+            // the loading system's copy vanishing early, a full disk — but it is a leak per
+            // failure, in a directory nothing else ever tidies.
+            try? fileManager.removeItem(at: enclosure)
             throw OriginalMediaError.notStored(error.localizedDescription)
         }
         return destination
