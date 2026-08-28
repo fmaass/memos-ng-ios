@@ -25,7 +25,7 @@ struct MediaLibraryRenderTests {
                 zoom: zoom,
                 wantsMore: { _ in false },
                 open: { _ in },
-                save: { _ in },
+                fetch: { _, _ in },
                 loadMore: {}
             )
         }

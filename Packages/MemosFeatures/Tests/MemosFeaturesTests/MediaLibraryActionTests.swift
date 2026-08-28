@@ -62,6 +62,9 @@ private func photo(_ uid: String, memoUID: String? = nil) -> MemoAttachment {
         thumbnailURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/thumb"),
         previewURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/mobile"),
         webURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/web"),
+        // Every real payload carries one: `downloadUrl` is required on both `AttachmentRef` and
+        // `AttachmentListItem`, and it is the file Share hands over for a picture.
+        downloadURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/original"),
         memoUID: memoUID
     )
 }
@@ -119,11 +122,15 @@ struct MediaTileMenuTests {
         )
     }
 
-    @Test("a file with no canonical URL is not offered a share that would share nothing")
+    @Test("a file with no file to hand over is not offered a share that would share nothing")
     func nothingToShare() {
         var bare = photo("a", memoUID: "m7")
-        bare.webURL = nil
+        // Not the web URL, which every payload carries whether or not a file stands behind it —
+        // the ORIGINAL, which is what a picture is handed on as (MEMNG-207).
+        bare.downloadURL = nil
         #expect(MediaTileMenu.actions(for: bare) == [.showMemo(uid: "m7")])
+        // The control: the same file with its original is offered the share.
+        #expect(MediaTileMenu.actions(for: photo("a", memoUID: "m7")).count == 2)
     }
 
     /// The viewer's overlay is built from the same list, over the page's own attachment — which is
@@ -134,12 +141,11 @@ struct MediaTileMenuTests {
     func overlayOffersTheWholeActionSet() throws {
         let attachment = photo("a", memoUID: "m7")
         let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
-        let webURL = try #require(attachment.webURL)
 
         #expect(page.memoUID == "m7")
         #expect(
             MediaTileMenu.actions(for: page.attachment)
-                == [.showMemo(uid: "m7"), .share(webURL)]
+                == [.showMemo(uid: "m7"), .share(attachment)]
         )
     }
 
@@ -147,7 +153,7 @@ struct MediaTileMenuTests {
     /// the screen it was opened from.
     @Test("a memo's own attachment is offered no Show Memo")
     func memoSourcedAttachmentHasNoOwner() {
-        #expect(MediaTileMenu.actions(for: photo("a")) == [.share(photo("a").webURL!)])
+        #expect(MediaTileMenu.actions(for: photo("a")) == [.share(photo("a"))])
     }
 }
 

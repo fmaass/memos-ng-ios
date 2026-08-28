@@ -63,6 +63,65 @@ extension OriginalMediaError: APIErrorCarrying {
     }
 }
 
+/// Which of an attachment's files a download asks the server for.
+///
+/// Two, because the app has two different questions about one upload. Somebody keeping a
+/// photograph wants the file as it was taken; somebody sending a clip to a friend wants something
+/// that will actually arrive. Naming them once here, rather than picking a URL at each call site,
+/// is what stops a tile menu and the viewer's overlay from disagreeing about which file "Share"
+/// means.
+public enum AttachmentRendition: Sendable, Equatable {
+    /// The file as it was uploaded — the archive master (ADR-0008).
+    case original
+    /// The copy this app hands to somebody else. See `MemoAttachment.file(_:)` for what that is,
+    /// and why it is the master nearly every time.
+    case shared
+}
+
+/// One fetchable file of an attachment: where it is, and what it is.
+///
+/// The mime travels WITH the URL because a derived rendition is not the mime the upload carries: a
+/// clip uploaded as `video/quicktime` is handed on as the `video/mp4` the server made of it, and
+/// the extension the share sheet reads comes off THIS mime, not off the attachment's.
+public struct AttachmentFile: Sendable, Equatable {
+    public let url: URL
+    public let mime: String
+
+    public init(url: URL, mime: String) {
+        self.url = url
+        self.mime = mime
+    }
+}
+
+extension MemoAttachment {
+    /// Where a rendition of this file is, or nil when the payload names no such file.
+    ///
+    /// `shared` is the archive master for everything except a clip, and what decides that is what
+    /// the server actually holds. Only three derived tiers are real files — `thumb` and `mobile`
+    /// are JPEGs of a PICTURE, `web` is the mp4 of a VIDEO — yet every payload carries a signed
+    /// URL for all four whether the file behind it exists or not (memos-ng
+    /// `app/services/asset_urls.py` signs the set unconditionally, from the uid alone). A derived
+    /// URL is therefore a guess, and `downloadUrl` is the one file every attachment really has.
+    /// For a picture or a document that settles it twice over: the thing somebody asked to send IS
+    /// the file they are looking at, and it is the tier certain to be there.
+    ///
+    /// A clip is the exception, on size. Its master is what the camera wrote — HEVC, often
+    /// gigabytes — while the mp4 beside it is the rendition this app already plays and small
+    /// enough for a message to carry. That is the difference between a share that completes and
+    /// one that never does.
+    public func file(_ rendition: AttachmentRendition) -> AttachmentFile? {
+        switch rendition {
+        case .original:
+            return downloadURL.map { AttachmentFile(url: $0, mime: mime) }
+        case .shared:
+            guard isVideo, let webURL else { return file(.original) }
+            // Not a guess about this upload: the web tier IS an mp4, whatever was uploaded
+            // (memos-ng `app/services/asset_paths.py`).
+            return AttachmentFile(url: webURL, mime: "video/mp4")
+        }
+    }
+}
+
 /// Fetching the file somebody actually uploaded.
 ///
 /// Everything else in this app deliberately reads DERIVED tiers: `MemoPresentation.fullScreenTier`

@@ -66,7 +66,7 @@ struct MediaViewerView: View {
             closeButton
         }
         .overlay(alignment: .topTrailing) { actions }
-        .savingOriginal(saving)
+        .fetchingFile(saving)
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -160,8 +160,8 @@ struct MediaViewerView: View {
                             dismiss()
                             jump?.request(uid)
                         },
-                        saveOriginal: { attachment in
-                            Task { await save(attachment) }
+                        fetch: { attachment, rendition in
+                            Task { await fetch(attachment, rendition) }
                         }
                     )
                 }
@@ -175,14 +175,14 @@ struct MediaViewerView: View {
         }
     }
 
-    /// Fetches the original of the file on screen and offers it to the share sheet.
+    /// Fetches the named file of the picture or clip on screen and offers it to the share sheet.
     ///
     /// The session is what holds the credential; without one there is nothing to present, which is
-    /// the same refusal `SessionStore.downloadOriginal` makes for a session that has ended.
-    private func save(_ attachment: MemoAttachment) async {
+    /// the same refusal `SessionStore.download` makes for a session that has ended.
+    private func fetch(_ attachment: MemoAttachment, _ rendition: AttachmentRendition) async {
         await saving.save(attachment) { [session] attachment in
             guard let session else { throw OriginalMediaError.notSignedIn }
-            return try await session.downloadOriginal(attachment)
+            return try await session.download(attachment, rendition)
         }
     }
 
@@ -221,9 +221,10 @@ struct MediaViewerView: View {
 struct MediaTileActionItem: View {
     let action: MediaTileAction
     let showMemo: (String) -> Void
-    /// What the slow one does. Defaulted so a surface that cannot download — a preview, a fitting
-    /// test — still builds the row rather than being handed a different menu.
-    var saveOriginal: (MemoAttachment) -> Void = { _ in }
+    /// What the two slow ones do: fetch the named file and offer it. Defaulted so a surface that
+    /// cannot download — a preview, a fitting test — still builds the row rather than being handed
+    /// a different menu.
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
 
     var body: some View {
         switch action {
@@ -233,15 +234,19 @@ struct MediaTileActionItem: View {
             } label: {
                 Label(action.title, systemImage: action.symbol)
             }
-        case .share(let url):
-            ShareLink(item: url) {
+        // Both of these are plain Buttons rather than `ShareLink`s, and for the same reason: a
+        // `ShareLink` hands over a value it is already holding, and neither of these files is on
+        // the phone until somebody has waited for it. A `ShareLink` is what this row used to be,
+        // which is exactly how the value it was holding came to be a URL (MEMNG-207).
+        case .share(let attachment):
+            Button {
+                fetch(attachment, .shared)
+            } label: {
                 Label(action.title, systemImage: action.symbol)
             }
         case .saveOriginal(let attachment):
-            // A plain Button, not a `ShareLink`: the file it will share does not exist yet, and
-            // the wait for it is the reason this action is not the same thing as `Share`.
             Button {
-                saveOriginal(attachment)
+                fetch(attachment, .original)
             } label: {
                 Label(action.title, systemImage: action.symbol)
             }

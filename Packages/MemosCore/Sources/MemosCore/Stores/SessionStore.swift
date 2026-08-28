@@ -136,7 +136,7 @@ public final class SessionStore {
     /// The credential the client presents — the SAME object its middleware reads, not a copy.
     ///
     /// It is not a widening of what this process holds; it is the one place the token lives while
-    /// the app is running, and it is never handed out. Two callers read it: `downloadOriginal`,
+    /// the app is running, and it is never handed out. Two callers read it: `download`,
     /// which is the one request that cannot go through the generated client, and a renewal, which
     /// REPLACES the value so that the client already built — and every store holding it — presents
     /// the successor on its next request (see `PresentedCredential`). It is cleared wherever
@@ -1142,13 +1142,20 @@ public final class SessionStore {
         return object["detail"] as? String
     }
 
-    /// Downloads the file somebody actually uploaded, and answers where it was put.
+    /// Downloads one of an attachment's files, and answers where it was put.
     ///
     /// It lives on the session rather than on a media type of its own because of the credential:
     /// the original tier is served unsigned and authenticated, so this is the only request outside
     /// the generated client that has to present the device token — and the token stays in here
     /// (see `credential`) rather than being handed to the layer that wants the file. The server it
     /// is offered to is pinned to this session's own (`OriginalMedia.sameOrigin`).
+    ///
+    /// A `shared` clip rides the very same lane, credential and all. Its URL is signed, so the
+    /// token is not what authorises it — the server's signed fast path never reads the header
+    /// (memos-ng `app/routers/assets.py`) — and it goes anyway because this is ONE lane: one
+    /// origin pin, one fence, one enclosure per request. A second lane that fetched media without
+    /// a credential would be a second copy of those rules to keep in step, which is how one of
+    /// them ends up missing the fence.
     ///
     /// It is FENCED by the session generation, the same fence `loadSettings` carries and for the
     /// same reason, which matters more here than anywhere else in this file. A download is the
@@ -1163,12 +1170,13 @@ public final class SessionStore {
     /// A 401 that belongs to the CURRENT session still ends it, exactly as on every other path. The
     /// error is thrown afterwards either way, because the screen that asked for the file needs to
     /// know it is not coming.
-    public func downloadOriginal(
+    public func download(
         _ attachment: MemoAttachment,
+        _ rendition: AttachmentRendition = .original,
         transport: any MediaDownloadTransport = MediaSession.shared,
         into directory: URL = .temporaryDirectory
     ) async throws -> URL {
-        guard let url = attachment.downloadURL else { throw OriginalMediaError.unavailable }
+        guard let wanted = attachment.file(rendition) else { throw OriginalMediaError.unavailable }
         guard let server = configuration?.baseURL, let credential else {
             throw OriginalMediaError.notSignedIn
         }
@@ -1186,10 +1194,10 @@ public final class SessionStore {
         let generation = sessionGeneration
         do {
             let file = try await OriginalMedia.fetch(
-                url: url,
+                url: wanted.url,
                 token: presented.token,
                 uid: attachment.uid,
-                mime: attachment.mime,
+                mime: wanted.mime,
                 server: server,
                 transport: transport,
                 into: directory

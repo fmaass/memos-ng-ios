@@ -47,7 +47,7 @@ struct MediaLibraryView: View {
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
             // on one view is how one of them silently stops appearing, and this screen now has
             // both a cover and a sheet.
-            .savingOriginal(saving)
+            .fetchingFile(saving)
         }
         // Outside the stack, for the reason the timeline's cover is: two presentations on one view
         // is how one of them silently stops appearing.
@@ -98,7 +98,7 @@ struct MediaLibraryView: View {
             zoom: mediaZoom,
             wantsMore: { library.shouldLoadMore(after: $0) },
             open: { open($0) },
-            save: { file in await save(file) },
+            fetch: { file, rendition in await fetch(file, rendition) },
             loadMore: { await loadMore() }
         )
         // Pinned above the scroll rather than inside it: the filter is how you change what the
@@ -181,11 +181,12 @@ struct MediaLibraryView: View {
         viewing = MediaViewerPresentation.viewer(for: library.items, startingAt: attachment.uid)
     }
 
-    /// Fetches the original of a tile's file and offers it to the share sheet. The credential the
-    /// original tier needs is the session's, and it stays there (see `OriginalMedia`).
-    private func save(_ attachment: MemoAttachment) async {
+    /// Fetches the named file of a tile's attachment and offers it to the share sheet. The
+    /// credential the original tier needs is the session's, and it stays there (see
+    /// `OriginalMedia`).
+    private func fetch(_ attachment: MemoAttachment, _ rendition: AttachmentRendition) async {
         await saving.save(attachment) { [session] file in
-            try await session.downloadOriginal(file)
+            try await session.download(file, rendition)
         }
     }
 
@@ -224,7 +225,9 @@ struct LibraryGrid: View {
     /// own vectors, not a number in a view body.
     let wantsMore: (Int) -> Bool
     let open: (MemoAttachment) -> Void
-    let save: (MemoAttachment) async -> Void
+    /// Fetch one of a file's renditions and offer it — the menu's two slow actions, as one
+    /// closure, because they differ only in which file they ask for.
+    let fetch: (MemoAttachment, AttachmentRendition) async -> Void
     let loadMore: () async -> Void
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
@@ -339,8 +342,8 @@ struct LibraryGrid: View {
                 mime: attachment.mime,
                 actions: MediaTileMenu.actions(for: attachment),
                 showMemo: { jump?.request($0) },
-                saveOriginal: { file in
-                    Task { await save(file) }
+                fetch: { file, rendition in
+                    Task { await fetch(file, rendition) }
                 }
             )
             .contextMenu { menu(attachment) }
@@ -355,8 +358,8 @@ struct LibraryGrid: View {
             MediaTileActionItem(
                 action: action,
                 showMemo: { jump?.request($0) },
-                saveOriginal: { file in
-                    Task { await save(file) }
+                fetch: { file, rendition in
+                    Task { await fetch(file, rendition) }
                 }
             )
         }
@@ -392,7 +395,7 @@ struct DocumentTile: View {
     /// is drawn at all — a control that opens an empty menu is worse than no control.
     var actions: [MediaTileAction] = []
     var showMemo: (String) -> Void = { _ in }
-    var saveOriginal: (MemoAttachment) -> Void = { _ in }
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
 
     var body: some View {
         Color.clear
@@ -418,9 +421,7 @@ struct DocumentTile: View {
         if !actions.isEmpty {
             Menu {
                 ForEach(actions) { action in
-                    MediaTileActionItem(
-                        action: action, showMemo: showMemo, saveOriginal: saveOriginal
-                    )
+                    MediaTileActionItem(action: action, showMemo: showMemo, fetch: fetch)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle.fill")
