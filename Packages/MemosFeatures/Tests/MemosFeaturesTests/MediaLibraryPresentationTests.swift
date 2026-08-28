@@ -119,23 +119,32 @@ struct MediaLibraryPresentationTests {
         #expect(Set(labels).count == labels.count)
     }
 
-    @Test("a tile is narrow enough that a phone fits a row of them")
-    func tilesFitAcrossAPhone() {
-        // 320 pt is the narrowest screen this app runs on. Four columns is what the grid is for;
-        // a minimum that only fits two turns the library into a list of large squares.
-        #expect(MediaLibraryPresentation.minimumTileWidth * 3 <= 320)
-        #expect(MediaLibraryPresentation.minimumTileWidth > 0)
+    @Test("a row still holds more than one photograph on the narrowest screen")
+    func rowsFitAcrossAPhone() {
+        // 320 pt is the narrowest screen this app runs on, and a row height that only fits one
+        // photograph across it turns the library into a list of large pictures rather than a
+        // library. Ordinary landscape photographs, at the target height, on that screen.
+        let landscape = (0..<4).map {
+            MemoAttachment(uid: "p\($0)", mime: "image/jpeg", status: .ready, width: 3, height: 2)
+        }
+        let rows = MediaLibraryPresentation.rows(for: landscape, width: 320, gap: 4)
+
+        #expect((rows.first?.tiles.count ?? 0) >= 2)
+        #expect(MediaLibraryPresentation.targetRowHeight > 0)
     }
 
     @Test("a document tile is square, whatever it is offered")
     func documentTileIsSquare() {
+        // The height a row gives it: a file the server never measured is laid out as a square, so
+        // the tile drawn in that box has to be one too.
+        let side = CGFloat(MediaLibraryPresentation.targetRowHeight)
         let size = LayoutProbe.size(
             DocumentTile(mime: "application/pdf"),
-            width: MediaLibraryPresentation.minimumTileWidth,
+            width: side,
             height: LayoutProbe.unbounded
         )
-        #expect(size.width == MediaLibraryPresentation.minimumTileWidth)
-        #expect(size.height == size.width, "a tile that is not square breaks the grid's rows")
+        #expect(size.width == side)
+        #expect(size.height == size.width, "a tile that is not square breaks the row it sits in")
     }
 }
 

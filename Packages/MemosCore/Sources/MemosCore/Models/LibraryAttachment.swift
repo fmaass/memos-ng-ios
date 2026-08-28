@@ -121,6 +121,7 @@ extension MemoAttachment {
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
             posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL,
+            downloadURL: URL(string: generated.downloadUrl, relativeTo: baseURL)?.absoluteURL,
             // The one thing this payload knows that a memo's own attachment list cannot: which
             // memo a file in the WHOLE library belongs to. Null for an orphan, and an orphan is a
             // row this list deliberately includes (MEMNG-171).

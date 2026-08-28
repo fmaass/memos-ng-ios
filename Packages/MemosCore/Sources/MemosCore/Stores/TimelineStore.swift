@@ -1,5 +1,9 @@
 import Foundation
 import MemosAPI
+// For `StagedSource`: the four things an upload needs to know about a picked file. It is the
+// outbox's type because the outbox was the first lane to need it, and a second identical struct
+// here would be a second answer to "what is a file about to be uploaded".
+import MemosOutbox
 
 /// How a tie in `created_at` is settled, which is the one part of the server's ordering the app
 /// cannot read off a memo.
@@ -409,26 +413,138 @@ public final class TimelineStore {
     }
 
     /// Replaces a memo's content with what the editor produced, and — when the editor was given a
-    /// date — the display date it carries.
+    /// date — the display date it carries, and — when the editor picked files — the media that
+    /// goes on it.
     ///
     /// `createdAt` is left OUT of the request when it is nil rather than sent as the memo's
     /// current value: a PATCH is a partial update, and an edit that did not touch the date has no
     /// business rewriting it. The web app sends the date on every edit because its editor always
-    /// holds one; here the absence is what says "unchanged".
+    /// holds one; here the absence is what says "unchanged". `attaching` is absent in exactly the
+    /// same way, and it matters more: `upload_uids` on a patch ADDS attachments
+    /// (`app/routers/memos.py` links the finalized uploads onto the memo), so an empty array sent
+    /// on every edit would be a field the server has to ignore rather than a statement about this
+    /// one.
+    ///
+    /// The files go up FIRST, in the foreground, and the memo is patched only once every one of
+    /// them has landed. That order is the rollback: an upload that fails means no patch is sent at
+    /// all, so a media edit either happens whole or does not happen — the memo keeps its text, its
+    /// date and its attachments, and the sheet stays open with the words still in it. Uploads that
+    /// did land before the failure are pending sessions the server expires; nothing links them, so
+    /// nothing appears half-attached.
     @discardableResult
     public func edit(
         uid: String,
         content: String,
         createdAt: Date? = nil,
+        attaching files: [StagedSource] = [],
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
-        await patch(
+        let key = editKey(
+            for: MemoEditAttempt(
+                uid: uid, content: content, createdAt: createdAt, files: files
+            )
+        )
+        var uploadUIDs: [String]?
+        if !files.isEmpty {
+            do {
+                uploadUIDs = try await MediaUpload.uploadAll(files, using: client)
+            } catch {
+                // This invocation is over, and it failed: the key stays behind for the retry.
+                finishEdit(key: key, saved: false)
+                await report(error)
+                return false
+            }
+        }
+        let saved = await patch(
             uid: uid,
-            .init(content: content, createdAt: createdAt),
+            .init(
+                content: content, createdAt: createdAt, editKey: key, uploadUids: uploadUIDs
+            ),
             using: client,
             baseURL: baseURL
         )
+        finishEdit(key: key, saved: saved)
+        return saved
+    }
+
+    /// What identifies ONE Save, so that a retry of it can be told apart from a new one.
+    ///
+    /// Everything the request would carry, because that is exactly the question the edit key
+    /// answers. Two attempts with the same fields are the same logical edit — a lost response, a
+    /// refused upload, a tap on Save after either — and they must share a key, or the second one
+    /// applies the first one's edit a second time. Two attempts that differ in ANY field are
+    /// different edits and must not: a shared key would have the server replay the first and answer
+    /// 200 while the new words went nowhere, which looks exactly like a save that worked.
+    private struct MemoEditAttempt: Equatable, Sendable {
+        var uid: String
+        var content: String
+        var createdAt: Date?
+        var files: [StagedSource]
+    }
+
+    /// The edit a key was minted for, that key, and how many invocations are USING it right now.
+    ///
+    /// One slot, because a person is editing one memo in one sheet: the moment a different edit is
+    /// submitted, the previous key is of no further use — the edit it named either landed or was
+    /// abandoned. The count is the part that cannot be inferred from the slot alone, and it is what
+    /// stops one invocation tidying up while an identical one is still on the wire.
+    private struct EditKeySlot {
+        var attempt: MemoEditAttempt
+        var key: String
+        var inFlight: Int
+    }
+
+    private var lastEdit: EditKeySlot?
+
+    /// The retry token this attempt sends, and a note that one more invocation is using it.
+    ///
+    /// It is what makes a media edit repeatable at all. Without a key the server refuses a retried
+    /// media edit outright (409 `uploads_unlinkable`, because the first attempt consumed the
+    /// uploads); with one, the replay is answered BEFORE the uploads are looked at, so a retry
+    /// whose predecessor actually landed gets the memo back rather than a conflict — and cannot
+    /// apply the edit twice.
+    ///
+    /// A UUID satisfies the contract's `^[A-Za-z0-9_-]{8,64}$` as it stands, hyphens included.
+    private func editKey(for attempt: MemoEditAttempt) -> String {
+        if var slot = lastEdit, slot.attempt == attempt {
+            slot.inFlight += 1
+            lastEdit = slot
+            return slot.key
+        }
+        // A different edit. Whatever is still running under the old key keeps it — it is holding
+        // it in a local — and `finishEdit` will find the slot renamed and leave it alone.
+        let slot = EditKeySlot(attempt: attempt, key: UUID().uuidString, inFlight: 1)
+        lastEdit = slot
+        return slot.key
+    }
+
+    /// One invocation has finished with its key.
+    ///
+    /// The key is released when it has done its work, because keeping it would make the very same
+    /// edit submitted again later — the same words typed back into a memo somebody has since
+    /// changed — answerable as a REPLAY: 200, and nothing applied.
+    ///
+    /// Two conditions, and each closes a way of losing an edit somebody made.
+    ///
+    /// The slot must still be THIS edit's. A save is not the only thing that can happen while a
+    /// save is in flight: a second one with different words can be submitted and mint its own key
+    /// into the slot first. Clearing then throws away the key of the edit still running, and if
+    /// that one's response is lost its retry mints a fresh key and applies the same edit twice.
+    ///
+    /// And this must be the LAST invocation using the key. Two saves of identical fields share one
+    /// key — correctly, because they are one logical edit and the second is answered as a replay of
+    /// the first. But then the first one's answer arriving would release a key the second is still
+    /// presenting; if the second's response is then lost, its retry mints a fresh one and the same
+    /// files are attached a second time. Same harm as above, reached by the other door.
+    ///
+    /// A failure never releases: the retry is the whole point of the key. And once nothing is in
+    /// flight and one of them landed, the key IS spent — a later tap on Save is a new edit by
+    /// design, which is what `aSuccessfulSaveEndsItsKey` holds.
+    private func finishEdit(key: String, saved: Bool) {
+        guard var slot = lastEdit, slot.key == key else { return }
+        slot.inFlight = max(0, slot.inFlight - 1)
+        lastEdit = saved && slot.inFlight == 0 ? nil : slot
     }
 
     /// Changes who can see a memo.
@@ -442,6 +558,28 @@ public final class TimelineStore {
         await patch(
             uid: uid, .init(visibility: visibility.generated), using: client, baseURL: baseURL
         )
+    }
+
+    /// Archives a memo, or takes it back out of the archive.
+    ///
+    /// One call for both directions, because on the wire it IS one call: `archived` is a Boolean on
+    /// `MemoPatch`, and the server turns it into a timestamp or a null (`app/services/memos.py`).
+    /// A pair of methods would be two spellings of one request that could drift apart.
+    ///
+    /// Nothing moves before the server answers. Archiving is reversible, so an optimistic version
+    /// would not be the disaster an optimistic delete is — but it would still show a memo leaving a
+    /// list it is in fact still in whenever the write fails, and this store already has exactly one
+    /// optimistic write (`toggleTask`) for a reason that does not apply here. What DOES happen when
+    /// the answer arrives is that the memo leaves the loaded list if this list is no longer asking
+    /// for it: see `apply`.
+    @discardableResult
+    public func setArchived(
+        _ archived: Bool,
+        uid: String,
+        using client: any APIProtocol,
+        baseURL: URL
+    ) async -> Bool {
+        await patch(uid: uid, .init(archived: archived), using: client, baseURL: baseURL)
     }
 
     /// Pins or unpins through the server's own routes rather than by patching the flag: pinning
@@ -738,14 +876,15 @@ public final class TimelineStore {
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
-            // The strict linking refusal is declared on the patch too. An edit changes text or
-            // visibility and never names an upload, so this is reported rather than recovered
-            // from — recovering would mean re-uploading files this call never sent.
+            // The strict linking refusal is declared on the patch too. A ticked checkbox names no
+            // upload, so this is reported rather than recovered from — recovering would mean
+            // re-uploading files this call never sent.
             case .conflict:
                 throw APIError.server(status: 409)
-            // A keyed edit that lost a race and left nothing behind. Neither patch path sends an
-            // edit key, so neither can safely repeat itself: the memo is put back and the person
-            // is told, rather than the app guessing at what the winner wrote.
+            // A keyed edit that lost a race and left nothing behind. THIS path sends no key (a
+            // checkbox is a whole content patch of its own), so it cannot safely repeat itself:
+            // the memo is put back and the person is told, rather than the app guessing at what
+            // the winner wrote.
             case .serviceUnavailable:
                 throw APIError.server(status: 503)
             case .unprocessableContent:
@@ -779,14 +918,18 @@ public final class TimelineStore {
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
-            // The strict linking refusal is declared on the patch too. An edit changes text or
-            // visibility and never names an upload, so this is reported rather than recovered
-            // from — recovering would mean re-uploading files this call never sent.
+            // Either a named upload the server cannot link, or an edit key already bound to a
+            // DIFFERENT memo. Neither is recoverable here: the uploads this call named are spent,
+            // and a key is minted per (memo, edit) so a key on another memo is not a state this
+            // client produces. Reported, and the sheet stays open with the words in it.
             case .conflict:
                 throw APIError.server(status: 409)
-            // A keyed edit that lost a race and left nothing behind. Neither patch path sends an
-            // edit key, so neither can safely repeat itself: the memo is put back and the person
-            // is told, rather than the app guessing at what the winner wrote.
+            // A keyed edit that lost a race and left nothing behind — the one refusal the contract
+            // says to repeat verbatim. It is repeated by the PERSON rather than by the app: the
+            // save failed, the sheet is still open, and tapping Save again re-sends the identical
+            // request with the identical key (`editKey(for:)`), which is exactly what the server
+            // asked for. Retrying in here would also have to decide what to do about the uploads,
+            // which are spent, and that decision belongs to the attempt rather than to this switch.
             case .serviceUnavailable:
                 throw APIError.server(status: 503)
             case .unprocessableContent:
@@ -801,15 +944,30 @@ public final class TimelineStore {
     }
 
     /// Replaces the loaded copy of a memo with the server's, if it is on screen at all — and
-    /// MOVES it when the server's copy no longer belongs where the old one sat.
+    /// MOVES it when the server's copy no longer belongs where the old one sat, or DROPS it when
+    /// this list is not asking for memos in the state the server says it is now in.
     ///
     /// A memo whose display date changed has left the day it was filed under, and the timeline is
     /// cut into days: replacing it in place would leave it printed under the old date, above
     /// memos newer than it, until something else forced a refresh. So it is re-placed — and only
     /// when an ordering key actually moved, because an ordinary content edit must not reshuffle
     /// a list whose exact order came from the server.
+    ///
+    /// The drop is the archive: a memo archived out of a plain timeline, or restored out of the
+    /// archived-only list, is a memo the request behind this list would not have returned. Keeping
+    /// it would leave a row that the next refresh removes without explanation. It happens HERE, in
+    /// the one place every server answer lands, so an archive made from a card, from the memo's own
+    /// screen, or noticed by the reconciling read all reach the same conclusion.
     public func apply(_ memo: Memo) {
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
+        guard query.admitsArchiveState(of: memo) else {
+            memos.remove(at: position)
+            // Same fence a delete raises, and for the same reason: a cursor page read while this
+            // memo still belonged here overlaps the rows around it and would put it back.
+            timelineGeneration += 1
+            newerCursor = nil
+            return
+        }
         let previous = memos[position]
         guard previous.createdAt != memo.createdAt || previous.pinned != memo.pinned else {
             memos[position] = memo

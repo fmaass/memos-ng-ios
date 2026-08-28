@@ -253,32 +253,22 @@ public struct ComposeView: View {
     /// nothing arriving above it can move it: attaching a photo grows the block upwards into the
     /// editor's space and the three pills stay exactly where they were.
     ///
-    /// An EDIT shows only the date. Attachments are managed on the memo itself and visibility is
-    /// its own deliberate action (see the type comment) — but a wrong date is a typo like any
-    /// other, and fixing it is what this sheet is for.
+    /// An EDIT shows the date and the photo picker, and not the visibility — who can see a memo is
+    /// its own deliberate action (see the type comment), while a wrong date is a typo like any
+    /// other and a photograph left out of a memo is exactly the thing somebody reopens it to fix.
+    ///
+    /// The files an edit picks go up in the FOREGROUND and the memo is patched with them directly
+    /// (`TimelineStore.edit(attaching:)`), rather than through the outbox that owns new captures:
+    /// without an edit key a queued retry cannot be made safe, so an edit is something that
+    /// happens while its sheet is open or does not happen at all.
     @ViewBuilder
     private var controls: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
+            attachedRow
             if !isEdit {
-                if !imports.attachments.isEmpty {
-                    PickedThumbnailRow(attachments: imports.attachments)
-                }
-                if imports.failed > 0,
-                    let summary = ComposeAttachments.summary(
-                        imported: imports.attachments.count, failed: imports.failed
-                    )
-                {
-                    HStack(spacing: DesignTokens.Space.snug) {
-                        Text(summary)
-                            .font(.footnote)
-                            .foregroundStyle(.orange)
-                        Button("Remove them") { clearPicked() }
-                            .font(.footnote)
-                    }
-                }
                 metaRow
             } else {
-                MemoDateRow(date: $date, clearable: false)
+                editRow
                 if let delete {
                     deleteRow(delete)
                 }
@@ -300,6 +290,56 @@ public struct ComposeView: View {
             // Photos are the reason to want the room; the sheet takes it rather than making
             // someone drag it open to see what they just attached.
             if !isEmpty { detent = .large }
+        }
+    }
+
+    /// What has been picked, and what would not read. Shared by both modes: a file the picker
+    /// cannot export is the one thing that must never pass quietly, whether it was picked for a
+    /// new memo or added to one that already exists.
+    @ViewBuilder
+    private var attachedRow: some View {
+        if !imports.attachments.isEmpty {
+            PickedThumbnailRow(attachments: imports.attachments)
+        }
+        if imports.failed > 0,
+            let summary = ComposeAttachments.summary(
+                imported: imports.attachments.count, failed: imports.failed
+            )
+        {
+            HStack(spacing: DesignTokens.Space.snug) {
+                Text(summary)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                Button("Remove them") { clearPicked() }
+                    .font(.footnote)
+            }
+        }
+    }
+
+    /// An edit's two controls: what to add, and when the memo happened.
+    ///
+    /// Two pills rather than the capture row's three, and the same discipline: nothing arrives or
+    /// leaves as the state changes, and `ViewThatFits` drops what each pill SAYS rather than
+    /// reflowing the row, so the last spelling is a promise that it fits at any text size.
+    private var editRow: some View {
+        ViewThatFits(in: .horizontal) {
+            editPills(.short)
+            editPills(.glyph)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func editPills(_ spelling: ComposeMetaRow.Spelling) -> some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            PhotosPickerPill(
+                stage: $stage,
+                count: imports.attachments.count,
+                isImporting: imports.isImporting,
+                spelling: spelling
+            )
+            // Not clearable: a memo being edited already has a date, and there is nothing to put
+            // it back to — "now" would be a date this sheet invented.
+            MemoDateRow(date: $date, clearable: false, spelling: spelling)
         }
     }
 

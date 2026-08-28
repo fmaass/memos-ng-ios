@@ -176,6 +176,7 @@ enum MemoFixture {
         visibility: MemoVisibility = .protected,
         pinned: Bool = false,
         createdAt: Date = Date(timeIntervalSince1970: 1_750_000_000),
+        archivedAt: Date? = nil,
         tags: [String] = [],
         attachments: [MemoAttachment] = []
     ) -> Memo {
@@ -188,6 +189,7 @@ enum MemoFixture {
             pinned: pinned,
             createdAt: createdAt,
             updatedAt: createdAt,
+            archivedAt: archivedAt,
             tags: tags,
             attachments: attachments
         )
