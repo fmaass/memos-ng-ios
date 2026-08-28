@@ -76,22 +76,44 @@ public enum MediaUpload {
 
         var offset = Int64(started.bytesReceived)
         var chunkSize = usableChunkSize(started.chunkSize)
+        var resyncs = 0
         while offset < size {
             let piece = try read(handle, at: offset, length: chunkSize)
-            // A file that is shorter than it measured a moment ago has been changed under us; the
-            // declared size can no longer be reached and the server will never call it complete.
+            // A file that is shorter than it measured a moment ago has been changed underneath;
+            // the declared size can no longer be reached and the server will never call it
+            // complete.
             guard !piece.isEmpty else { throw MediaUploadError.stalled }
-            let answer = try await append(
-                piece, to: started.uploadUid, at: offset, using: client
-            )
-            // The SERVER's count is the position, never this loop's arithmetic: it is what a
-            // resume would read, and the one number that cannot disagree with what it holds.
-            guard Int64(answer.bytesReceived) > offset else { throw MediaUploadError.stalled }
-            offset = Int64(answer.bytesReceived)
-            chunkSize = usableChunkSize(answer.chunkSize)
+            switch try await append(piece, to: started.uploadUid, at: offset, using: client) {
+            case .accepted(let answer):
+                // The SERVER's count is the position, never this loop's arithmetic: it is what a
+                // resume would read, and the one number that cannot disagree with what it holds.
+                guard Int64(answer.bytesReceived) > offset else { throw MediaUploadError.stalled }
+                offset = Int64(answer.bytesReceived)
+                chunkSize = usableChunkSize(answer.chunkSize)
+            case .offsetGap:
+                // The contract's own answer to a gap, and the outbox's: ask the session where it
+                // stands and resend from there (`app/routers/uploads.py` — "Offset gap; re-sync
+                // via HEAD"). Same semantics as the background lane, over the generated client.
+                resyncs += 1
+                let synced = try await self.offset(of: started.uploadUid, using: client)
+                // Two ways this stops instead of spinning: a server that reports the very offset
+                // it just refused is not converging, and a run of gaps on a session nothing else
+                // is writing to means something is wrong that resending cannot fix.
+                guard synced != offset, resyncs <= maximumResyncs else {
+                    throw MediaUploadError.stalled
+                }
+                offset = synced
+            }
         }
         return started.uploadUid
     }
+
+    /// How many offset gaps one upload will answer before giving up.
+    ///
+    /// A gap is already close to impossible on this lane — the session is created inside the call
+    /// and nothing else can append to it — so a run of them is a server disagreeing with itself,
+    /// not a resumable upload. The outbox is the lane built for genuinely long-lived sessions.
+    static let maximumResyncs = 3
 
     /// The size to read next. A server that names no size of its own — or an impossible one — must
     /// not turn into a loop that sends nothing: zero bytes would be refused for ever, and a
@@ -167,12 +189,51 @@ public enum MediaUpload {
         }
     }
 
+    /// What one chunk came back as. The gap is a case rather than an error because it is a step in
+    /// the protocol — the server telling the client where to carry on from — and modelling it as a
+    /// failure is what would make the abort look like the only option.
+    enum ChunkOutcome {
+        case accepted(Components.Schemas.UploadOut)
+        case offsetGap
+    }
+
+    /// Where the server says this session stands.
+    ///
+    /// The answer is a HEADER on a bodyless response — `Upload-Offset` — which is why the route
+    /// exists at all: it is the one question that can be asked without moving any bytes. It IS
+    /// published in the contract (`upload_offset_api_uploads__upload_uid__head`), so it is asked
+    /// through the generated client like everything else here; the outbox builds the same request
+    /// by hand only because its own requests must go on a background `URLSession`.
+    static func offset(
+        of uploadUID: String,
+        using client: any APIProtocol
+    ) async throws -> Int64 {
+        let response = try await client.uploadOffsetApiUploadsUploadUidHead(
+            .init(path: .init(uploadUid: uploadUID))
+        )
+        switch response {
+        case .ok(let ok):
+            guard let offset = ok.headers.uploadOffset else {
+                // A re-sync that cannot read the offset has nothing to resume from, and guessing
+                // one would resend into the very gap this call exists to close.
+                throw MediaUploadError.refused(
+                    .unexpected(description: "the upload session did not report its offset")
+                )
+            }
+            return Int64(offset)
+        case .unprocessableContent:
+            throw MediaUploadError.refused(.server(status: 422))
+        case .undocumented(let statusCode, _):
+            throw MediaUploadError.refused(.fromStatus(statusCode))
+        }
+    }
+
     static func append(
         _ piece: Data,
         to uploadUID: String,
         at offset: Int64,
         using client: any APIProtocol
-    ) async throws -> Components.Schemas.UploadOut {
+    ) async throws -> ChunkOutcome {
         let response = try await client.appendChunkApiUploadsUploadUidPatch(
             .init(
                 path: .init(uploadUid: uploadUID),
@@ -182,13 +243,11 @@ public enum MediaUpload {
         )
         switch response {
         case .ok(let ok):
-            return try ok.body.json
-        // The offset gap. It is not recovered from here: this lane uploads a freshly exported file
-        // once, from the beginning, with nothing else writing to the same session — so a gap means
-        // something this client does not model, and resuming into it would be guesswork. The
-        // outbox is where resume lives, because that is where a half-sent file survives a launch.
+            return .accepted(try ok.body.json)
+        // The offset gap: not a failure but an instruction — re-sync with the session and resend
+        // from the offset it reports. Answered in `upload`, where the loop that would resend is.
         case .conflict:
-            throw MediaUploadError.refused(.server(status: 409))
+            return .offsetGap
         case .unprocessableContent:
             throw MediaUploadError.refused(.server(status: 422))
         case .undocumented(let statusCode, _):

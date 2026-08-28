@@ -440,6 +440,11 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        let key = editKey(
+            for: MemoEditAttempt(
+                uid: uid, content: content, createdAt: createdAt, files: files
+            )
+        )
         var uploadUIDs: [String]?
         if !files.isEmpty {
             do {
@@ -449,12 +454,55 @@ public final class TimelineStore {
                 return false
             }
         }
-        return await patch(
+        let saved = await patch(
             uid: uid,
-            .init(content: content, createdAt: createdAt, uploadUids: uploadUIDs),
+            .init(
+                content: content, createdAt: createdAt, editKey: key, uploadUids: uploadUIDs
+            ),
             using: client,
             baseURL: baseURL
         )
+        // The key has done its work. Kept, the very same edit made again later — the same words
+        // typed back into a memo somebody has since changed — would be answered as a REPLAY and
+        // silently not applied.
+        if saved { lastEdit = nil }
+        return saved
+    }
+
+    /// What identifies ONE Save, so that a retry of it can be told apart from a new one.
+    ///
+    /// Everything the request would carry, because that is exactly the question the edit key
+    /// answers. Two attempts with the same fields are the same logical edit — a lost response, a
+    /// refused upload, a tap on Save after either — and they must share a key, or the second one
+    /// applies the first one's edit a second time. Two attempts that differ in ANY field are
+    /// different edits and must not: a shared key would have the server replay the first and answer
+    /// 200 while the new words went nowhere, which looks exactly like a save that worked.
+    private struct MemoEditAttempt: Equatable, Sendable {
+        var uid: String
+        var content: String
+        var createdAt: Date?
+        var files: [StagedSource]
+    }
+
+    /// The attempt a key has been minted for, and that key. One slot, because a person is editing
+    /// one memo in one sheet: the moment a different edit is submitted, the previous key is of no
+    /// further use — the edit it named either landed or was abandoned.
+    private var lastEdit: (attempt: MemoEditAttempt, key: String)?
+
+    /// The retry token this attempt sends.
+    ///
+    /// It is what makes a media edit repeatable at all. Without a key the server refuses a retried
+    /// media edit outright (409 `uploads_unlinkable`, because the first attempt consumed the
+    /// uploads); with one, the replay is answered BEFORE the uploads are looked at, so a retry
+    /// whose predecessor actually landed gets the memo back rather than a conflict — and cannot
+    /// apply the edit twice.
+    ///
+    /// A UUID satisfies the contract's `^[A-Za-z0-9_-]{8,64}$` as it stands, hyphens included.
+    private func editKey(for attempt: MemoEditAttempt) -> String {
+        if let lastEdit, lastEdit.attempt == attempt { return lastEdit.key }
+        let key = UUID().uuidString
+        lastEdit = (attempt, key)
+        return key
     }
 
     /// Changes who can see a memo.
@@ -786,14 +834,15 @@ public final class TimelineStore {
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
-            // The strict linking refusal is declared on the patch too. An edit changes text or
-            // visibility and never names an upload, so this is reported rather than recovered
-            // from — recovering would mean re-uploading files this call never sent.
+            // The strict linking refusal is declared on the patch too. A ticked checkbox names no
+            // upload, so this is reported rather than recovered from — recovering would mean
+            // re-uploading files this call never sent.
             case .conflict:
                 throw APIError.server(status: 409)
-            // A keyed edit that lost a race and left nothing behind. Neither patch path sends an
-            // edit key, so neither can safely repeat itself: the memo is put back and the person
-            // is told, rather than the app guessing at what the winner wrote.
+            // A keyed edit that lost a race and left nothing behind. THIS path sends no key (a
+            // checkbox is a whole content patch of its own), so it cannot safely repeat itself:
+            // the memo is put back and the person is told, rather than the app guessing at what
+            // the winner wrote.
             case .serviceUnavailable:
                 throw APIError.server(status: 503)
             case .unprocessableContent:
@@ -827,14 +876,18 @@ public final class TimelineStore {
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
-            // The strict linking refusal is declared on the patch too. An edit changes text or
-            // visibility and never names an upload, so this is reported rather than recovered
-            // from — recovering would mean re-uploading files this call never sent.
+            // Either a named upload the server cannot link, or an edit key already bound to a
+            // DIFFERENT memo. Neither is recoverable here: the uploads this call named are spent,
+            // and a key is minted per (memo, edit) so a key on another memo is not a state this
+            // client produces. Reported, and the sheet stays open with the words in it.
             case .conflict:
                 throw APIError.server(status: 409)
-            // A keyed edit that lost a race and left nothing behind. Neither patch path sends an
-            // edit key, so neither can safely repeat itself: the memo is put back and the person
-            // is told, rather than the app guessing at what the winner wrote.
+            // A keyed edit that lost a race and left nothing behind — the one refusal the contract
+            // says to repeat verbatim. It is repeated by the PERSON rather than by the app: the
+            // save failed, the sheet is still open, and tapping Save again re-sends the identical
+            // request with the identical key (`editKey(for:)`), which is exactly what the server
+            // asked for. Retrying in here would also have to decide what to do about the uploads,
+            // which are spent, and that decision belongs to the attempt rather than to this switch.
             case .serviceUnavailable:
                 throw APIError.server(status: 503)
             case .unprocessableContent:

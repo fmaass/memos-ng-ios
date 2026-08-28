@@ -1,6 +1,8 @@
 import Foundation
+import HTTPTypes
 import MemosAPI
 import MemosOutbox
+import OpenAPIRuntime
 import Testing
 
 @testable import MemosCore
@@ -9,6 +11,28 @@ private let listMemosOperation = "list_memos_api_memos_get"
 private let patchMemoOperation = "patch_memo_api_memos__uid__patch"
 private let startUploadOperation = "start_upload_api_uploads_post"
 private let appendChunkOperation = "append_chunk_api_uploads__upload_uid__patch"
+private let uploadOffsetOperation = "upload_offset_api_uploads__upload_uid__head"
+
+/// What the server answers a `HEAD /api/uploads/{uid}` with: a status, the offset in a HEADER, and
+/// NO body at all. Built by hand rather than through `Stub.json` because the shape is the point —
+/// the generated client has to read a header off a response that carries nothing else.
+private func offsetAnswer(_ offset: Int) -> (HTTPResponse, HTTPBody?) {
+    var response = HTTPResponse(status: .ok)
+    response.headerFields[HTTPField.Name("Upload-Offset")!] = String(offset)
+    return (response, nil)
+}
+
+/// The server refusing a chunk that does not start where it holds: the 409 the contract answers an
+/// offset gap with, body and all.
+private func offsetGap() -> (HTTPResponse, HTTPBody?) {
+    Stub.json(#"{"detail":"Offset gap; re-sync via HEAD"}"#, status: .conflict)
+}
+
+/// The offset a chunk request declared, as the server reads it.
+private func sentOffset(_ request: HTTPRequest) -> Int {
+    let field = request.headerFields.first { $0.name.canonicalName == "upload-offset" }
+    return Int(field?.value ?? "-1") ?? -1
+}
 
 /// One upload session's answer, in the shape the server sends it.
 private func uploadOut(uid: String, chunkSize: Int, received: Int) -> String {
@@ -130,10 +154,7 @@ struct MediaEditTests {
             case startUploadOperation:
                 return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
             case appendChunkOperation:
-                let offset = request.headerFields.first {
-                    $0.name.canonicalName == "upload-offset"
-                }
-                offsets.set(offsets.get() + [Int(offset?.value ?? "-1") ?? -1])
+                offsets.set(offsets.get() + [sentOffset(request)])
                 let data = try await Stub.bytes(body)
                 received.set(received.get() + data.count)
                 return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: received.get()))
@@ -245,6 +266,222 @@ struct MediaEditTests {
         // The upload lane wraps the API's own error to say which step failed; the wrapping must
         // not cost a 401 its identity, or a dead credential never ends the session.
         #expect(ended.count == 1)
+    }
+
+    // MARK: - the retry token
+
+    /// The whole point of an edit key: a Save that is repeated is ONE edit, and a Save that is
+    /// different is another. Without it a retried media edit is refused outright (the first attempt
+    /// consumed the uploads); with it reused too eagerly, new words would be answered as a replay
+    /// of the old ones and silently go nowhere.
+    @Test("one Save keeps one edit key across its retries, and a different Save gets another")
+    func editKeysIdentifyOneSave() async throws {
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let patches = LockedValue<Int>(0)
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            patches.set(patches.get() + 1)
+            keys.set(keys.get() + [(try await Stub.body(body))["edit_key"] as? String ?? ""])
+            // The first three attempts fail AFTER the request was made — the ambiguous case, where
+            // the client cannot know whether the edit landed.
+            return patches.get() <= 3
+                ? Stub.empty(.internalServerError)
+                : Stub.json(Stub.memo(uid: "a", content: "two"))
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+        // The same Save, tapped again.
+        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+        // A DIFFERENT Save, while the previous one is still unresolved: the words were changed
+        // before the second tap. Sharing the earlier key would have the server replay the earlier
+        // edit and answer 200 while these words went nowhere.
+        await store.edit(uid: "a", content: "two", using: client, baseURL: Stub.baseURL)
+        let saved = await store.edit(
+            uid: "a", content: "two", using: client, baseURL: Stub.baseURL
+        )
+
+        let sent = keys.get()
+        #expect(saved)
+        #expect(sent.count == 4)
+        #expect(!sent[0].isEmpty, "the patch carried no edit key at all")
+        #expect(sent[0] == sent[1], "a retried Save minted a second key")
+        #expect(sent[2] != sent[0], "a Save of different words reused the previous key")
+        #expect(sent[3] == sent[2], "a retried Save minted a second key")
+        // The contract's own shape: 8-64 characters of [A-Za-z0-9_-].
+        for key in sent {
+            #expect(key.count >= 8 && key.count <= 64)
+            #expect(key.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+        }
+    }
+
+    @Test("the same words typed again after a save that worked are a new edit, not a replay")
+    func aSuccessfulSaveEndsItsKey() async throws {
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            keys.set(keys.get() + [(try await Stub.body(body))["edit_key"] as? String ?? ""])
+            return Stub.json(Stub.memo(uid: "a", content: "one"))
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+
+        // Held past the success, the second one would be answered as a replay of the first — a
+        // 200, and the edit not applied — which is indistinguishable on screen from a save that
+        // worked.
+        #expect(keys.get().count == 2)
+        #expect(keys.get()[0] != keys.get()[1])
+    }
+
+    // MARK: - the offset gap
+
+    /// The contract's answer to a gap: ask the session where it stands, resend from there. Same
+    /// semantics as the outbox's background lane, over the operation the schema publishes for it.
+    @Test("an offset gap is re-synced with the session and the upload carries on from there")
+    func offsetGapIsResynced() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let offsets = LockedValue<[Int]>([])
+        let heads = LockedValue<Int>(0)
+        let received = LockedValue<Int>(4)
+        let client = Stub.client { request, body, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case uploadOffsetOperation:
+                heads.set(heads.get() + 1)
+                // The server holds the first four bytes after all — the state the gap was about.
+                return offsetAnswer(4)
+            case appendChunkOperation:
+                let offset = sentOffset(request)
+                offsets.set(offsets.get() + [offset])
+                guard offset != 0 else {
+                    return offsetGap()
+                }
+                let data = try await Stub.bytes(body)
+                received.set(offset + data.count)
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: received.get()))
+            case patchMemoOperation:
+                return Stub.json(Stub.memo(uid: "a"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let saved = await store.edit(
+            uid: "a", content: "gapped", attaching: [file], using: client, baseURL: Stub.baseURL
+        )
+
+        #expect(saved, "an offset gap abandoned an edit the contract says to resume")
+        #expect(heads.get() == 1, "the session was never asked where it stands")
+        // 0 was refused; the re-sync said 4; the upload carried on from there to the end.
+        #expect(offsets.get() == [0, 4, 8])
+    }
+
+    @Test("a gap the server keeps reporting at the same place stops rather than spinning")
+    func aGapThatDoesNotMoveStops() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let chunks = LockedValue<Int>(0)
+        let patches = LockedValue<Int>(0)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case uploadOffsetOperation:
+                // The offset it just refused — a server that is not converging.
+                return offsetAnswer(0)
+            case appendChunkOperation:
+                chunks.set(chunks.get() + 1)
+                return offsetGap()
+            case patchMemoOperation:
+                patches.set(patches.get() + 1)
+                return Stub.json(Stub.memo(uid: "a"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let saved = await store.edit(
+            uid: "a", content: "stuck", attaching: [file], using: client, baseURL: Stub.baseURL
+        )
+
+        #expect(!saved)
+        #expect(chunks.get() == 1, "the same chunk was resent into a gap that had not moved")
+        // And the edit is refused WHOLE: no patch, so nothing is half-applied and the retry the
+        // person makes carries the same edit key.
+        #expect(patches.get() == 0)
+        #expect(store.lastError != nil)
+    }
+
+    /// What makes the abort above safe, and the one property the reviewer's alternative was
+    /// protecting: a failed media edit leaves nothing attached, and the retry cannot apply twice.
+    @Test("an edit abandoned mid-upload attaches nothing, and its retry carries the same key")
+    func aRetryAfterAnAbortCannotDoubleApply() async throws {
+        let file = try stagedFile(bytes: 8)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let uploads = LockedValue<Int>(0)
+        let chunkFails = LockedValue<Bool>(true)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case startUploadOperation:
+                uploads.set(uploads.get() + 1)
+                return Stub.json(
+                    uploadOut(uid: "u\(uploads.get())", chunkSize: 64, received: 0),
+                    status: .created
+                )
+            case appendChunkOperation:
+                guard !chunkFails.get() else { return Stub.empty(.internalServerError) }
+                let data = try await Stub.bytes(body)
+                return Stub.json(
+                    uploadOut(uid: "u\(uploads.get())", chunkSize: 64, received: data.count)
+                )
+            case patchMemoOperation:
+                keys.set(keys.get() + [(try await Stub.body(body))["edit_key"] as? String ?? ""])
+                return Stub.json(Stub.memo(uid: "a", content: "with a photo"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let first = await store.edit(
+            uid: "a", content: "with a photo", attaching: [file], using: client,
+            baseURL: Stub.baseURL
+        )
+        #expect(!first)
+        #expect(keys.get().isEmpty, "an edit whose upload failed still patched the memo")
+
+        // The person taps Save again on the sheet that stayed open.
+        chunkFails.set(false)
+        let second = await store.edit(
+            uid: "a", content: "with a photo", attaching: [file], using: client,
+            baseURL: Stub.baseURL
+        )
+
+        #expect(second)
+        // Exactly one patch, and it carries the key the abandoned attempt would have used — so a
+        // third attempt after a lost response replays rather than attaching the file twice.
+        #expect(keys.get().count == 1)
+        #expect(!keys.get()[0].isEmpty)
+        #expect(uploads.get() == 2, "control: the retry really did upload the file again")
     }
 
     @Test("a server that names no chunk size gets one, not a loop that sends nothing")
