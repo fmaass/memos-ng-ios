@@ -226,30 +226,34 @@ struct MediaTileActionItem: View {
     /// a different menu.
     var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
 
-    var body: some View {
+    /// Everything a tap on this row does — the button's whole action, and the only thing it does.
+    ///
+    /// It is a method rather than three closures written into three branches of `body`, and the
+    /// reason is that a `Button`'s action is unreachable from a test: SwiftUI hands out no way to
+    /// invoke one, and the probe this bundle has reads accessibility LABELS, which are identical
+    /// whatever the control turns out to be. Written inline, the one thing that decides whether a
+    /// recipient is handed a file or a link — which rendition each row asks for — was asserted by
+    /// nothing at all, and the row could go back to being a `ShareLink` over `webURL` with every
+    /// test still green (MEMNG-207, review round 1).
+    func tapped() {
         switch action {
-        case .showMemo(let uid):
-            Button {
-                showMemo(uid)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
-        // Both of these are plain Buttons rather than `ShareLink`s, and for the same reason: a
-        // `ShareLink` hands over a value it is already holding, and neither of these files is on
-        // the phone until somebody has waited for it. A `ShareLink` is what this row used to be,
-        // which is exactly how the value it was holding came to be a URL (MEMNG-207).
-        case .share(let attachment):
-            Button {
-                fetch(attachment, .shared)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
-        case .saveOriginal(let attachment):
-            Button {
-                fetch(attachment, .original)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
+        case .showMemo(let uid): showMemo(uid)
+        // Neither of these is a `ShareLink`, and it is the same reason for both: a `ShareLink`
+        // hands over a value it is already holding, and neither of these files is on the phone
+        // until somebody has waited for it. A `ShareLink` is what the Share row used to be, which
+        // is exactly how the value it was holding came to be a URL.
+        case .share(let attachment): fetch(attachment, .shared)
+        case .saveOriginal(let attachment): fetch(attachment, .original)
+        }
+    }
+
+    /// One button, whatever the row is. There is no per-case branch here on purpose: a branch is
+    /// where a row that hands over a URL grew last time, and where the next one would.
+    var body: some View {
+        Button {
+            tapped()
+        } label: {
+            Label(action.title, systemImage: action.symbol)
         }
     }
 }

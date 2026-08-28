@@ -29,6 +29,15 @@ private func clip(_ uid: String = "v1") -> MemoAttachment {
     )
 }
 
+/// What the closures a menu row is handed were actually called with.
+///
+/// Not isolated to an actor and not locked: every call it records is made synchronously inside
+/// `tapped()`, on the test's own thread, before the next line of the test runs.
+private final class TapRecorder: @unchecked Sendable {
+    var fetched: [(uid: String, rendition: AttachmentRendition)] = []
+    var shown: [String] = []
+}
+
 /// Counts calls from a closure the test hands over.
 @MainActor
 private final class Calls {
@@ -268,6 +277,49 @@ struct MediaSaveFlowTests {
                 for: photo("a", original: URL(string: "https://memos.example.invalid/x/original"))
             ).map(\.title) == ["Share"]
         )
+    }
+
+    /// What a tap on each row actually asks for.
+    ///
+    /// `MediaTileMenu.actions` says what is OFFERED and `SessionStore.download` says what a
+    /// rendition costs on the wire; between them sits the row, and until this test nothing crossed
+    /// it. The rendition is the whole question — `.shared` is a file, and the thing this ticket
+    /// replaced was a row that handed over a link instead.
+    @Test("tapping Share asks for the shared file; tapping Save Original asks for the master")
+    func eachRowAsksForItsOwnFile() {
+        let video = clip("v1")
+        let recorder = TapRecorder()
+
+        for action in MediaTileMenu.actions(for: video) {
+            MediaTileActionItem(
+                action: action,
+                showMemo: { recorder.shown.append($0) },
+                fetch: { recorder.fetched.append(($0.uid, $1)) }
+            ).tapped()
+        }
+
+        let uids = recorder.fetched.map(\.uid)
+        let renditions = recorder.fetched.map(\.rendition)
+        // Two rows, in the order the menu shows them, each asking for its own file.
+        #expect(uids == ["v1", "v1"])
+        #expect(renditions == [.shared, .original])
+        #expect(recorder.shown.isEmpty)
+    }
+
+    /// The third row, because a routing rule needs a case per input and not only the happy one:
+    /// the row that navigates must not start a download.
+    @Test("tapping Show Memo goes to the memo and fetches nothing")
+    func theMemoRowFetchesNothing() {
+        let recorder = TapRecorder()
+
+        MediaTileActionItem(
+            action: .showMemo(uid: "m7"),
+            showMemo: { recorder.shown.append($0) },
+            fetch: { recorder.fetched.append(($0.uid, $1)) }
+        ).tapped()
+
+        #expect(recorder.shown == ["m7"])
+        #expect(recorder.fetched.isEmpty)
     }
 
     /// The other end of the same rule: what the activity sheet is actually handed.
