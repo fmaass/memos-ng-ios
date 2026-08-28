@@ -297,6 +297,61 @@ struct CameraCaptureTests {
         #expect(rig.capture.problem == nil)
     }
 
+    // MARK: - one answer per shutter press
+
+    /// Lets whatever a delegate hopped to the main actor actually run. Yields rather than sleeps:
+    /// the work is already enqueued here, so it needs a turn, not a delay.
+    static func settle() async {
+        for _ in 0..<10 { await Task.yield() }
+    }
+
+    /// The wedge this closes, and the reason it is worth a lock.
+    ///
+    /// A capture cut short before any photograph existed — the camera interrupted, the session torn
+    /// down mid-shot — is reported by `AVCapturePhotoOutput` through the END of the capture and
+    /// nothing else. With nothing routing that, the answer never comes: the screen stays
+    /// `.capturing` for the rest of the session, its shutter dead and its mode switch refusing to
+    /// run under a capture in flight. `aFailedStillReturnsTheShutter` above holds the other half —
+    /// that such an answer puts the camera back to `.ready` with the reason on it.
+    @Test("a capture cut short before any photograph answers as a failure")
+    func anAbortedCaptureIsAnswered() async {
+        let answers = Box<[Result<Data, CameraFailure>]>([])
+        let delegate = PhotoDelegate { answers.value.append($0) }
+
+        delegate.finishedCapture(error: CameraFailure("The session was interrupted."))
+        await Self.settle()
+
+        #expect(answers.value.count == 1, "the capture ended and nobody was ever told")
+        guard case .failure(let failure) = answers.value.first else {
+            Issue.record("an aborted capture did not answer with a failure")
+            return
+        }
+        #expect(failure.reason == "The session was interrupted.")
+    }
+
+    /// The trap on the other side of that fix. The end-of-capture callback fires for EVERY capture,
+    /// the successful ones included — so routing it without deduplicating answers twice for one
+    /// shutter press, and the second answer is a failure arriving on top of a photograph that
+    /// worked. Exactly one answer, and it is the photograph.
+    @Test("a successful capture answers once, though both callbacks fire")
+    func aSuccessfulCaptureAnswersOnce() async {
+        let answers = Box<[Result<Data, CameraFailure>]>([])
+        let delegate = PhotoDelegate { answers.value.append($0) }
+        let bytes = CapturedMediaTests.heif()
+
+        delegate.finishedProcessing(.success(bytes))
+        delegate.finishedCapture(error: nil)
+        delegate.finishedCapture(error: CameraFailure("and one that arrived even later"))
+        await Self.settle()
+
+        #expect(answers.value.count == 1, "one shutter press answered \(answers.value.count) times")
+        guard case .success(let data) = answers.value.first else {
+            Issue.record("a photograph that arrived was answered as a failure")
+            return
+        }
+        #expect(data == bytes)
+    }
+
     // MARK: - what the hardware is asked for
 
     @Test("the camera asks for HEVC, and for the microphone only when it is recording video")

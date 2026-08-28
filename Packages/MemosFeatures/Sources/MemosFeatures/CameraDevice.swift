@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 
 /// A failure the capture hardware reported, flattened to something that can cross a queue.
 ///
@@ -198,16 +199,66 @@ final class AVCameraDevice: CameraDeviceControlling {
     }
 }
 
-/// One still, delivered.
+/// One still, delivered — once, whichever way the capture ends.
 ///
 /// `nonisolated`: AVFoundation calls this back on a queue of its own choosing. The bytes are taken
 /// out of the `AVCapturePhoto` THERE — the photo object cannot cross to the main actor and its file
 /// representation can — and only the `Data` travels.
-private nonisolated final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+///
+/// A capture reports through TWO callbacks and the difference between them is the whole reason this
+/// class has a lock in it. The photograph arrives at `didFinishProcessingPhoto`; the END of the
+/// capture arrives at `didFinishCaptureFor`, for every capture, successful ones included. A capture
+/// cut short before any photograph existed — the camera interrupted, the session torn down mid-shot
+/// — reports through the second and NOTHING else, so a delegate that implements only the first
+/// leaves the screen waiting for an answer that is never coming: `.capturing` for the rest of the
+/// session, with a dead shutter and a mode switch that refuses to run under a capture in flight.
+///
+/// So both roads lead here and exactly one of them may answer. The claim is made SYNCHRONOUSLY,
+/// where the callback lands, rather than after the hop to the main actor: two hops have no
+/// guaranteed order between them, and claiming there would let the end of a successful capture
+/// report a failure for the photograph that had just succeeded.
+nonisolated final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
     private let deliver: @MainActor @Sendable (Result<Data, CameraFailure>) -> Void
+    private let oneAnswer = OSAllocatedUnfairLock(initialState: false)
 
     init(deliver: @escaping @MainActor @Sendable (Result<Data, CameraFailure>) -> Void) {
         self.deliver = deliver
+    }
+
+    /// The photo output answered: a photograph, or the reason there is not one.
+    ///
+    /// Separate from the callback because `AVCapturePhoto` cannot be built outside a camera, so
+    /// this is the seam a test can reach — the routing and the one-answer rule are here, and the
+    /// callback below is the adapter that extracts the bytes.
+    func finishedProcessing(_ result: Result<Data, CameraFailure>) {
+        hand(result)
+    }
+
+    /// The capture ENDED.
+    ///
+    /// On the ordinary path the photograph above has already answered and this is dropped. What it
+    /// catches is the capture that ended without one; a nil error here means the capture finished
+    /// and nobody said anything, which is the same wedge by another road.
+    ///
+    /// Separate from the callback for the same reason as above: `AVCaptureResolvedPhotoSettings`
+    /// has no initialiser, so the callback carrying one cannot be called from a test.
+    func finishedCapture(error: (any Error)?) {
+        if let error {
+            hand(.failure(CameraFailure(error)))
+        } else {
+            hand(.failure(CameraFailure("That photograph did not arrive.")))
+        }
+    }
+
+    private func hand(_ result: Result<Data, CameraFailure>) {
+        let isTheAnswer = oneAnswer.withLock { answered -> Bool in
+            guard !answered else { return false }
+            answered = true
+            return true
+        }
+        guard isTheAnswer else { return }
+        let deliver = self.deliver
+        Task { @MainActor in deliver(result) }
     }
 
     func photoOutput(
@@ -215,16 +266,23 @@ private nonisolated final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDe
         didFinishProcessingPhoto photo: AVCapturePhoto,
         error: (any Error)?
     ) {
-        let result: Result<Data, CameraFailure>
         if let error {
-            result = .failure(CameraFailure(error))
+            finishedProcessing(.failure(CameraFailure(error)))
         } else if let data = photo.fileDataRepresentation() {
-            result = .success(data)
+            finishedProcessing(.success(data))
         } else {
-            result = .failure(CameraFailure("The camera produced no file for that photo."))
+            finishedProcessing(
+                .failure(CameraFailure("The camera produced no file for that photo."))
+            )
         }
-        let deliver = self.deliver
-        Task { @MainActor in deliver(result) }
+    }
+
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+        error: (any Error)?
+    ) {
+        finishedCapture(error: error)
     }
 }
 
