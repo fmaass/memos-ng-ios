@@ -833,23 +833,3 @@ private actor RotatingSSETransport: SSEConnecting {
         )
     }
 }
-
-/// What a stubbed answer is, so a handler written as a `switch` can return one line per case.
-///
-/// The `Stub` helpers hand back a tuple, and a `switch` whose arms are tuples of an
-/// `HTTPResponse` and an optional body is unreadable. This is the same three answers with a name.
-enum HTTPResponseLike: Sendable {
-    case json(String)
-    case status(HTTPResponse.Status)
-    case detail(String, status: HTTPResponse.Status)
-    case validation(String)
-
-    var parts: (HTTPResponse, HTTPBody?) {
-        switch self {
-        case .json(let payload): Stub.json(payload)
-        case .status(let status): Stub.empty(status)
-        case .detail(let detail, let status): Stub.detail(detail, status: status)
-        case .validation(let message): Stub.validationError(message)
-        }
-    }
-}
