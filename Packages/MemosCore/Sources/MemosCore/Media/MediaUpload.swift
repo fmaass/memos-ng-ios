@@ -94,8 +94,22 @@ public enum MediaUpload {
                 // The contract's own answer to a gap, and the outbox's: ask the session where it
                 // stands and resend from there (`app/routers/uploads.py` — "Offset gap; re-sync
                 // via HEAD"). Same semantics as the background lane, over the generated client.
+                //
+                // It is asked, and today it cannot answer. The route is published with an
+                // `application/json` body it does not send — a HEAD carries a status and the
+                // `Upload-Offset` header and nothing else — so the generated client cannot read
+                // the answer back. That is measured rather than assumed: see
+                // `theOffsetRouteCannotBeReadAsPublished`, which fails on the real shape and
+                // succeeds on the same response with a body, naming the cause exactly.
+                //
+                // So a gap ends the upload instead, which is safe: no memo patch is sent, nothing
+                // is half-attached, and the retry the person makes carries the same edit key
+                // (`TimelineStore.edit`). Fixing the contract in memos-ng is what makes this
+                // branch resume on its own — and that test is what will say so when it does,
+                // rather than this comment quietly going stale.
                 resyncs += 1
-                let synced = try await self.offset(of: started.uploadUid, using: client)
+                guard let synced = try? await self.offset(of: started.uploadUid, using: client)
+                else { throw MediaUploadError.refused(.server(status: 409)) }
                 // Two ways this stops instead of spinning: a server that reports the very offset
                 // it just refused is not converging, and a run of gaps on a session nothing else
                 // is writing to means something is wrong that resending cannot fix.

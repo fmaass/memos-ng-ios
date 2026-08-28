@@ -15,11 +15,17 @@ private let uploadOffsetOperation = "upload_offset_api_uploads__upload_uid__head
 
 /// What the server answers a `HEAD /api/uploads/{uid}` with: a status, the offset in a HEADER, and
 /// NO body at all. Built by hand rather than through `Stub.json` because the shape is the point —
-/// the generated client has to read a header off a response that carries nothing else.
-private func offsetAnswer(_ offset: Int) -> (HTTPResponse, HTTPBody?) {
+/// the generated client is asked to read a header off a response that carries nothing else.
+///
+/// `body: true` is the same answer as the CONTRACT describes it, with the `application/json` the
+/// route is published as sending. The difference between the two is the whole of why the offset
+/// cannot be read today, and both are here so a test can say which of them it is talking about.
+private func offsetAnswer(_ offset: Int, body: Bool = false) -> (HTTPResponse, HTTPBody?) {
     var response = HTTPResponse(status: .ok)
     response.headerFields[HTTPField.Name("Upload-Offset")!] = String(offset)
-    return (response, nil)
+    guard body else { return (response, nil) }
+    response.headerFields[.contentType] = "application/json"
+    return (response, HTTPBody("{}"))
 }
 
 /// The server refusing a chunk that does not start where it holds: the 409 the contract answers an
@@ -343,17 +349,88 @@ struct MediaEditTests {
 
     // MARK: - the offset gap
 
-    /// The contract's answer to a gap: ask the session where it stands, resend from there. Same
-    /// semantics as the outbox's background lane, over the operation the schema publishes for it.
-    @Test("an offset gap is re-synced with the session and the upload carries on from there")
-    func offsetGapIsResynced() async throws {
+    /// WHY a gap cannot be resumed today, named exactly rather than guessed at.
+    ///
+    /// The contract publishes `HEAD /api/uploads/{uid}` with an `application/json` body — and a
+    /// HEAD sends a status, the `Upload-Offset` header and nothing else. The generated client is
+    /// built from that contract, so it looks for a body that never comes.
+    ///
+    /// The second half is what makes this a diagnosis instead of an observation: the SAME call,
+    /// against the SAME header, with the body the contract promises, reads the offset back
+    /// perfectly. So what defeats the re-sync is the missing body and not the route, the header or
+    /// the client — and the day memos-ng corrects the contract, this test is what will fail and
+    /// say the resume can be turned on.
+    @Test("the session's own offset cannot be read back through the generated client")
+    func theOffsetRouteCannotBeReadAsPublished() async throws {
+        let asItReallyAnswers = Stub.client { _, _, operation in
+            operation == uploadOffsetOperation ? offsetAnswer(4) : Stub.empty(.ok)
+        }
+        await #expect(throws: (any Error).self) {
+            try await MediaUpload.offset(of: "u1", using: asItReallyAnswers)
+        }
+
+        let asPublished = Stub.client { _, _, operation in
+            operation == uploadOffsetOperation ? offsetAnswer(4, body: true) : Stub.empty(.ok)
+        }
+        let read = try await MediaUpload.offset(of: "u1", using: asPublished)
+        #expect(read == 4, "the offset is unreadable even WITH the body the contract promises")
+    }
+
+    /// So the gap ends the edit — and ends it whole, which is what makes it safe.
+    @Test("an offset gap the session cannot answer abandons the edit without patching the memo")
+    func offsetGapAbortsWhenTheSessionCannotBeRead() async throws {
         let file = try stagedFile(bytes: 10)
         defer { try? FileManager.default.removeItem(at: file.url) }
 
         let store = TimelineStore()
         let offsets = LockedValue<[Int]>([])
         let heads = LockedValue<Int>(0)
-        let received = LockedValue<Int>(4)
+        let patches = LockedValue<Int>(0)
+        let client = Stub.client { request, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case uploadOffsetOperation:
+                heads.set(heads.get() + 1)
+                // Exactly what the server sends, which the client cannot read — see above.
+                return offsetAnswer(4)
+            case appendChunkOperation:
+                offsets.set(offsets.get() + [sentOffset(request)])
+                return offsetGap()
+            case patchMemoOperation:
+                patches.set(patches.get() + 1)
+                return Stub.json(Stub.memo(uid: "a"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let saved = await store.edit(
+            uid: "a", content: "gapped", attaching: [file], using: client, baseURL: Stub.baseURL
+        )
+
+        #expect(!saved)
+        // The session IS asked where it stands: the contract's answer is attempted, not skipped.
+        #expect(heads.get() == 1, "the gap was abandoned without asking the session anything")
+        #expect(offsets.get() == [0], "the same chunk was resent into a gap nobody had resolved")
+        // Whole, not half: no patch, so nothing is attached and the retry the person makes
+        // carries the same edit key (`aRetryAfterAnAbortCannotDoubleApply`).
+        #expect(patches.get() == 0)
+        #expect(store.lastError != nil)
+    }
+
+    /// The resume itself, against a session that CAN answer — the shape the contract describes and
+    /// the one this lane runs on the moment memos-ng sends it. Without this the resume would be
+    /// code nothing exercises.
+    @Test("a session that answers is re-synced, and the upload carries on from where it stands")
+    func offsetGapIsResyncedWhenTheSessionAnswers() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let offsets = LockedValue<[Int]>([])
+        let heads = LockedValue<Int>(0)
         let client = Stub.client { request, body, operation in
             switch operation {
             case startUploadOperation:
@@ -361,16 +438,13 @@ struct MediaEditTests {
             case uploadOffsetOperation:
                 heads.set(heads.get() + 1)
                 // The server holds the first four bytes after all — the state the gap was about.
-                return offsetAnswer(4)
+                return offsetAnswer(4, body: true)
             case appendChunkOperation:
                 let offset = sentOffset(request)
                 offsets.set(offsets.get() + [offset])
-                guard offset != 0 else {
-                    return offsetGap()
-                }
+                guard offset != 0 else { return offsetGap() }
                 let data = try await Stub.bytes(body)
-                received.set(offset + data.count)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: received.get()))
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: offset + data.count))
             case patchMemoOperation:
                 return Stub.json(Stub.memo(uid: "a"))
             default:
@@ -383,7 +457,7 @@ struct MediaEditTests {
             uid: "a", content: "gapped", attaching: [file], using: client, baseURL: Stub.baseURL
         )
 
-        #expect(saved, "an offset gap abandoned an edit the contract says to resume")
+        #expect(saved, "an offset gap abandoned an edit the session had answered")
         #expect(heads.get() == 1, "the session was never asked where it stands")
         // 0 was refused; the re-sync said 4; the upload carried on from there to the end.
         #expect(offsets.get() == [0, 4, 8])
@@ -402,8 +476,10 @@ struct MediaEditTests {
             case startUploadOperation:
                 return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
             case uploadOffsetOperation:
-                // The offset it just refused — a server that is not converging.
-                return offsetAnswer(0)
+                // The offset it just refused — a server that is not converging. Answered in the
+                // shape the contract describes, so the guard being tested is the one about
+                // PROGRESS rather than the one about a session that cannot be read.
+                return offsetAnswer(0, body: true)
             case appendChunkOperation:
                 chunks.set(chunks.get() + 1)
                 return offsetGap()
