@@ -76,6 +76,53 @@ enum TagChipsPresentation {
     }
 }
 
+/// Which of the sheet's two rows of tag chips this is.
+///
+/// They are twins by design and they land in the SAME place. The shortcut row sits under the
+/// collapsed Filters row, where one tap runs the search and leaves for what it found (MEMNG-177);
+/// the filter panel's own row is the first thing drawn when that row is opened, where a tap is one
+/// of several choices being composed. The sheet swaps one for the other the instant the filters
+/// open (`SearchSheetTagShortcut`), so only ever one of them is on screen.
+///
+/// Drawn identically, that swap is INVISIBLE — same heading, same chips, same order, in the same
+/// position — so the row under "Filters" looks untouched and the controls that arrive under it read
+/// as filter content opening below the tags rather than under the Filters row. That is what
+/// MEMNG-214 reported. The placement was already right; what was missing was anything on screen
+/// saying which row is which. So that is a value, decided once here, rather than a heading typed
+/// into each of the two views.
+enum SearchTagRow: CaseIterable, Sendable {
+    /// Under the collapsed Filters row. A tap is a whole gesture that ends on the results.
+    case shortcut
+    /// Inside the panel the Filters row opens. A tap is a selection, and nothing leaves.
+    case filter
+}
+
+/// What a tag row is headed, and whether it is drawn on the filter panel's own surface.
+struct SearchTagRowSignature: Equatable, Sendable {
+    /// The words over the chips. Different for the two rows, because the heading is the one part
+    /// of a row of chips that can say what the chips are FOR.
+    let heading: String
+    /// Whether the row belongs to the card the Filters row opens into. The card is the other half
+    /// of the answer: a bare stack under the disclosure is simply more sheet, and more sheet where
+    /// a tag row already was is exactly the swap nobody can see. A surface of its own makes the
+    /// panel visibly hang from the row that opened it.
+    let insidePanel: Bool
+}
+
+/// How each of the two rows says which one it is.
+enum SearchTagRowStyle {
+    static func signature(for row: SearchTagRow) -> SearchTagRowSignature {
+        switch row {
+        // "Tags" is the way IN: these are the account's tags, and a tap on one goes and finds
+        // what is filed under it.
+        case .shortcut: SearchTagRowSignature(heading: "Tags", insidePanel: false)
+        // Named for what a tap DOES here instead, which is the whole difference between the two
+        // rows — and the words that stop the panel opening under a heading that has not changed.
+        case .filter: SearchTagRowSignature(heading: "Filter by tag", insidePanel: true)
+        }
+    }
+}
+
 /// The account's most-used tags, as the search sheet's other way in — a word rather than a date.
 ///
 /// The store is owned HERE, like the heatmap's: SwiftUI builds this view fresh for every
@@ -142,7 +189,7 @@ struct TagChipRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
             if shows {
-                Text("Tags")
+                Text(SearchTagRowStyle.signature(for: .shortcut).heading)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 // Scrolled rather than wrapped. Chips grow with the text size, and a row that
