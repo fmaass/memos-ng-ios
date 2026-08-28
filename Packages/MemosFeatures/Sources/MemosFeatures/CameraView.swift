@@ -49,7 +49,9 @@ struct CameraView: View {
 
     private var top: some View {
         HStack {
-            Button { dismiss() } label: {
+            Button {
+                dismiss()
+            } label: {
                 Image(systemName: "xmark")
                     .font(.title3.weight(.semibold))
                     .frame(width: 36, height: 36)

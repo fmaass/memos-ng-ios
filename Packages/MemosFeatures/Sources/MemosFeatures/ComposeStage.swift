@@ -25,6 +25,12 @@ struct ComposeStage: Equatable {
         case presenting
     }
 
+    /// Where media is being attached from.
+    enum Source: Equatable {
+        case photos
+        case camera
+    }
+
     /// Whether the sheet wants the editor focused — the INTENT, which is not the same thing as
     /// the keyboard being on screen: focus can be lost while the keyboard is still animating
     /// away, and a picker gated on intent alone would present into exactly that window (review
@@ -35,16 +41,10 @@ struct ComposeStage: Equatable {
     private(set) var keyboardVisible = false
     /// The picker's phase. Read through `pickingPhotos` by the presentation binding.
     private(set) var phase: PickerPhase = .idle
-    /// Which of the two ways in the phase above belongs to. They cannot both be up — one sheet,
-    /// one presentation — and they share the whole hand-off, because the camera arrives over the
-    /// same sheet whose height is still following the keyboard down.
+    /// Which source the phase above belongs to. They cannot both be up — one sheet, one
+    /// presentation — and they share the whole hand-off, because the camera arrives over the same
+    /// sheet whose height is still following the keyboard down.
     private(set) var presented: Source = .photos
-
-    /// Where media is being attached from.
-    enum Source: Equatable {
-        case photos
-        case camera
-    }
 
     /// Whether the photo picker should be on screen.
     var pickingPhotos: Bool { phase == .presenting && presented == .photos }
