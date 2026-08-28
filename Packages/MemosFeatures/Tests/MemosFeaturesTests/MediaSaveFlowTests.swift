@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import SwiftUI
 import Testing
 
 @testable import MemosFeatures
@@ -151,6 +152,56 @@ struct MediaSaveFlowTests {
                 for: photo("a", original: URL(string: "https://memos.example.invalid/x/original"))
             ).count == 2
         )
+    }
+
+    /// The gap this closes: the library's document branch drew a tile and offered nothing at all,
+    /// so the one kind of file you would most want to KEEP — the PDF, the voice memo — was the one
+    /// with no way to save it. "Cannot be opened" was being read as "cannot be acted on".
+    @Test("a file that cannot be opened is still offered everything that can be done with it")
+    func documentsAreOfferedTheSameActions() {
+        let pdf = document()
+
+        #expect(
+            MediaTileMenu.actions(for: pdf).map(\.title) == ["Show Memo", "Share", "Save Original"]
+        )
+        // Both halves of the invariant, together: this file has no page in the viewer AND has
+        // things that can be done with it. Either one alone is what the library got wrong.
+        #expect(MediaLibraryPresentation.tileKind(for: pdf) == .document)
+        #expect(!MediaLibraryPresentation.isOpenable(.document))
+    }
+
+    /// A context menu is a gesture nobody is told about. Every other tile can afford one, because
+    /// its actions are reachable another way — the tap opens the file and the viewer offers them
+    /// again. This tile has no tap, so the long press would be the ONLY way, which is why the
+    /// actions are also on the tile where they can be seen.
+    @Test("a document tile really shows a control for its actions, and an empty one shows none")
+    func theDocumentTileShowsItsActions() {
+        let offered = ScreenProbe.labels(
+            of: DocumentTile(
+                mime: "application/pdf", actions: MediaTileMenu.actions(for: document())
+            )
+        )
+        let bare = ScreenProbe.labels(of: DocumentTile(mime: "application/pdf"))
+
+        // The positive control first: the probe can see this tile at all.
+        #expect(offered.contains("File"), "the probe found nothing of the tile: \(offered)")
+        #expect(offered.contains("File actions"), "a document tile offers nothing: \(offered)")
+        // A tile with nothing to offer draws no control — a button that opens an empty menu is
+        // worse than none.
+        #expect(bare.contains("File"))
+        #expect(!bare.contains("File actions"))
+    }
+
+    private func document() -> MemoAttachment {
+        var pdf = MemoAttachment(
+            uid: "d1",
+            mime: "application/pdf",
+            status: .ready,
+            webURL: URL(string: "https://memos.example.invalid/api/attachments/d1/web"),
+            downloadURL: URL(string: "https://memos.example.invalid/api/attachments/d1/original")
+        )
+        pdf.memoUID = "m7"
+        return pdf
     }
 
     @Test("the action carries the whole file, because a download needs more than a URL")

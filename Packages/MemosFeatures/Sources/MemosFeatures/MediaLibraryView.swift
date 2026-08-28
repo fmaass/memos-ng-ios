@@ -250,20 +250,43 @@ struct MediaLibraryView: View {
             .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: kind))
             .accessibilityHint(kind == .video ? "Plays full screen" : "Opens full screen")
             .contextMenu {
-                ForEach(MediaTileMenu.actions(for: attachment)) { action in
-                    MediaTileActionItem(
-                        action: action,
-                        showMemo: { jump?.request($0) },
-                        saveOriginal: { file in
-                            Task { await save(file) }
-                        }
-                    )
-                }
+                menu(attachment)
             } preview: {
                 tilePreview(attachment)
             }
         } else {
-            DocumentTile(mime: attachment.mime)
+            // The SAME menu, and that is the whole of this branch's change: a PDF or a voice memo
+            // has a memo it hangs on and an original to keep, exactly as a photograph does. What it
+            // does not have is a tap — the viewer has no page for it — and "cannot be opened" was
+            // quietly being read as "cannot be acted on", which left the one kind of file you would
+            // most want to save with no way to save it.
+            //
+            // No preview: a context-menu preview is the picture lifted off the grid, and there is
+            // no picture here to lift.
+            DocumentTile(
+                mime: attachment.mime,
+                actions: MediaTileMenu.actions(for: attachment),
+                showMemo: { jump?.request($0) },
+                saveOriginal: { file in
+                    Task { await save(file) }
+                }
+            )
+            .contextMenu { menu(attachment) }
+        }
+    }
+
+    /// What a long press offers, built once for both kinds of tile. Written into each branch
+    /// separately it is one edit away from the two offering different things about one file.
+    @ViewBuilder
+    private func menu(_ attachment: MemoAttachment) -> some View {
+        ForEach(MediaTileMenu.actions(for: attachment)) { action in
+            MediaTileActionItem(
+                action: action,
+                showMemo: { jump?.request($0) },
+                saveOriginal: { file in
+                    Task { await save(file) }
+                }
+            )
         }
     }
 
@@ -315,8 +338,19 @@ struct MediaLibraryView: View {
 /// It gets a tile rather than being hidden: the library is what the household has posted, and a
 /// grid that silently drops the PDF somebody attached is a grid that lies about what is there.
 /// Nothing about it is a failure, so nothing about it wears the failure glyph.
+///
+/// It is the ONE tile whose actions need a button. Everywhere else the long press is a shortcut —
+/// a photograph opens on a tap and the viewer over it carries the same actions again — but this
+/// tile has no tap and no viewer, so a context menu would be the only way to reach the memo it
+/// hangs on or the file itself, and a gesture nobody is told about is not a way to reach anything.
+/// So the actions are on the tile, visibly, and the long press keeps offering them as well.
 struct DocumentTile: View {
     let mime: String
+    /// What can be done with this file. Empty in a preview or a fitting test, and then no button
+    /// is drawn at all — a control that opens an empty menu is worse than no control.
+    var actions: [MediaTileAction] = []
+    var showMemo: (String) -> Void = { _ in }
+    var saveOriginal: (MemoAttachment) -> Void = { _ in }
 
     var body: some View {
         Color.clear
@@ -328,8 +362,31 @@ struct DocumentTile: View {
                         .font(.title2)
                         .foregroundStyle(.secondary)
                 }
+                .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: .document))
             }
+            // An overlay, so the button cannot change the size of the tile it sits on — the grid's
+            // rows are solved from the file's own proportions and nothing drawn on top may move
+            // them.
+            .overlay(alignment: .topTrailing) { menuButton }
             .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
-            .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: .document))
+    }
+
+    @ViewBuilder
+    private var menuButton: some View {
+        if !actions.isEmpty {
+            Menu {
+                ForEach(actions) { action in
+                    MediaTileActionItem(
+                        action: action, showMemo: showMemo, saveOriginal: saveOriginal
+                    )
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(DesignTokens.Space.snug)
+            }
+            .accessibilityLabel("File actions")
+        }
     }
 }
