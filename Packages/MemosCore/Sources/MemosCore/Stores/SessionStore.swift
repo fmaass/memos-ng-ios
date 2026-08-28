@@ -129,6 +129,9 @@ public final class SessionStore {
     /// arrive after someone has signed in as B, and anything that assigns it without checking
     /// would be telling B a fact about A.
     private var sessionGeneration = 0
+    /// The rotation in flight, if there is one, so a second `renewDeviceToken` joins it instead of
+    /// starting a sibling that would destroy the token this one is still reasoning about.
+    private var renewalInFlight: Task<DeviceTokenRenewal, Never>?
     private var client: (any APIProtocol)?
     /// The credential the client presents — the SAME object its middleware reads, not a copy.
     ///
@@ -908,8 +911,35 @@ public final class SessionStore {
     /// a credential slot somebody else is now using would sign the current account out at its next
     /// request. The successor is dropped instead — its predecessor is gone either way, and the
     /// session it belonged to is over.
+    /// One rotation at a time, and a second caller is told about that one rather than starting a
+    /// sibling.
+    ///
+    /// This is a correctness property, not a courtesy. A rotation is not idempotent: the second
+    /// one destroys the token the first is still holding, so the first's ambiguity probe — which
+    /// asks with exactly that token — is refused, concludes its successor was lost, and wipes the
+    /// credential the second is about to install. A successful renewal would end as a sign-out.
+    ///
+    /// Serialized HERE rather than by whoever calls it. The Settings row disables its button while
+    /// one is in flight, but a store may not rest a correctness property on a screen's discipline:
+    /// a second window, a background refresh, or any later caller would not be bound by it, and the
+    /// race would be back with nothing to show it had returned.
     @discardableResult
     public func renewDeviceToken() async -> DeviceTokenRenewal {
+        if let renewalInFlight { return await renewalInFlight.value }
+        let rotation = Task { [self] in
+            let outcome = await performRenewal()
+            // Cleared HERE rather than by the caller that started it. That caller can be resumed
+            // long after a later one has legitimately begun the NEXT rotation, and clearing it
+            // then would drop that rotation's handle and let a third call start a sibling — the
+            // very thing this exists to prevent.
+            self.renewalInFlight = nil
+            return outcome
+        }
+        renewalInFlight = rotation
+        return await rotation.value
+    }
+
+    private func performRenewal() async -> DeviceTokenRenewal {
         guard let client, let credential else { return .failed }
         let generation = sessionGeneration
         let successor: String
@@ -1142,10 +1172,15 @@ public final class SessionStore {
         guard let server = configuration?.baseURL, let credential else {
             throw OriginalMediaError.notSignedIn
         }
-        // This is the ONE request that does not go through the middleware, so the epoch fence it
-        // applies has to be applied by hand here. A download is also the longest-lived request the
-        // app makes, which makes it the likeliest of all to be answered after a renewal replaced
-        // the token it presented.
+        // The epoch fence the middleware applies has to be applied by hand here, because this
+        // request does not go through it. It is not the only lane that bypasses the middleware —
+        // the outbox builds its own requests (`DeviceOutboxCredentials`) and so does the live
+        // channel (`MediaEventClient.device`) — but it is the only one that needs a fence: those
+        // two re-read the credential from the vault per drain and per connection, so a rotation
+        // is simply what their next attempt picks up, and neither of them ends a session on a 401.
+        // This one holds its token across the request AND reports to `handle`, and a download is
+        // the longest-lived request the app makes, which makes it the likeliest of all to be
+        // answered after a renewal replaced the token it presented.
         let presented = credential.presented()
         guard !presented.token.isEmpty else { throw OriginalMediaError.notSignedIn }
         let generation = sessionGeneration
@@ -1175,13 +1210,18 @@ public final class SessionStore {
                 MemosLog.session.info("a download failed for a session that has ended")
                 throw OriginalMediaError.superseded
             }
-            if error == .unauthorized, credential.isCurrent(presented.epoch) {
-                await handle(.unauthorized)
-            } else if error == .unauthorized {
+            if error == .unauthorized, !credential.isCurrent(presented.epoch) {
                 MemosLog.session.info(
                     "a download was refused for a credential this device replaced; not a sign-out"
                 )
+                // Reported as superseded rather than rethrown as a refusal. Ending the session is
+                // only half of what `.refused(.unauthorized)` does — it is also the shape every
+                // screen turns into "your access was rejected, sign in again", which on a live
+                // session that has just renewed is a false instruction that costs someone a
+                // working sign-in.
+                throw OriginalMediaError.superseded
             }
+            if error == .unauthorized { await handle(.unauthorized) }
             throw OriginalMediaError.refused(error)
         }
     }

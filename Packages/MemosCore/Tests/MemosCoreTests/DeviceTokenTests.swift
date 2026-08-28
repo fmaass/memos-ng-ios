@@ -2,6 +2,7 @@ import Foundation
 import HTTPTypes
 import MemosAPI
 @testable import MemosCore
+import MemosOutbox
 import OpenAPIRuntime
 import Testing
 
@@ -568,6 +569,165 @@ struct DeviceTokenTests {
         #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_first")
     }
 
+    // MARK: - two renewals at once
+
+    /// A rotation is not idempotent, and nothing outside this store serializes one: the Settings
+    /// row disables its button, but a store may not lean on a screen's own discipline for a
+    /// correctness property, and a background refresh or a second window would not be bound by it
+    /// at all.
+    ///
+    /// Two rotations in flight is not merely wasteful. The second destroys the token the first is
+    /// still holding, so the first's ambiguity probe — which asks with that token — is refused,
+    /// concludes the successor is lost, and wipes the credential the second is about to install.
+    /// A perfectly successful renewal ends as a sign-out. The fix is that the case cannot arise:
+    /// there is one rotation, and the second caller is told about that one.
+    @Test("two renewals at once are one rotation, and both callers get its answer")
+    func concurrentRenewalsAreOneRotation() async throws {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let release = Box(false)
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: return .json(Stub.user)
+            case tokenRenewOperation:
+                while !release.value { await Task.yield() }
+                return .json(Stub.exchange(token: "memos_pat_next"))
+            default: return .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+
+        let first = Task { await store.renewDeviceToken() }
+        await onTheWire(tokenRenewOperation, seen)
+        let second = Task { await store.renewDeviceToken() }
+        // Let the second call get as far as it is ever going to get while the first is parked.
+        for _ in 0..<500 { await Task.yield() }
+        release.value = true
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+
+        let rotations = seen.get().filter { $0.operation == tokenRenewOperation }.count
+        #expect(rotations == 1, "the second call started a sibling rotation")
+        #expect(firstOutcome == .renewed)
+        #expect(secondOutcome == firstOutcome, "the two callers disagreed about one rotation")
+        #expect(store.state.user != nil)
+        #expect(credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_next")
+    }
+
+    /// And a renewal after that one has finished is a new rotation, so serializing them is a queue
+    /// rather than a latch that fires once.
+    @Test("a renewal after the first has finished rotates again")
+    func aLaterRenewalRotatesAgain() async {
+        let seen = LockedValue<[SeenRequest]>([])
+        let store = await signedIn(credentials: InMemoryCredentials(), seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .json(Stub.exchange(token: "memos_pat_next"))
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+
+        _ = await store.renewDeviceToken()
+        _ = await store.renewDeviceToken()
+
+        #expect(seen.get().filter { $0.operation == tokenRenewOperation }.count == 2)
+    }
+
+    // MARK: - the lanes that do not go through the middleware
+
+    /// The download is refused because it presented the token a renewal replaced — which the epoch
+    /// fence already stops from ending the session. What it must ALSO not do is tell the person
+    /// their access was rejected: the session is alive, the credential is good, and "sign in again"
+    /// is a false instruction that costs them a working sign-in.
+    @Test("a download refused for a replaced credential says so, and is not a rejection")
+    func supersededDownloadIsNotARejection() async {
+        let credentials = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let session = Box<SessionStore?>(nil)
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .json(Stub.exchange(token: "memos_pat_next"))
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+        session.value = store
+        // The renewal lands while the download is on the wire, which is the whole scenario: the
+        // request left with the predecessor and comes back refused.
+        let transport = RotatingDownloads(status: 401) {
+            if let store = session.value { _ = await store.renewDeviceToken() }
+        }
+
+        await #expect(throws: OriginalMediaError.superseded) {
+            try await store.downloadOriginal(
+                MemoAttachment(
+                    uid: "a1",
+                    mime: "image/jpeg",
+                    status: .ready,
+                    downloadURL: URL(string: "https://memos.example.invalid/x/original")!
+                ),
+                transport: transport
+            )
+        }
+
+        #expect(store.state.user != nil, "a replaced credential is not a rejected one")
+    }
+
+    /// The outbox reaches the server with its own requests, not through the generated client, so
+    /// the middleware's fence never sees them. It does not need to: the credential is read from
+    /// the vault once per drain and never written into a queued job, so the rotation a renewal
+    /// commits is simply what the next attempt picks up. Driven through the REAL renewal here,
+    /// because that is the write whose effect is being claimed.
+    @Test("a queued outbox attempt after a renewal presents the successor")
+    func outboxDrainPresentsTheSuccessor() async throws {
+        let vault = InMemoryCredentials()
+        let seen = LockedValue<[SeenRequest]>([])
+        let store = await signedIn(credentials: vault, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .json(Stub.exchange(token: "memos_pat_next"))
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+        let outbox = DeviceOutboxCredentials(credentials: vault, owner: { "fabian" })
+        let before = await outbox.currentCredentials()
+        #expect(before?.token == "memos_pat_first", "the premise: it was holding the old one")
+
+        let outcome = await store.renewDeviceToken()
+        #expect(outcome == .renewed)
+
+        let after = await outbox.currentCredentials()
+        #expect(after?.token == "memos_pat_next")
+    }
+
+    /// The live channel is the other one. It builds its own request per CONNECTION and reads the
+    /// credential fresh each time, so a reconnect after a rotation carries the successor. Proven
+    /// across two connections with the rotation between them — a channel that captured its
+    /// credential once would present the same token twice and this would not move.
+    @Test("an SSE reconnect after a rotation presents the successor")
+    func sseReconnectPresentsTheSuccessor() async throws {
+        let vault = InMemoryCredentials()
+        try vault.set("memos_pat_first", for: SessionStore.tokenAccount)
+        try vault.set("https://memos.example.invalid", for: SessionStore.serverAccount)
+        // The write a renewal commits, made directly so this test is about the LANE rather than
+        // about the renewal (which `outboxDrainPresentsTheSuccessor` drives for real).
+        let transport = RotatingSSETransport {
+            try? vault.set("memos_pat_next", for: SessionStore.tokenAccount)
+        }
+        let client = MediaEventClient.device(
+            credentials: vault,
+            identity: MediaIdentity(),
+            transport: transport,
+            sleeper: RecordingSleeper(budget: 2)
+        )
+
+        _ = await client.collect()
+
+        let presented = await transport.authorizations
+        #expect(presented.count >= 2, "the channel did not reconnect, so nothing was proven")
+        #expect(presented.first == "Bearer memos_pat_first")
+        #expect(presented.last == "Bearer memos_pat_next")
+    }
+
     // MARK: - the row's lifetime
 
     @Test("signing out forgets the row along with the credential it described")
@@ -631,6 +791,46 @@ struct DeviceTokenNameTests {
         let fits = String(repeating: flag, count: 127) + "n"
         #expect(fits.unicodeScalars.count == 255)
         #expect(DeviceTokenName.sanitized(fits) != nil)
+    }
+}
+
+/// A download that does something to the session BEFORE it answers — here, renewing it, so the
+/// reply lands on a credential the request did not present.
+private struct RotatingDownloads: MediaDownloadTransport {
+    let status: Int
+    let rotate: @Sendable () async -> Void
+
+    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        await rotate()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try Data("original".utf8).write(to: url)
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://example.invalid")!,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (url, response)
+    }
+}
+
+/// A live channel that closes every connection at once and rotates the stored credential after the
+/// FIRST one, so what the reconnect presents is the question being asked.
+private actor RotatingSSETransport: SSEConnecting {
+    private(set) var authorizations: [String?] = []
+    private let rotate: @Sendable () -> Void
+
+    init(rotate: @escaping @Sendable () -> Void) {
+        self.rotate = rotate
+    }
+
+    func connect(_ request: URLRequest) async throws -> SSEConnection {
+        authorizations.append(request.value(forHTTPHeaderField: "Authorization"))
+        if authorizations.count == 1 { rotate() }
+        return SSEConnection(
+            statusCode: 200,
+            body: AsyncThrowingStream { $0.finish() }
+        )
     }
 }
 

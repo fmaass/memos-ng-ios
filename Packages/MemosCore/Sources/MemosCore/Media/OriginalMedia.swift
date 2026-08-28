@@ -35,8 +35,11 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
     case refused(APIError)
     /// It arrived and could not be kept.
     case notStored(String)
-    /// The session that asked for it ended while it was on its way, so the file was thrown away.
-    /// Not a failure of the download — an answer to a question nobody is asking any more.
+    /// The sign-in that asked for it moved on while it was on its way. Two ways that happens: the
+    /// session ended, so the file was thrown away; or a renewal replaced the credential the request
+    /// presented, so the refusal that came back is about a token this device no longer holds.
+    /// Neither is a failure of the download and neither is a rejection of the credential in hand —
+    /// it is an answer to a question nobody is asking any more.
     case superseded
 
     public var errorDescription: String? {
@@ -47,7 +50,7 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
             "This file is hosted somewhere other than the server you are signed in to."
         case .refused(let error): error.errorDescription
         case .notStored(let detail): "The download could not be saved: \(detail)"
-        case .superseded: "The download was cancelled because the account changed."
+        case .superseded: "The download was cancelled because this device's sign-in changed."
         }
     }
 }
