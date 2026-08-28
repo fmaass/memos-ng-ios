@@ -55,6 +55,21 @@ enum Stub {
         )
     }
 
+    /// The session's own client, which reads a credential that can MOVE underneath it. Overloaded
+    /// on the same label so that every `makeClient: { _, token in Stub.client(token: token, …) }`
+    /// in these suites keeps building the client the app actually builds — including the epoch
+    /// fence, which a token closure has no way to carry.
+    static func client(
+        token: PresentedCredential,
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        APIClientFactory.make(
+            configuration: ServerConfiguration(baseURL: baseURL),
+            credential: token,
+            transport: StubTransport(handler: handler)
+        )
+    }
+
     static let user = """
         {"subject":"fabian","display_name":"Fabian","email":"f@example.invalid",\
         "role":"admin","auth_kind":"oidc"}
@@ -138,6 +153,44 @@ enum Stub {
     /// A 400 from the exchange, with one of the server's four stable detail codes.
     static func exchangeFailure(_ detail: String) -> (HTTPResponse, HTTPBody?) {
         json(#"{"detail":"\#(detail)"}"#, status: .badRequest)
+    }
+
+    /// A refusal in FastAPI's own shape — `{"detail": "<code>"}` — at whatever status sent it.
+    /// The renewal's `token_not_renewable` arrives this way, and it is a different answer from
+    /// every other 400, so a test has to be able to send exactly it.
+    static func detail(
+        _ detail: String,
+        status: HTTPResponse.Status
+    ) -> (HTTPResponse, HTTPBody?) {
+        json(#"{"detail":"\#(detail)"}"#, status: status)
+    }
+
+    /// FastAPI's 422, in the shape `HTTPValidationError` declares — a LIST under `detail`, which
+    /// is what makes it a different answer from every other refusal the app reads.
+    static func validationError(_ message: String) -> (HTTPResponse, HTTPBody?) {
+        json(
+            #"{"detail":[{"loc":[],"msg":"\#(message)","type":"value_error"}]}"#,
+            status: .unprocessableContent
+        )
+    }
+
+    /// What `GET` and `PATCH /api/auth/native/token` answer: the presenting token's own row.
+    ///
+    /// There is no `id` in it, deliberately — the contract withholds one because a bearer has no
+    /// sibling to act on. Both nullable fields are written out as JSON `null` rather than omitted,
+    /// which is what the server sends and what the generated decoder has to survive.
+    static func nativeToken(
+        name: String,
+        createdAt: String = "2026-08-01T09:00:00Z",
+        lastUsed: String? = "2026-08-27T09:00:00Z",
+        expiresAt: String? = "2027-08-01T09:00:00Z"
+    ) -> String {
+        let used = lastUsed.map { "\"\($0)\"" } ?? "null"
+        let expires = expiresAt.map { "\"\($0)\"" } ?? "null"
+        return """
+            {"name":"\(jsonEscaped(name))","created_at":"\(createdAt)",\
+            "last_used":\(used),"expires_at":\(expires)}
+            """
     }
 
     /// The JSON body a store actually sent, so a test asserts the request rather than trusting it.

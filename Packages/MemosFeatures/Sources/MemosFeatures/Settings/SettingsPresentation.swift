@@ -140,9 +140,14 @@ enum MediaCacheClearing {
 /// The Settings screen's sections, in the order they are read.
 ///
 /// An explicit list rather than whatever the view body happens to contain, so that "these seven
-/// and no others" is a thing a test can hold. Tokens and notifications are coming and are NOT here:
-/// a section rendered as a disabled row or a "coming soon" line is a promise the app has not kept,
-/// and it costs a reader a tap to find that out. They arrive when they work.
+/// and no others" is a thing a test can hold. Notifications are coming and are NOT here: a section
+/// rendered as a disabled row or a "coming soon" line is a promise the app has not kept, and it
+/// costs a reader a tap to find that out. They arrive when they work.
+///
+/// This device's token is not a section either, and that is a decision rather than the same rule:
+/// it works (`DeviceTokenSection`), and it belongs to the account already named at the top of the
+/// screen rather than beside Appearance and Storage. A device may read, rename and renew ITSELF
+/// and nothing else, so there is no token LIST here to be a section of.
 enum SettingsScreen {
     enum Section: String, CaseIterable, Equatable {
         case account

@@ -40,9 +40,14 @@ struct SettingsScreenTests {
         #expect(SettingsScreen.sections.dropLast().allSatisfy { $0.title != nil })
     }
 
-    /// Tokens and notifications are coming and are deliberately absent. A section rendered as a
-    /// disabled row or a "coming soon" line is a promise the app has not kept, and it costs a
-    /// reader a tap to find that out — so this fails the moment one is stubbed in.
+    /// Notifications are coming and are deliberately absent. A section rendered as a disabled row
+    /// or a "coming soon" line is a promise the app has not kept, and it costs a reader a tap to
+    /// find that out — so this fails the moment one is stubbed in.
+    ///
+    /// "Tokens" stays on this list now that a device CAN read and rename its own credential: the
+    /// row for that sits inside Account (`DeviceTokenSection`), because a bearer manages itself and
+    /// nothing else, and a section under that heading would promise the token LIST this app has no
+    /// route to.
     @Test("nothing is stubbed in ahead of working")
     func noStubbedSections() {
         let titles = SettingsScreen.sections.compactMap { $0.title?.lowercased() }

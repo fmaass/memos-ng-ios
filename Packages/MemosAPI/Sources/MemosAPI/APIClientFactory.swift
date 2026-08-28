@@ -42,4 +42,33 @@ public enum APIClientFactory {
             middlewares: [BearerAuthMiddleware(token: token)]
         )
     }
+
+    /// The session's own client: it presents whatever the credential holds at the moment each
+    /// request goes out, so a renewal reaches every client already built — and a refusal of a
+    /// token the renewal replaced is fenced off from the rule that ends sessions
+    /// (`PresentedCredential`).
+    public static func make(
+        configuration: ServerConfiguration,
+        credential: PresentedCredential,
+        urlSession: URLSession = .shared
+    ) -> any APIProtocol {
+        make(
+            configuration: configuration,
+            credential: credential,
+            transport: URLSessionTransport(configuration: .init(session: urlSession))
+        )
+    }
+
+    public static func make(
+        configuration: ServerConfiguration,
+        credential: PresentedCredential,
+        transport: any ClientTransport
+    ) -> any APIProtocol {
+        Client(
+            serverURL: configuration.baseURL,
+            configuration: runtimeConfiguration,
+            transport: transport,
+            middlewares: [BearerAuthMiddleware(credential: credential)]
+        )
+    }
 }
