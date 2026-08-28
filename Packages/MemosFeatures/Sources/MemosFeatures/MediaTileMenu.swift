@@ -79,19 +79,59 @@ enum MediaTileMenu {
     ///
     /// It is also LAST because it is the slow one, and the archive master is the reason: it is
     /// megabytes to gigabytes over a household connection.
+    ///
+    /// Naming a file is not the same as having one, which is the other absence here: a row is
+    /// offered only for a file the server is already holding (`heldFile(_:of:)`). So a clip still
+    /// being transcoded is offered its master and no Share, and nothing here decides that by
+    /// disabling a row — an action that cannot work is not shown, exactly as an action with
+    /// nothing to fetch is not (MEMNG-209).
     static func actions(for attachment: MemoAttachment) -> [MediaTileAction] {
         var actions: [MediaTileAction] = []
         if let uid = attachment.memoUID {
             actions.append(.showMemo(uid: uid))
         }
-        let shared = attachment.file(.shared)
-        if shared != nil {
+        if heldFile(.shared, of: attachment) != nil {
             actions.append(.share(attachment))
         }
-        let original = attachment.file(.original)
-        if original != nil, original != shared {
+        // Compared against the file Share NAMES rather than the one it can hand over: a clip whose
+        // mp4 is still being made offers no Share, and its master is still a different file — and
+        // then the only thing left that can be done with it.
+        if let master = heldFile(.original, of: attachment), master != attachment.file(.shared) {
             actions.append(.saveOriginal(attachment))
         }
         return actions
+    }
+
+    /// The file a row would hand over, but only when the server is actually HOLDING it.
+    ///
+    /// Every payload names all four derived tiers whether the file behind one exists or not
+    /// (memos-ng `app/services/asset_urls.py` signs the set from the uid alone), so a derived URL
+    /// is a promise about a file the worker may not have made yet. Since MEMNG-207 Share fetches
+    /// that file, so a clip still being transcoded offered a download that 404s into the error
+    /// alert — beside a tile that was visibly still waiting (MEMNG-209).
+    ///
+    /// The two kinds of file become real at different moments, which is why this is not one
+    /// question. A DERIVED tier exists only once the server says it is finished, so it is gated on
+    /// `readiness`. The ARCHIVE MASTER is written by the upload itself, before the worker starts —
+    /// memos-ng leaves an attachment `uploading` until its bytes land and moves it to
+    /// `pending`/`processing` afterwards (`app/services/uploads.py`) — so it is gated on the one
+    /// status that means no bytes at all. Gating the master on readiness too would take an action
+    /// away from a file sitting right there: a photograph is handed on as its own master, and its
+    /// Share has to survive the seconds its tiers are being made.
+    ///
+    /// It is what the menu is built from, not what makes the fetch safe: a tap that somehow
+    /// arrives anyway fails the way it always did, in `OriginalMedia.fetch`, into the message the
+    /// sheet already shows. This decides what is OFFERED.
+    static func heldFile(
+        _ rendition: AttachmentRendition,
+        of attachment: MemoAttachment
+    ) -> AttachmentFile? {
+        guard let file = attachment.file(rendition) else { return nil }
+        // The master, whichever rendition asked for it: `shared` IS the original for everything
+        // but a clip.
+        if file == attachment.file(.original) {
+            return attachment.status == .uploading ? nil : file
+        }
+        return attachment.readiness == .ready ? file : nil
     }
 }
