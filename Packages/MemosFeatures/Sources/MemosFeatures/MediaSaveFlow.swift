@@ -97,16 +97,14 @@ nonisolated final class FetchedFileHold: @unchecked Sendable {
     /// fetch made for it — so the rule about what a download leaves behind stays in the one place
     /// that states it.
     static func removeCoordinated(_ file: URL) {
-        var failure: NSError?
-        let coordinator = NSFileCoordinator()
-        coordinator.coordinate(writingItemAt: file, options: .forDeleting, error: &failure) {
+        // When coordination itself fails the accessor never runs and nothing is removed — and
+        // that is the correct outcome, not a gap to patch: a coordinator that declined proves
+        // nothing about who may still be reading, so removing anyway would bypass the very
+        // exclusion this function exists to provide. The file stays for the system's own reaping
+        // of the temp directory, the backstop that bounded this leak before it was closed.
+        NSFileCoordinator().coordinate(writingItemAt: file, options: .forDeleting, error: nil) {
             OriginalMedia.discard($0)
         }
-        // A coordinator that declined is not a reader: the accessor never ran, so nothing was
-        // removed and nothing ever would be. The file is thrown away anyway, because this is
-        // already past the scope that owned it and the alternative is the leak this exists to
-        // close.
-        if failure != nil { OriginalMedia.discard(file) }
     }
 }
 
