@@ -775,29 +775,55 @@ public final class SessionStore {
     /// It lives on the session rather than on a media type of its own because of the credential:
     /// the original tier is served unsigned and authenticated, so this is the only request outside
     /// the generated client that has to present the device token — and the token stays in here
-    /// (see `bearer`) rather than being handed to the layer that wants the file.
+    /// (see `bearer`) rather than being handed to the layer that wants the file. The server it is
+    /// offered to is pinned to this session's own (`OriginalMedia.sameOrigin`).
     ///
-    /// A 401 ends the session exactly as it does on every other path. The error is still thrown
-    /// afterwards, because the screen that asked for the file needs to know it is not coming.
+    /// It is FENCED by the session generation, the same fence `loadSettings` carries and for the
+    /// same reason, which matters more here than anywhere else in this file. A download is the
+    /// longest-lived request the app makes — an original is the archive master, so a clip can be on
+    /// the wire for minutes — which makes it far and away the most likely reply to land after
+    /// somebody has signed out or switched accounts. Landing unfenced it does two things, and both
+    /// are worse than a failed download: it hands the successor session a file belonging to the
+    /// account before it, and a 401 arriving from the DEAD credential ends the session of the LIVE
+    /// one. So the generation is read before the request and checked on both ways back, the late
+    /// file is deleted rather than returned, and the late 401 is discarded rather than obeyed.
+    ///
+    /// A 401 that belongs to the CURRENT session still ends it, exactly as on every other path. The
+    /// error is thrown afterwards either way, because the screen that asked for the file needs to
+    /// know it is not coming.
     public func downloadOriginal(
         _ attachment: MemoAttachment,
         transport: any MediaDownloadTransport = MediaSession.shared,
         into directory: URL = .temporaryDirectory
     ) async throws -> URL {
         guard let url = attachment.downloadURL else { throw OriginalMediaError.unavailable }
-        guard let bearer, let token = await bearer(), !token.isEmpty else {
-            throw OriginalMediaError.notSignedIn
-        }
+        guard let server = configuration?.baseURL, let bearer, let token = await bearer(),
+            !token.isEmpty
+        else { throw OriginalMediaError.notSignedIn }
+        let generation = sessionGeneration
         do {
-            return try await OriginalMedia.fetch(
+            let file = try await OriginalMedia.fetch(
                 url: url,
                 token: token,
                 uid: attachment.uid,
                 mime: attachment.mime,
+                server: server,
                 transport: transport,
                 into: directory
             )
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("an original arrived for a session that has ended")
+                // Deleted, not merely unreturned: it is the previous account's photograph, and
+                // leaving it in a shared temporary directory is leaving it for the next one.
+                try? FileManager.default.removeItem(at: file)
+                throw OriginalMediaError.superseded
+            }
+            return file
         } catch OriginalMediaError.refused(let error) {
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("a download failed for a session that has ended")
+                throw OriginalMediaError.superseded
+            }
             if error == .unauthorized { await handle(.unauthorized) }
             throw OriginalMediaError.refused(error)
         }

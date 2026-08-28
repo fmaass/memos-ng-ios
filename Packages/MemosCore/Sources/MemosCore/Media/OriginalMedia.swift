@@ -28,17 +28,26 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
     /// Nobody is signed in, so there is no credential to present. The original tier is not signed:
     /// without a token there is no request to make.
     case notSignedIn
+    /// The URL is not served by the server this device is signed in to, so the credential was not
+    /// offered to it and no request was made. See `sameOrigin`.
+    case foreignHost
     /// The server answered, and the answer was not the file.
     case refused(APIError)
     /// It arrived and could not be kept.
     case notStored(String)
+    /// The session that asked for it ended while it was on its way, so the file was thrown away.
+    /// Not a failure of the download — an answer to a question nobody is asking any more.
+    case superseded
 
     public var errorDescription: String? {
         switch self {
         case .unavailable: "This file has no original to download."
         case .notSignedIn: "Sign in again to download this file."
+        case .foreignHost:
+            "This file is hosted somewhere other than the server you are signed in to."
         case .refused(let error): error.errorDescription
         case .notStored(let detail): "The download could not be saved: \(detail)"
+        case .superseded: "The download was cancelled because the account changed."
         }
     }
 }
@@ -67,8 +76,54 @@ extension OriginalMediaError: APIErrorCarrying {
 /// authenticated (memos-ng `app/routers/assets.py`, the unsigned/auth branch), so the request
 /// carries the device credential instead of a signature.
 public enum OriginalMedia {
+    /// Whether a URL is served by the SAME origin as the server this device is signed in to —
+    /// scheme, host and port, with the scheme's default port resolved.
+    ///
+    /// This is the pin on the bearer lane, and it is the reason it exists. Every other media URL in
+    /// this app is fetched with no credential at all: a derived tier carries its authorisation in
+    /// its own signature, so a URL pointing anywhere is at worst a picture that does not load. This
+    /// one carries the DEVICE TOKEN in a header, and a token is only safe on the host it was
+    /// minted for — so a `downloadUrl` naming another host would hand the household's credential to
+    /// that host. In practice these URLs are relative and resolve against the session's own base;
+    /// the pin is what makes "in practice" unnecessary.
+    ///
+    /// Anything that is not `http`/`https`, or has no host, matches nothing: a `file:` URL has no
+    /// origin to compare, and refusing is the only answer that cannot be wrong.
+    public static func sameOrigin(_ url: URL, as server: URL) -> Bool {
+        guard let one = origin(of: url), let other = origin(of: server) else { return false }
+        return one == other
+    }
+
+    private static func origin(of url: URL) -> Origin? {
+        guard let scheme = url.scheme?.lowercased(),
+            let host = url.host()?.lowercased(),
+            !host.isEmpty,
+            let port = url.port ?? defaultPort(for: scheme)
+        else { return nil }
+        return Origin(scheme: scheme, host: host, port: port)
+    }
+
+    private struct Origin: Equatable {
+        var scheme: String
+        var host: String
+        var port: Int
+    }
+
+    /// Only the two schemes this app ever talks over. A scheme with no default here is a scheme
+    /// with no origin, which is refused above.
+    private static func defaultPort(for scheme: String) -> Int? {
+        switch scheme {
+        case "https": 443
+        case "http": 80
+        default: nil
+        }
+    }
+
     /// The request that fetches one. `Accept: */*` is stated rather than left to the URL loading
     /// system's default, which asks for HTML first — this route serves whatever the file is.
+    ///
+    /// It does not decide WHETHER the token may go: `fetch` pins the origin before anything is
+    /// built, so this is never reached for a URL the credential must not be offered to.
     public static func request(url: URL, token: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -117,10 +172,14 @@ public enum OriginalMedia {
         token: String,
         uid: String,
         mime: String,
+        server: URL,
         transport: any MediaDownloadTransport,
         into directory: URL = .temporaryDirectory,
         fileManager: FileManager = .default
     ) async throws -> URL {
+        // BEFORE the request is built, so a URL the credential may not be offered to produces no
+        // request at all rather than one that is thrown away afterwards.
+        guard sameOrigin(url, as: server) else { throw OriginalMediaError.foreignHost }
         let (temporary, response): (URL, URLResponse)
         do {
             (temporary, response) = try await transport.download(request(url: url, token: token))
