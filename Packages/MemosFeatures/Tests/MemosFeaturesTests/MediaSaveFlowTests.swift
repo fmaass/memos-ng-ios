@@ -45,6 +45,48 @@ private final class Calls {
     func record() { count += 1 }
 }
 
+/// What a flow actually threw away.
+///
+/// Locked rather than merely `@unchecked`, and `nonisolated` for the same reason the hold is: the
+/// release that matters most runs from a `deinit`, which is on no actor and no promised thread.
+private nonisolated final class Removals: @unchecked Sendable {
+    private let lock = NSLock()
+    private var urls: [URL] = []
+
+    func record(_ files: [URL]) {
+        lock.lock()
+        urls += files
+        lock.unlock()
+    }
+
+    var all: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return urls
+    }
+}
+
+/// A file in the shape `OriginalMedia.fetch` leaves one: real bytes, inside an enclosure directory
+/// of its own — which is what a discard removes, and what a test about deletion has to have.
+private func fetchedFile(_ name: String = "a1.jpeg") throws -> URL {
+    let enclosure = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: enclosure, withIntermediateDirectories: true)
+    let file = enclosure.appending(path: name)
+    try Data("bytes".utf8).write(to: file)
+    return file
+}
+
+/// Whether a path is gone, giving a removal that deliberately runs off this thread — a coordinated
+/// delete waits for readers, so it may not wait on the one drawing the screen — a bounded moment.
+private func goneWithin(_ seconds: Double, _ file: URL) async -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if !FileManager.default.fileExists(atPath: file.path) { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return !FileManager.default.fileExists(atPath: file.path)
+}
+
 /// Handing a file to somebody else.
 ///
 /// Three things are being held. That an action is OFFERED only where it can work — a file whose
@@ -56,7 +98,13 @@ private final class Calls {
 @Suite("Handing a file on")
 struct MediaSaveFlowTests {
     private let attachment = MemoAttachment(uid: "a1", mime: "image/jpeg", status: .ready)
-    private let file = URL(fileURLWithPath: "/tmp/a1.jpeg")
+    /// A path in the shape a fetch leaves one in: the file inside an enclosure of its own, because
+    /// the enclosure is what `OriginalMedia.discard` removes. Nothing writes it — these tests are
+    /// about what the flow OFFERS — and it is under a name of this suite's own precisely so that a
+    /// real removal reaching it reaches nothing else. A bare `/tmp/a1.jpeg` here would name `/tmp`
+    /// as the directory a discard takes.
+    private let file = FileManager.default.temporaryDirectory
+        .appending(path: "media-save-flow-tests/a1.jpeg")
 
     @Test("a file that arrives is offered, and nothing is left saying it failed")
     func successOffersTheFile() async {
@@ -437,5 +485,109 @@ struct MediaSaveFlowTests {
         )
 
         #expect(MediaTileMenu.actions(for: bare).map(\.title) == ["Share"])
+    }
+
+    // MARK: - how long a fetched file lives (MEMNG-210)
+
+    /// The bug: nothing ever threw a fetched file away. `finish()` cleared the binding and the
+    /// file stayed in the temporary directory until iOS reaped it — one per share, one per Save
+    /// Original, and an original is the archive master.
+    ///
+    /// What it is NOT fixed by is a delete when the sheet closes. The sheet closing says only that
+    /// the sheet closed: what the receiver was handed is an `NSItemProvider`, whose file
+    /// representation is loaded asynchronously in the OTHER process — in place, under file
+    /// coordination, when the system can manage it — and no callback tells this side that the last
+    /// reader is finished. So the release is by SCOPE, and this is the first of its two points: the
+    /// next fetch on the same flow, which cannot happen until the sheet has gone and somebody has
+    /// walked back through the menu.
+    @Test("the file a fetch replaces is thrown away, so a screen holds one at a time")
+    func theNextFetchThrowsAwayTheOneBefore() async {
+        let removals = Removals()
+        let flow = MediaSaveFlow(remove: { removals.record($0) })
+        let next = FileManager.default.temporaryDirectory
+            .appending(path: "media-save-flow-tests-next/a2.jpeg")
+
+        await flow.save(attachment) { _ in self.file }
+        flow.finish()
+        #expect(removals.all.isEmpty, "the file went when the sheet closed, under whoever read it")
+
+        await flow.save(attachment) { _ in next }
+
+        #expect(removals.all == [file])
+        #expect(flow.saved == FetchedFile(url: next))
+    }
+
+    /// The second release point, and the one that closes the leak for good: the screen that
+    /// fetched the file goes, and the file goes with it. Without this the last file of every
+    /// viewer that is ever dismissed stays for the life of the process.
+    @Test("a fetched file does not outlive the flow that fetched it")
+    func theFlowsScopeEndThrowsTheFileAway() async {
+        let removals = Removals()
+        var flow: MediaSaveFlow? = MediaSaveFlow(remove: { removals.record($0) })
+
+        await flow?.save(attachment) { _ in self.file }
+        #expect(removals.all.isEmpty, "the file went while the flow was still offering it")
+
+        // The cover is dismissed and the state it held is torn down.
+        flow = nil
+
+        #expect(removals.all == [file])
+    }
+
+    /// The half of this that is a safety property rather than a tidiness one, held on the real
+    /// filesystem: dismissing the sheet mid-share must not pull the file out from under the app
+    /// that is reading it.
+    @Test("the sheet closing leaves the file where it is — a receiver may still be reading it")
+    func dismissingTheSheetDoesNotDeleteTheFile() async throws {
+        let onDisk = try fetchedFile()
+        var flow: MediaSaveFlow? = MediaSaveFlow()
+
+        await flow?.save(attachment) { _ in onDisk }
+        flow?.finish()
+
+        #expect(FileManager.default.fileExists(atPath: onDisk.path))
+
+        // The control, and it is the point rather than a formality: this test can see a deletion
+        // at all. The same file, on the same path, does go when the scope that owned it ends — so
+        // the assertion above is about the dismissal and not about a removal that never runs.
+        flow = nil
+        let gone = await goneWithin(5, onDisk)
+        #expect(gone, "the flow's scope ended and the file it fetched is still there")
+    }
+
+    /// One delivery wins. Two releases can arrive at once — a fetch superseding the last file
+    /// while the screen behind it is being torn down — and the claim is taken synchronously under
+    /// the lock, so between them each path is removed exactly once. Not merely wasted work: every
+    /// download gets an enclosure of its own, so a second removal of the same path is a removal of
+    /// whatever happens to be there by then.
+    @Test("a held file is thrown away once, however many releases arrive")
+    func aReleaseIsClaimedOnce() {
+        let removals = Removals()
+        let hold = FetchedFileHold(remove: { removals.record($0) })
+        hold.hold(file)
+
+        hold.release()
+        hold.release()
+
+        #expect(removals.all == [file])
+    }
+
+    /// What the real removal does, on real files: the file and the directory the fetch made for
+    /// it, taken under a `.forDeleting` coordinated write — the one documented way a writer
+    /// excludes a reader in another process it cannot see.
+    @Test("the removal a scope end runs takes the file and the enclosure it arrived in")
+    func theRemovalTakesTheEnclosure() throws {
+        let onDisk = try fetchedFile()
+        let enclosure = onDisk.deletingLastPathComponent()
+        let untouched = try fetchedFile()
+        defer { OriginalMedia.discard(untouched) }
+
+        FetchedFileHold.removeCoordinated(onDisk)
+
+        #expect(!FileManager.default.fileExists(atPath: onDisk.path))
+        #expect(!FileManager.default.fileExists(atPath: enclosure.path))
+        // The control: a file made the same way and not removed is still there, so the two
+        // absences above are this call's doing and not the temporary directory's.
+        #expect(FileManager.default.fileExists(atPath: untouched.path))
     }
 }
