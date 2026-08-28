@@ -409,4 +409,33 @@ struct MediaSaveFlowTests {
         #expect(MediaTileMenu.actions(for: deriving).map(\.title) == ["Share"])
         #expect(MediaTileMenu.actions(for: queued).map(\.title) == ["Show Memo", "Share"])
     }
+
+    /// `Show Memo` is navigation, not a file: the memo an owned attachment belongs to exists for
+    /// the whole time its bytes are still arriving, so the one row that hands nothing over stays.
+    /// Pinned deliberately — the empty menus above are about FILES the server is not holding, and
+    /// this is the row the holding question does not touch.
+    @Test("an owned file still uploading keeps Show Memo — the memo exists, the bytes do not")
+    func anOwnedUploadInFlightKeepsItsMemo() {
+        var arriving = document()
+        arriving.status = .uploading
+
+        #expect(MediaTileMenu.actions(for: arriving).map(\.title) == ["Show Memo"])
+    }
+
+    /// A payload that names no web tier for a clip falls back to what every other kind of file
+    /// does: the shared copy IS the master (`MemoAttachment.file(_:)`), and the master is held
+    /// once its bytes have landed. So the one row offered is a Share handing over the original —
+    /// not a second row for the same bytes, and never a derived file the server never made. The
+    /// server signs a web URL for every clip today, so this pins the fallback, not a live path.
+    @Test("a clip whose payload names no mp4 shares its master, once and as one row")
+    func aClipWithoutAWebTierSharesItsMaster() {
+        let bare = MemoAttachment(
+            uid: "v9",
+            mime: "video/quicktime",
+            status: .processing,
+            downloadURL: URL(string: "https://memos.example.invalid/api/attachments/v9/original")
+        )
+
+        #expect(MediaTileMenu.actions(for: bare).map(\.title) == ["Share"])
+    }
 }
