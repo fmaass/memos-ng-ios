@@ -188,4 +188,28 @@ struct ComposeImportTests {
 
         #expect(imports.attachments.map(\.filename) == ["second.heic"])
     }
+
+    /// And that replacement is exactly why a capture cannot live in the same list. A photo taken in
+    /// the app and then dropped because somebody afterwards chose two from the library is a photo
+    /// nobody can take again — a pick can always be made a second time.
+    @Test("a capture survives the next pick, which replaces only what was picked")
+    func aCaptureSurvivesTheNextPick() async {
+        let imports = ComposeImports()
+        let shot = Self.media("IMG_20260828-141530.heic")
+
+        await imports.load(["first"], stamp: imports.selected()) { _ in Self.media("first.heic") }
+        imports.captured(shot)
+        #expect(imports.attachments.map(\.filename) == ["first.heic", "IMG_20260828-141530.heic"])
+
+        await imports.load(["second"], stamp: imports.selected()) { _ in Self.media("second.heic") }
+
+        #expect(
+            imports.attachments.map(\.filename) == ["second.heic", "IMG_20260828-141530.heic"],
+            "the next pick took the capture with it"
+        )
+        // "Remove them" still means all of it: a capture is attached to this memo like anything
+        // else, and clearing the attachments clears the attachments.
+        imports.clear()
+        #expect(imports.attachments.isEmpty, "the capture outlived the removal")
+    }
 }

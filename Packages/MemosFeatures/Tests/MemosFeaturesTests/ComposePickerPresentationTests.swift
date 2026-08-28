@@ -143,6 +143,51 @@ struct ComposePickerPresentationTests {
         #expect(!stage.wantsKeyboard)
     }
 
+    /// The camera is the pill's other choice, and it gets the identical hand-off: a full-screen
+    /// camera arriving while the sheet under it is still following the keyboard down is the same
+    /// defect as a picker doing it, and one answer to that question is enough.
+    @Test("the camera waits for the keyboard exactly as the picker does")
+    func theCameraWaitsForTheKeyboardToo() {
+        var stage = ComposeStage()
+        stage.opened()
+        stage.keyboardShown()
+
+        stage.openCamera()
+
+        #expect(!stage.wantsKeyboard)
+        #expect(!stage.capturing, "the camera arrived in the frame the keyboard began to leave")
+        stage.keyboardHidden()
+        #expect(stage.capturing)
+        // And it is the camera that is up, not both things at once.
+        #expect(!stage.pickingPhotos, "opening the camera opened the photo picker as well")
+        stage.cameraClosed()
+        #expect(!stage.capturing)
+        #expect(!stage.wantsKeyboard, "the camera closing brought the keyboard back over the row")
+    }
+
+    /// The two presentations are told apart by the value, not by whichever dismissal happens to
+    /// arrive: a `fullScreenCover` and a `photosPicker` both write `false` through their binding
+    /// when they close, and a phase that could not say which one had closed would let either
+    /// dismissal take the other down.
+    @Test("a dismissal closes the presentation it belongs to, and not the other one")
+    func eachDismissalClosesItsOwnPresentation() {
+        var stage = ComposeStage()
+
+        stage.pickPhotos()
+        #expect(stage.pickingPhotos)
+        stage.cameraClosed()
+        #expect(stage.pickingPhotos, "a camera dismissal closed the photo picker")
+        stage.photosPickerClosed()
+        #expect(!stage.pickingPhotos)
+
+        stage.openCamera()
+        #expect(stage.capturing)
+        stage.photosPickerClosed()
+        #expect(stage.capturing, "a picker dismissal closed the camera")
+        stage.cameraClosed()
+        #expect(!stage.capturing)
+    }
+
     /// The other half, on the real screen: the pill that opens the picker is still there, still
     /// says what it does, and there is no more of it than there is of the pill beside it.
     ///

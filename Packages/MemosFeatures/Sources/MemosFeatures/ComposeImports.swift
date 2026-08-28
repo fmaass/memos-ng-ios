@@ -21,7 +21,16 @@ import Observation
 final class ComposeImports {
     /// The files the current selection produced. The picker hands back its own temporary export;
     /// each one is copied out of it, in order, and the copies are what the outbox takes over.
-    private(set) var attachments: [PickedMedia] = []
+    private(set) var picked: [PickedMedia] = []
+    /// What was taken with the in-app camera, kept APART from the picker's files.
+    ///
+    /// A pick replaces what was picked — that is the picker's own semantics, and the reason a
+    /// second pick does not add to the first. A capture cannot live under that rule: a photo taken
+    /// here and then dropped because somebody afterwards chose two from the library is a photo
+    /// nobody can take again.
+    private(set) var captures: [PickedMedia] = []
+    /// Everything attached, in the order it goes to the server.
+    var attachments: [PickedMedia] { picked + captures }
     /// How many files of the current selection could not be read. Counted, never dropped: see
     /// `ComposeAttachments`.
     private(set) var failed = 0
@@ -61,10 +70,18 @@ final class ComposeImports {
             imported.append(media)
         }
         guard stamp == current else { return false }
-        attachments = imported
+        picked = imported
         failed = failures
         isImporting = false
         return true
+    }
+
+    /// A capture made in this app's camera, added to what is already attached.
+    ///
+    /// It does NOT fence a pick in flight, and it does not have to: the two lists are separate, so
+    /// a selection that lands afterwards replaces the picked files and leaves this one where it is.
+    func captured(_ media: PickedMedia) {
+        captures.append(media)
     }
 
     /// Drops what is attached AND fences everything in flight, loads that have not begun
@@ -72,7 +89,8 @@ final class ComposeImports {
     /// or the removal undoes itself a second later.
     func clear() {
         current += 1
-        attachments = []
+        picked = []
+        captures = []
         failed = 0
         isImporting = false
     }
