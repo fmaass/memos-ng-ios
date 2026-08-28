@@ -71,4 +71,41 @@ public enum APIClientFactory {
             middlewares: [BearerAuthMiddleware(credential: credential)]
         )
     }
+
+    /// The management screen's own client: it presents the step-up grant, and it is built with
+    /// `GrantAuthMiddleware` ALONE.
+    ///
+    /// That is the guarantee rather than an implementation detail. This client holds no reference
+    /// to the session's credential, so there is no branch — no fallback, no "if the grant is
+    /// missing" — by which the device's personal access token could be attached to a `/api/pats`
+    /// request. A device token manages nothing but itself (ADR-0015), and the way to keep that
+    /// true from this side is for the client that reaches token management to have never been
+    /// able to see one.
+    ///
+    /// It is also the client that BUYS the grant, made before there is one to present: the mint
+    /// request is anonymous by construction, exactly as the sign-in exchange is.
+    public static func make(
+        configuration: ServerConfiguration,
+        grant: ManagementGrant,
+        urlSession: URLSession = .shared
+    ) -> any APIProtocol {
+        make(
+            configuration: configuration,
+            grant: grant,
+            transport: URLSessionTransport(configuration: .init(session: urlSession))
+        )
+    }
+
+    public static func make(
+        configuration: ServerConfiguration,
+        grant: ManagementGrant,
+        transport: any ClientTransport
+    ) -> any APIProtocol {
+        Client(
+            serverURL: configuration.baseURL,
+            configuration: runtimeConfiguration,
+            transport: transport,
+            middlewares: [GrantAuthMiddleware(grant: grant)]
+        )
+    }
 }
