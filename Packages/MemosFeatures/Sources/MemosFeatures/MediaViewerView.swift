@@ -233,15 +233,15 @@ struct MediaTileActionItem: View {
     /// invoke one, and the probe this bundle has reads accessibility LABELS, which are identical
     /// whatever the control turns out to be. Written inline, the one thing that decides whether a
     /// recipient is handed a file or a link — which rendition each row asks for — was asserted by
-    /// nothing at all, and the row could go back to being a `ShareLink` over `webURL` with every
-    /// test still green (MEMNG-207, review round 1).
+    /// nothing at all, and the row could go back to being a share-link control over `webURL` with
+    /// every test still green (MEMNG-207, review round 1).
     func tapped() {
         switch action {
         case .showMemo(let uid): showMemo(uid)
-        // Neither of these is a `ShareLink`, and it is the same reason for both: a `ShareLink`
-        // hands over a value it is already holding, and neither of these files is on the phone
-        // until somebody has waited for it. A `ShareLink` is what the Share row used to be, which
-        // is exactly how the value it was holding came to be a URL.
+        // Neither of these is SwiftUI's built-in share-link control, and it is the same reason for
+        // both: that control hands over a value it is already holding, and neither of these files
+        // is on the phone until somebody has waited for it. It is what the Share row used to be,
+        // which is exactly how the value it was holding came to be a URL.
         case .share(let attachment): fetch(attachment, .shared)
         case .saveOriginal(let attachment): fetch(attachment, .original)
         }

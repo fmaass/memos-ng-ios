@@ -87,9 +87,10 @@ public final class MediaSaveFlow {
 
 /// The system share sheet over one file.
 ///
-/// A `UIActivityViewController` rather than a `ShareLink`, and the difference is the point: a
-/// `ShareLink` is a BUTTON, and the file it would share does not exist until somebody has waited
-/// for it. This is presented after the download, on the file that arrived.
+/// A `UIActivityViewController` rather than SwiftUI's built-in share-link control, and the
+/// difference is the point: that control is a BUTTON, and the file it would share does not exist
+/// until somebody has waited for it. This is presented after the download, on the file that
+/// arrived.
 struct ShareSheet: UIViewControllerRepresentable {
     let url: URL
 

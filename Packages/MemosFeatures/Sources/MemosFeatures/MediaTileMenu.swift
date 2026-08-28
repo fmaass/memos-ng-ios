@@ -14,10 +14,10 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
     /// Fetch the file and hand it to the share sheet.
     ///
     /// It carries the attachment rather than a URL, and that is the whole of MEMNG-207 rather than
-    /// a tidy-up. This used to carry the file's `webUrl` and give it to a `ShareLink`, so what a
-    /// recipient was sent was a signed link into the household server: good for about two hours,
-    /// resolvable only from inside the house, and naming that server out loud. What goes now is
-    /// the file (`AttachmentRendition.shared`).
+    /// a tidy-up. This used to carry the file's `webUrl` and give it to SwiftUI's built-in
+    /// share-link control, so what a recipient was sent was a signed link into the household
+    /// server: good for about two hours, resolvable only from inside the house, and naming that
+    /// server out loud. What goes now is the file (`AttachmentRendition.shared`).
     case share(MemoAttachment)
     /// Fetch the file as it was uploaded and hand it to the share sheet.
     ///
