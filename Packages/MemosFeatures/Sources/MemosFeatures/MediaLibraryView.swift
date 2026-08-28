@@ -235,6 +235,9 @@ struct LibraryGrid: View {
     @State private var contentWidth: CGFloat = 0
 
     var body: some View {
+        // Hoisted because the measuring closure below is `Sendable` and may run off the main
+        // actor, where the design tokens are not reachable.
+        let inset = 2 * DesignTokens.Space.tight
         ScrollView {
             LazyVStack(spacing: DesignTokens.Space.tight) {
                 if let error = errorText {
@@ -248,6 +251,20 @@ struct LibraryGrid: View {
                 }
             }
             .padding(.vertical, DesignTokens.Space.tight)
+        }
+        // Measured on the scroll, whose frame is real from the first layout pass, items or none.
+        // It was measured on the row stack itself, which is EMPTY until a width exists — and an
+        // empty lazy stack's geometry never fired on device, so the width stayed zero, zero
+        // solved to no rows, and no rows kept the stack empty: a library that could never draw
+        // its first page (MEMNG-206). What the rows are owed is the scroll's width inside the
+        // safe area, less the gallery's own padding either side.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            max(
+                0,
+                proxy.size.width - proxy.safeAreaInsets.leading - proxy.safeAreaInsets.trailing
+                    - inset)
+        } action: { width in
+            contentWidth = width
         }
     }
 
@@ -275,15 +292,6 @@ struct LibraryGrid: View {
                     Spacer(minLength: 0)
                 }
             }
-        }
-        // Stated so the stack reports the width it was OFFERED even while it is empty. Without it
-        // an empty library measures zero, and a zero width solves to no rows at all — which is a
-        // grid that can never draw its first page.
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.width
-        } action: { width in
-            contentWidth = width
         }
         .padding(.horizontal, DesignTokens.Space.tight)
     }
