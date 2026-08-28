@@ -160,13 +160,22 @@ public enum OriginalMedia {
         }
     }
 
-    /// Fetches the original and leaves it in `directory` under `filename(uid:mime:)`.
+    /// Fetches the original and leaves it in a directory of its OWN, under `filename(uid:mime:)`.
     ///
     /// The move is the reason this is not two lines at a call site: the URL loading system deletes
     /// its temporary copy the moment `download` returns, so the file has to be moved inside this
-    /// function or it is already gone. Any file of the same name is removed first — the same one
-    /// downloaded twice is the same bytes, and a stale copy left in the way would be silently
-    /// shared instead of the fresh one.
+    /// function or it is already gone.
+    ///
+    /// The enclosing directory is fresh for every request, and that is not tidiness. The file has
+    /// to keep a name a person will recognise in the share sheet — `filename(uid:mime:)`, which is
+    /// derived from the file rather than made up — so two downloads of the SAME attachment would
+    /// otherwise land on the same path. Two such requests can be in the air at once (a second tap
+    /// on a tile whose first download is still going, or one made in a session that has since
+    /// ended), and then one of them tidying up would unlink the very file the other has already
+    /// handed to the share sheet. A directory apiece makes that impossible by construction rather
+    /// than by timing: no two requests ever name the same path.
+    ///
+    /// It is also what `discard` removes, which is why the two live next to each other.
     public static func fetch(
         url: URL,
         token: String,
@@ -187,13 +196,24 @@ public enum OriginalMedia {
             throw OriginalMediaError.refused(.transport(description: error.localizedDescription))
         }
         try accept(response)
-        let destination = directory.appending(path: filename(uid: uid, mime: mime))
+        let enclosure = directory.appending(path: UUID().uuidString)
+        let destination = enclosure.appending(path: filename(uid: uid, mime: mime))
         do {
-            try? fileManager.removeItem(at: destination)
+            try fileManager.createDirectory(at: enclosure, withIntermediateDirectories: true)
             try fileManager.moveItem(at: temporary, to: destination)
         } catch {
             throw OriginalMediaError.notStored(error.localizedDescription)
         }
         return destination
+    }
+
+    /// Throws away a file `fetch` produced, and the directory it made for it.
+    ///
+    /// The pair is why this exists rather than a `removeItem` at the call site: what has to go is
+    /// the enclosure as well as the file, and the fact that a downloaded original always HAS an
+    /// enclosure of its own is this type's guarantee (see `fetch`) — not something a caller
+    /// somewhere else should have to know, or be trusted to remember.
+    public static func discard(_ file: URL, fileManager: FileManager = .default) {
+        try? fileManager.removeItem(at: file.deletingLastPathComponent())
     }
 }

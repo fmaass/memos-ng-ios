@@ -813,9 +813,12 @@ public final class SessionStore {
             )
             guard generation == sessionGeneration else {
                 MemosLog.session.info("an original arrived for a session that has ended")
-                // Deleted, not merely unreturned: it is the previous account's photograph, and
-                // leaving it in a shared temporary directory is leaving it for the next one.
-                try? FileManager.default.removeItem(at: file)
+                // Thrown away, not merely unreturned: it is the previous account's photograph, and
+                // leaving it in a temporary directory is leaving it for the next one. It removes
+                // this request's OWN enclosure and nothing else — `fetch` gives every download a
+                // directory to itself precisely so that a tidy-up here cannot reach a file some
+                // other request has already handed to the share sheet.
+                OriginalMedia.discard(file)
                 throw OriginalMediaError.superseded
             }
             return file

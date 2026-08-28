@@ -140,22 +140,36 @@ struct OriginalMediaTests {
             into: directory
         )
 
+        // The name a person sees in the share sheet is the file's own, not a scratch name.
         #expect(saved.lastPathComponent == "a1.jpeg")
         #expect(try Data(contentsOf: saved) == Data("the whole photograph".utf8))
+        // Inside a directory of its own, one level down: that is what lets two downloads of one
+        // attachment keep the same filename and still never share a path — see
+        // `everyDownloadGetsItsOwnPath`. Read back off the filesystem rather than compared as
+        // URLs, which differ by a trailing slash for the same directory.
+        let enclosures = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(enclosures == [saved.deletingLastPathComponent().lastPathComponent])
         // The loading system deletes its temporary copy the moment `download` returns, so a
         // version of this that only remembered the path would hand the share sheet nothing.
         let loaderCopy = try #require(transport.temporary.get())
         #expect(!FileManager.default.fileExists(atPath: loaderCopy.path))
     }
 
-    @Test("the same file downloaded twice replaces the copy that was there")
-    func theSecondDownloadWins() async throws {
+    /// Two downloads of ONE attachment must never name the same file.
+    ///
+    /// They keep the same human-readable name — that is what the share sheet shows — so without a
+    /// directory apiece they would land on one path. Two such requests really can overlap: a second
+    /// tap on a tile whose first download is still running, or one made in a session that has since
+    /// ended and is about to tidy itself up. Sharing a path, that tidy-up unlinks a file the other
+    /// request has already handed to the share sheet.
+    @Test("two downloads of the same file write disjoint paths, and both survive")
+    func everyDownloadGetsItsOwnPath() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        _ = try await OriginalMedia.fetch(
+        let first = try await OriginalMedia.fetch(
             url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
             transport: StubDownloads(bytes: Data("first".utf8)), into: directory
         )
@@ -164,7 +178,43 @@ struct OriginalMediaTests {
             transport: StubDownloads(bytes: Data("second".utf8)), into: directory
         )
 
+        #expect(first != second, "two downloads of one file landed on the same path")
+        // Both are still there, each with its own bytes: neither request overwrote the other.
+        #expect(try Data(contentsOf: first) == Data("first".utf8))
         #expect(try Data(contentsOf: second) == Data("second".utf8))
+        // And the name a person sees is the same for both — the disjointness is in the enclosure,
+        // which is exactly where it belongs.
+        #expect(first.lastPathComponent == second.lastPathComponent)
+    }
+
+    /// The other half of the enclosure: throwing one download away leaves the other alone.
+    @Test("discarding a download removes its own directory and nothing else")
+    func discardingRemovesOnlyItsOwn() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let kept = try await OriginalMedia.fetch(
+            url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
+            transport: StubDownloads(bytes: Data("kept".utf8)), into: directory
+        )
+        let thrownAway = try await OriginalMedia.fetch(
+            url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
+            transport: StubDownloads(bytes: Data("gone".utf8)), into: directory
+        )
+
+        OriginalMedia.discard(thrownAway)
+
+        #expect(!FileManager.default.fileExists(atPath: thrownAway.path))
+        // The DIRECTORY goes too, or every abandoned download leaves an empty one behind for ever.
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: thrownAway.deletingLastPathComponent().path
+            )
+        )
+        // And the file somebody may already be sharing is untouched.
+        #expect(try Data(contentsOf: kept) == Data("kept".utf8))
     }
 
     @Test("a refusal keeps the identity of the status it was")
