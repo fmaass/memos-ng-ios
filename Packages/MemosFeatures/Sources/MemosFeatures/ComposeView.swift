@@ -34,19 +34,6 @@ public struct ComposeSubmission: Sendable, Equatable {
     public func capturedAt(now: Date = Date()) -> Date { createdAt ?? now }
 }
 
-/// Writing a memo — new or edited, one screen.
-///
-/// It is a SHEET with detents: capturing a thought is a half-screen act, and the keyboard is
-/// already taking the other half. It opens at `.medium` and grows to `.large` when there is
-/// something worth the room.
-///
-/// Visibility offers "server default" as the unmarked choice on a NEW memo: the account already
-/// has an answer for who sees things, and a compose screen that demands the decision every time
-/// teaches people to stop reading it. An EDIT never touches visibility here — that is its own
-/// deliberate action on the memo, not a side effect of fixing a typo.
-///
-/// Photos and videos are attached from the LIBRARY, not captured in the app: something shot with
-/// the system camera moments ago is already there, and an in-app stills camera would re-encode it.
 /// The destructive action an edit sheet offers, and the question it asks first.
 ///
 /// It is handed IN rather than owned for the same reason the save is: the sheet has no store and no
@@ -73,6 +60,23 @@ public struct ComposeDelete {
     }
 }
 
+/// Writing a memo — new or edited, one screen.
+///
+/// It is a SHEET with detents: capturing a thought is a half-screen act, and the keyboard is
+/// already taking the other half. It opens at `.medium` and grows to `.large` when there is
+/// something worth the room.
+///
+/// Visibility offers "server default" as the unmarked choice on a NEW memo: the account already
+/// has an answer for who sees things, and a compose screen that demands the decision every time
+/// teaches people to stop reading it. An EDIT never touches visibility here — that is its own
+/// deliberate action on the memo, not a side effect of fixing a typo.
+///
+/// Media comes from two places, both of them originals. The LIBRARY, through the system picker,
+/// which exports the file it holds rather than a rendering of it; and the app's own camera
+/// (`CameraView`), which writes the photo output's `fileDataRepresentation()` and moves the movie
+/// output's file. Neither of them re-encodes anything, and the one obvious way of doing this —
+/// `UIImagePickerController` — was rejected for exactly that reason: it hands back a transcoded
+/// JPEG for a still the phone took as HEIF. The original is the archive master (ADR-0008).
 public struct ComposeView: View {
     public enum Mode: Equatable {
         case create
@@ -223,6 +227,11 @@ public struct ComposeView: View {
             matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .current
         )
+        // The other source, presented the same way and for the same reason: it is asked for from
+        // the pill and only ever closed through this binding.
+        .fullScreenCover(isPresented: capturingCamera) {
+            CameraView(capture: CameraCapture { media in imports.captured(media) })
+        }
     }
 
     /// A prompt rather than an empty grey rectangle. `TextEditor` has no placeholder, so it is one
@@ -425,6 +434,11 @@ public struct ComposeView: View {
     /// `MemoEditFlow.sheet` is built on.
     private var pickingPhotos: Binding<Bool> {
         Binding(get: { stage.pickingPhotos }, set: { if !$0 { stage.photosPickerClosed() } })
+    }
+
+    /// The camera's presentation, on the same discipline as the picker's.
+    private var capturingCamera: Binding<Bool> {
+        Binding(get: { stage.capturing }, set: { if !$0 { stage.cameraClosed() } })
     }
 
     /// Emptying the picker fences whatever it is still loading first: the selection this clears
@@ -781,6 +795,17 @@ nonisolated public enum ComposeMetaRow {
         default: return "\(count) photos or videos attached. Add photos or videos"
         }
     }
+
+    /// The two places media comes from, as the pill's menu names them.
+    ///
+    /// A MENU on the existing pill rather than a fourth pill in the row. The row is exactly its
+    /// three pills at every text size — `DynamicTypeFittingTests` holds both halves of that, the
+    /// all-glyph fallback fitting a 369pt sheet and the row measuring the sum of its three — and a
+    /// fourth glyph does not fit at the accessibility sizes. It is also the truer shape: attaching
+    /// media is ONE intention with two sources, the way the visibility pill beside it is one
+    /// question with three answers.
+    public static let libraryChoice = "Photo library"
+    public static let cameraChoice = "Camera"
 }
 
 /// The three pills, in the one order they are ever in.
@@ -814,13 +839,17 @@ struct ComposeMetaPills: View {
     }
 }
 
-/// The photos pill, which OPENS the picker: it replaced an "Add photos or videos" button that sat
-/// apart from the meta row and moved whenever anything in that row changed.
+/// The photos pill, which offers the two places media comes from: the library, and the camera.
 ///
-/// It ASKS rather than presents. A `PhotosPicker` control goes straight from the tap to the
-/// presentation, leaving nowhere to put the keyboard down first — which is the moment the flicker
-/// lived in (see `ComposeStage`). The presentation is a modifier on the sheet; this is the button
-/// that reaches it, and it is a plain `Button` like the date pill beside it for that reason alone.
+/// It replaced an "Add photos or videos" button that sat apart from the meta row and moved whenever
+/// anything in that row changed, and it is a MENU for the reason given on
+/// `ComposeMetaRow.libraryChoice` — the row is three pills wide at every text size, and this is one
+/// intention with two sources rather than two intentions.
+///
+/// Either way it ASKS rather than presents. A `PhotosPicker` control goes straight from the tap to
+/// the presentation, leaving nowhere to put the keyboard down first — which is the moment the
+/// flicker lived in (see `ComposeStage`) — and a full-screen camera arriving over a settling sheet
+/// is the same defect. Both presentations are modifiers on the sheet; this is what reaches them.
 struct PhotosPickerPill: View {
     @Binding var stage: ComposeStage
     let count: Int
@@ -828,12 +857,22 @@ struct PhotosPickerPill: View {
     var spelling: ComposeMetaRow.Spelling = .short
 
     var body: some View {
-        Button {
-            stage.pickPhotos()
+        Menu {
+            Button {
+                stage.pickPhotos()
+            } label: {
+                Label(ComposeMetaRow.libraryChoice, systemImage: "photo.on.rectangle.angled")
+            }
+            Button {
+                stage.openCamera()
+            } label: {
+                Label(ComposeMetaRow.cameraChoice, systemImage: "camera")
+            }
         } label: {
             PhotosPill(count: count, isImporting: isImporting, spelling: spelling)
         }
-        .buttonStyle(.plain)
+        // The MENU is what VoiceOver lands on, and a label here replaces whatever the pill inside
+        // says — the same reason `VisibilityMenu` carries one.
         .accessibilityLabel(
             ComposeMetaRow.photosAccessibilityLabel(count: count, isImporting: isImporting)
         )

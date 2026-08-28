@@ -1,4 +1,4 @@
-/// What the compose sheet has up: its keyboard, and its photo picker.
+/// What the compose sheet has up: its keyboard, and whichever way of attaching media it is showing.
 ///
 /// They are one value because they are not independent. The sheet raises the keyboard as it opens,
 /// and a picker asked for while it stands used to present WHILE the keyboard resigned — the
@@ -25,6 +25,12 @@ struct ComposeStage: Equatable {
         case presenting
     }
 
+    /// Where media is being attached from.
+    enum Source: Equatable {
+        case photos
+        case camera
+    }
+
     /// Whether the sheet wants the editor focused — the INTENT, which is not the same thing as
     /// the keyboard being on screen: focus can be lost while the keyboard is still animating
     /// away, and a picker gated on intent alone would present into exactly that window (review
@@ -35,9 +41,16 @@ struct ComposeStage: Equatable {
     private(set) var keyboardVisible = false
     /// The picker's phase. Read through `pickingPhotos` by the presentation binding.
     private(set) var phase: PickerPhase = .idle
+    /// Which source the phase above belongs to. They cannot both be up — one sheet, one
+    /// presentation — and they share the whole hand-off, because the camera arrives over the same
+    /// sheet whose height is still following the keyboard down.
+    private(set) var presented: Source = .photos
 
     /// Whether the photo picker should be on screen.
-    var pickingPhotos: Bool { phase == .presenting }
+    var pickingPhotos: Bool { phase == .presenting && presented == .photos }
+
+    /// Whether the in-app camera should be on screen.
+    var capturing: Bool { phase == .presenting && presented == .camera }
 
     /// The sheet has appeared. The keyboard comes with it: writing is what this screen is for.
     mutating func opened() { wantsKeyboard = true }
@@ -47,6 +60,18 @@ struct ComposeStage: Equatable {
     /// finished leaving, not in the same frame it begins to, and not into the tail of a dismissal
     /// some other interaction already started.
     mutating func pickPhotos() {
+        present(.photos)
+    }
+
+    /// The camera was chosen from the same pill. It gets the identical hand-off: a full-screen
+    /// camera arriving while the sheet under it is still settling is the same defect as a picker
+    /// doing it, and there is no reason for two answers to one question.
+    mutating func openCamera() {
+        present(.camera)
+    }
+
+    private mutating func present(_ source: Source) {
+        presented = source
         wantsKeyboard = false
         phase = keyboardVisible ? .waitingForKeyboard : .presenting
     }
@@ -66,7 +91,13 @@ struct ComposeStage: Equatable {
     /// The picker closed. The keyboard is not asked back: what has just arrived on the sheet is a
     /// row of thumbnails, and a keyboard springing up over them is the sheet arguing with itself.
     mutating func photosPickerClosed() {
-        if phase == .presenting { phase = .idle }
+        if phase == .presenting, presented == .photos { phase = .idle }
+    }
+
+    /// The camera closed — because a capture was taken and attached, or because somebody left.
+    /// Neither brings the keyboard back, for the reason the picker does not.
+    mutating func cameraClosed() {
+        if phase == .presenting, presented == .camera { phase = .idle }
     }
 
     /// Focus moved without this value being asked — somebody tapped into the editor, or dragged
