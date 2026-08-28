@@ -347,4 +347,95 @@ struct MediaSaveFlowTests {
         #expect(!carriesTheDerivedLink, "the share sheet was handed the derived-tier link")
         #expect(!carriesTheOriginalLink, "the share sheet was handed the server's own URL")
     }
+
+    // MARK: - what the server is holding YET (MEMNG-209)
+
+    /// The bug: a payload names all four derived tiers whether the worker has made them or not, so
+    /// a clip still being transcoded offered Share of an mp4 that is not on disk — a tap that
+    /// fetches a 404 into the error alert, beside a tile that is visibly still waiting.
+    @Test("a clip whose mp4 has not been made yet is offered no Share")
+    func transcodingClipOffersNoShare() {
+        var transcoding = clip()
+        transcoding.status = .processing
+
+        #expect(MediaTileMenu.actions(for: transcoding).map(\.title) == ["Save Original"])
+        // The control: the same clip, finished, is offered both — so the absence above is about
+        // the mp4 that does not exist yet, and not about clips.
+        #expect(MediaTileMenu.actions(for: clip()).map(\.title) == ["Share", "Save Original"])
+    }
+
+    /// `failed` is the server's last word about the DERIVED tiers, not about the upload: the
+    /// master they would have been made from is still there, so the one thing left that can be
+    /// done with the file is still offered.
+    @Test("a clip the server gave up on offers its master, never the mp4 it never made")
+    func failedClipStillOffersItsMaster() {
+        var abandoned = clip()
+        abandoned.status = .failed
+
+        #expect(MediaTileMenu.actions(for: abandoned).map(\.title) == ["Save Original"])
+        // The control: a clip in the same shape whose tiers did get made is offered both.
+        #expect(MediaTileMenu.actions(for: clip()).map(\.title) == ["Share", "Save Original"])
+    }
+
+    /// The other end of the same rule. Before the bytes land there is no master either: memos-ng
+    /// leaves an attachment `uploading` until its file is written and moves it on afterwards, so
+    /// that is the one status meaning the server holds nothing at all.
+    @Test("a file whose bytes are still on their way offers nothing to hand over")
+    func anUploadInFlightOffersNothing() {
+        let master = URL(string: "https://memos.example.invalid/x/original")
+        var arriving = photo("a1", original: master)
+        arriving.status = .uploading
+        var arrivingClip = clip()
+        arrivingClip.status = .uploading
+
+        #expect(MediaTileMenu.actions(for: arriving).map(\.title) == [])
+        #expect(MediaTileMenu.actions(for: arrivingClip).map(\.title) == [])
+        // The control: the same picture, landed, is offered its file — so the two absences above
+        // are about the upload and not about an empty menu.
+        #expect(MediaTileMenu.actions(for: photo("a1", original: master)).map(\.title) == ["Share"])
+    }
+
+    /// The gate is about the DERIVED file, and a picture hands over none: what Share sends for a
+    /// photograph or a PDF is the master it was uploaded as, which is on disk while the tiers
+    /// beside it are still being made. Taking that row away for the seconds a tile shimmers would
+    /// remove an action for a file that is sitting right there.
+    @Test("a picture or a document still being derived keeps the Share of its own file")
+    func aFileBeingDerivedKeepsItsShare() {
+        var deriving = photo("a1", original: URL(string: "https://memos.example.invalid/x/orig"))
+        deriving.status = .processing
+        var queued = document()
+        queued.status = .pending
+
+        #expect(MediaTileMenu.actions(for: deriving).map(\.title) == ["Share"])
+        #expect(MediaTileMenu.actions(for: queued).map(\.title) == ["Show Memo", "Share"])
+    }
+
+    /// `Show Memo` is navigation, not a file: the memo an owned attachment belongs to exists for
+    /// the whole time its bytes are still arriving, so the one row that hands nothing over stays.
+    /// Pinned deliberately — the empty menus above are about FILES the server is not holding, and
+    /// this is the row the holding question does not touch.
+    @Test("an owned file still uploading keeps Show Memo — the memo exists, the bytes do not")
+    func anOwnedUploadInFlightKeepsItsMemo() {
+        var arriving = document()
+        arriving.status = .uploading
+
+        #expect(MediaTileMenu.actions(for: arriving).map(\.title) == ["Show Memo"])
+    }
+
+    /// A payload that names no web tier for a clip falls back to what every other kind of file
+    /// does: the shared copy IS the master (`MemoAttachment.file(_:)`), and the master is held
+    /// once its bytes have landed. So the one row offered is a Share handing over the original —
+    /// not a second row for the same bytes, and never a derived file the server never made. The
+    /// server signs a web URL for every clip today, so this pins the fallback, not a live path.
+    @Test("a clip whose payload names no mp4 shares its master, once and as one row")
+    func aClipWithoutAWebTierSharesItsMaster() {
+        let bare = MemoAttachment(
+            uid: "v9",
+            mime: "video/quicktime",
+            status: .processing,
+            downloadURL: URL(string: "https://memos.example.invalid/api/attachments/v9/original")
+        )
+
+        #expect(MediaTileMenu.actions(for: bare).map(\.title) == ["Share"])
+    }
 }
