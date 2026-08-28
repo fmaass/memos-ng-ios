@@ -41,6 +41,13 @@ struct SettingsView: View {
     /// is what says the tap was heard.
     @State private var savingVisibility = false
     @State private var visibilityFailed = false
+    /// The device name being typed, or `nil` when the row is only being read. Held by the screen
+    /// rather than by the row, so an answer arriving from the session — which redraws the row —
+    /// cannot throw away what somebody is in the middle of typing.
+    @State private var tokenDraft: String?
+    /// A rename or a renewal is on the wire. One flag for both: they are alternatives, and a
+    /// renewal is not something to start twice (see `DeviceTokenSection`).
+    @State private var tokenBusy = false
 
     var body: some View {
         List {
@@ -66,6 +73,9 @@ struct SettingsView: View {
         // that failed there would otherwise leave this screen — the one whose whole job is to show
         // and change them — permanently blank.
         .task { await session.loadSettings() }
+        // The phone learns its expiry at the mint and nowhere else, so without this read a
+        // reinstalled app cannot say how long this device has left.
+        .task { await session.loadDeviceToken() }
         .task { cache = MediaCacheClearing.usage() }
     }
 
@@ -104,6 +114,16 @@ struct SettingsView: View {
             }
             Spacer(minLength: 0)
         }
+        Divider()
+        DeviceTokenSection(
+            token: session.deviceToken,
+            notice: session.deviceTokenNotice,
+            now: .now,
+            isBusy: tokenBusy,
+            draft: $tokenDraft,
+            rename: { name in Task { await renameToken(to: name) } },
+            renew: { Task { await renewToken() } }
+        )
     }
 
     @ViewBuilder
@@ -215,6 +235,21 @@ struct SettingsView: View {
         savingVisibility = true
         visibilityFailed = !(await session.setDefaultVisibility(visibility))
         savingVisibility = false
+    }
+
+    /// Both of these say nothing of their own about how it went: the row is drawn from the
+    /// session's `deviceToken` and `deviceTokenNotice`, so what is on screen afterwards is what the
+    /// server answered rather than what this screen hoped.
+    private func renameToken(to name: String) async {
+        tokenBusy = true
+        await session.renameDeviceToken(to: name)
+        tokenBusy = false
+    }
+
+    private func renewToken() async {
+        tokenBusy = true
+        await session.renewDeviceToken()
+        tokenBusy = false
     }
 }
 

@@ -42,6 +42,23 @@ public enum SignOutOutcome: Sendable, Equatable {
     }
 }
 
+/// How a renewal ended.
+///
+/// Three answers rather than a `Bool`, because the middle one is not a failure and must not read
+/// as one: a token with no expiry cannot be renewed and does not need to be, and telling its owner
+/// that renewal "did not work" would invite them to keep pressing at something that is already
+/// fine. `failed` is the only one that means try again; the sentence for all three is on
+/// `deviceTokenNotice`.
+public enum DeviceTokenRenewal: Sendable, Equatable {
+    /// The successor is minted, stored and being presented.
+    case renewed
+    /// The server refused because this token carries no expiry (`token_not_renewable`). The
+    /// credential is untouched and still works.
+    case notRenewable
+    /// It did not happen. The credential is untouched and still works.
+    case failed
+}
+
 /// The session: one credential, one server, and the rule that a 401 ends it.
 ///
 /// There is no refresh lifecycle to fall back on (the personal access token IS the credential)
@@ -71,6 +88,13 @@ public final class SessionStore {
     /// and most screens never ask. It arrives on the same `/api/settings` read as the default
     /// above and has the same lifetime — it belongs to the account, not to the app.
     public private(set) var avatar: String?
+    /// What the server says about the credential THIS device is holding, or `nil` while it has not
+    /// been read. Scoped to the session exactly as the two above are.
+    public private(set) var deviceToken: DeviceToken?
+    /// What went wrong the last time the row was read, renamed or renewed — `nil` when nothing
+    /// did. Beside the row rather than in `lastError`, because none of these ends a session and a
+    /// failed rename must not overwrite the sentence a failed sign-out left on the screen.
+    public private(set) var deviceTokenNotice: String?
 
     private let credentials: any CredentialStore
     private let makeClient:
@@ -101,14 +125,15 @@ public final class SessionStore {
     /// would be telling B a fact about A.
     private var sessionGeneration = 0
     private var client: (any APIProtocol)?
-    /// The credential the client presents, kept for the ONE request that cannot go through the
-    /// client: the original-tier download (see `OriginalMedia`).
+    /// The credential the client presents — the SAME object its middleware reads, not a copy.
     ///
-    /// It is not a widening of what this process holds — the same closure is already captured by
-    /// the client every request goes through — and it is never handed out. `downloadOriginal` reads
-    /// it, builds the header and drops it; there is no accessor. It is cleared wherever `client` is,
-    /// which is the property it exists alongside.
-    private var bearer: (@Sendable () async -> String?)?
+    /// It is not a widening of what this process holds; it is the one place the token lives while
+    /// the app is running, and it is never handed out. Two callers read it: `downloadOriginal`,
+    /// which is the one request that cannot go through the generated client, and a renewal, which
+    /// REPLACES the value so that the client already built — and every store holding it — presents
+    /// the successor on its next request (see `PresentedCredential`). It is cleared wherever
+    /// `client` is, which is the property it exists alongside.
+    private var credential: PresentedCredential?
     /// The wait between the exchange's two attempts. Injected so a test can take it away: a
     /// suite that really slept would pay 1.5 s per retry case for nothing.
     private let sleeper: @Sendable (Duration) async throws -> Void
@@ -204,11 +229,12 @@ public final class SessionStore {
                 abandonSignIn(restoring: previousState)
                 return false
             }
+            let credential = PresentedCredential(token)
             adopt(
-                client: makeClient(configuration) { token },
+                client: makeClient(configuration) { () -> String? in credential.current },
                 configuration: configuration,
                 user: exchanged.user,
-                token: { token }
+                credential: credential
             )
             if persistence == .storedNowhere { lastError = Self.storageWarning }
             return true
@@ -308,7 +334,8 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         lastFailure = nil
-        let client = makeClient(configuration) { trimmed }
+        let credential = PresentedCredential(trimmed)
+        let client = makeClient(configuration) { () -> String? in credential.current }
         do {
             let user = try await Self.whoami(client)
             switch await persist(token: trimmed, configuration: configuration) {
@@ -317,18 +344,24 @@ public final class SessionStore {
                 return
             case .stored:
                 adopt(
-                    client: client, configuration: configuration, user: user, token: { trimmed }
+                    client: client,
+                    configuration: configuration,
+                    user: user,
+                    credential: credential
                 )
             case .storedNowhere:
                 adopt(
-                    client: client, configuration: configuration, user: user, token: { trimmed }
+                    client: client,
+                    configuration: configuration,
+                    user: user,
+                    credential: credential
                 )
                 lastError = Self.storageWarning
             }
         } catch {
             state = .signedOut
             self.client = nil
-            self.bearer = nil
+            self.credential = nil
             lastError = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }
     }
@@ -378,11 +411,15 @@ public final class SessionStore {
 
         state = .signingIn
         lastError = nil
-        let client = makeClient(configuration) { storedToken }
+        let credential = PresentedCredential(storedToken)
+        let client = makeClient(configuration) { () -> String? in credential.current }
         do {
             let user = try await Self.whoami(client)
             adopt(
-                client: client, configuration: configuration, user: user, token: { storedToken }
+                client: client,
+                configuration: configuration,
+                user: user,
+                credential: credential
             )
         } catch let error as APIError where error == .unauthorized {
             await wipeCredential()
@@ -390,7 +427,7 @@ public final class SessionStore {
         } catch {
             // The token was neither confirmed nor rejected. Park, keep, retry — see `unreachable`.
             self.client = nil
-            self.bearer = nil
+            self.credential = nil
             state = .unreachable(
                 (error as? APIError)?.errorDescription ?? error.localizedDescription
             )
@@ -474,11 +511,16 @@ public final class SessionStore {
         client: any APIProtocol,
         configuration: ServerConfiguration,
         user: User,
-        token: @escaping @Sendable () async -> String?
+        credential: PresentedCredential
     ) {
         self.configuration = configuration
         self.client = client
-        self.bearer = token
+        self.credential = credential
+        // The row belongs to the credential, and this is a different credential. Cleared here for
+        // the same reason the account's settings below are: showing the previous device's name and
+        // expiry against a new sign-in would be a screen describing a token nobody is holding.
+        deviceToken = nil
+        deviceTokenNotice = nil
         // Whatever the last account's default was, it is not this one's until it is fetched.
         // This lifecycle is deliberately the licence's: the default is account-scoped in exactly
         // the way the published binding is, so it is reset where that is published and cleared
@@ -501,7 +543,7 @@ public final class SessionStore {
     private func failSignIn(_ error: NativeLoginError) {
         state = .signedOut
         client = nil
-        bearer = nil
+        credential = nil
         lastError = error.message
         lastFailure = error
     }
@@ -612,13 +654,17 @@ public final class SessionStore {
             )
         }
         client = nil
-        bearer = nil
+        credential = nil
         configuration = nil
         // The account's default belongs to the account. Carrying it into the next sign-in would
         // have the compose sheet promise someone else's setting. Cleared here, alongside the
         // licence this method revokes, because they scope to the identity together.
         defaultVisibility = nil
         avatar = nil
+        // Same lifetime, one thing over: the row describes the credential this method just threw
+        // away, so keeping it would leave Settings naming a token that is gone.
+        deviceToken = nil
+        deviceTokenNotice = nil
         sessionGeneration += 1
         identity.rotate()
         state = .signedOut
@@ -770,13 +816,236 @@ public final class SessionStore {
         }
     }
 
+    // MARK: - the credential this device is holding
+
+    /// Reads the presenting token's own row — its name, its expiry and when it last spoke.
+    ///
+    /// The route reaches no further than the credential making the request, so this asks for
+    /// nothing the device does not already hold. What it adds is the two dates: a phone knows its
+    /// expiry from the mint response and nowhere else, which means a reinstalled app cannot tell
+    /// its owner how long this device has left.
+    ///
+    /// Fenced by the session generation for the reason `loadSettings` is: a reply can outlive the
+    /// question, and a row about the account that was signed in when this started must not be
+    /// written into the session of the one signed in now. A 401 ends the session here exactly as
+    /// it does everywhere else.
+    public func loadDeviceToken() async {
+        guard let client else { return }
+        let generation = sessionGeneration
+        do {
+            let row = try await Self.deviceToken(client)
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("GET /api/auth/native/token answered for an ended session")
+                return
+            }
+            deviceToken = row
+            deviceTokenNotice = nil
+        } catch let error as APIError where error == .unauthorized {
+            guard generation == sessionGeneration else { return }
+            await handle(.unauthorized)
+        } catch {
+            guard generation == sessionGeneration else { return }
+            // Whatever was already on the row stays: a read that failed is not evidence that the
+            // token changed, and blanking the name because the network dropped would be the screen
+            // forgetting something it knows.
+            deviceTokenNotice = Self.tokenUnreadable
+        }
+    }
+
+    /// Renames the presenting token — the only field of it a device may change.
+    ///
+    /// Nothing moves optimistically. What the screen shows afterwards is the SERVER's copy out of
+    /// the PATCH response, so a rename that did not take cannot leave the row claiming it did.
+    @discardableResult
+    public func renameDeviceToken(to name: String) async -> Bool {
+        guard let client else { return false }
+        // Checked here rather than by the field alone, so that the one rule is the one the request
+        // is built from: a name the server would refuse is never sent.
+        guard let sanitized = DeviceTokenName.sanitized(name) else {
+            deviceTokenNotice = Self.tokenNameRefused
+            return false
+        }
+        let generation = sessionGeneration
+        do {
+            let row = try await Self.renameDeviceToken(client, to: sanitized)
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("PATCH /api/auth/native/token answered for an ended session")
+                return false
+            }
+            deviceToken = row
+            deviceTokenNotice = nil
+            return true
+        } catch let error as APIError where error == .unauthorized {
+            guard generation == sessionGeneration else { return false }
+            await handle(.unauthorized)
+            return false
+        } catch {
+            guard generation == sessionGeneration else { return false }
+            deviceTokenNotice = Self.tokenRenameRefused
+            return false
+        }
+    }
+
+    /// Rotates this device's token: the server mints a successor and destroys the presenter in one
+    /// statement, and this is the half of that which happens on the phone.
+    ///
+    /// The order is the whole of the safety. The credential is written to storage FIRST and only
+    /// then swapped in memory, because the other way round leaves the device working from a token
+    /// it never wrote down: a force-quit after that, and the next launch restores the credential
+    /// the server already destroyed, which signs someone out for good. A storage write that fails
+    /// still swaps — the successor is by then the ONLY working credential on the device, and
+    /// keeping the dead one to punish the keychain helps nobody — but it says so out loud.
+    ///
+    /// The swap itself reaches every client through `PresentedCredential`, so the session carries
+    /// on mid-flight: the timeline that is already on screen keeps loading, with the new token.
+    ///
+    /// Nothing is written for a session that has ended. A renewal is a MINT, and a mint landing in
+    /// a credential slot somebody else is now using would sign the current account out at its next
+    /// request. The successor is dropped instead — its predecessor is gone either way, and the
+    /// session it belonged to is over.
+    @discardableResult
+    public func renewDeviceToken() async -> DeviceTokenRenewal {
+        guard let client, let credential else { return .failed }
+        let generation = sessionGeneration
+        let successor: String
+        do {
+            successor = try await Self.renew(client)
+        } catch let error as APIError where error == .unauthorized {
+            guard generation == sessionGeneration else { return .failed }
+            await handle(.unauthorized)
+            return .failed
+        } catch is NotRenewable {
+            guard generation == sessionGeneration else { return .failed }
+            deviceTokenNotice = Self.tokenNotRenewable
+            return .notRenewable
+        } catch {
+            guard generation == sessionGeneration else { return .failed }
+            deviceTokenNotice = Self.tokenRenewalFailed
+            return .failed
+        }
+        guard generation == sessionGeneration else {
+            MemosLog.session.info("a renewal answered for a session that has ended; it is dropped")
+            return .failed
+        }
+        var storageRefused = false
+        do {
+            // ONE item, so nothing can land inside it. The server address is not touched: a
+            // renewal changes the token and nothing else, and naming the address again would be a
+            // second write for no reason.
+            try await credentials.set(successor, for: Self.tokenAccount)
+        } catch {
+            storageRefused = true
+            let detail = String(describing: error)
+            MemosLog.session.error(
+                "the renewed credential could not be stored: \(detail, privacy: .public)"
+            )
+            lastError = Self.renewalStorageWarning
+        }
+        credential.replace(with: successor)
+        MemosLog.session.info("POST /api/auth/native/renew -> 200, the device swapped its token")
+        // Read back rather than assembled from the renewal's answer: the successor is a new row
+        // with its own dates, and inventing them here would put a `created_at` on the screen that
+        // no server ever said.
+        await loadDeviceToken()
+        // AFTER the read, which clears the notice on success. `lastError` alone would not do:
+        // the screen this renewal was started from draws the row and does not draw `lastError`,
+        // so the warning would land nowhere the person pressing Renew can see it.
+        if storageRefused { deviceTokenNotice = Self.renewalStorageWarning }
+        return .renewed
+    }
+
+    /// What a read that failed says. Deliberately not a sign-out and not a blank row.
+    public static let tokenUnreadable =
+        "This device's access could not be read just now."
+
+    /// What a name this app will not send says. The bounds are the server's own.
+    public static let tokenNameRefused =
+        "A device name has to be between 1 and \(DeviceTokenName.maxLength) characters."
+
+    public static let tokenRenameRefused =
+        "The server did not accept that name, so the old one stands."
+
+    /// Not a failure: an unbounded token cannot silently expire, so there is nothing to renew.
+    public static let tokenNotRenewable =
+        "This device's token does not expire, so there is nothing to renew."
+
+    public static let tokenRenewalFailed =
+        "The access could not be renewed. This device still works with the token it has."
+
+    /// The successor works and could not be written down — the renewal's own `storageWarning`.
+    public static let renewalStorageWarning =
+        "Renewed, but the new credential could not be saved on this device. "
+        + "It will not survive quitting the app - sign out properly before you do."
+
+    /// The server refusing to renew a token that has no expiry. A refusal, not a transport
+    /// failure, and the one 400 this route answers with.
+    private struct NotRenewable: Error {}
+
+    static func deviceToken(_ client: any APIProtocol) async throws -> DeviceToken {
+        let response = try await client.nativeTokenApiAuthNativeTokenGet(.init())
+        switch response {
+        case .ok(let ok):
+            MemosLog.session.info("GET /api/auth/native/token -> 200")
+            return DeviceToken(try ok.body.json)
+        case .undocumented(let statusCode, _):
+            throw APIError.fromStatus(statusCode)
+        }
+    }
+
+    static func renameDeviceToken(
+        _ client: any APIProtocol,
+        to name: String
+    ) async throws -> DeviceToken {
+        let response = try await client.renameNativeTokenApiAuthNativeTokenPatch(
+            .init(body: .json(.init(name: name)))
+        )
+        switch response {
+        case .ok(let ok):
+            MemosLog.session.info("PATCH /api/auth/native/token -> 200")
+            return DeviceToken(try ok.body.json)
+        case .unprocessableContent:
+            throw APIError.server(status: 422)
+        case .undocumented(let statusCode, _):
+            throw APIError.fromStatus(statusCode)
+        }
+    }
+
+    /// The successor token, or the reason there is not one.
+    ///
+    /// The 400 is read rather than reported as "HTTP 400", because `token_not_renewable` is the
+    /// difference between "try again" and "this token never needed renewing".
+    static func renew(_ client: any APIProtocol) async throws -> String {
+        let response = try await client.nativeRenewApiAuthNativeRenewPost(.init())
+        switch response {
+        case .ok(let ok):
+            return try ok.body.json.token
+        case .undocumented(let statusCode, let payload):
+            if statusCode == 400, let body = payload.body,
+                let data = try? await Data(collecting: body, upTo: 4096),
+                detail(in: data) == "token_not_renewable"
+            {
+                throw NotRenewable()
+            }
+            throw APIError.fromStatus(statusCode)
+        }
+    }
+
+    /// FastAPI's `{"detail": "<code>"}`, when that is what arrived. A 422 carries a LIST under the
+    /// same key, so the type is checked rather than assumed.
+    private static func detail(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object["detail"] as? String
+    }
+
     /// Downloads the file somebody actually uploaded, and answers where it was put.
     ///
     /// It lives on the session rather than on a media type of its own because of the credential:
     /// the original tier is served unsigned and authenticated, so this is the only request outside
     /// the generated client that has to present the device token — and the token stays in here
-    /// (see `bearer`) rather than being handed to the layer that wants the file. The server it is
-    /// offered to is pinned to this session's own (`OriginalMedia.sameOrigin`).
+    /// (see `credential`) rather than being handed to the layer that wants the file. The server it
+    /// is offered to is pinned to this session's own (`OriginalMedia.sameOrigin`).
     ///
     /// It is FENCED by the session generation, the same fence `loadSettings` carries and for the
     /// same reason, which matters more here than anywhere else in this file. A download is the
@@ -797,7 +1066,7 @@ public final class SessionStore {
         into directory: URL = .temporaryDirectory
     ) async throws -> URL {
         guard let url = attachment.downloadURL else { throw OriginalMediaError.unavailable }
-        guard let server = configuration?.baseURL, let bearer, let token = await bearer(),
+        guard let server = configuration?.baseURL, let token = credential?.current,
             !token.isEmpty
         else { throw OriginalMediaError.notSignedIn }
         let generation = sessionGeneration
