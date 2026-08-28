@@ -1,7 +1,7 @@
 # Provenance of the memos-ng artefacts vendored into this package.
 # Written by scripts/sync-openapi.sh — do not edit by hand.
 repo=memos-ng
-commit=55c9a6fb3539ba7a152c8b69e73b4bdb547706d7
-subject=Let a device token read and rename itself (#114)
-committed=2026-08-28T06:06:04+02:00
+commit=b4c7944e07a9c59e600c07e5ab7ccdc851eed986
+subject=Mint a management grant from a fresh sign-on, and let it manage tokens (#115)
+committed=2026-08-28T07:41:54+02:00
 files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md
