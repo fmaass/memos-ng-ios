@@ -147,32 +147,18 @@ struct MediaViewerView: View {
     @ViewBuilder
     private var actions: some View {
         let page = pages.first { $0.id == currentPage }
-        let available = page.map { MediaTileMenu.actions(for: $0.attachment) } ?? []
-        if !available.isEmpty {
-            Menu {
-                ForEach(available) { action in
-                    MediaTileActionItem(
-                        action: action,
-                        showMemo: { uid in
-                            // Out of the cover FIRST: the jump changes tabs, and a full-screen
-                            // cover presented by the tab being left would be a black screen over
-                            // the memo.
-                            dismiss()
-                            jump?.request(uid)
-                        },
-                        fetch: { attachment, rendition in
-                            Task { await fetch(attachment, rendition) }
-                        }
-                    )
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding()
+        MediaViewerActions(
+            control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
+            showMemo: { uid in
+                // Out of the cover FIRST: the jump changes tabs, and a full-screen cover presented
+                // by the tab being left would be a black screen over the memo.
+                dismiss()
+                jump?.request(uid)
+            },
+            fetch: { attachment, rendition in
+                Task { await fetch(attachment, rendition) }
             }
-            .accessibilityLabel("More")
-        }
+        )
     }
 
     /// Fetches the named file of the picture or clip on screen and offers it to the share sheet.
@@ -210,6 +196,66 @@ struct MediaViewerView: View {
         // The player belongs to a page of THIS list; a video on a page that has just arrived has
         // to be one the playback rules can find.
         playback.adopt(pages: shown, startingAt: selection.startPage.id)
+    }
+}
+
+/// The viewer's control over the file on screen, in whichever shape its actions call for.
+///
+/// A view of its own rather than a branch written into the viewer's body, for the reason every
+/// other seam in this file exists: what it draws is decided by `MediaTileMenu.control(of:)` and
+/// what a press DOES is `MediaTileActionItem.tapped()`, so both halves can be asserted without a
+/// full-screen cover, a pager and a player standing behind them.
+///
+/// A single action is drawn as itself — its own icon, one tap — because a three-dots menu fronting
+/// one row is an indirection that buys nothing (MEMNG-213). Two or more keep the menu.
+///
+/// Both shapes press the SAME row. That is what keeps the one-download-at-a-time guard and the
+/// session's own fence behind Share on one path: the direct button is different chrome around the
+/// dispatch the menu row already had, not a second way to start a download.
+struct MediaViewerActions: View {
+    let control: MediaActionControl
+    let showMemo: (String) -> Void
+    /// Defaulted for the same reason the row's is: a surface that cannot download still builds the
+    /// control rather than being handed a different one.
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
+
+    var body: some View {
+        switch control {
+        case .hidden:
+            EmptyView()
+        case .direct(let action):
+            // Labelled with the action's own name, not "More": the glyph now says which action it
+            // is, and VoiceOver has to say the same thing.
+            Button {
+                row(action).tapped()
+            } label: {
+                glyph(action.symbol)
+            }
+            .accessibilityLabel(action.title)
+        case .menu(let actions):
+            Menu {
+                ForEach(actions) { action in
+                    row(action)
+                }
+            } label: {
+                glyph("ellipsis.circle.fill")
+            }
+            .accessibilityLabel("More")
+        }
+    }
+
+    /// The row, whichever shape it ends up drawn in — a menu item, or the button itself.
+    private func row(_ action: MediaTileAction) -> MediaTileActionItem {
+        MediaTileActionItem(action: action, showMemo: showMemo, fetch: fetch)
+    }
+
+    /// The overlay's one glyph, so the direct button and the menu are the same target in the same
+    /// corner of the same picture.
+    private func glyph(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 30))
+            .foregroundStyle(.white.opacity(0.85))
+            .padding()
     }
 }
 

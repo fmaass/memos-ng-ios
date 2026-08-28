@@ -56,6 +56,27 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
     }
 }
 
+/// The SHAPE of the control a surface draws over one file's actions.
+///
+/// A three-dots menu is an indirection, and an indirection over a single row buys nothing: it hides
+/// that row's name behind a glyph meaning "something", and charges a tap to find out what. So the
+/// control follows the list — one action is drawn as ITSELF, with its own icon and its own tap, and
+/// the menu comes back the moment there is a choice to make (MEMNG-213). Settings made the same
+/// move when its menu of one became a gear.
+///
+/// A value rather than a count read in a view body, for the reason `MediaTileAction` is one: the
+/// surfaces that offer these actions must agree about them, and "how many is one" is exactly the
+/// kind of decision that gets written twice and then diverges.
+enum MediaActionControl: Equatable, Sendable {
+    /// Nothing can be done with this file: no control at all. A button that opens an empty menu is
+    /// worse than no button.
+    case hidden
+    /// Exactly one thing can be done: that action IS the control.
+    case direct(MediaTileAction)
+    /// Two or more, in the order `actions(for:)` returned them.
+    case menu([MediaTileAction])
+}
+
 /// What the menu over a library file contains.
 enum MediaTileMenu {
     /// The actions for one file, in the order they are shown.
@@ -100,6 +121,24 @@ enum MediaTileMenu {
             actions.append(.saveOriginal(attachment))
         }
         return actions
+    }
+
+    /// How this file's actions are offered: as nothing, as the one action itself, or as the menu.
+    ///
+    /// The list and its shape are decided in one place so a surface cannot draw a menu over a list
+    /// this rule calls single, or the reverse.
+    static func control(for attachment: MemoAttachment) -> MediaActionControl {
+        control(of: actions(for: attachment))
+    }
+
+    /// The same rule over a list already in hand, which is what makes it assertable without an
+    /// attachment standing behind every case.
+    static func control(of actions: [MediaTileAction]) -> MediaActionControl {
+        switch actions.count {
+        case 0: .hidden
+        case 1: .direct(actions[0])
+        default: .menu(actions)
+        }
     }
 
     /// The file a row would hand over, but only when the server is actually HOLDING it.
