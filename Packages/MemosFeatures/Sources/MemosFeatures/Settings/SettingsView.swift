@@ -85,8 +85,8 @@ struct SettingsView: View {
         // Only openable while the app knows which server it is signed in to: the management
         // sign-on is a round trip to that server, and there is nowhere to send it otherwise.
         .sheet(isPresented: $managingTokens) {
-            if let configuration = session.configuration {
-                ManageTokensView(configuration: configuration)
+            if let baseURL = session.serverBaseURL {
+                ManageTokensView(serverBaseURL: baseURL)
             }
         }
     }

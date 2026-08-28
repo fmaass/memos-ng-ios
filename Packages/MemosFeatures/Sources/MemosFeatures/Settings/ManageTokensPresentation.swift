@@ -18,7 +18,12 @@ enum ManageTokensPresentation {
     /// be a tap that unexpectedly throws somebody into the household sign-on.
     static let rowCaption =
         "See, create and revoke this account's access tokens. It needs a fresh sign-in."
-    static let rowLabel = "Manage this account's access tokens"
+    /// Says the price too, and it has to: a button replaces its children's accessibility, so the
+    /// caption below the title reaches nobody using a screen reader. A hint would not do — a hint
+    /// is optional and can be switched off, and "this throws you into the household sign-on" is
+    /// not optional information about a row somebody is deciding whether to press.
+    static let rowLabel =
+        "Manage this account's access tokens. It needs a fresh sign-in."
 
     // MARK: - buying a management session
 
@@ -52,7 +57,7 @@ enum ManageTokensPresentation {
     /// as one — the app can ship before the deploy, and this screen must never be what breaks.
     static let unsupported =
         "This server does not offer token management to the app yet. Nothing is wrong with your "
-            + "sign-in; the account's tokens can still be managed in the web app."
+        + "sign-in; the account's tokens can still be managed in the web app."
 
     static let empty = "This account has no access tokens."
 
@@ -74,7 +79,7 @@ enum ManageTokensPresentation {
     /// recoverable and its text is not, and both halves of that are said.
     static let secretLost =
         "The new token's text is gone - it is shown once and only once. The token itself still "
-            + "works: sign in again to find it in the list, and revoke it if you did not copy it."
+        + "works: sign in again to find it in the list, and revoke it if you did not copy it."
 
     // MARK: - creating and revoking
 
@@ -83,7 +88,7 @@ enum ManageTokensPresentation {
     static let createLabel = "Create a token with this name"
     static let createCaption =
         "A new token never expires and can do everything this account can. Revoke it here when it "
-            + "is no longer needed."
+        + "is no longer needed."
 
     /// Named, because a screen reader reaching a row of identical "Revoke" buttons cannot tell
     /// which token it is about to destroy.

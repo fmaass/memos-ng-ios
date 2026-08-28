@@ -99,6 +99,15 @@ public final class ManageTokensStore {
         self.now = now
     }
 
+    /// Built from the base URL the session is signed in to.
+    ///
+    /// It exists because the layer above cannot name a `ServerConfiguration`: that type belongs to
+    /// the API layer, and the screens layer reaches the API through this one and never directly
+    /// (the dependency rule, checked by the gate). A URL is a thing both layers can say.
+    public convenience init(serverBaseURL: URL) {
+        self.init(configuration: ServerConfiguration(baseURL: serverBaseURL))
+    }
+
     // MARK: - buying a management session
 
     /// The step-up: the same browser sign-on the app signs in with, asking for a grant instead of

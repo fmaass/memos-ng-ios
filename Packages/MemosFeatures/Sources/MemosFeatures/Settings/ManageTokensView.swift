@@ -1,3 +1,4 @@
+import Foundation
 import MemosCore
 import SwiftUI
 import UIKit
@@ -27,8 +28,10 @@ struct ManageTokensView: View {
     @State private var presenter = SafariLoginPresenter()
     @State private var draft = ""
 
-    init(configuration: ServerConfiguration) {
-        _store = State(initialValue: ManageTokensStore(configuration: configuration))
+    /// Takes the server's base URL rather than a configuration: `ServerConfiguration` belongs to
+    /// the API layer, which this one reaches through `MemosCore` and never directly.
+    init(serverBaseURL: URL) {
+        _store = State(initialValue: ManageTokensStore(serverBaseURL: serverBaseURL))
     }
 
     var body: some View {
