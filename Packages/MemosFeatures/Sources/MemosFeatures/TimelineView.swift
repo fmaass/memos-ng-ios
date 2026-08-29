@@ -98,7 +98,10 @@ public struct TimelineView: View {
             // what they already looked like they were.
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: SettingsRoute.self) { _ in
+            // `stackDestination`, not `navigationDestination`: what the tab bar does under a
+            // pushed screen is the route's to say, and saying it here is how Settings came to be
+            // drawn under the Timeline and Library icons it has nothing to do with (MEMNG-220).
+            .stackDestination(for: SettingsRoute.self) { _ in
                 SettingsView(signOut: signOut, avatar: avatar)
             }
             // The memo is looked for in BOTH lists. A card tapped on the search results is a
@@ -106,7 +109,7 @@ public struct TimelineView: View {
             // knew the timeline pushed an empty screen for exactly those memos. Whichever list
             // held it is also the list the detail screen edits, so an edit made from a result
             // lands where it was read.
-            .navigationDestination(for: MemoRoute.self) { route in
+            .stackDestination(for: MemoRoute.self) { route in
                 if let found = holder(of: route.uid) {
                     MemoDetailView(uid: route.uid, initial: found.memo, timeline: found.store)
                 }
