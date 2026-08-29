@@ -1008,8 +1008,15 @@ public final class TimelineStore {
         } catch {
             // Put the memo back as it was. It is found by uid rather than by the index captured
             // above, because a refresh may have moved it while the request was in flight.
+            //
+            // Through `admitted` like every other memo this store takes in, because `original` is
+            // a snapshot from BEFORE the request and the request is exactly long enough for an
+            // attachment to be deleted underneath it: tick a box, delete a picture, the patch
+            // fails, and a raw restore would put the picture back on a memo the server has no
+            // copy of it for. The tick still rolls back — that is what the snapshot is for — and
+            // only what the server has confirmed gone is left out of it.
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
-                memos[current] = original
+                memos[current] = admitted(original)
             }
             await report(error)
             return false

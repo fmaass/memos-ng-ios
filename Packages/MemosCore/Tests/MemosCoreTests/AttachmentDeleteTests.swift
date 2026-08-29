@@ -39,6 +39,16 @@ struct AttachmentDeleteTests {
         Stub.json(Stub.page(memos))
     }
 
+    /// The calendar an anchor is read in, and a day to anchor on — an anchored list is the only
+    /// kind that believes there is anything above it, so it is the only one that pages upward.
+    private static var utc: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        return calendar
+    }
+
+    private static let anchored = MemoQuery(anchor: .day(year: 2026, month: 8, day: 24))
+
     /// The request itself: the right verb at the right path, carrying the credential the middleware
     /// attaches — which is what a hand-written stand-in for the client could never show.
     @Test("the delete goes to that one attachment, with the token on it")
@@ -321,6 +331,200 @@ struct AttachmentDeleteTests {
             "the copy handed to the caller still had the picture on it"
         )
         #expect(store.memos[0].attachments.map(\.uid) == ["a2"])
+    }
+
+    /// The optimistic write's ROLLBACK, which restores a snapshot taken before the request.
+    ///
+    /// `toggleTask` is the one write in this store that moves the list before the server answers,
+    /// so it is the one that holds a pre-request copy of a memo — and a failed patch puts that copy
+    /// back. The copy was taken before the delete, so a raw restore is a resurrection by the one
+    /// door that never goes near a server answer.
+    @Test("a failed checkbox rolls the tick back without rolling the picture back")
+    func aFailedToggleDoesNotRestoreADeletedPicture() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case deleteAttachmentOperation:
+                return Stub.empty(.noContent)
+            case patchMemoOperation:
+                entered.set(true)
+                try await Self.hold(until: release)
+                return Stub.empty(.internalServerError)
+            default:
+                return Stub.json(
+                    Stub.page([
+                        Stub.memo(
+                            uid: "m1",
+                            content: "- [ ] ring the plumber",
+                            attachments: [
+                                Stub.attachment(uid: "a1", status: "ready"),
+                                Stub.attachment(uid: "a2", status: "ready"),
+                            ]
+                        )
+                    ])
+                )
+            }
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+
+        let tick = Task {
+            await store.toggleTask(at: 0, in: "m1", using: client, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        release.set(true)
+        let ticked = await tick.value
+
+        #expect(removed)
+        #expect(!ticked, "control: the patch was refused, so there is a rollback to judge")
+        // The tick goes back, which is what the snapshot is for.
+        #expect(store.memos[0].content == "- [ ] ring the plumber", "the tick did not roll back")
+        // The picture does not, which is what the snapshot must not be allowed to do.
+        #expect(
+            store.memos[0].attachments.map(\.uid) == ["a2"],
+            "a failed checkbox put a deleted picture back"
+        )
+    }
+
+    /// The rule stated as a REQUEST COUNT, so it fails if anyone ever fences this delete on the
+    /// list's lineage. A next page issued before the delete and answered after it is a
+    /// continuation of a list the delete did not change — it lands, once, minus the picture. A
+    /// generation bump would have `loadMore` drop it and ask again, which is the second request
+    /// this counts.
+    @Test("a page in flight when the delete lands still lands, and is not asked for twice")
+    func aPageInFlightStillLands() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let secondPages = Counter()
+        let client = Stub.client { request, _, operation in
+            guard operation == listMemosOperation else { return Stub.empty(.noContent) }
+            guard request.path?.contains("cursor=page-2") == true else {
+                return Stub.json(
+                    Stub.page([Self.memo("m1", ["x1"])], nextCursor: "page-2")
+                )
+            }
+            secondPages.increment()
+            entered.set(true)
+            try await Self.hold(until: release)
+            return Stub.json(Stub.page([Self.memo("m2", ["a1", "a2"])]))
+        }
+        let store = TimelineStore(pageSize: 1)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.hasMore)
+
+        let page = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        // The memo this attachment is on is not loaded yet; the delete is still a fact about it.
+        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client)
+        release.set(true)
+        await page.value
+
+        #expect(removed)
+        #expect(store.memos.map(\.uid) == ["m1", "m2"], "the page in flight was dropped")
+        #expect(!store.hasMore, "the page's own cursor was not adopted")
+        #expect(secondPages.count == 1, "the page was asked for \(secondPages.count) times")
+        #expect(
+            store.memos[1].attachments.map(\.uid) == ["a2"],
+            "the page brought the picture back"
+        )
+    }
+
+    /// The block ABOVE an anchored list, which is its own admission lane.
+    @Test("a page above answered after the delete cannot bring the picture back")
+    func anUpwardPageCannotBringItBack() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { request, _, operation in
+            guard operation == listMemosOperation else { return Stub.empty(.noContent) }
+            guard request.path?.contains("sort=created_at") == true else {
+                return Stub.json(
+                    Stub.page(
+                        [Stub.memo(uid: "m1", createdAt: "2026-08-24T18:00:00Z")],
+                        nextCursor: nil
+                    )
+                )
+            }
+            entered.set(true)
+            try await Self.hold(until: release)
+            // Ascending, the memos directly above the list — one of them carrying the picture.
+            return Stub.json(
+                Stub.page([
+                    Stub.memo(
+                        uid: "m2",
+                        createdAt: "2026-08-25T09:00:00Z",
+                        attachments: [
+                            Stub.attachment(uid: "a1", status: "ready"),
+                            Stub.attachment(uid: "a2", status: "ready"),
+                        ]
+                    )
+                ])
+            )
+        }
+        let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        #expect(store.hasNewer, "control: an anchored list has something above it")
+
+        let above = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client)
+        release.set(true)
+        _ = await above.value
+
+        #expect(removed)
+        #expect(store.memos.map(\.uid) == ["m2", "m1"], "control: the block above landed on top")
+        #expect(
+            store.memos[0].attachments.map(\.uid) == ["a2"],
+            "the page above brought the picture back"
+        )
+    }
+
+    /// A created memo is a server memo too, and it goes in by its own door (`placed`) rather than
+    /// through `apply`. Nothing realistic puts a deleted uid on a memo made afterwards — the point
+    /// is that the lane is covered rather than trusted.
+    @Test("a created memo cannot arrive carrying a picture this session deleted")
+    func aCreatedMemoCannotBringItBack() async {
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case deleteAttachmentOperation:
+                return Stub.empty(.noContent)
+            case "create_memo_api_memos_post":
+                return Stub.json(
+                    Stub.memo(
+                        uid: "m2",
+                        content: "new",
+                        createdAt: "2026-08-25T09:00:00Z",
+                        attachments: [
+                            Stub.attachment(uid: "a1", status: "ready"),
+                            Stub.attachment(uid: "a2", status: "ready"),
+                        ]
+                    ),
+                    status: .created
+                )
+            default:
+                return Self.page([Self.memo("m1", ["a1"])])
+            }
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        #expect(removed)
+
+        let created = await store.create(content: "new", using: client, baseURL: Stub.baseURL)
+
+        #expect(created)
+        #expect(store.memos.map(\.uid) == ["m2", "m1"], "control: the created memo was placed")
+        #expect(
+            store.memos[0].attachments.map(\.uid) == ["a2"],
+            "a created memo brought a deleted picture back"
+        )
     }
 
     /// The counter this delete deliberately does NOT fence on. `timelineGeneration` is the LIST's

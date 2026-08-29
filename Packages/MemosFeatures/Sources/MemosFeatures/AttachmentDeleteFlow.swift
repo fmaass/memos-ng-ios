@@ -75,29 +75,54 @@ public final class AttachmentDeleteFlow {
         }
     }
 
-    /// Feeds one event to the machine, RUNS the request when that event is the one that starts it,
-    /// and applies the answer.
+    /// The picture a request is out for, or nil. What a caller that claimed one reads back.
+    public var deleting: String? { Self.deletes(stage) }
+
+    /// Moves the machine NOW, on the caller's own turn, and answers whether THIS event is the one
+    /// that starts a request.
+    ///
+    /// The synchronous half, and it has to be synchronous. Both surfaces feed this machine from a
+    /// button and from an alert binding, and a binding's dismissal fires in the same turn as the
+    /// button that dismissed it. Wrapped in tasks, those are two unstructured pieces of work with
+    /// no order between them: the cancellation can run first, move `asking` back to `idle`, and
+    /// the Delete somebody actually pressed then finds nothing to confirm and silently does
+    /// nothing. Claimed here, before any hop, the confirmation has already reached `deleting` by
+    /// the time the dismissal is delivered — and a `cancelled` against `deleting` is the no-op it
+    /// is supposed to be. Same rule as `PhotoDelegate`'s one-shot claim, for the same reason.
+    @discardableResult
+    public func claim(_ event: Event) -> Bool {
+        let previous = stage
+        stage = Self.next(stage, on: event)
+        settle(event)
+        return Self.deletes(stage) != nil && Self.deletes(previous) == nil
+    }
+
+    /// Runs the request a claim started, and applies the answer.
     ///
     /// The request is passed IN, exactly as `MemoEditFlow.advanceDelete` takes it, because the flow
     /// has no store and no client — and because that is what makes "exactly one delete, of the
     /// picture that was asked about" a thing a test can hold rather than a sequence it has to
-    /// trust. It fires on the TRANSITION into `deleting` and nowhere else: `previous` is read
-    /// before the machine moves, so a second confirmation arriving while the request is out sends
-    /// nothing.
+    /// trust. It sends only from `deleting`, which only a claim can reach, so nothing that arrives
+    /// while the request is out can start a second one.
     @discardableResult
-    public func advance(
-        _ event: Event,
-        delete: @MainActor (String) async -> Bool
-    ) async -> Bool {
-        let previous = stage
-        stage = Self.next(stage, on: event)
-        settle(event)
-        guard let uid = Self.deletes(stage), Self.deletes(previous) == nil else { return false }
+    public func perform(delete: @MainActor (String) async -> Bool) async -> Bool {
+        guard let uid = Self.deletes(stage) else { return false }
         let succeeded = await delete(uid)
         let answer = Event.returned(succeeded)
         stage = Self.next(stage, on: answer)
         settle(answer)
         return succeeded
+    }
+
+    /// Both halves, for a caller that has nothing to do between them — which is every test and no
+    /// view: a view claims first so the claim cannot be reordered against a dismissal.
+    @discardableResult
+    public func advance(
+        _ event: Event,
+        delete: @MainActor (String) async -> Bool
+    ) async -> Bool {
+        guard claim(event) else { return false }
+        return await perform(delete: delete)
     }
 
     /// What an event means for what the screen SAYS. Separate from the machine because the stage

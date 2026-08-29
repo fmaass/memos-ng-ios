@@ -232,11 +232,18 @@ public struct MemoDetailView: View {
         Binding(get: { asked != nil }, set: { if !$0 { sendPictureDelete(.cancelled) } })
     }
 
-    /// Every event goes through the flow's one entry point, carrying the request with it — the same
-    /// arrangement `ComposeDelete` uses for the memo's own delete, so there is exactly one place a
-    /// picture can start being deleted.
+    /// Every event goes through the flow, and the STATE MOVES HERE — synchronously, before any
+    /// task exists.
+    ///
+    /// The alert's dismissal binding fires in the same turn as the button that dismissed it, so a
+    /// confirmation and a cancellation both wrapped in tasks would be two pieces of work with no
+    /// order between them: the cancellation running first puts the machine back to `idle` and the
+    /// Delete somebody pressed then does nothing at all. Claimed first, the confirmation is
+    /// already at `deleting` when the dismissal lands, where a cancellation is the no-op it should
+    /// be. Only the REQUEST needs a task.
     private func sendPictureDelete(_ event: AttachmentDeleteFlow.Event) {
-        Task { await photoDelete.advance(event, delete: deletePicture) }
+        guard photoDelete.claim(event) else { return }
+        Task { await photoDelete.perform(delete: deletePicture) }
     }
 
     /// The request itself. WHEN it runs — once, on the transition into `deleting`, for the picture

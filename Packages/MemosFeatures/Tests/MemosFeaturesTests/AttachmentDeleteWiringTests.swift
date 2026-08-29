@@ -264,6 +264,89 @@ struct AttachmentDeleteWiringTests {
         await flow.advance(.tapped("a1"), delete: store.delete)
         #expect(flow.lastError == nil)
     }
+    // MARK: - the claim, and the order two events can arrive in
+
+    /// The ordering bug the synchronous claim exists for.
+    ///
+    /// An alert's dismissal binding fires in the same turn as the button that dismissed it. While
+    /// both events were wrapped in tasks they were two pieces of work with no order between them,
+    /// and the cancellation winning put the machine back to `idle` — so the Delete somebody
+    /// actually pressed found nothing to confirm and did nothing at all, in silence. The claim
+    /// happens on the caller's own turn, so by the time the dismissal is delivered the request has
+    /// already been claimed and a cancellation is the no-op it is supposed to be.
+    @Test("a dismissal arriving after a confirmation was claimed does not swallow the delete")
+    func aDismissalAfterTheClaimDoesNotSwallowIt() async {
+        let flow = AttachmentDeleteFlow()
+        let store = AttachmentDeleteRecorder(result: true)
+
+        #expect(!flow.claim(.tapped("a1")), "the tap that only asks claimed a request")
+        #expect(flow.claim(.confirmed), "the confirmation did not claim the request")
+        // The alert going away, delivered after the claim — which is now the only order there is.
+        #expect(!flow.claim(.cancelled))
+        #expect(flow.stage == .deleting("a1"), "a dismissal recalled a request already claimed")
+
+        let gone = await flow.perform(delete: store.delete)
+
+        #expect(gone)
+        #expect(store.uids == ["a1"], "the store saw \(store.uids)")
+    }
+
+    /// The other order, which must stay harmless: a question answered no, and a confirmation
+    /// after it has nothing to confirm.
+    @Test("a confirmation after a cancellation claims nothing and sends nothing")
+    func aConfirmationAfterACancellationSendsNothing() async {
+        let flow = AttachmentDeleteFlow()
+        let store = AttachmentDeleteRecorder(result: true)
+
+        flow.claim(.tapped("a1"))
+        #expect(!flow.claim(.cancelled))
+        #expect(flow.stage == .idle)
+        #expect(!flow.claim(.confirmed), "a confirmation with no question open claimed a request")
+
+        let gone = await flow.perform(delete: store.delete)
+
+        #expect(!gone)
+        #expect(store.uids.isEmpty, "the store saw \(store.uids)")
+    }
+
+    /// `perform` sends only from `deleting`, which only a claim reaches — so a view that forgets
+    /// to claim sends nothing rather than deleting whatever was last asked about.
+    @Test("performing without a claim sends nothing")
+    func performWithoutAClaimSendsNothing() async {
+        let flow = AttachmentDeleteFlow()
+        let store = AttachmentDeleteRecorder(result: true)
+        flow.claim(.tapped("a1"))
+
+        let gone = await flow.perform(delete: store.delete)
+
+        #expect(!gone)
+        #expect(store.uids.isEmpty, "a request went out for a question nobody had answered")
+    }
+
+    /// What the viewer renders as its notice, and exactly when there is one to render. The viewer
+    /// is a full-screen cover over a screen whose own notice belongs to a different flow, so this
+    /// value is the only thing standing between a refused delete and silence.
+    @Test("the failure message is there exactly after a refusal, and gone at the next question")
+    func theFailureMessageAppearsOnlyOnARefusal() async {
+        let flow = AttachmentDeleteFlow()
+        let accepts = AttachmentDeleteRecorder(result: true)
+        let refuses = AttachmentDeleteRecorder(result: false)
+        #expect(flow.lastError == nil)
+
+        await flow.advance(.tapped("a1"), delete: accepts.delete)
+        #expect(flow.lastError == nil)
+        await flow.advance(.confirmed, delete: accepts.delete)
+        #expect(accepts.uids == ["a1"], "control: the accepted request was sent")
+        #expect(flow.lastError == nil, "a delete that worked said something had gone wrong")
+
+        await flow.advance(.tapped("a2"), delete: refuses.delete)
+        await flow.advance(.confirmed, delete: refuses.delete)
+        #expect(refuses.uids == ["a2"], "control: the refused request was sent")
+        #expect(flow.lastError == AttachmentDeleteFlow.failureMessage)
+
+        await flow.advance(.tapped("a2"), delete: refuses.delete)
+        #expect(flow.lastError == nil, "the last refusal was still on screen under a new question")
+    }
 }
 
 /// The store the delete is asserted against: which pictures were deleted, in order, and how many

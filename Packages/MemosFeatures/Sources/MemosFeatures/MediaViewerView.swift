@@ -87,6 +87,7 @@ struct MediaViewerView: View {
             closeButton
         }
         .overlay(alignment: .topTrailing) { actions }
+        .overlay(alignment: .bottom) { failureNotice }
         // The question lives HERE, on the cover, and not on the screen that presented it: an alert
         // attached under a full-screen presentation never appears at all. An alert rather than a
         // confirmation dialog for the reason `ComposeView.deleteRow` records — the dialog put its
@@ -220,6 +221,21 @@ struct MediaViewerView: View {
         .accessibilityLabel(AttachmentDeleteFlow.title(for: page.attachment))
     }
 
+    /// What a refused delete says, on the one screen with nowhere else to say it.
+    ///
+    /// The detail view behind this cover has a notice of its own, but it is a DIFFERENT flow's and
+    /// it is behind a full-screen cover nobody can see past — so a delete refused from in here
+    /// used to fail in silence, the picture simply staying where it was. It is the same card the
+    /// timeline shows a failure in, so one refusal does not look like two different things, and
+    /// the next question clears it (`AttachmentDeleteFlow` settles `lastError` on every `tapped`).
+    @ViewBuilder
+    private var failureNotice: some View {
+        if let failure = deletion.lastError {
+            NoticeCard(text: failure, tone: .error)
+                .padding(DesignTokens.Space.roomy)
+        }
+    }
+
     /// The page a question is open about, or nil.
     private var asked: MediaPage? {
         guard let uid = deletion.asking else { return nil }
@@ -233,24 +249,25 @@ struct MediaViewerView: View {
         Binding(get: { asked != nil }, set: { if !$0 { send(.cancelled) } })
     }
 
-    /// Every event goes through the flow's one entry point, carrying the request with it, so there
-    /// is exactly one place a delete can begin — and none at all on a viewer that was handed no
-    /// way to delete.
+    /// Every event goes through the flow, and the STATE MOVES HERE — synchronously, before any
+    /// task exists.
+    ///
+    /// The alert's dismissal binding fires in the same turn as the button that dismissed it, so a
+    /// confirmation and a cancellation both wrapped in tasks would be two pieces of work with no
+    /// order between them, and the cancellation winning would silently swallow a Delete somebody
+    /// pressed. Claimed first, the confirmation is already at `deleting` when the dismissal lands.
+    /// Only the REQUEST needs a task — and none at all on a viewer that was handed no way to
+    /// delete.
     private func send(_ event: AttachmentDeleteFlow.Event) {
         guard let delete else { return }
-        Task { await deliver(event, delete: delete) }
-    }
-
-    private func deliver(
-        _ event: AttachmentDeleteFlow.Event,
-        delete: @escaping @MainActor (String) async -> Bool
-    ) async {
-        // Read BEFORE the machine moves: by the time the answer is back the stage is `idle` again
-        // and nothing would say which page it was about.
-        let askedUID = deletion.asking
-        let gone = await deletion.advance(event, delete: delete)
-        guard gone, let askedUID else { return }
-        remove(askedUID)
+        // Read from the claim rather than before it: the stage now names the page the request is
+        // for, and by the time the answer is back it is `idle` again and says nothing.
+        guard deletion.claim(event), let target = deletion.deleting else { return }
+        Task {
+            let gone = await deletion.perform(delete: delete)
+            guard gone else { return }
+            remove(target)
+        }
     }
 
     /// The page is gone from the server; take it off the screen, and keep it off.
