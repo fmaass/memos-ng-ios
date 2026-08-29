@@ -131,6 +131,41 @@ public enum MemoPresentation {
     }
 }
 
+/// What the memo's screen offers on ONE of its pictures.
+///
+/// A list rather than a Boolean, and rendered from rather than mirrored by the view: an affordance
+/// that exists only inside a `contextMenu` body is one no test can miss the absence of. It is also
+/// where a "Move Left"/"Move Right" would join if reordering is ever funded, which is why the
+/// shape is a list of one and not a lone `canDelete`.
+public enum AttachmentAction: String, Equatable, Sendable, Identifiable, CaseIterable {
+    case delete
+
+    public var id: String { rawValue }
+
+    public var symbol: String {
+        switch self {
+        case .delete: "trash"
+        }
+    }
+
+    /// Whether the row is drawn as dangerous — and, with it, whether it belongs at the END of the
+    /// menu (HIG: a destructive action is last, away from the finger's resting place).
+    public var isDestructive: Bool {
+        switch self {
+        case .delete: true
+        }
+    }
+
+    /// What the row says, which depends on what the file IS: "Delete Photo" over a picture and
+    /// "Delete Video" over a clip. The wording lives with the flow that owns the whole
+    /// conversation, so the row and the alert cannot come to call one file two things.
+    public func title(for attachment: MemoAttachment) -> String {
+        switch self {
+        case .delete: AttachmentDeleteFlow.title(for: attachment)
+        }
+    }
+}
+
 /// What the memo DETAIL screen offers on a memo, decided outside the view.
 ///
 /// Editing used to live only in the timeline card's context menu — a long press on a card, with
@@ -197,6 +232,21 @@ public enum MemoDetailPresentation {
                 archived: false, title: "Restore memo", symbol: "arrow.uturn.backward"
             )
             : MemoArchiveAction(archived: true, title: "Archive memo", symbol: "archivebox")
+    }
+
+    /// What can be done to one of this memo's pictures from the screen it is on.
+    ///
+    /// Nil-gated on `mine` exactly as `editMode` and `archiveAction` are, and for the same reason:
+    /// the server refuses the delete on somebody else's attachment, and an affordance that leads to
+    /// a 403 is worse than none at all. `MemoAttachment` carries no ownership of its own — the memo
+    /// is what owns the file — so the memo is what the gate reads.
+    ///
+    /// Destructive last, always. It is the only entry today, so the ORDER is what a test can hold
+    /// before there is a second one to hold it against.
+    public static func attachmentActions(for memo: Memo) -> [AttachmentAction] {
+        guard memo.mine else { return [] }
+        return AttachmentAction.allCases.filter { !$0.isDestructive }
+            + AttachmentAction.allCases.filter(\.isDestructive)
     }
 
     /// The date an edit actually SENDS: only one the editor moved.
