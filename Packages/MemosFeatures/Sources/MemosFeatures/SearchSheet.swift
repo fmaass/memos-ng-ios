@@ -67,21 +67,21 @@ struct SearchSheet: View {
                 apply: { self.search.apply($0) },
                 expanded: $filtersExpanded
             )
+            // Tags before the heatmap: a word is the commoner way back to a memo than a day, and
+            // the chips are one line where the heatmap is a card — first is where they are still
+            // on a medium detent at the larger text sizes. Whether they are drawn at all is
+            // `SearchSheetTagShortcut`'s to say, so it is a decision a test can read back.
+            if SearchSheetTagShortcut.shows(
+                outcome: search.outcome,
+                filters: search.filters,
+                filtersExpanded: filtersExpanded
+            ) {
+                SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
+            }
             // Nothing typed yet: the way in is a date rather than a word. Once there is a term the
             // sheet is about that term, and a heatmap under it would be answering a question
             // nobody is asking any more.
             if search.outcome == .idle {
-                // Tags before the heatmap: a word is the commoner way back to a memo than a day,
-                // and the chips are one line where the heatmap is a card — first is where they
-                // are still on a medium detent at the larger text sizes.
-                //
-                // Withdrawn once the filters hold anything, because the two rows then mean
-                // opposite things about the same tags: this one's tap is a whole gesture that
-                // ends on the results, and the filters' is a choice being composed. Only ever one
-                // of them is on screen.
-                if search.filters.isEmpty, !filtersExpanded {
-                    SearchSheetTags(load: loadTags, search: runSearch, showResults: showResults)
-                }
                 SearchSheetHeatmap(load: loadHeatmap, chose: chose)
             }
             MonthScrubberSlot()
@@ -122,6 +122,28 @@ struct SearchSheet: View {
         .padding(DesignTokens.Space.regular)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+    }
+}
+
+/// Whether the shortcut row of tag chips is on screen at all.
+///
+/// Three things have to be true of it at once, and none of them is about the tags. The sheet is
+/// still IDLE: once there is a term the sheet is about that term. Nothing has been narrowed yet:
+/// the two rows mean opposite things about the same tags — this one's tap is a whole gesture that
+/// ends on the results (MEMNG-177), the filter panel's is a choice being composed — so a search
+/// that is already narrowed belongs to the panel. And the filters are CLOSED: the panel draws a row
+/// of its own the moment it opens, and two rows of the same chips meaning opposite things is the
+/// confusion MEMNG-214 reported. Only ever one of them is on screen.
+///
+/// A value rather than three conditions inline in a view body, because "only ever one of them" is
+/// the assertion, and an assertion nobody can read back is a convention.
+enum SearchSheetTagShortcut {
+    static func shows(
+        outcome: MemoSearchOutcome,
+        filters: SearchFilters,
+        filtersExpanded: Bool
+    ) -> Bool {
+        outcome == .idle && filters.isEmpty && !filtersExpanded
     }
 }
 

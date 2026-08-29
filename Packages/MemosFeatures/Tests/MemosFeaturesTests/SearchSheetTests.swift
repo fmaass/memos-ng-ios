@@ -219,6 +219,54 @@ struct SearchSheetTests {
         #expect(lifecycle.appearances == 2, "a second appearance reused the first one's read")
     }
 
+    /// MEMNG-214's placement half: whatever the filter panel draws, it is never drawn under a
+    /// shortcut row that is still there. Three things have to be true at once for that row to be on
+    /// screen, and one case per category, because the interesting ones are the two that take it
+    /// away — a search that has been narrowed, and filters that are open.
+    @Test("the shortcut tag row is off the screen whenever the filters are open")
+    func theShortcutRowIsDrawnOnlyOnAnIdleUnnarrowedSheet() {
+        #expect(
+            SearchSheetTagShortcut.shows(outcome: .idle, filters: .empty, filtersExpanded: false),
+            "an idle sheet nobody has narrowed drew no way in at all"
+        )
+        // Open filters: the panel draws a row of the same chips as its first control, and two rows
+        // of them meaning opposite things is exactly what the ticket reported.
+        #expect(
+            !SearchSheetTagShortcut.shows(outcome: .idle, filters: .empty, filtersExpanded: true),
+            "the shortcut row stayed on screen under the opened filters"
+        )
+        // Already narrowed: the tags belong to the panel, whether it is open or shut.
+        for expanded in [false, true] {
+            #expect(
+                !SearchSheetTagShortcut.shows(
+                    outcome: .idle,
+                    filters: SearchFilters(tags: ["travel"]),
+                    filtersExpanded: expanded
+                ),
+                "a narrowed search drew the shortcut row (filters expanded: \(expanded))"
+            )
+        }
+        // A sheet that is about a term is not about a way in. One case per outcome, so an outcome
+        // added later cannot quietly bring the row back under a search that is already running.
+        let busy: [MemoSearchOutcome] = [
+            .tooShort(minimum: MemoSearch.minimumTermLength),
+            .searching,
+            .matched,
+            .noMatches,
+            .failed("the server said no"),
+        ]
+        for outcome in busy {
+            #expect(
+                !SearchSheetTagShortcut.shows(
+                    outcome: outcome,
+                    filters: .empty,
+                    filtersExpanded: false
+                ),
+                "\(outcome) still drew the shortcut row"
+            )
+        }
+    }
+
     /// MEMNG-176. The row grew from nothing to a line of chips as the tags landed, and everything
     /// under it moved with it. Waiting, it now keeps the room the chips will take.
     @Test("the tag row is the same height waiting as it is once the tags land")
