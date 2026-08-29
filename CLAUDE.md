@@ -196,7 +196,7 @@ Writes to known pages resolve BY ID from here; name-search is discovery only.
 - Book: book:3153 (memos-ng-ios — Features)
 - Charter: page:3158
 - Documentation Backlog: none — work is tracked in windshift workspace `MEMNG`
-- Lessons Learned: none yet
+- Lessons Learned: page:3281
 - Session Reviews chapter: chapter:3155
 - Decisions chapter: chapter:3154 (ADR-0001: page:3157)
 - Register / Roadmap: none — implementation plans are pages in the book (page:3186, page:3274),
