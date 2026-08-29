@@ -164,7 +164,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos answered for a list that has moved on")
                 return
             }
-            memos = page.memos
+            memos = admitted(page.memos)
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
             // An anchored first page starts BELOW a ceiling, so everything written after that day
@@ -227,7 +227,7 @@ public final class TimelineStore {
                 // A cursor page can overlap the one before it when a memo moved; appending blindly
                 // would show the same memo twice and break SwiftUI's identity.
                 let known = Set(memos.map(\.uid))
-                memos += page.memos.filter { !known.contains($0.uid) }
+                memos += admitted(page.memos.filter { !known.contains($0.uid) })
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
@@ -322,7 +322,7 @@ public final class TimelineStore {
                 hasNewer = page.nextCursor != nil
                 newerCursor = page.nextCursor
                 let known = Set(memos.map(\.uid))
-                let fresh = page.memos.filter { !known.contains($0.uid) }
+                let fresh = admitted(page.memos.filter { !known.contains($0.uid) })
                 lastError = nil
                 if !fresh.isEmpty {
                     memos = Array(fresh.reversed()) + memos
@@ -387,7 +387,7 @@ public final class TimelineStore {
             )
             switch response {
             case .created(let created):
-                let memo = Memo(try created.body.json, baseURL: baseURL)
+                let memo = admitted(Memo(try created.body.json, baseURL: baseURL))
                 memos = Self.placed(memo, in: memos, tie: .justCreated)
                 lastError = nil
                 return true
@@ -653,6 +653,119 @@ public final class TimelineStore {
         }
     }
 
+    /// Removes ONE picture or clip from a memo it is already posted on.
+    ///
+    /// The server hard-deletes: the row, the original and every derived tier go, and there is no
+    /// trash to take them back out of. So nothing moves here before the 204 arrives, exactly as the
+    /// whole-memo delete waits for its own — and, unlike that one, nothing about the LIST changes,
+    /// so `timelineGeneration` is deliberately left alone. That counter is the list's lineage
+    /// (`refresh` bumps it, so does a memo leaving or moving in `apply`); fencing this call on it
+    /// would throw away a real 204 whenever somebody pulled to refresh while the request was out.
+    /// What this delete needs instead is a memory of what it removed: `removedAttachments`.
+    ///
+    /// Two calls for one attachment JOIN: the second awaits the first's answer and sends nothing.
+    /// The caller's question — "is it gone?" — has one true answer, and a second DELETE for a uid
+    /// the first one has already removed would come back 404 and be read as a fact about a file
+    /// this app deleted itself. The slot is claimed BEFORE the first suspension point, so two taps
+    /// arriving in one turn of the main actor cannot both find it empty.
+    @discardableResult
+    public func deleteAttachment(
+        uid: String,
+        from memoUID: String,
+        using client: any APIProtocol
+    ) async -> Bool {
+        if let running = attachmentDeletions[uid] { return await running.value }
+        let deletion = Task { [self] in
+            let outcome = await performAttachmentDelete(uid: uid, from: memoUID, using: client)
+            // Cleared HERE rather than by the caller that started it, for the reason
+            // `SessionStore.renewDeviceToken` clears its own slot inside the task: that caller can
+            // be resumed long after a later one has legitimately begun the next delete of this
+            // uid, and clearing it then would drop the later one's handle.
+            self.attachmentDeletions[uid] = nil
+            return outcome
+        }
+        attachmentDeletions[uid] = deletion
+        return await deletion.value
+    }
+
+    private func performAttachmentDelete(
+        uid: String,
+        from memoUID: String,
+        using client: any APIProtocol
+    ) async -> Bool {
+        do {
+            let response = try await client.deleteAttachmentApiAttachmentsUidDelete(
+                .init(path: .init(uid: uid))
+            )
+            switch response {
+            case .noContent:
+                break
+            case .unprocessableContent:
+                throw APIError.server(status: 422)
+            case .undocumented(let statusCode, _):
+                // A 404 says the same thing a 204 does: the file is not on the server. It is what
+                // the web app deleting it first looks like, and what a retry of a request whose
+                // answer was lost looks like. Reporting it would put "That item no longer exists"
+                // over a picture that has indeed stopped existing, which is what was asked for.
+                guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
+            }
+            forget(uid, from: memoUID)
+            lastError = nil
+            return true
+        } catch {
+            await report(error)
+            return false
+        }
+    }
+
+    /// The attachment is gone from the server; make it gone from this list, and stay gone.
+    ///
+    /// In place, by uid: the memo's own ordering keys did not move, so it keeps its position and
+    /// nothing is re-placed. The tombstone is what the rest of the store reads — see `admitted`.
+    private func forget(_ attachment: String, from memoUID: String) {
+        removedAttachments.insert(attachment)
+        guard let position = memos.firstIndex(where: { $0.uid == memoUID }) else { return }
+        memos[position].attachments.removeAll { $0.uid == attachment }
+    }
+
+    /// The delete in flight for each attachment uid, so a second call for one of them joins it
+    /// rather than sending a sibling request.
+    private var attachmentDeletions: [String: Task<Bool, Never>] = [:]
+
+    /// The attachments this session has watched the server confirm gone.
+    ///
+    /// It exists because a response can outlive the delete that made it wrong. Every read this
+    /// store has out at that moment — a page, a reconciling read, an edit's own answer — describes
+    /// the memo as it was BEFORE the file was removed, and each of them carries the attachment
+    /// back in on arrival. Nothing else can tell those answers apart from the truth: they are
+    /// well-formed, current-looking and simply older than one fact.
+    ///
+    /// Never cleared. A uid the server hard-deleted cannot legitimately come back — the row and
+    /// the files are gone and a new upload gets a new uid — so there is nothing for an expiry to
+    /// protect against, and the set is bounded by the deletes one session makes.
+    private var removedAttachments: Set<String> = []
+
+    /// The one door a server memo comes through, with everything this list knows to be gone
+    /// stripped off it.
+    ///
+    /// Every site that takes a `Memo` from the server calls this: the first page (`refresh`), the
+    /// next one (`loadMore`), the block above (`loadNewer`), a created memo (`create`), the copy
+    /// `fetchMemo` hands its caller, and `apply` — which is where the reconciling read, an edit's
+    /// answer, a pin, an archive and a ticked checkbox all land. A funnel rather than a check in
+    /// each of them because the failure mode is a lane somebody forgets, and one that has to be
+    /// remembered six times is one that will be.
+    private func admitted(_ memo: Memo) -> Memo {
+        guard !removedAttachments.isEmpty else { return memo }
+        var admitted = memo
+        admitted.attachments.removeAll { removedAttachments.contains($0.uid) }
+        return admitted
+    }
+
+    private func admitted(_ memos: [Memo]) -> [Memo] {
+        guard !removedAttachments.isEmpty else { return memos }
+        return memos.map { admitted($0) }
+    }
+
     /// Re-reads ONE memo from the server and applies it to the loaded list.
     ///
     /// The live media channel is what ends the waiting now, so this is no longer a poll. It is the
@@ -750,7 +863,7 @@ public final class TimelineStore {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
-                let memo = Memo(try ok.body.json, baseURL: baseURL)
+                let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
                 apply(memo)
                 return memo
             case .unprocessableContent:
@@ -895,8 +1008,15 @@ public final class TimelineStore {
         } catch {
             // Put the memo back as it was. It is found by uid rather than by the index captured
             // above, because a refresh may have moved it while the request was in flight.
+            //
+            // Through `admitted` like every other memo this store takes in, because `original` is
+            // a snapshot from BEFORE the request and the request is exactly long enough for an
+            // attachment to be deleted underneath it: tick a box, delete a picture, the patch
+            // fails, and a raw restore would put the picture back on a memo the server has no
+            // copy of it for. The tick still rolls back — that is what the snapshot is for — and
+            // only what the server has confirmed gone is left out of it.
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
-                memos[current] = original
+                memos[current] = admitted(original)
             }
             await report(error)
             return false
@@ -959,6 +1079,7 @@ public final class TimelineStore {
     /// the one place every server answer lands, so an archive made from a card, from the memo's own
     /// screen, or noticed by the reconciling read all reach the same conclusion.
     public func apply(_ memo: Memo) {
+        let memo = admitted(memo)
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
         guard query.admitsArchiveState(of: memo) else {
             memos.remove(at: position)

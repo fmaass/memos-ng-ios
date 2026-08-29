@@ -207,4 +207,12 @@ struct ComposePickerPresentationTests {
         let pickers = labels.filter { $0 == "Add photos or videos" }.count
         #expect(pickers == dates, "photos pills: \(pickers), date pills: \(dates) — \(labels)")
     }
+
+    @Test("the picker's menu keeps its declared order, library above camera")
+    func photoChoicesKeepTheirDeclaredOrder() {
+        // The popup cannot be opened under `xcodebuild test`, so what is held is the value the
+        // menu is given. The system default is priority order, which turns an upward-opening
+        // menu upside down — see `ComposeMetaRow.photoChoicesOrder` for the screen this bit.
+        #expect(ComposeMetaRow.photoChoicesOrder == .fixed)
+    }
 }

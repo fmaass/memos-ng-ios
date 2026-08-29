@@ -188,3 +188,16 @@ Anything that leaves this repo under my name — App Store listing text, release
 README, an issue or a PR body — is first-person **singular**, carries **no AI attribution** (no
 "Generated with…", no `Co-authored-by`, no bot sign-off), and leaks nothing internal (no ticket
 keys, no internal hostnames, no estate paths). Verification claims must be literally true.
+
+## BookStack Page Registry
+
+Writes to known pages resolve BY ID from here; name-search is discovery only.
+
+- Book: book:3153 (memos-ng-ios — Features)
+- Charter: page:3158
+- Documentation Backlog: none — work is tracked in windshift workspace `MEMNG`
+- Lessons Learned: none yet
+- Session Reviews chapter: chapter:3155
+- Decisions chapter: chapter:3154 (ADR-0001: page:3157)
+- Register / Roadmap: none — implementation plans are pages in the book (page:3186, page:3274),
+  each filed as a windshift Epic

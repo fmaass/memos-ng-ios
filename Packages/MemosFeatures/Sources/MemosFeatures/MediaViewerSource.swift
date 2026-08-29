@@ -126,4 +126,46 @@ enum MediaViewerPager {
         guard source.prefix(shown.count).map(\.id) == shown.map(\.id) else { return shown }
         return source
     }
+
+    /// What the viewer shows once some of its pages have been DELETED.
+    ///
+    /// The composition rather than a second rule, and the composition is the whole point. A memo's
+    /// source is `.fixed`: it is the value the cover was presented with, and it never shrinks. The
+    /// viewer's page list is recomputed from it on every evaluation, so a page taken out of `shown`
+    /// alone comes straight back the next time the body runs — `extended` sees a source that still
+    /// begins with what is on screen, only longer, and adopts it. So the deleted ids are stripped
+    /// from the SOURCE before `extended` ever compares the two.
+    static func visible(
+        shown: [MediaPage],
+        source: [MediaPage],
+        removed: Set<MediaPage.ID>
+    ) -> [MediaPage] {
+        guard !removed.isEmpty else { return extended(shown, with: source) }
+        return extended(shown, with: source.filter { !removed.contains($0.id) })
+    }
+
+    /// The pages left after one is deleted, and which one the reader is standing on afterwards.
+    ///
+    /// The NEXT page, or the previous one when the deleted page was the last — the same answer
+    /// Photos gives, and the only one that does not throw the reader back to the start. `nil` means
+    /// there is nothing left to look at, and the viewer's answer to that is to close: an empty
+    /// pager is a black screen with a close button on it.
+    ///
+    /// Deleting a page the reader is NOT on leaves them exactly where they are. It cannot happen
+    /// from this viewer's own overlay, which only ever acts on the current page, but the rule is
+    /// stated rather than assumed because the answer to "which page now" must not depend on which
+    /// caller asked.
+    static func removing(
+        _ id: MediaPage.ID,
+        from shown: [MediaPage],
+        current: MediaPage.ID
+    ) -> (pages: [MediaPage], current: MediaPage.ID?) {
+        guard let index = shown.firstIndex(where: { $0.id == id }) else { return (shown, current) }
+        var remaining = shown
+        remaining.remove(at: index)
+        guard !remaining.isEmpty else { return (remaining, nil) }
+        guard current == id else { return (remaining, current) }
+        // The page that has slid into the gap is the next one; past the end, it is the one before.
+        return (remaining, remaining[min(index, remaining.count - 1)].id)
+    }
 }

@@ -806,6 +806,15 @@ nonisolated public enum ComposeMetaRow {
     /// question with three answers.
     public static let libraryChoice = "Photo library"
     public static let cameraChoice = "Camera"
+
+    /// The order the menu shows those two in: the declared one, top to bottom.
+    ///
+    /// Left to itself, a menu that is not inside scrollable content orders by PRIORITY on iOS —
+    /// the first item is kept nearest the point of interaction. This pill sits at the bottom of
+    /// the sheet, over the keyboard, so its menu opens upward, and priority put the library —
+    /// declared first — at the bottom, under the camera. Fixed order is what the declaration
+    /// says, wherever the menu opens.
+    public static let photoChoicesOrder: MenuOrder = .fixed
 }
 
 /// The three pills, in the one order they are ever in.
@@ -871,6 +880,7 @@ struct PhotosPickerPill: View {
         } label: {
             PhotosPill(count: count, isImporting: isImporting, spelling: spelling)
         }
+        .menuOrder(ComposeMetaRow.photoChoicesOrder)
         // The MENU is what VoiceOver lands on, and a label here replaces whatever the pill inside
         // says — the same reason `VisibilityMenu` carries one.
         .accessibilityLabel(
