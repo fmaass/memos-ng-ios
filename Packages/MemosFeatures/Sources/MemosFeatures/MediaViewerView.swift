@@ -26,6 +26,13 @@ struct MediaViewerView: View {
     /// memo's viewer is `.fixed`; the library's is `.library`, which is what lets a swipe carry on
     /// past the page the grid had loaded when the file was tapped (MEMNG-189).
     let source: MediaViewerSource
+    /// How a page is removed from the server, when this viewer is allowed to remove one at all.
+    ///
+    /// Passed IN rather than reached for, exactly as the memo delete's request is: the viewer has
+    /// no store and no client, and the screen that presented it is the only thing that knows which
+    /// memo these pictures hang on. `nil` is a viewer that cannot delete — the media library's —
+    /// and it is what makes a control with nothing behind it impossible rather than merely absent.
+    let delete: (@MainActor (String) async -> Bool)?
 
     @Environment(\.dismiss) private var dismiss
     /// The way out of a tab that cannot open a memo. Optional: a preview or a test host has no
@@ -50,10 +57,24 @@ struct MediaViewerView: View {
     /// the sound needs — none of which a view body can be asked about, so none of which is
     /// decided in one (`MediaViewerPlaybackCoordinator`).
     @State private var playback: MediaViewerPlaybackCoordinator
+    /// How far the delete conversation has got, and about which page (`AttachmentDeleteFlow`).
+    @State private var deletion = AttachmentDeleteFlow()
+    /// The pages the server has confirmed gone, from this viewer.
+    ///
+    /// It has to be kept, not merely removed from `shown`. A memo's source is FIXED and never
+    /// shrinks, and `pages` is recomputed from it every evaluation — so a page taken out of `shown`
+    /// alone is put straight back by the next one. `MediaViewerPager.visible` is where the two
+    /// meet.
+    @State private var removed: Set<MediaPage.ID> = []
 
-    init(selection: MediaViewerSelection, source: MediaViewerSource) {
+    init(
+        selection: MediaViewerSelection,
+        source: MediaViewerSource,
+        delete: (@MainActor (String) async -> Bool)? = nil
+    ) {
         self.selection = selection
         self.source = source
+        self.delete = delete
         _currentPage = State(initialValue: selection.startPage.id)
         _shown = State(initialValue: selection.pages)
         _playback = State(initialValue: MediaViewerPlaybackCoordinator(selection: selection))
@@ -66,6 +87,22 @@ struct MediaViewerView: View {
             closeButton
         }
         .overlay(alignment: .topTrailing) { actions }
+        // The question lives HERE, on the cover, and not on the screen that presented it: an alert
+        // attached under a full-screen presentation never appears at all. An alert rather than a
+        // confirmation dialog for the reason `ComposeView.deleteRow` records — the dialog put its
+        // Cancel neither on screen nor in the accessibility tree.
+        .alert(
+            asked.map { AttachmentDeleteFlow.question(for: $0.attachment) } ?? "",
+            isPresented: askingDelete,
+            presenting: asked
+        ) { page in
+            Button(AttachmentDeleteFlow.title(for: page.attachment), role: .destructive) {
+                send(.confirmed)
+            }
+            Button("Cancel", role: .cancel) { send(.cancelled) }
+        } message: { _ in
+            Text(AttachmentDeleteFlow.explanation)
+        }
         .fetchingFile(saving)
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
@@ -147,18 +184,88 @@ struct MediaViewerView: View {
     @ViewBuilder
     private var actions: some View {
         let page = pages.first { $0.id == currentPage }
-        MediaViewerActions(
-            control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
-            showMemo: { uid in
-                // Out of the cover FIRST: the jump changes tabs, and a full-screen cover presented
-                // by the tab being left would be a black screen over the memo.
-                dismiss()
-                jump?.request(uid)
-            },
-            fetch: { attachment, rendition in
-                Task { await fetch(attachment, rendition) }
+        HStack(spacing: 0) {
+            // Beside the file's own actions rather than inside them: `MediaTileMenu`'s list is what
+            // the library tile and this overlay share, and a destructive row that exists on only
+            // one of the two surfaces does not belong in the shared list.
+            if selection.deletable, delete != nil, let page {
+                deleteButton(for: page)
             }
-        )
+            MediaViewerActions(
+                control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
+                showMemo: { uid in
+                    // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
+                    // presented by the tab being left would be a black screen over the memo.
+                    dismiss()
+                    jump?.request(uid)
+                },
+                fetch: { attachment, rendition in
+                    Task { await fetch(attachment, rendition) }
+                }
+            )
+        }
+    }
+
+    /// The same glyph, in the same size, in the same corner as the actions beside it — the picture
+    /// underneath is the only thing on this screen, so every control on it is drawn one way.
+    private func deleteButton(for page: MediaPage) -> some View {
+        Button {
+            send(.tapped(page.attachment.uid))
+        } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 30))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding()
+        }
+        .accessibilityLabel(AttachmentDeleteFlow.title(for: page.attachment))
+    }
+
+    /// The page a question is open about, or nil.
+    private var asked: MediaPage? {
+        guard let uid = deletion.asking else { return nil }
+        return pages.first { $0.id == uid }
+    }
+
+    /// What the alert binds to. Only dismissal comes back through it — the question is opened by
+    /// the button, never by an assignment from outside, the same discipline `MemoEditFlow.sheet` is
+    /// built on.
+    private var askingDelete: Binding<Bool> {
+        Binding(get: { asked != nil }, set: { if !$0 { send(.cancelled) } })
+    }
+
+    /// Every event goes through the flow's one entry point, carrying the request with it, so there
+    /// is exactly one place a delete can begin — and none at all on a viewer that was handed no
+    /// way to delete.
+    private func send(_ event: AttachmentDeleteFlow.Event) {
+        guard let delete else { return }
+        Task { await deliver(event, delete: delete) }
+    }
+
+    private func deliver(
+        _ event: AttachmentDeleteFlow.Event,
+        delete: @escaping @MainActor (String) async -> Bool
+    ) async {
+        // Read BEFORE the machine moves: by the time the answer is back the stage is `idle` again
+        // and nothing would say which page it was about.
+        let askedUID = deletion.asking
+        let gone = await deletion.advance(event, delete: delete)
+        guard gone, let askedUID else { return }
+        remove(askedUID)
+    }
+
+    /// The page is gone from the server; take it off the screen, and keep it off.
+    private func remove(_ id: MediaPage.ID) {
+        removed.insert(id)
+        let outcome = MediaViewerPager.removing(id, from: shown, current: currentPage ?? id)
+        shown = outcome.pages
+        // Nothing left to look at. An empty pager is a black screen with a close button on it, so
+        // the viewer closes itself instead.
+        guard let next = outcome.current else {
+            dismiss()
+            return
+        }
+        currentPage = next
+        playback.adopt(pages: shown, startingAt: next)
     }
 
     /// Fetches the named file of the picture or clip on screen and offers it to the share sheet.
@@ -185,7 +292,7 @@ struct MediaViewerView: View {
     /// `onAppear` above. `MediaViewerPager.extended` is what decides whether the source is this
     /// list grown longer or a different list altogether.
     private var pages: [MediaPage] {
-        MediaViewerPager.extended(shown, with: source.pages)
+        MediaViewerPager.visible(shown: shown, source: source.pages, removed: removed)
     }
 
     /// Locks the reconciled list in, and tells playback about it — the two pieces of state that

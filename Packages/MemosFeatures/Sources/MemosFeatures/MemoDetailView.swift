@@ -21,6 +21,8 @@ public struct MemoDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var viewing: MediaViewerSelection?
     @State private var edit = MemoEditFlow()
+    /// How far the conversation about removing ONE of this memo's pictures has got.
+    @State private var photoDelete = AttachmentDeleteFlow()
     @State private var exit = MemoDetailExit()
     /// An archive is in flight. The control is disabled while it is, so a second tap cannot ask
     /// for the opposite of what the first one is still doing.
@@ -52,7 +54,7 @@ public struct MemoDetailView: View {
                 // A save that failed used to be a haptic and nothing else: the sheet stayed open
                 // and never said why. The store's own message when it has one, a plain sentence
                 // when it does not, and only ever after a save actually failed.
-                if let failure = edit.lastError {
+                if let failure = edit.lastError ?? photoDelete.lastError {
                     NoticeCard(text: timeline.lastError ?? failure, tone: .error)
                 }
 
@@ -74,16 +76,7 @@ public struct MemoDetailView: View {
                 // attachments stay one swipe away while it does, which is what a player
                 // presented over the pager took away.
                 ForEach(memo.attachments) { attachment in
-                    let slot = MemoPresentation.detailSlot(for: attachment)
-                    let video = attachment.isVideo
-                    let plays = MemoPresentation.playbackURL(for: attachment) != nil
-                    AttachmentThumbnail(attachment: attachment, tier: .mobile, slot: slot)
-                        .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
-                        .contentShape(.rect)
-                        .onTapGesture { open(attachment) }
-                        .accessibilityAddTraits(.isButton)
-                        .accessibilityLabel(video ? "Video" : "Photo")
-                        .accessibilityHint(plays ? "Plays full screen" : "Opens full screen")
+                    picture(attachment)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -92,8 +85,28 @@ public struct MemoDetailView: View {
         .fullScreenCover(item: $viewing) { selection in
             // A memo's media is all there when the screen opens and never grows, so the viewer
             // over it pages through a value rather than through a store.
-            MediaViewerView(selection: selection, source: .fixed(selection.pages))
-                .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
+            MediaViewerView(
+                selection: selection,
+                source: .fixed(selection.pages),
+                delete: deletePicture
+            )
+            .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
+        }
+        // The question the gallery's own destructive row asks. It sits on the screen the row is
+        // on; the viewer over it asks its own, because an alert under a full-screen cover never
+        // appears. An alert rather than a confirmation dialog for the reason
+        // `ComposeView.deleteRow` records.
+        .alert(
+            asked.map { AttachmentDeleteFlow.question(for: $0) } ?? "",
+            isPresented: askingDelete,
+            presenting: asked
+        ) { attachment in
+            Button(AttachmentDeleteFlow.title(for: attachment), role: .destructive) {
+                sendPictureDelete(.confirmed)
+            }
+            Button("Cancel", role: .cancel) { sendPictureDelete(.cancelled) }
+        } message: { _ in
+            Text(AttachmentDeleteFlow.explanation)
         }
         .background(Color(.systemGroupedBackground))
         .scrollEdgeEffectStyle(.soft, for: .top)
@@ -150,6 +163,90 @@ public struct MemoDetailView: View {
             // swiped it away while the delete was in flight gets no second `onDismiss`.
             if exit.memoDeletedChanged(gone) { dismiss() }
         }
+    }
+
+    /// One of the memo's pictures, at the proportions the server measured — and what can be done
+    /// to it.
+    ///
+    /// The context menu is RENDERED from `attachmentActions(for:)` rather than written out here, so
+    /// an affordance that stops being offered, or stops being gated on the memo being mine, is a
+    /// failing test rather than a line nobody notices is missing. The same list becomes named
+    /// accessibility actions, because a context menu must never be the only way to reach an action
+    /// and a long press is not something VoiceOver performs.
+    @ViewBuilder
+    private func picture(_ attachment: MemoAttachment) -> some View {
+        let slot = MemoPresentation.detailSlot(for: attachment)
+        let video = attachment.isVideo
+        let plays = MemoPresentation.playbackURL(for: attachment) != nil
+        let actions = MemoDetailPresentation.attachmentActions(for: memo)
+        let tile = AttachmentThumbnail(attachment: attachment, tier: .mobile, slot: slot)
+            .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
+            .contentShape(.rect)
+            .onTapGesture { open(attachment) }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(video ? "Video" : "Photo")
+            .accessibilityHint(plays ? "Plays full screen" : "Opens full screen")
+        // Nothing to offer is no menu at all: a long press that opens an empty card is worse than
+        // one that does nothing.
+        if actions.isEmpty {
+            tile
+        } else {
+            tile
+                .contextMenu {
+                    ForEach(actions) { action in
+                        row(action, on: attachment)
+                    }
+                }
+                .accessibilityActions {
+                    ForEach(actions) { action in
+                        row(action, on: attachment)
+                    }
+                }
+        }
+    }
+
+    /// One row of that menu, in whichever shape it is drawn — a menu item, or a named accessibility
+    /// action. Both press the SAME thing, so the two cannot come to do different things.
+    private func row(_ action: AttachmentAction, on attachment: MemoAttachment) -> some View {
+        Button(role: action.isDestructive ? ButtonRole.destructive : nil) {
+            perform(action, on: attachment)
+        } label: {
+            Label(action.title(for: attachment), systemImage: action.symbol)
+        }
+    }
+
+    private func perform(_ action: AttachmentAction, on attachment: MemoAttachment) {
+        switch action {
+        case .delete: sendPictureDelete(.tapped(attachment.uid))
+        }
+    }
+
+    /// The picture a question is open about, or nil.
+    private var asked: MemoAttachment? {
+        guard let uid = photoDelete.asking else { return nil }
+        return memo.attachments.first { $0.uid == uid }
+    }
+
+    /// What the alert binds to. Only dismissal comes back through it.
+    private var askingDelete: Binding<Bool> {
+        Binding(get: { asked != nil }, set: { if !$0 { sendPictureDelete(.cancelled) } })
+    }
+
+    /// Every event goes through the flow's one entry point, carrying the request with it — the same
+    /// arrangement `ComposeDelete` uses for the memo's own delete, so there is exactly one place a
+    /// picture can start being deleted.
+    private func sendPictureDelete(_ event: AttachmentDeleteFlow.Event) {
+        Task { await photoDelete.advance(event, delete: deletePicture) }
+    }
+
+    /// The request itself. WHEN it runs — once, on the transition into `deleting`, for the picture
+    /// that was asked about — is `AttachmentDeleteFlow.advance`'s decision, and the store is what
+    /// makes two of them one request on the wire.
+    private func deletePicture(_ attachmentUID: String) async -> Bool {
+        guard let client = session?.api else { return false }
+        let deleted = await timeline.deleteAttachment(uid: attachmentUID, from: uid, using: client)
+        feedback.fire(deleted ? .deleted : .postFailed)
+        return deleted
     }
 
     /// The editor has gone from the screen. Whether the memo went with it is the other half, and
