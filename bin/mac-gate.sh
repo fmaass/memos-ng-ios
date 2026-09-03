@@ -1575,12 +1575,24 @@ s_warnings() {
   # forced-cast warning this gate's failure; scoping both to the simulator SDK only moves it to
   # MarkdownUI's @_implementationOnly warning. A gate that goes red for a warning nobody here can
   # fix is a gate that gets ignored.
+  #
+  # Each package is its own root here, so SwiftPM would resolve each one's graph afresh from the
+  # manifests' lower bounds — and a new upstream tag then reaches this step alone, past the pins
+  # the rest of the gate builds against. It did: three tags published 1–3 Sep 2026 (generator
+  # 1.13.1, runtime 1.12.1, http-types 1.7.0) put 192 unused-`public import` diagnostics into the
+  # generated client while the pinned xcodebuild had none. So the tracked Package.resolved is
+  # placed beside each manifest and the build is refused any version it does not name — the same
+  # mechanism as -onlyUsePackageVersionsFromResolvedFile on the test build. SwiftPM accepts a
+  # file that pins more packages than the root needs (measured on this host 2026-09-03).
   local rc=0 pkg
   for pkg in Packages/MemosAPI Packages/MemosCore Packages/MemosOutbox Packages/MemosShareKit; do
-    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host)"
+    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host, tracked pins)"
+    cp Package.resolved "$pkg/Package.resolved" || { rc=1; continue; }
     swift build --package-path "$pkg" \
       --scratch-path "$GATE_WORK/warnings/$(basename "$pkg")" \
+      --only-use-versions-from-resolved-file \
       -Xswiftc -warnings-as-errors || rc=$?
+    rm -f "$pkg/Package.resolved"
   done
 
   echo "--- Packages/MemosFeatures with warnings as errors (xcodebuild, iOS simulator, Debug)"
