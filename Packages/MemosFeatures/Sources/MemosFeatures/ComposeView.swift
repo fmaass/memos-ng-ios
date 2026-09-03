@@ -654,8 +654,22 @@ struct MemoDatePicker: View {
 
     /// The picker edits this rather than `date` directly, so that "no date chosen" survives merely
     /// looking at the picker: the memo takes a date when the picker's value MOVES.
-    private var chosen: Binding<Date> {
-        Binding(get: { self.date ?? self.seed }, set: { self.date = $0 })
+    ///
+    /// A move onto another DAY also closes the picker. That tap is what the pill was opened for,
+    /// and a calendar that stayed up once it had been answered read as though the tap had done
+    /// nothing — the pill it dated is behind the popover. A move that only changes the time keeps
+    /// the picker up: the hour and minute are edited in place under the calendar, and a picker
+    /// that went away on every tick of the wheel would be a time nobody could set. Internal rather
+    /// than private because driving this binding is the tap on the calendar (`ComposeDateTests`).
+    var chosen: Binding<Date> {
+        Binding(
+            get: { self.date ?? self.seed },
+            set: { moved in
+                let shown = self.date ?? self.seed
+                self.date = moved
+                if !Calendar.current.isDate(moved, inSameDayAs: shown) { self.onDone() }
+            }
+        )
     }
 
     /// The calendar's own width. A number rather than a `@ScaledMetric` because the control is a
