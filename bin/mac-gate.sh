@@ -1552,6 +1552,7 @@ build_memos_features() { # $1 = where the build log goes; returns xcodebuild's o
          -destination 'generic/platform=iOS Simulator' \
          -derivedDataPath "$GATE_WORK/warnings/MemosFeatures" \
          -clonedSourcePackagesDirPath "$GATE_WORK/warnings/spm" \
+         -onlyUsePackageVersionsFromResolvedFile \
          -skipPackagePluginValidation ) > "$1" 2>&1
 }
 
@@ -1575,12 +1576,24 @@ s_warnings() {
   # forced-cast warning this gate's failure; scoping both to the simulator SDK only moves it to
   # MarkdownUI's @_implementationOnly warning. A gate that goes red for a warning nobody here can
   # fix is a gate that gets ignored.
+  #
+  # Each package is its own root here, so SwiftPM would resolve each one's graph afresh from the
+  # manifests' lower bounds — and a new upstream tag then reaches this step alone, past the pins
+  # the rest of the gate builds against. It did: three tags published 1–3 Sep 2026 (generator
+  # 1.13.1, runtime 1.12.1, http-types 1.7.0) put 192 unused-`public import` diagnostics into the
+  # generated client while the pinned xcodebuild had none. So the tracked Package.resolved is
+  # placed beside each manifest and the build is refused any version it does not name — the same
+  # mechanism as -onlyUsePackageVersionsFromResolvedFile on the test build. SwiftPM accepts a
+  # file that pins more packages than the root needs (measured on this host 2026-09-03).
   local rc=0 pkg
   for pkg in Packages/MemosAPI Packages/MemosCore Packages/MemosOutbox Packages/MemosShareKit; do
-    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host)"
+    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host, tracked pins)"
+    cp Package.resolved "$pkg/Package.resolved" || { rc=1; continue; }
     swift build --package-path "$pkg" \
       --scratch-path "$GATE_WORK/warnings/$(basename "$pkg")" \
+      --only-use-versions-from-resolved-file \
       -Xswiftc -warnings-as-errors || rc=$?
+    rm -f "$pkg/Package.resolved"
   done
 
   echo "--- Packages/MemosFeatures with warnings as errors (xcodebuild, iOS simulator, Debug)"
@@ -1611,6 +1624,10 @@ s_warnings() {
   # Every source of the target is made to compile again: an incremental build that compiles nothing
   # cannot go red for a warning sitting in a file it skipped.
   find Packages/MemosFeatures/Sources -name '*.swift' -exec touch {} +
+  # The same pins as the four builds above: xcodebuild reads a package's resolved file from beside
+  # its manifest, and the flag in build_memos_features refuses any version it does not name.
+  cp Package.resolved Packages/MemosFeatures/Package.resolved \
+    || { echo "WARNAERR FAIL: cannot place the tracked pins beside Packages/MemosFeatures"; return 1; }
   build_memos_features "$mf_build_log"
   local real_rc=$?
 
@@ -1626,6 +1643,7 @@ s_warnings() {
     echo "               that build would read as a warning being fatal. Rename it and run again."
     echo "MemosFeatures build exit $real_rc; the canary build did not run, so this step cannot pass"
     cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
+    rm -f Packages/MemosFeatures/Package.resolved
     [ "$rc" -ne 0 ] || rc=1
     return $rc
   fi
@@ -1645,6 +1663,7 @@ SWIFT
   canary_rc=$?
   rm -f "$GATE_CANARY_FILE"
   GATE_CANARY_FILE=""
+  rm -f Packages/MemosFeatures/Package.resolved
 
   cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
   cp "$mf_canary_log" .gate-artifacts/MemosFeatures-canary-build.log
@@ -1666,9 +1685,12 @@ s_deps() {
   local rc=0 pkg
   for pkg in Packages/*/; do
     [ -f "$pkg/Package.swift" ] || continue
-    echo "--- swift package show-dependencies: $pkg"
+    echo "--- swift package show-dependencies: $pkg (tracked pins)"
+    # Listed from the same pins the builds used, so the graph this prints is the graph that built.
+    cp Package.resolved "$pkg/Package.resolved" || { rc=1; continue; }
     swift package --package-path "$pkg" --scratch-path "$GATE_WORK/scratch/$(basename "$pkg")" \
-      show-dependencies || rc=$?
+      --only-use-versions-from-resolved-file show-dependencies || rc=$?
+    rm -f "$pkg/Package.resolved"
   done
   # The dependency rule is a property of the manifests, so it is checked on the manifests, with a
   # positive control in the same run: a grep that finds nothing proves nothing on its own.

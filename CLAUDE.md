@@ -22,9 +22,11 @@ on the application-groups entitlement instead; the share extension declares no k
 both declare the app group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
 check (below) → `xcodebuild test` (all five test bundles) → a read-back of the BUILT app and
 .appex (each one's `PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
-a rebuild of every package with its warnings fatal (`swift build -warnings-as-errors` for the four
-that declare macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes
-from its own manifest) → the dependency-rule greps → the share-link rule
+a rebuild of every package with its warnings fatal, each against the tracked `Package.resolved`
+copied beside its manifest and refused any version that file does not name, so a fresh upstream
+tag cannot reach this step alone (`swift build -warnings-as-errors` for the four that declare
+macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes from its own
+manifest) → the dependency-rule greps → the share-link rule
 (`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
 `Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → a
 per-bundle test-count check. It ends with one summary line of every step's exit code and
