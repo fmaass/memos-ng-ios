@@ -181,7 +181,11 @@ struct EngineTests {
 
         await harness.engine.drain()
 
-        #expect(harness.scheduler.uploads.isEmpty, "the chunk was handed over after withdrawal")
+        #expect(
+            harness.scheduler.authorityVerdicts == [false],
+            "the authority the engine handed the executor still said yes after the withdrawal"
+        )
+        #expect(harness.scheduler.uploads.isEmpty, "so no chunk was handed over")
         let saved = try #require(await harness.reload())
         #expect(saved.state != .held, "and the capture is not held for it either")
     }
@@ -479,6 +483,34 @@ struct EngineTests {
         let released = try #require(await harness.reload())
         #expect(released.state == .waiting)
         #expect(released.holdReason == nil)
+    }
+
+    /// N2, the ordering. A cold wake restores the session over the network; a chunk result
+    /// delivered inside that round trip finds no handler and its server-confirmed offset is lost.
+    /// Attachment is what a wake does FIRST, so the result lands on a handler either way.
+    @Test("a result delivered while a restore is still pending is recorded, not dropped")
+    func aResultDuringRestoreIsRecorded() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let identity = try #require(harness.scheduler.uploads.first).identity
+
+        // The wake's own ordering: adopt (attach) first, and only then the long restore. Modelled
+        // by delivering the result while nothing has been signed in yet.
+        harness.credentials.set(nil)
+        await harness.engine.handle(
+            ChunkResult(
+                identity: identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        let saved = try #require(await harness.reload())
+        #expect(
+            saved.files[0].bytesConfirmed == 400,
+            "the server's own byte count was dropped, so those bytes are sent again"
+        )
     }
 }
 
@@ -978,6 +1010,7 @@ struct NetworkPolicyDrainTests {
 @MainActor
 @Suite("Adoption is not a send")
 struct OutboxAdoptionTests {
+
     @Test("a wake with no credential still takes over the queue and sends nothing")
     func adoptionNeedsNoAuthority() async throws {
         let root = try Fixture.temporaryDirectory()

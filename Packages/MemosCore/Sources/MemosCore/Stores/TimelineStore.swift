@@ -466,6 +466,19 @@ public final class TimelineStore {
     /// (`MemoSearch`, whose debounce is long enough for a session to end inside it).
     public func sessionIsCurrent(_ handle: SessionHandle) -> Bool { sessionStillCurrent(handle) }
 
+    /// The same fence, as a value the SENDING executor can ask.
+    ///
+    /// `sessionStillCurrent` is main-actor isolated, which is right for everything this store
+    /// applies and wrong for a lane that sends from somewhere else. A chunked upload runs for
+    /// minutes off this actor, so it carries this instead: the incarnation it was granted under,
+    /// and a nonisolated box to compare it with (`SessionReporting.sessionIncarnation`).
+    private func sendAuthority() -> SendAuthority {
+        guard let session else { return .unfenced }
+        let incarnation = session.sessionIncarnation
+        let granted = incarnation.current
+        return SendAuthority { incarnation.isCurrent(granted) }
+    }
+
     private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
         // A store with no session named to it has nothing to be wrong about — a preview, and the
         // suites that are about paging. A store that HAS one and finds it holding no client is
@@ -572,7 +585,9 @@ public final class TimelineStore {
         var uploadUIDs: [String]?
         if !files.isEmpty {
             do {
-                uploadUIDs = try await MediaUpload.uploadAll(files, using: client)
+                uploadUIDs = try await MediaUpload.uploadAll(
+                    files, using: client, under: sendAuthority()
+                )
             } catch {
                 // This invocation is over, and it failed: the key stays behind for the retry.
                 finishEdit(key: key, saved: false)

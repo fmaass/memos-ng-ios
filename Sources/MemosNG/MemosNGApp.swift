@@ -85,6 +85,11 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
             }
         )
         uploadSettings = outbox.map { UploadSettings(preferences: $0.uploadPreferences) }
+        // ATTACHED AT LAUNCH, ahead of everything. The system can deliver a finished chunk's
+        // result the instant this process exists, and a result that finds no handler is discarded
+        // with the server's own byte count in it. Nothing here waits on a session: recording what
+        // already happened is not a send.
+        if let outbox { Task { @MainActor in await outbox.adopt() } }
         // Registration has to happen before launch finishes, whatever else is true of this
         // launch. The queue is named EXPLICITLY: with `nil` the system delivers the launch handler
         // on a background queue, where assuming main-actor isolation is a trap rather than a hop —
@@ -123,16 +128,17 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     /// to an account, so without this a woken app drains nothing at all and the job sits there
     /// looking as though it had been tried.
     private func startOutbox() async {
+        // ADOPTION FIRST — before the restore, not after it. The system woke this process because
+        // a chunk FINISHED: its answer carries the server's own byte count, and a result that
+        // finds no handler is discarded and its bytes sent again. `restore` is a network round
+        // trip, so attaching behind it leaves that whole trip as a window. Adoption sends nothing,
+        // so it needs no session and waits for none.
+        await outbox?.adopt()
         if session.state.user == nil {
             await session.restore()
         }
-        // ADOPTION FIRST, and unconditionally. The system woke this process because a chunk
-        // FINISHED: its answer carries the server's own byte count, and a wake that attached no
-        // handler discards it and re-sends bytes the server already holds. Adoption sends nothing,
-        // so it needs no authority.
-        await outbox?.adopt()
-        // Sending does. A wake whose restore did not settle keeps its captures queued and the next
-        // one acquires cleanly.
+        // Sending is what needs authority. A wake whose restore did not settle keeps its captures
+        // queued and the next one acquires cleanly.
         guard session.credentialGrant() != nil else { return }
         await outbox?.start()
     }

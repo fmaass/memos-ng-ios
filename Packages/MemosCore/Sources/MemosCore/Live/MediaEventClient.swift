@@ -136,6 +136,9 @@ public final class MediaEventClient: Sendable {
     /// thrown error means storage would not answer, and only the first of those is terminal.
     private let credentials: @Sendable () async throws -> MediaEventCredentials?
     private let generation: @Sendable () async -> Int
+    /// Asked by the TRANSPORT before every connect, first and reconnect alike — this loop outlives
+    /// any one session (`SendAuthority`).
+    private let authority: SendAuthority
     private let backoff: SSEBackoff
     private let idleReconnectDelay: TimeInterval
     private let transport: any SSEConnecting
@@ -147,10 +150,12 @@ public final class MediaEventClient: Sendable {
         backoff: SSEBackoff = SSEBackoff(),
         idleReconnectDelay: TimeInterval = 15,
         transport: any SSEConnecting = URLSessionSSETransport(),
-        sleeper: any SSESleeper = ContinuousClockSleeper()
+        sleeper: any SSESleeper = ContinuousClockSleeper(),
+        authority: SendAuthority = .unfenced
     ) {
         self.credentials = credentials
         self.generation = generation
+        self.authority = authority
         self.backoff = backoff
         self.idleReconnectDelay = idleReconnectDelay
         self.transport = transport
@@ -176,7 +181,8 @@ public final class MediaEventClient: Sendable {
         backoff: SSEBackoff = SSEBackoff(),
         idleReconnectDelay: TimeInterval = 15,
         transport: any SSEConnecting = URLSessionSSETransport(),
-        sleeper: any SSESleeper = ContinuousClockSleeper()
+        sleeper: any SSESleeper = ContinuousClockSleeper(),
+        authority: SendAuthority = .unfenced
     ) -> MediaEventClient {
         MediaEventClient(
             credentials: {
@@ -191,7 +197,8 @@ public final class MediaEventClient: Sendable {
             backoff: backoff,
             idleReconnectDelay: idleReconnectDelay,
             transport: transport,
-            sleeper: sleeper
+            sleeper: sleeper,
+            authority: authority
         )
     }
 
@@ -308,7 +315,9 @@ public final class MediaEventClient: Sendable {
 
         var opened = false
         do {
-            let connection = try await transport.connect(request)
+            // Every attempt, including each reconnect: this loop outlives any one session and
+            // the credential it presents is the one this device held when it started.
+            let connection = try await transport.connect(request, under: authority)
             switch connection.statusCode {
             case 200:
                 break

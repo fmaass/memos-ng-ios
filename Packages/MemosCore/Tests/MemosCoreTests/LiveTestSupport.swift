@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 @testable import MemosCore
 
 /// The bytes the running server actually writes.
@@ -114,12 +115,20 @@ actor ScriptedSSETransport: SSEConnecting {
         return requests[index].value(forHTTPHeaderField: name)
     }
 
+    /// What the production authority answered at each connect.
+    var verdicts: [Bool] = []
+
     func url(of index: Int) -> String? {
         guard index < requests.count else { return nil }
         return requests[index].url?.absoluteString
     }
 
-    func connect(_ request: URLRequest) async throws -> SSEConnection {
+    func connect(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> SSEConnection
+    {
+        // The double records the PRODUCTION authority's verdict; it does not implement the policy.
+        verdicts.append(authority.holds())
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         requests.append(request)
         // Past the end of the script this server behaves like the real one with nothing in
         // flight: it opens and closes immediately (`app/routers/assets.py:763-764`). A test that
@@ -190,7 +199,8 @@ enum LiveStub {
             token: LiveStub.token
         ),
         backoff: SSEBackoff = SSEBackoff(),
-        idleReconnectDelay: TimeInterval = 15
+        idleReconnectDelay: TimeInterval = 15,
+        authority: SendAuthority = .unfenced
     ) -> MediaEventClient {
         MediaEventClient(
             credentials: { credentials },
@@ -198,7 +208,8 @@ enum LiveStub {
             backoff: backoff,
             idleReconnectDelay: idleReconnectDelay,
             transport: transport,
-            sleeper: sleeper
+            sleeper: sleeper,
+            authority: authority
         )
     }
 }

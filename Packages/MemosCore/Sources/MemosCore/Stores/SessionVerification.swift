@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 
 /// Whether the server has confirmed the credential this session is running on.
 ///
@@ -108,6 +109,14 @@ public final class SessionEpoch: @unchecked Sendable {
 public protocol SessionReporting: AnyObject {
     /// The client and the incarnation it belongs to, in one read.
     var activeHandle: SessionHandle? { get }
+
+    /// The incarnation counter in a box a SENDER can read without hopping to the main actor.
+    ///
+    /// A store's own `sessionStillCurrent` is main-actor isolated, which is the right answer for
+    /// everything the store applies. It is the wrong answer for a lane that sends from another
+    /// executor — a chunked upload — where the check has to happen on the executor doing the
+    /// sending, at the instant it sends (`SendAuthority`).
+    nonisolated var sessionIncarnation: SessionEpoch { get }
 
     /// A failure that never reached the server, judged against the incarnation that ISSUED the
     /// request rather than the one running now.

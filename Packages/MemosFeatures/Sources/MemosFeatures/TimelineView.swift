@@ -631,8 +631,15 @@ public struct TimelineView: View {
             let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
         else { return }
+        // The channel reconnects for as long as this screen is up, so what it presents has to
+        // keep proving it belongs to a session this device holds — asked by the transport, at
+        // each connect (`SendAuthority`).
+        let incarnation = session.sessionIncarnation
+        let granted = incarnation.current
         await MediaChannel.consume(
-            MediaEventClient.device().stream(),
+            MediaEventClient.device(
+                authority: SendAuthority { incarnation.isCurrent(granted) }
+            ).stream(),
             into: timeline,
             alongside: { [searchPresentation] in searchPresentation.liveResults },
             using: handle,

@@ -95,6 +95,10 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     }
 
     private var hook: (@Sendable () -> Void)?
+    private var verdicts: [Bool] = []
+
+    /// What the authority answered, in order, each time this executor was reached.
+    var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
 
     func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { pretendInFlight } }
 
@@ -117,7 +121,12 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         under authority: SendAuthority
     ) async {
         beforeUpload?()
-        guard authority.holds() else { return }
+        // The double does NOT enforce the policy it is used to test — a stand-in that implements
+        // the guard proves only that the stand-in has one. It records the verdict the PRODUCTION
+        // `SendAuthority` gives at the instant this executor runs, and the test reads that.
+        let permitted = authority.holds()
+        lock.withLock { verdicts.append(permitted) }
+        guard permitted else { return }
         lock.withLock {
             scheduled.append(
                 Scheduled(

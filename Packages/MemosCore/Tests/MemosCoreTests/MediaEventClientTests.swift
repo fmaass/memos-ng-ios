@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 @testable import MemosCore
 import Testing
 
@@ -379,4 +380,27 @@ struct SSEBackoffTests {
     func negativeHint() {
         #expect(SSEBackoff().delay(forAttempt: 1, serverHint: -5) == 0)
     }
+    /// The channel's loop outlives any one session: it reconnects for as long as the screen is up,
+    /// presenting the credential this device held when it started. A withdrawn session must not
+    /// open a stream — and the check belongs in the transport, because every reconnect is a send
+    /// the client makes on its own without asking anybody.
+    @Test("a session that has been withdrawn opens no stream, first attempt or reconnect")
+    func aWithdrawnSessionNeverConnects() async {
+        let epoch = SessionEpoch()
+        let granted = epoch.current
+        epoch.bump()
+        let transport = ScriptedSSETransport([ScriptedConnection(), ScriptedConnection()])
+        let sleeper = RecordingSleeper(budget: 3)
+        let client = LiveStub.client(
+            transport: transport,
+            sleeper: sleeper,
+            authority: SendAuthority { epoch.isCurrent(granted) }
+        )
+
+        for await _ in client.stream() {}
+
+        #expect(await transport.requests.isEmpty, "a stream was opened for a withdrawn session")
+        #expect(await transport.verdicts.allSatisfy { !$0 }, "and the authority said so each time")
+    }
+
 }

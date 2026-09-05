@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import MemosCore
+import MemosOutbox
 import SwiftUI
 import Testing
 import UIKit
@@ -901,7 +902,9 @@ struct MediaViewerLoadingTests {
 actor RecordingTransport: MediaTransport {
     private(set) var requested: [URL] = []
 
-    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
         if let url = request.url { requested.append(url) }
         throw URLError(.notConnectedToInternet)
     }

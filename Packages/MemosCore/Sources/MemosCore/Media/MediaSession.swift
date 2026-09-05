@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 
 /// What the image layer fetches through. One method, so a test can hand it a scripted answer or
 /// no answer at all and still exercise the real loader.
@@ -7,7 +8,8 @@ import Foundation
 /// `delegate:` parameter, which cannot satisfy a protocol requirement, and adding an overload
 /// that could would make every ordinary call site ambiguous.
 public protocol MediaTransport: Sendable {
-    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse)
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
 }
 
 /// The session the image layer owns, and the only one it ever uses.
@@ -58,8 +60,12 @@ public final class MediaSession: @unchecked Sendable {
 }
 
 extension MediaSession: MediaTransport {
-    public func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        try await session.data(for: request)
+    public func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
+        // On the executor that sends, with nothing between the answer and the request.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        return try await session.data(for: request)
     }
 }
 

@@ -806,7 +806,9 @@ private struct RotatingDownloads: MediaDownloadTransport {
     let status: Int
     let rotate: @Sendable () async -> Void
 
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
         await rotate()
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try Data("original".utf8).write(to: url)
@@ -824,13 +826,20 @@ private struct RotatingDownloads: MediaDownloadTransport {
 /// FIRST one, so what the reconnect presents is the question being asked.
 private actor RotatingSSETransport: SSEConnecting {
     private(set) var authorizations: [String?] = []
+    /// What the production authority answered at each connect.
+    private(set) var verdicts: [Bool] = []
     private let rotate: @Sendable () -> Void
 
     init(rotate: @escaping @Sendable () -> Void) {
         self.rotate = rotate
     }
 
-    func connect(_ request: URLRequest) async throws -> SSEConnection {
+    func connect(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> SSEConnection
+    {
+        // The double records the PRODUCTION authority's verdict; it does not implement the policy.
+        verdicts.append(authority.holds())
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         authorizations.append(request.value(forHTTPHeaderField: "Authorization"))
         if authorizations.count == 1 { rotate() }
         return SSEConnection(

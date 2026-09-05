@@ -759,6 +759,78 @@ struct OfflineSessionTests {
         #expect(session.state.user != nil, "and the session itself is untouched by it")
     }
 
+    /// B2. The revoke is a request, and A's 204 for it can land after B has signed in. Unfenced,
+    /// A's sign-out destroys B's credential — the app's most destructive single act, performed for
+    /// an account nobody is signed in as.
+    @Test("a sign-out answered after somebody else signed in does not wipe them")
+    func aStaleSignOutDoesNotWipeTheSuccessor() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let switching = LockedValue<Bool>(false)
+        let credentials = InMemoryCredentials()
+        let session = makeSession(credentials: credentials, file: StubLastKnownUser()) {
+            _, _, operation in
+            guard operation == logoutOperation else { return Stub.json(Stub.user) }
+            // B signs in while A's revoke is on the wire.
+            if switching.get(), let session = box.get() {
+                switching.set(false)
+                await session.signIn(serverAddress: storedHost, token: "pat-b")
+            }
+            return Stub.empty(.noContent)
+        }
+        box.set(session)
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+
+        switching.set(true)
+        _ = await session.signOut()
+
+        #expect(session.state.user != nil, "A's revoke ended the session that replaced it")
+        #expect(session.credentialGrant()?.token == "pat-b")
+        #expect(!credentials.isEmpty, "and threw away a credential that was never A's")
+    }
+
+    /// N1. A restored session's replacement check must REPLACE the flight the restore
+    /// invalidated, not join it. Joined, the caller waits on an occupant whose own generation
+    /// guard makes it write nothing, and the session stays `.verifying` with no request out.
+    @Test("a replacement validation does not join the flight it supersedes")
+    func aReplacementDoesNotJoinASupersededFlight() async {
+        let calls = Counter()
+        let holding = LockedValue<Bool>(true)
+        let account = SpyAccountStore()
+        let session = makeSession(
+            credentials: credentials(),
+            file: boundFile(),
+            account: account,
+            // The replacement is SCHEDULED, so this suite's default sleeper — which stops the
+            // ladder at its first wait — would take the very thing under test away.
+            sleeper: RetryLadderSleeper(stoppingAfter: 3)
+        ) { _, _, _ in
+            calls.increment()
+            // The launch check is HELD, so the flight is occupied when the session moves.
+            if calls.count == 1 {
+                for _ in 0..<5000 where holding.get() { await Task.yield() }
+            }
+            return Stub.json(Stub.user)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        await settle(until: { calls.count == 1 })
+        #expect(session.verification == .verifying, "the premise: a check is out and unanswered")
+
+        // A switch the licence refuses: the session is put back, its generation moves, and the
+        // check in flight can no longer answer for it.
+        account.refuseNextClears(1)
+        await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        await settle(until: { session.verification == .verified })
+
+        #expect(session.lastError == SessionStore.licenceBlockedSignIn, "the switch was refused")
+        #expect(
+            session.verification == .verified,
+            "the replacement joined the flight it superseded and asked nobody anything"
+        )
+        holding.set(false)
+        await launch.value
+    }
+
     /// R-B5. A sign-in whose write threw keeps working from memory and deletes the file. Its
     /// credential epoch never moves, so a later revalidation matches it — and would put the file
     /// back for a token storage may not hold. The proof of a WRITE is a different fact from the

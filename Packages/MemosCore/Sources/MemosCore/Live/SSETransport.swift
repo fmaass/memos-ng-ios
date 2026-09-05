@@ -19,7 +19,12 @@ public struct SSEConnection: Sendable {
 /// What opens an event stream. One method, so a test can script a server that fails three times
 /// and then answers, and the client's real reconnect loop is what runs against it.
 public protocol SSEConnecting: Sendable {
-    func connect(_ request: URLRequest) async throws -> SSEConnection
+    /// - Parameter authority: asked INSIDE this transport, immediately before the connect. The
+    ///   client's loop reconnects on its own for as long as the app is running, so every
+    ///   attempt — not only the first — is a send that has to prove it still belongs to a
+    ///   session this device holds (`SendAuthority`).
+    func connect(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> SSEConnection
 }
 
 /// The real transport: `URLSession.bytes(for:)`, chunked at line boundaries.
@@ -48,7 +53,11 @@ public struct URLSessionSSETransport: SSEConnecting {
         return URLSession(configuration: configuration)
     }
 
-    public func connect(_ request: URLRequest) async throws -> SSEConnection {
+    public func connect(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> SSEConnection
+    {
+        // On the executor that opens the stream, with nothing between the answer and the connect.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let (bytes, response) = try await session.bytes(for: request)
         // A non-HTTP response has no status to read. Zero is not 200, so it takes the retry path
         // rather than being mistaken for an open stream.

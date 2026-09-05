@@ -2,6 +2,7 @@ import Foundation
 import HTTPTypes
 import MemosAPI
 @testable import MemosCore
+import MemosOutbox
 import OpenAPIRuntime
 import Testing
 
@@ -211,6 +212,81 @@ struct SessionNoiseTests {
         #expect(timeline.lastError == nil, "and wrote A's sentence over B's list")
     }
 
+    /// The download lane. An original is the longest-lived REQUEST this app makes, and it is the
+    /// one request that carries the device token outside the generated client — so the transport
+    /// asks the authority itself rather than trusting the fences the caller puts either side of it.
+    @Test("a download for a session that has ended is never sent")
+    func aDownloadForAnEndedSessionIsNeverSent() async {
+        let session = await signedIn(handler: { _, _, _ in Stub.json(Stub.user) })
+        let transport = RecordingDownloadTransport()
+        await session.signOutWithoutRevoking()
+
+        await #expect(throws: (any Error).self) {
+            try await session.download(
+                MemoAttachment(
+                    uid: "a1",
+                    mime: "image/jpeg",
+                    status: .ready,
+                    downloadURL: URL(string: "https://memos.example.invalid/x/original")!
+                ),
+                transport: transport
+            )
+        }
+
+        #expect(transport.sends == 0, "a request went out for a session nobody is signed in to")
+    }
+
+    /// B3. A chunked upload is the longest-lived thing this app sends and it runs off the main
+    /// actor. Handed only a client, it kept starting sessions and appending chunks for an account
+    /// the device had left — the check has to travel with it and be asked before every send.
+    @Test("an upload whose session ended sends no further chunk")
+    func anUploadStopsWhenTheSessionEnds() async throws {
+        let sends = Counter()
+        let box = LockedValue<SessionStore?>(nil)
+        let session = await signedIn(
+            handler: { _, _, operation in
+                guard operation != whoamiOperation else { return Stub.json(Stub.user) }
+                sends.increment()
+                if operation == "start_upload_api_uploads_post" {
+                    // The session ends while the upload session is being opened, so the FIRST
+                    // send is legitimate and every one after it is not. 201 is what this route
+                    // answers with; a 200 here would fail to decode and the upload would stop for
+                    // a reason that has nothing to do with the fence.
+                    if let session = box.get() { await session.signOutWithoutRevoking() }
+                    return Stub.json(
+                        #"{"upload_uid":"u1","chunk_size":8,"bytes_received":0}"#,
+                        status: .created
+                    )
+                }
+                return Stub.json(#"{"upload_uid":"u1","chunk_size":8,"bytes_received":8}"#)
+            }
+        )
+        box.set(session)
+        let timeline = TimelineStore()
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "one.bin")
+        try Data(repeating: 7, count: 64).write(to: file)
+
+        let saved = await timeline.edit(
+            uid: "m1",
+            content: "with a picture",
+            attaching: [StagedSource(url: file, filename: "one.bin", mime: "image/jpeg")],
+            using: handle,
+            baseURL: Stub.baseURL
+        )
+
+        #expect(!saved, "an edit for a session that ended did not save")
+        #expect(
+            sends.count == 1,
+            "it opened one upload session and then went on sending chunks for a session that ended"
+        )
+    }
+
     /// The PATCH family — `save`, `setVisibility`, `setArchived` are all one method — across a
     /// session end. It is the apply point with the most entry points behind it, and the one that
     /// had no fence: an edit issued under A and answered after a switch to B would land in B,
@@ -263,5 +339,27 @@ struct SessionNoiseTests {
         await timeline.refresh(using: held, baseURL: Stub.baseURL)
 
         #expect(timeline.memos.isEmpty)
+    }
+}
+
+/// Counts what actually left for the network, so "no request was sent" is a fact rather than an
+/// inference from an error.
+final class RecordingDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var sends: Int { lock.withLock { count } }
+
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        lock.withLock { count += 1 }
+        return (
+            URL(filePath: "/dev/null"),
+            HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+        )
     }
 }
