@@ -69,6 +69,11 @@
 # a lock on the branch's gate directory, taken before anything is copied. The loser does not
 # wait: it says who holds the lock and stops.
 #
+# Before copying, a successful pruned origin fetch with the standard fetch refspec lets the
+# build host reclaim unlocked gate/work lanes older than 24 hours and absent from both local
+# and origin heads. Current lanes are protected. Reaping logs directory sizes and the data
+# volume's free space before and after; a failed fetch or non-standard refspec skips it.
+#
 # Exit codes: 2 = refusal (unsafe or unusable inputs, nothing was copied or run);
 #             3 = another run of this branch holds the gate lock (nothing was copied or run);
 #             4 = the lock this run held was reaped while the run was starting, and the build host
@@ -161,6 +166,7 @@ CLASSIFY_VERDICT=""
 CLASSIFY_BASE="-"
 CLASSIFY_REASON=""
 CLASSIFY_PATHS=""
+ORIGIN_FETCHED=0
 
 # The allowlist, by NAME. Conservative on purpose: it names what cannot change a build, and
 # everything it does not name meets the full gate — project.yml (where the release numbers live),
@@ -186,21 +192,23 @@ gate_classify() {
   CLASSIFY_REASON=""
   CLASSIFY_PATHS=""
 
-  # main is not a branch measured against origin/main, and it is where a release is cut from.
-  case "$branch" in
-    main|master)
-      CLASSIFY_REASON="the branch is $branch, which is not a change set measured against origin/main"
-      return 0 ;;
-  esac
-
   # Fetched first: the base is only as honest as the ref it is read from, and a stale origin/main
   # would make an old change set look small. A fetch that cannot reach the remote is not fatal —
   # it falls back to the ref on disk and says so — but a base that cannot be resolved at all owes
   # the full gate, because then nothing is known about what changed.
   local fetch_note=""
-  if ! git fetch --quiet origin 2>/dev/null; then
+  # Pruning makes deleted branches disappear from the local inventory used by the lane reaper.
+  if git fetch --quiet --prune origin 2>/dev/null; then
+    ORIGIN_FETCHED=1
+  else
     fetch_note=" (origin could not be fetched — the origin/main already on disk was used)"
   fi
+  # main needs the inventory too, even though it has no change set to classify.
+  case "$branch" in
+    main|master)
+      CLASSIFY_REASON="the branch is $branch, which is not a change set measured against origin/main${fetch_note}"
+      return 0 ;;
+  esac
   local base
   base="$(git merge-base origin/main HEAD 2>/dev/null)" || base=""
   if [ -z "$base" ]; then
@@ -537,10 +545,29 @@ fi
 # --- (2) resolve the remote target and refuse anything outside the gate root -------------------
 # Resolved on the build host, where the path actually exists: lexically (so a `..` in the branch
 # name cannot escape) AND physically (so a symlink planted in the gate root cannot either).
+surviving_branches=""
+reap_skip_reason="origin fetch failed; local refs may be incomplete"
+origin_fetch_refspec="$(git config --get-all remote.origin.fetch)" || origin_fetch_refspec=""
+if [ "$origin_fetch_refspec" != '+refs/heads/*:refs/remotes/origin/*' ]; then
+  ORIGIN_FETCHED=0
+  reap_skip_reason="non-standard fetch refspec"
+  say "GATE_REAP skipped: $reap_skip_reason"
+fi
+if [ "$ORIGIN_FETCHED" -eq 1 ]; then
+  surviving_refs="$(git for-each-ref refs/heads refs/remotes/origin --format='%(refname)')" \
+    || die_refuse "cannot enumerate local and origin branches for lane reaping"
+  surviving_branches="$(printf '%s\n' "$surviving_refs" \
+    | sed -e '/^refs\/remotes\/origin\/HEAD$/d' -e 's#^refs/heads/##' -e t \
+      -e 's#^refs/remotes/origin/##' | sort -u)"
+fi
 preflight_out="$(
   {
     printf "branch='%s'\n" "$(esc "$branch")"
     printf "lock_owner='%s'\n" "$(esc "$LOCK_OWNER")"
+    printf "origin_fetched='%s'\n" "$(esc "$ORIGIN_FETCHED")"
+    printf "reap_skip_reason='%s'\n" "$(esc "$reap_skip_reason")"
+    printf "surviving_branches='%s'\n" "$(esc "$surviving_branches")"
+    cat "$repo_root/scripts/reap-gate-lanes.sh"
     cat <<'PRE_EOF'
 set -uo pipefail
 gate_root_raw="$HOME/build/memos-ng-ios/gate"
@@ -580,6 +607,21 @@ if [ -e "$target" ]; then
     exit 2
   fi
 fi
+echo "GATE_REAP data volume before:"
+df -h "$gate_root" | sed 's/^/GATE_REAP /' || exit 2
+if [ "$origin_fetched" -eq 1 ]; then
+  survivors_file="$(mktemp "${TMPDIR:-/tmp}/gate-survivors-XXXXXX")" || exit 2
+  trap 'rm -f "$survivors_file"' EXIT
+  printf '%s\n' "$surviving_branches" > "$survivors_file" || exit 2
+  # The work root is resolved the same way as the gate root: the reaper compares physical paths,
+  # and a symlinked ~/build (the likely answer to a full disk) would otherwise refuse every run.
+  work_root="$(cd "$HOME/build/memos-ng-ios/work" 2>/dev/null && pwd -P)" || work_root="$HOME/build/memos-ng-ios/work"
+  reap_gate_lanes "$gate_root" "$work_root" "$branch" "$survivors_file" || exit 2
+else
+  echo "GATE_REAP skipped: $reap_skip_reason"
+fi
+echo "GATE_REAP data volume after:"
+df -h "$gate_root" | sed 's/^/GATE_REAP /' || exit 2
 mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
 # The lock is a directory, because mkdir is the one atomic "claim it or find it claimed" this
 # host has in every shell it runs: /bin/bash here is 3.2 and has no flock. It is taken now,
@@ -605,6 +647,9 @@ PRE_EOF
 )"
 preflight_rc=$?
 printf '%s\n' "$preflight_out" | tee -a "$log" >/dev/null
+while IFS= read -r preflight_line; do
+  case "$preflight_line" in GATE_REAP*) say "$preflight_line" ;; esac
+done <<< "$preflight_out"
 if [ "$preflight_rc" -ne 0 ]; then
   printf '%s\n' "$preflight_out" >&2
   exit 2
@@ -808,6 +853,8 @@ say "--- step: remote ---"
   printf "GATE_DEVICE_TYPE='%s'\n" "$(esc "$DEVICE_TYPE")"
   printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
+  printf "GATE_BRANCH='%s'\n" "$(esc "$branch")"
+  cat "$repo_root/scripts/reap-gate-lanes.sh"
   cat <<'REMOTE_EOF'
 set -uo pipefail
 
@@ -857,6 +904,8 @@ DERIVED="$GATE_WORK/DerivedData"
 # far more often than that. Locks are NEVER sweep targets — they are owned by the runs that hold
 # them and clean themselves up through the trap; deleting one from the side would strip a live
 # run of its serialization.
+HYGIENE_GATE_ROOT="${GATE_TARGET%/"$GATE_BRANCH"}"
+HYGIENE_WORK_ROOT="${GATE_WORK%/"$GATE_BRANCH"}"
 touch "$GATE_TARGET" "$GATE_WORK" 2>/dev/null
 for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
   find "$hygiene_root" -mindepth 2 -maxdepth 2 -type d -mtime +3 \
@@ -865,25 +914,27 @@ for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
         case "$stale" in
           *.lock*) continue ;;
         esac
+        gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$stale" || continue
         rm -rf "$stale" && echo "GATE_HYGIENE swept stale tree $stale"
       done
 done
 # Age alone is not enough on a busy day: five concurrent branches at ~3G each filled the host
 # to ENOSPC while every tree was hours old. Under PRESSURE the age rule yields — when free
-# space is below 10G, the oldest-stamped sibling trees go, newest-stamped last, until 15G is
-# free or nothing sweepable remains. The current run's trees and every lock stay untouchable;
-# a still-active sibling loses only an incremental cache it will rebuild, which is the right
-# trade against every gate on the host dying on a full disk.
+# space is below 15G, the oldest-stamped sibling trees go, newest-stamped last, until 20G is
+# free or nothing sweepable remains. Locked siblings may be waiting or building, so their
+# trees must survive even under pressure; an unlocked sibling can rebuild its cache next run.
 free_kb() { df -k / | awk 'NR==2 {print $4}'; }
-if [ "$(free_kb)" -lt 10485760 ]; then
-  echo "GATE_HYGIENE pressure: under 10G free — reaping oldest sibling trees"
+# The 2026-09-05 mid-run ENOSPC needs more headroom for DerivedData and warnings rebuilds.
+if [ "$(free_kb)" -lt 15728640 ]; then
+  echo "GATE_HYGIENE pressure: under 15G free — reaping oldest sibling trees"
   for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
     ls -1dtr "$hygiene_root"/*/* 2>/dev/null | while IFS= read -r victim; do
       [ -d "$victim" ] || continue
       case "$victim" in
         "$GATE_TARGET"|"$GATE_WORK"|*.lock*) continue ;;
       esac
-      [ "$(free_kb)" -ge 15728640 ] && break
+      [ "$(free_kb)" -ge 20971520 ] && break
+      gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$victim" || continue
       rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
     done
   done
