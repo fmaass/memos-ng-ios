@@ -380,7 +380,8 @@ public actor OutboxRepository {
         binding: AccountBinding,
         sources: [StagedSource],
         id: UUID = UUID(),
-        idempotencyKey: UUID = UUID()
+        idempotencyKey: UUID = UUID(),
+        under authority: SendAuthority = .unfenced
     ) throws -> UploadJob {
         let directory = mediaDirectory(id)
         do {
@@ -399,6 +400,11 @@ public actor OutboxRepository {
                 files: files,
                 binding: binding
             )
+            // The LAST word, on this executor, immediately before the manifest is committed.
+            // Copying the files above is the slow part of a capture and the caller's check was
+            // before it: an account switch landing in that interval would otherwise commit a job
+            // stamped with the account that is leaving, which the next drain can only hold.
+            guard authority.holds() else { throw SendAuthorityWithdrawn() }
             try save(job)
             return job
         } catch {

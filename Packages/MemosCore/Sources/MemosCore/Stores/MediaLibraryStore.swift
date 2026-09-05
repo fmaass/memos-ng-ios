@@ -183,7 +183,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
                 return
             }
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
         }
     }
 
@@ -237,7 +237,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     guard sessionStillCurrent(handle) else { return }
                     continue
                 }
-                await report(error, issuedUnder: handle.generation)
+                await report(error, issuedUnder: handle)
                 return
             }
         }
@@ -278,12 +278,17 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Says what went wrong — unless what went wrong was this app cancelling its own request.
     /// Same rule, same helper, as `TimelineStore.report`: a supersede cancels the transport before
     /// it moves the lineage, so the fence above cannot tell that `-999` from a real failure.
-    private func report(_ error: any Error, issuedUnder generation: Int?) async {
+    private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
+        // Fenced for the reason `TimelineStore.report` is: a stale 401 reaching `onUnauthorized`
+        // ends the session running now, and a stale sentence lands on a grid that never asked.
+        guard sessionStillCurrent(handle) else {
+            MemosLog.api.info("a failure for a session that has ended is not reported")
+            return
+        }
         // A server that never answered goes to the session and nowhere else — the same rule, and
         // the same reason, as `TimelineStore.report`.
         if let failure = StoreFailure.transportFailure(error) {
-            guard let generation else { return }
-            session?.noteTransportFailure(failure, issuedUnder: generation)
+            session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
         guard let apiError = StoreFailure.reportable(error) else {

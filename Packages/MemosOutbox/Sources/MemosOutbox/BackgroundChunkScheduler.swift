@@ -59,7 +59,16 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
         }
     }
 
-    public func upload(_ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity) {
+    public func upload(
+        _ request: URLRequest,
+        fromFile file: URL,
+        identity: OutboxTaskIdentity,
+        under authority: SendAuthority
+    ) {
+        // A chunk handed to the background session is the one send that cannot be taken back: it
+        // outlives this process. The engine checked before the hop that got here; this asks again
+        // on THIS executor, because the hop itself is a suspension the switch fits into.
+        guard authority.holds() else { return }
         let task = session.uploadTask(with: request, fromFile: file)
         task.taskDescription = identity.taskDescription
         task.resume()

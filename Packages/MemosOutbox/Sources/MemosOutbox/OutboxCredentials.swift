@@ -53,3 +53,26 @@ public protocol OutboxCredentialsProviding: Sendable {
     /// this exists to catch, since a drain pass outlives the switch that happens during it.
     func isCurrent(_ credentials: OutboxCredentials) -> Bool
 }
+
+/// The authority a send is made under, asked at the LAST instant before it goes out.
+///
+/// It TRAVELS into the executor that performs the effect rather than being checked beside the call
+/// that starts it. Between a check on one actor and an effect on another there is a hop, and a hop
+/// is a suspension — which is exactly the window an account switch fits into. Checking here means
+/// the answer and the send are on the same executor with nothing in between.
+///
+/// A closure rather than a value, because the question is "is this still true NOW", and a value
+/// captured earlier can only answer "was it true then".
+public struct SendAuthority: Sendable {
+    private let stillCurrent: @Sendable () -> Bool
+
+    public init(_ stillCurrent: @escaping @Sendable () -> Bool) {
+        self.stillCurrent = stillCurrent
+    }
+
+    public func holds() -> Bool { stillCurrent() }
+
+    /// For the callers with no session behind them — a test double, and the share extension's
+    /// lane, which is fenced by the account licence instead.
+    public static let unfenced = SendAuthority { true }
+}

@@ -23,7 +23,15 @@ public struct OutboxHTTPResponse: Sendable, Equatable {
 /// The small, foreground JSON calls: starting an upload session, the offset HEAD, the memo create,
 /// the health probe. Chunks do NOT go through here — they belong to the background session.
 public protocol OutboxHTTPPerforming: Sendable {
-    func perform(_ request: URLRequest) async throws -> OutboxHTTPResponse
+    /// - Parameter authority: asked inside this executor, immediately before the request leaves —
+    ///   see `SendAuthority`. A performer that finds it withdrawn sends nothing and throws.
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+}
+
+/// What a performer throws when the authority it was handed no longer holds.
+public struct SendAuthorityWithdrawn: Error, Equatable {
+    public init() {}
 }
 
 public struct URLSessionHTTPPerformer: OutboxHTTPPerforming {
@@ -33,7 +41,12 @@ public struct URLSessionHTTPPerformer: OutboxHTTPPerforming {
         self.session = session
     }
 
-    public func perform(_ request: URLRequest) async throws -> OutboxHTTPResponse {
+    public func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        // Asked HERE, on the executor that is about to send, with nothing between the answer and
+        // the send.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             return OutboxHTTPResponse(statusCode: -1, body: data)
@@ -81,7 +94,12 @@ public protocol OutboxChunkHandling: Sendable {
 public protocol OutboxChunkScheduling: Sendable {
     /// The tasks the session is carrying right now, whatever launched this process.
     func inFlight() async -> [OutboxTaskIdentity]
-    func upload(_ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity) async
+    func upload(
+        _ request: URLRequest,
+        fromFile file: URL,
+        identity: OutboxTaskIdentity,
+        under authority: SendAuthority
+    ) async
     func cancel(_ identities: [OutboxTaskIdentity]) async
 }
 

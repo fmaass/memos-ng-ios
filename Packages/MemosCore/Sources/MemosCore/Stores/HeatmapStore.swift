@@ -74,13 +74,13 @@ public final class HeatmapStore {
                 MemosLog.api.info("GET /api/stats/heatmap answered for a load that was overtaken")
                 return
             }
-            guard sessionStillCurrent(handle) else {
+            if sessionStillCurrent(handle) {
+                counts = loaded
+                hasLoaded = true
+                lastError = nil
+            } else {
                 MemosLog.api.info("an answer for a session that has ended is not applied")
-                return
             }
-            counts = loaded
-            hasLoaded = true
-            lastError = nil
         } catch {
             guard mine == attempt else { return }
             // The counts already on screen stay. A heatmap that empties itself because one
@@ -89,7 +89,13 @@ public final class HeatmapStore {
             //
             // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180). Nor
             // is a server that never answered: that one is the session's to say, once, in a banner.
-            if let failure = StoreFailure.transportFailure(error) {
+            // Fenced like every other apply point: an answer for a session that has ended is
+            // not this one's to speak about — see `TimelineStore.report`. It falls THROUGH rather
+            // than returning, because the spinner below is this call's own and nobody else is
+            // coming to take it down.
+            if !sessionStillCurrent(handle) {
+                MemosLog.api.info("a failure for a session that has ended is not reported")
+            } else if let failure = StoreFailure.transportFailure(error) {
                 session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription

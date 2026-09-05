@@ -138,7 +138,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         // under can have ended since — an account switch is two writes and this pass runs across
         // both. The pass is ABANDONED rather than the jobs held: nothing is wrong with them, and
         // the next pass acquires under whoever is signed in then.
-        guard self.credentials.isCurrent(credentials) else { return }
+        guard mayStillSend(credentials) else { return }
         guard await isReachable(credentials) else {
             await onChange()
             return
@@ -162,7 +162,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             // Asked again for every step, beside `permitsNetwork` and for the same reason: the
             // only honest moment is the moment before a request would go out, and each of the
             // three actions below produces one.
-            guard self.credentials.isCurrent(credentials) else { return }
+            guard mayStillSend(credentials) else { return }
             switch OutboxPlanner.nextAction(
                 for: current, credentials: credentials, now: clock()
             ) {
@@ -219,6 +219,16 @@ public actor OutboxEngine: OutboxChunkHandling {
         self.credentials.isCurrent(credentials)
     }
 
+    /// The same question, as a value that travels INTO the executor performing the effect.
+    ///
+    /// `mayStillSend` answers on this actor; every send then hops to another one, and the hop is a
+    /// suspension. What crosses it is this, so the last word before the bytes leave is spoken
+    /// where they leave from (`SendAuthority`).
+    private func authority(under credentials: OutboxCredentials) -> SendAuthority {
+        let provider = self.credentials
+        return SendAuthority { provider.isCurrent(credentials) }
+    }
+
     /// Whether bytes may leave this device RIGHT NOW.
     ///
     /// Read fresh at every step rather than once per pass: a drain that started on the home wifi
@@ -242,9 +252,9 @@ public actor OutboxEngine: OutboxChunkHandling {
     // MARK: - the four calls
 
     private func isReachable(_ credentials: OutboxCredentials) async -> Bool {
-        guard mayStillSend(credentials) else { return false }
         let request = OutboxRequests.health(baseURL: credentials.serverBaseURL)
-        guard let response = try? await http.perform(request) else { return false }
+        guard let response = try? await http.perform(request, under: authority(under: credentials))
+        else { return false }
         return response.isSuccess
     }
 
@@ -263,8 +273,8 @@ public actor OutboxEngine: OutboxChunkHandling {
             await save(job.held(.serverRefused, error: error.localizedDescription))
             return nil
         }
-        guard mayStillSend(credentials) else { return nil }
-        guard let response = try? await http.perform(request) else {
+        guard let response = try? await http.perform(request, under: authority(under: credentials))
+        else {
             await save(job.backingOff(at: clock(), error: "The server could not be reached."))
             return nil
         }
@@ -304,9 +314,12 @@ public actor OutboxEngine: OutboxChunkHandling {
         )
         let identity = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: offset)
         // The slice above was an await, and a chunk handed to the background session outlives this
-        // pass entirely — it is the one send that cannot be taken back.
-        guard mayStillSend(credentials) else { return }
-        await scheduler.upload(request, fromFile: chunk, identity: identity)
+        // pass entirely — it is the one send that cannot be taken back. The authority goes WITH it
+        // rather than being checked here, because `upload` is another actor and the hop to it is
+        // one more instant for the switch to land in.
+        await scheduler.upload(
+            request, fromFile: chunk, identity: identity, under: authority(under: credentials)
+        )
         // The chunk is already with the background session, and this write only records that. Its
         // failure is reported, not acted on: the answer is applied against the manifest as it
         // stands, which is exactly what `handle` re-reads.
@@ -323,8 +336,8 @@ public actor OutboxEngine: OutboxChunkHandling {
         let request = OutboxRequests.offset(
             baseURL: credentials.serverBaseURL, token: credentials.token, uploadUID: uploadUID
         )
-        guard mayStillSend(credentials) else { return nil }
-        guard let response = try? await http.perform(request) else { return nil }
+        guard let response = try? await http.perform(request, under: authority(under: credentials))
+        else { return nil }
         if response.statusCode == 404 {
             // The session expired or was reaped. The ORIGINAL is untouched — it starts again.
             return job.clearingLostUpload(fileID: fileID)
@@ -344,9 +357,11 @@ public actor OutboxEngine: OutboxChunkHandling {
         // Nothing is created against a queue that could not be written: the capture waits, whole,
         // rather than being sent while the disk has no record that it was ever tried.
         guard await save(current) else { return nil }
-        // The manifest write above was an await; the create is the send it precedes.
-        guard mayStillSend(credentials) else { return nil }
-        switch await completion.create(job: current, credentials: credentials) {
+        // The manifest write above was an await; the create is the send it precedes, on another
+        // executor again — so the authority travels rather than being asked here.
+        switch await completion.create(
+            job: current, credentials: credentials, under: authority(under: credentials)
+        ) {
         case .created:
             // The one exit. Everything the capture owns goes with it.
             await repository.delete(current)
@@ -460,7 +475,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         // the server said is on disk; the next drain carries on from there. The same is true of a
         // session that ENDED while the chunk was in flight: the answer is recorded, and the next
         // pass carries on under whoever is signed in then.
-        guard let credentials, self.credentials.isCurrent(credentials) else { return }
+        guard let credentials, mayStillSend(credentials) else { return }
         await advance(next, credentials: credentials)
         await onChange()
     }

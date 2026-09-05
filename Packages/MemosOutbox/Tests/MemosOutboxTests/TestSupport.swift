@@ -18,7 +18,12 @@ final class ScriptedHTTP: OutboxHTTPPerforming, @unchecked Sendable {
         self.handler = handler
     }
 
-    func perform(_ request: URLRequest) async throws -> OutboxHTTPResponse {
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        // The double answers the same question the real performer does, so a test can put the
+        // withdrawal between two sends and see the second one refused.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         lock.withLock { seen.append(request) }
         return try handler(request)
     }
@@ -89,6 +94,8 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         self.pretendInFlight = inFlight
     }
 
+    private var hook: (@Sendable () -> Void)?
+
     func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { pretendInFlight } }
 
     /// Set after the harness knows the job and file ids a relaunch would have left behind.
@@ -96,7 +103,21 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         lock.withLock { pretendInFlight = identities }
     }
 
-    func upload(_ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity) async {
+    /// Run the instant BEFORE the authority is asked — how a test puts an account switch inside
+    /// the hop between the engine's decision to send and this executor performing it.
+    var beforeUpload: (@Sendable () -> Void)? {
+        get { lock.withLock { hook } }
+        set { lock.withLock { hook = newValue } }
+    }
+
+    func upload(
+        _ request: URLRequest,
+        fromFile file: URL,
+        identity: OutboxTaskIdentity,
+        under authority: SendAuthority
+    ) async {
+        beforeUpload?()
+        guard authority.holds() else { return }
         lock.withLock {
             scheduled.append(
                 Scheduled(
@@ -176,8 +197,13 @@ final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
         self.lastOutcome = last ?? outcomes.last ?? .created(uid: "m1")
     }
 
-    func create(job: UploadJob, credentials: OutboxCredentials) async -> MemoCompletionOutcome {
-        lock.withLock {
+    func create(
+        job: UploadJob,
+        credentials: OutboxCredentials,
+        under authority: SendAuthority
+    ) async -> MemoCompletionOutcome {
+        guard authority.holds() else { return .retry("no authority") }
+        return lock.withLock {
             attempts.append(job.idempotencyKey)
             guard !outcomes.isEmpty else { return lastOutcome }
             return outcomes.removeFirst()

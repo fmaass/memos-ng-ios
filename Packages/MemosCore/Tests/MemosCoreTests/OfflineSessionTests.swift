@@ -16,6 +16,19 @@ private let storedToken = "memos_pat_stored_secret"
 private let storedAddress = "https://memos.example.invalid"
 private let storedHost = "memos.example.invalid"
 
+/// SHA-256 of the tokens these suites use, computed OUTSIDE this app.
+///
+/// `CredentialFingerprint.of` is the thing under test wherever a file's binding matters; asking it
+/// for the expected value would only prove it agrees with itself. These come from
+/// `printf '%s' <token> | sha256sum`.
+private let storedTokenDigest =
+    "5d2a365dd73d07176c16a36d32cdcd04f11bbdc5f78484b8a9828003a5d1fa65"
+private let firstTokenDigest = "6ecd928668c00c27e3331ea8766db560545fea862ee6292b668e8549748b0a1c"
+private let successorTokenDigest =
+    "448fef6e89c704541eb6fc5db4b20742bad99ab2f40d608de6e91a6add1685bb"
+private let freshTokenDigest = "01d0ff22c1e4a04f8258805d136fe55d96c14ee83c3248a0694809bda4a3bf79"
+private let renewedTokenDigest = "ae70f29131b473c0d593fee213ffda42de1c10f9568308512817c87d0f431e58"
+
 /// What a phone with no route to its server throws. `-1009` with no stream errno beside it is the
 /// `offline` classification rather than the Local Network denial (`NativeLoginTransportFailure`).
 private func offline() -> URLError { URLError(.notConnectedToInternet) }
@@ -115,10 +128,14 @@ struct OfflineSessionTests {
         return store
     }
 
+    /// - Parameter fingerprint: the literal digest for the default token, so a launch that admits
+    ///   proves the store's own hasher produced THAT value rather than merely agreeing with
+    ///   itself. The `token:` form is for the cases that want a deliberately different one.
     private func boundFile(
         subject: String = "fabian",
         server: String = storedAddress,
-        token: String = storedToken
+        token: String? = nil,
+        fingerprint: String = storedTokenDigest
     ) -> StubLastKnownUser {
         StubLastKnownUser(
             LastKnownUser(
@@ -128,7 +145,7 @@ struct OfflineSessionTests {
                 role: "admin",
                 authKind: "oidc",
                 serverBaseURL: server,
-                credentialFingerprint: CredentialFingerprint.of(token)
+                credentialFingerprint: token.map(CredentialFingerprint.of) ?? fingerprint
             )
         )
     }
@@ -545,7 +562,7 @@ struct OfflineSessionTests {
         #expect(file.stored?.subject == "fabian")
         #expect(file.stored?.serverBaseURL == storedAddress)
         #expect(
-            file.stored?.credentialFingerprint == CredentialFingerprint.of("memos_pat_fresh"),
+            file.stored?.credentialFingerprint == freshTokenDigest,
             "the fingerprint is of the token whoami answered for"
         )
     }
@@ -581,7 +598,7 @@ struct OfflineSessionTests {
 
         #expect(
             file.stored?.credentialFingerprint
-                == CredentialFingerprint.of("memos_pat_successor"),
+                == renewedTokenDigest,
             "a file naming the predecessor would fail the NEXT launch's fingerprint check"
         )
 
@@ -736,10 +753,67 @@ struct OfflineSessionTests {
 
         let stored = try #require(file.stored)
         #expect(
-            stored.credentialFingerprint == CredentialFingerprint.of("pat-successor"),
+            stored.credentialFingerprint == successorTokenDigest,
             "a stale 200 rewrote the file with a token the server had already destroyed"
         )
         #expect(session.state.user != nil, "and the session itself is untouched by it")
+    }
+
+    /// R-B5. A sign-in whose write threw keeps working from memory and deletes the file. Its
+    /// credential epoch never moves, so a later revalidation matches it — and would put the file
+    /// back for a token storage may not hold. The proof of a WRITE is a different fact from the
+    /// identity of the credential, and only one of them is what the file needs.
+    @Test("a revalidation does not re-create a file an unproven write deleted")
+    func revalidationDoesNotResurrectAnUnprovenFile() async {
+        let file = boundFile()
+        let session = makeSession(credentials: RefusingCredentials(), file: file) { _, _, _ in
+            Stub.json(Stub.user)
+        }
+        await session.signIn(serverAddress: storedHost, token: "memos_pat_fresh")
+        #expect(session.state.user != nil, "the session works from memory; that is the premise")
+        #expect(file.stored == nil, "and the unproven write took the file with it")
+
+        session.noteTransportFailure(.offline, issuedUnder: session.activeHandle?.generation ?? -1)
+        await session.enteredForeground()
+
+        #expect(session.verification == .verified, "the revalidation really did succeed")
+        #expect(file.stored == nil, "and still wrote no file for a credential never written down")
+    }
+
+    /// R-N1. A refused switch puts back a `.verifying` session — and the bump that keeps
+    /// pre-attempt answers from becoming current also makes the check in flight exit. Restoring
+    /// the STATE without restoring the lifecycle strands it there for ever.
+    @Test("a refused switch over an unconfirmed session does not strand it")
+    func aRefusedSwitchOverAnUnconfirmedSessionAsksAgain() async {
+        let answering = LockedValue<Bool>(false)
+        let sleeper = RetryLadderSleeper(stoppingAfter: 3)
+        let account = SpyAccountStore()
+        let session = makeSession(
+            credentials: credentials(),
+            file: boundFile(),
+            account: account,
+            sleeper: sleeper
+        ) { _, _, _ in
+            guard answering.get() else { throw offline() }
+            return Stub.json(Stub.user)
+        }
+        await session.enteredForeground()
+        await session.restore()
+        guard case .unverified = session.verification else {
+            Issue.record("expected .unverified, got \(session.verification)")
+            return
+        }
+
+        account.refuseNextClears(1)
+        answering.set(true)
+        await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        await settle(until: { session.verification == .verified })
+
+        #expect(session.lastError == SessionStore.licenceBlockedSignIn, "the switch was refused")
+        #expect(
+            session.verification == .verified,
+            "a session put back unconfirmed with nothing running is stranded there"
+        )
     }
 }
 
@@ -929,6 +1003,96 @@ struct InvalidationFenceTests {
         #expect(file.stored == nil, "no identity was written for a session that had ended")
         #expect(account.published == nil, "and no licence was published for it")
         #expect(restarts.count == 0, "and no drain was started on its behalf")
+        #expect(session.credentialGrant() == nil, "and no authority was left behind for one")
+    }
+
+    /// R-B2(a). The sign-out completes while the sign-in is waiting on `whoami`. The sign-in then
+    /// resumes and would persist and establish a credential for a session somebody ended — and its
+    /// own `persist` mints a fresh generation, so a check against THAT number cannot see it.
+    @Test("a sign-in overtaken by a sign-out installs nothing")
+    func aSignInOvertakenBySignOutInstallsNothing() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let file = StubLastKnownUser()
+        let account = SpyAccountStore()
+        let credentials = InMemoryCredentials()
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in
+                    // The sign-out lands INSIDE the whoami this sign-in is waiting on.
+                    if let session = box.get() { await session.signOutWithoutRevoking() }
+                    return Stub.json(Stub.user)
+                }
+            },
+            account: account,
+            lastKnownUser: file
+        )
+        box.set(session)
+
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+
+        #expect(session.state == .signedOut, "the sign-out is what the session ended as")
+        #expect(session.credentialGrant() == nil)
+        #expect(account.published == nil, "no licence for a session nobody asked for")
+        #expect(file.stored == nil)
+        #expect(credentials.isEmpty, "and nothing of it was written down")
+    }
+
+    /// R-B2(b), the other ordering. The wipe awaits its keychain delete; a sign-in completes
+    /// inside that await and owns the session. The wipe's tail would otherwise clear the NEW
+    /// session's configuration and settings and assign `.signedOut` over it.
+    @Test("a sign-out overtaken by a sign-in does not clear the session it found")
+    func aSignOutOvertakenBySignInLeavesItAlone() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let signingIn = LockedValue<Bool>(false)
+        let credentials = InterruptingCredentials {
+            guard let session = await box.get(), signingIn.get() else { return }
+            signingIn.set(false)
+            await session.signIn(serverAddress: storedHost, token: "pat-b")
+        }
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            }
+        )
+        box.set(session)
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+        #expect(session.state.user != nil)
+
+        signingIn.set(true)
+        await session.signOutWithoutRevoking()
+
+        #expect(session.state.user != nil, "the sign-in that landed inside the delete owns this")
+        #expect(session.credentialGrant()?.token == "pat-b")
+        #expect(session.serverBaseURL != nil, "the wipe's tail cleared the wrong session")
+    }
+
+}
+
+/// A credential store that lets something else happen in the middle of its DELETE.
+final class InterruptingCredentials: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+    private let duringRemove: @Sendable () async -> Void
+
+    init(duringRemove: @escaping @Sendable () async -> Void) {
+        self.duringRemove = duringRemove
+    }
+
+    func set(_ value: String, for account: String) async throws {
+        lock.withLock { storage[account] = value }
+    }
+
+    func string(for account: String) async throws -> String? { lock.withLock { storage[account] } }
+
+    func remove(_ account: String) async throws {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
+    }
+
+    func removeAll(_ accounts: [String]) async throws {
+        await duringRemove()
+        lock.withLock { for account in accounts { storage[account] = nil } }
     }
 }
 

@@ -168,6 +168,24 @@ struct EngineTests {
         #expect(saved.state == .waiting)
     }
 
+    /// R-B4. The authority is withdrawn AFTER the engine's own check and before the executor that
+    /// actually sends — the window an actor hop opens. The scheduler is the one send that cannot
+    /// be taken back, so the check has to be inside it.
+    @Test("a withdrawal between the engine's check and the scheduler sends no chunk")
+    func aWithdrawalInsideTheHopSendsNoChunk() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        // The scheduler asks the authority as it is at the moment IT runs, so withdrawing after
+        // the engine has decided to send is exactly the interleaving under test.
+        harness.scheduler.beforeUpload = { harness.credentials.supersede() }
+
+        await harness.engine.drain()
+
+        #expect(harness.scheduler.uploads.isEmpty, "the chunk was handed over after withdrawal")
+        let saved = try #require(await harness.reload())
+        #expect(saved.state != .held, "and the capture is not held for it either")
+    }
+
     /// And between two chunk sends: the first chunk is already with the background session, its
     /// answer comes back, and the pass that would send the SECOND one no longer has the authority
     /// the first was sent with.
@@ -951,6 +969,46 @@ struct NetworkPolicyDrainTests {
         let saved = try #require(await harness.reload())
         #expect(saved.state == .uploading)
         #expect(saved.waitReason == nil)
+    }
+}
+
+/// R-N2. A wake with no authority still has to ADOPT: the system woke this process because a
+/// chunk finished, and its answer carries the server's own byte count. A wake that gated adoption
+/// on authority attached no handler, discarded that answer and re-sent bytes the server holds.
+@MainActor
+@Suite("Adoption is not a send")
+struct OutboxAdoptionTests {
+    @Test("a wake with no credential still takes over the queue and sends nothing")
+    func adoptionNeedsNoAuthority() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        let source = try Fixture.file(in: root, named: "one.heic", bytes: 400)
+        _ = try await repository.enqueue(
+            content: "on the beach",
+            visibility: nil,
+            capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+        )
+        let http = ScriptedHTTP.standard(chunkSize: 400)
+        let preferences = Fixture.preferences(name: "memosng.outbox.tests.adoption")
+        defer { Fixture.forgetting("memosng.outbox.tests.adoption") }
+        let outbox = Outbox(
+            repository: repository,
+            // Nobody is signed in — the cold background wake this is about.
+            credentials: StaticCredentials(credentials: nil),
+            http: http,
+            scheduler: ScriptedScheduler(),
+            completion: ScriptedCompletion([.retry("not now")], repeating: .retry("not now")),
+            network: StubNetworkPath(),
+            preferences: preferences.store
+        )
+
+        await outbox.adopt()
+
+        #expect(outbox.jobs.count == 1, "the queue is taken over whether or not it may be drained")
+        #expect(http.requests.isEmpty, "and adoption itself sent nothing")
     }
 }
 

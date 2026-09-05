@@ -210,7 +210,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
                 return
             }
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
         }
     }
 
@@ -283,7 +283,7 @@ public final class TimelineStore {
                     guard sessionStillCurrent(handle) else { return }
                     continue
                 }
-                await report(error, issuedUnder: handle.generation)
+                await report(error, issuedUnder: handle)
                 return
             }
         }
@@ -390,7 +390,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
                 return nil
             }
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return nil
         }
     }
@@ -408,7 +408,16 @@ public final class TimelineStore {
     /// moves the lineage, so the cancelled request is still the current one when its `-999` lands
     /// (MEMNG-180). `StoreFailure` recognises the cancellation itself, and it is the same
     /// recognition in every store rather than five that drift apart.
-    private func report(_ error: any Error, issuedUnder generation: Int?) async {
+    private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
+        // A FAILURE is as much this session's as a success is, and the fence is the same one. A
+        // stale 401 reaching `onUnauthorized` below wipes the session running NOW — the single
+        // worst thing a missing fence can do here — and a stale sentence lands on a screen that
+        // never asked for it. Neither is a list-lineage question, so the lineage guards at the
+        // call sites cannot answer it.
+        guard sessionStillCurrent(handle) else {
+            MemosLog.api.info("a failure for a session that has ended is not reported")
+            return
+        }
         // A server that never answered is the SESSION's to say, once, in a banner — never this
         // store's. Saying it here as well is what painted an error card under that banner on every
         // load, refresh and tag fetch of an offline launch, and no ordering fixes it from in here:
@@ -416,8 +425,10 @@ public final class TimelineStore {
         // `.unverified` has nothing to clear the card it wrote.
         if let failure = StoreFailure.transportFailure(error) {
             serverUnreachable = true
-            guard let generation else { return }
-            session?.noteTransportFailure(failure, issuedUnder: generation)
+            // The sentence a PREVIOUS answer left behind is not about this attempt, and a reader
+            // that sees both reads the older one (`MemoSearch.answer`).
+            lastError = nil
+            session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
         guard let apiError = StoreFailure.reportable(error) else {
@@ -451,6 +462,10 @@ public final class TimelineStore {
     ///
     /// A store with no session named to it answers yes: a preview and a suite that is about paging
     /// have no incarnation to be wrong about.
+    /// The same question, asked by the owner that holds this store's handle across its own awaits
+    /// (`MemoSearch`, whose debounce is long enough for a session to end inside it).
+    public func sessionIsCurrent(_ handle: SessionHandle) -> Bool { sessionStillCurrent(handle) }
+
     private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
         // A store with no session named to it has nothing to be wrong about — a preview, and the
         // suites that are about paging. A store that HAS one and finds it holding no client is
@@ -511,7 +526,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return false
         }
     }
@@ -561,9 +576,15 @@ public final class TimelineStore {
             } catch {
                 // This invocation is over, and it failed: the key stays behind for the retry.
                 finishEdit(key: key, saved: false)
-                await report(error, issuedUnder: handle.generation)
+                await report(error, issuedUnder: handle)
                 return false
             }
+        }
+        // The upload above is the longest await this store makes, and the patch below is a SEND.
+        // A session that ended inside the upload must not have a memo edited under its name.
+        guard sessionStillCurrent(handle) else {
+            finishEdit(key: key, saved: false)
+            return false
         }
         let saved = await patch(
             uid: uid,
@@ -735,7 +756,7 @@ public final class TimelineStore {
             lastError = nil
             return true
         } catch {
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return false
         }
     }
@@ -769,7 +790,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return false
         }
     }
@@ -842,7 +863,7 @@ public final class TimelineStore {
             lastError = nil
             return true
         } catch {
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return false
         }
     }
@@ -948,6 +969,8 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
+            // Same rule as `report`: a 401 about a session that has ended must not end this one.
+            guard sessionStillCurrent(handle) else { return false }
             if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
             return false
         }
@@ -1014,7 +1037,9 @@ public final class TimelineStore {
             }
         } catch {
             // A memo that cannot be read is a navigation that does not happen, which the caller can
-            // see from the nil. A 401 still ends the session wherever it happens.
+            // see from the nil. A 401 still ends the session wherever it happens — as long as it
+            // is THIS session the refusal was about.
+            guard sessionStillCurrent(handle) else { return nil }
             if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
             return nil
         }
@@ -1162,10 +1187,14 @@ public final class TimelineStore {
             // fails, and a raw restore would put the picture back on a memo the server has no
             // copy of it for. The tick still rolls back — that is what the snapshot is for — and
             // only what the server has confirmed gone is left out of it.
+            // The rollback is a WRITE, and a write for a session that has ended belongs to
+            // nobody: the row it would put back is the previous account's, and the list it would
+            // put it into is the next one's.
+            guard sessionStillCurrent(handle) else { return false }
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
                 memos[current] = admitted(original)
             }
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return false
         }
     }
@@ -1216,7 +1245,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error, issuedUnder: handle.generation)
+            await report(error, issuedUnder: handle)
             return false
         }
     }

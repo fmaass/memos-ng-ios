@@ -140,10 +140,21 @@ struct SessionNoiseTests {
     /// nothing at all — not the rows, not the counts, not the chips.
     @Test("a page answered for a session that has ended is not applied")
     func aPageFromAnEndedSessionIsNotApplied() async throws {
+        // Each store gets the payload ITS decoder accepts. One list for all four would fail the
+        // library, tag and heatmap decoders before their guards were ever reached, and the
+        // assertions below would then pass with the guards removed.
         let session = await signedIn(
             handler: { _, _, operation in
-                guard operation != whoamiOperation else { return Stub.json(Stub.user) }
-                return Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+                switch operation {
+                case whoamiOperation: return Stub.json(Stub.user)
+                case "list_attachments_api_attachments_get":
+                    return Stub.json("[\(Stub.attachment(uid: "x", status: "ready"))]")
+                case "list_tags_api_tags_get":
+                    return Stub.json(#"[{"name":"travel","count":3}]"#)
+                case "stats_heatmap_api_stats_heatmap_get":
+                    return Stub.json(#"{"2026-09-05":2}"#)
+                default: return Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+                }
             }
         )
         let timeline = TimelineStore()
@@ -164,9 +175,40 @@ struct SessionNoiseTests {
         await tags.load(using: underA)
 
         #expect(timeline.memos.isEmpty, "a page for a session that has ended is not a list")
-        #expect(library.items.isEmpty)
+        #expect(library.items.isEmpty, "and neither is a page of attachments")
         #expect(!heatmap.hasLoaded, "and it is not an ANSWER either")
         #expect(!tags.hasLoaded)
+        #expect(tags.tags.isEmpty)
+        #expect(heatmap.counts.isEmpty)
+    }
+
+    /// R-B3, the failure direction — and the worst of it. A 401 issued under A and answered
+    /// after B is signed in reaches `onUnauthorized`, which is the app's ONE "this session is
+    /// over" signal: unfenced, A's refusal wipes B. The middleware cannot catch it either, because
+    /// B installed a different credential OBJECT and A's retained one was never replaced.
+    @Test("a stale 401 does not end the session that replaced it")
+    func aStale401DoesNotEndTheSuccessor() async throws {
+        let refusing = LockedValue<Bool>(false)
+        let session = await signedIn(
+            handler: { _, _, operation in
+                guard operation != whoamiOperation else { return Stub.json(Stub.user) }
+                guard refusing.get() else { return Stub.json(Stub.memoList([], nextCursor: nil)) }
+                return Stub.empty(.unauthorized)
+            }
+        )
+        let timeline = TimelineStore(onUnauthorized: { [session] in
+            await session.handle(.unauthorized)
+        })
+        timeline.reports(to: session)
+        let underA = try #require(session.activeHandle)
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        #expect(session.state.user != nil, "the premise: B is signed in")
+        refusing.set(true)
+        await timeline.refresh(using: underA, baseURL: Stub.baseURL)
+
+        #expect(session.state.user != nil, "A's refusal ended the session that replaced it")
+        #expect(timeline.lastError == nil, "and wrote A's sentence over B's list")
     }
 
     /// The PATCH family — `save`, `setVisibility`, `setArchived` are all one method — across a

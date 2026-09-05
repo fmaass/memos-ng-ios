@@ -166,6 +166,15 @@ public final class SessionStore {
     /// will ever see the end of. False until a scene says otherwise, because a headless launch is
     /// the state this app is in more often than not.
     private var isForegrounded = false
+    /// Whether the credential this session is running on was ever written down successfully.
+    ///
+    /// Not the same question as "is the credential in memory the current one". A sign-in whose
+    /// write threw keeps working from memory and deletes the last-known-user file, because storage
+    /// may hold the PREDECESSOR and a file naming this identity beside that token is the
+    /// wrong-identity admission the fingerprint exists to prevent. A later revalidation matches
+    /// the credential epoch — nothing about it moved — and would happily write the file back. The
+    /// epoch cannot see the difference; this flag is what remembers it.
+    private var persistenceProven = false
     /// Whether a sign-in is running. A second one is REFUSED, not joined.
     ///
     /// Joined would be wrong: two sign-ins are two different intents — a different token, possibly
@@ -326,6 +335,10 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         lastFailure = nil
+        // Taken before the browser leg, which is the longest await in the app: a sign-out or
+        // another installation completing inside it owns the session by the time the code comes
+        // back. See the pasted leg for why `persist`'s own generation cannot answer this.
+        let issued = sessionGeneration
         do {
             let callbackURL = try await presenter.authenticate(
                 authorizeURL: authorizeURL,
@@ -340,6 +353,10 @@ public final class SessionStore {
                 makeClient(configuration, .anonymous), code: code, verifier: verifier
             )
             let token = exchanged.token
+            guard owns(issued) else {
+                MemosLog.session.info("a sign-in was overtaken before its credential was stored")
+                return false
+            }
             let persistence = await persist(token: token, configuration: configuration)
             guard persistence.outcome != .licenceNotRevoked else {
                 abandonSignIn(restoring: previous)
@@ -362,8 +379,10 @@ public final class SessionStore {
             enterVerified()
             if persistence.outcome == .storedNowhere {
                 lastError = Self.storageWarning
+                persistenceProven = false
                 forgetLastKnownUser()
             } else {
+                persistenceProven = true
                 record(exchanged.user, of: configuration, boundTo: token)
             }
             return true
@@ -480,8 +499,18 @@ public final class SessionStore {
         lastFailure = nil
         let credential = PresentedCredential(trimmed)
         let client = makeClient(configuration, credential)
+        // Taken BEFORE the first await. `persist` mints a generation of its own, so checking only
+        // that one asks whether the sign-in still owns the session it just took over — which it
+        // trivially does. The question that matters is whether it still owned the session it
+        // STARTED in, and a sign-out completing while `whoami` was on the wire is exactly the
+        // answer no.
+        let issued = sessionGeneration
         do {
             let user = try await Self.whoami(client)
+            guard owns(issued) else {
+                MemosLog.session.info("a sign-in was overtaken before its credential was stored")
+                return
+            }
             let persistence = await persist(token: trimmed, configuration: configuration)
             if persistence.outcome == .licenceNotRevoked {
                 abandonSignIn(restoring: previous)
@@ -503,6 +532,7 @@ public final class SessionStore {
                     credential: credential
                 )
                 enterVerified()
+                persistenceProven = true
                 record(user, of: configuration, boundTo: trimmed)
             case .storedNowhere:
                 establish(
@@ -513,6 +543,7 @@ public final class SessionStore {
                 )
                 enterVerified()
                 lastError = Self.storageWarning
+                persistenceProven = false
                 // The write threw, which does not prove the PREDECESSOR survived it — the vault
                 // writes before its verifying read, and `setAll` can throw after one item has
                 // already landed. Keeping A's fingerprint beside B's user on screen is the
@@ -608,6 +639,10 @@ public final class SessionStore {
             MemosLog.session.error(
                 "the stored device credential would not read: \(detail, privacy: .public)"
             )
+            // Before the complaint, not only before the admission: a sentence about a credential
+            // read that failed belongs to the session that asked for it, and writing it over a
+            // session installed since would put a storage warning on somebody else's screen.
+            guard owns(issued) else { return }
             lastError = Self.storageUnreadable
             return
         }
@@ -656,8 +691,14 @@ public final class SessionStore {
             // Immediately after, with nothing awaited in between: `establish` leaves a session
             // that looks confirmed, and it is not — the server has not been asked yet.
             verification = .verifying
+            // This credential came OUT of storage, so storage demonstrably holds it — the one
+            // installation whose proof is the read itself rather than a write.
+            persistenceProven = true
         } else {
             state = .signingIn
+            // Same proof, same reason: whatever this check confirms, it confirms about a token
+            // that was read out of storage a moment ago.
+            persistenceProven = true
         }
 
         await validate(
@@ -714,8 +755,10 @@ public final class SessionStore {
             // The credential this answer was made FOR may have been replaced while it was on the
             // wire. Writing its fingerprint then would name a token the server destroyed, and the
             // next launch would decline to admit a device that did everything right.
-            if credential.isCurrent(presented.epoch) {
+            if credential.isCurrent(presented.epoch), persistenceProven {
                 record(user, of: configuration, boundTo: presented.token)
+            } else if !persistenceProven {
+                MemosLog.session.info("this device's credential was never written down; no file")
             } else {
                 MemosLog.session.info("a check answered for a credential this device replaced")
             }
@@ -1045,6 +1088,15 @@ public final class SessionStore {
         onVerified()
     }
 
+    /// Whether the operation that started under `generation` still owns this session.
+    ///
+    /// One question, asked by every operation that spans an await, immediately before each effect
+    /// it would have. A sign-in, a wipe, a renewal and a launch check are DIFFERENT operations
+    /// from each other: nothing serialises them, so joining does not cover this and cannot. What
+    /// covers it is that each of them refuses to write anything once the number it started under
+    /// has moved.
+    private func owns(_ generation: Int) -> Bool { generation == sessionGeneration }
+
     /// Ends the incarnation the session is in — synchronously, and BEFORE the caller's first
     /// await.
     ///
@@ -1221,6 +1273,13 @@ public final class SessionStore {
         credential = snapshot.credential
         configuration = snapshot.configuration
         verification = snapshot.verification
+        // Restoring the STATE is not restoring the lifecycle. The bump above is what stops a
+        // pre-attempt answer becoming current again — and it is also what makes the check in
+        // flight exit without doing anything, so a session put back as `.verifying` would sit
+        // there with no task and no retry behind it. The same rule as a cancelled check: whatever
+        // is not confirmed gets a replacement, immediately.
+        guard verification != .verified, state.user != nil else { return }
+        scheduleRetry(attempt: 0, delay: .zero)
     }
 
     /// The pair a restore needs, read through one seam so a failure to READ is distinguishable
@@ -1272,8 +1331,14 @@ public final class SessionStore {
         invalidateIdentityScopedState()
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         verification = .verified
+        persistenceProven = false
         retryInFlight?.cancel()
         retryInFlight = nil
+        // Everything above this line is synchronous and belongs to the incarnation this method
+        // just ended. Everything below it happens AFTER a keychain await, and a sign-in can
+        // complete inside that await — so the tail asks whether the session it is about to clear
+        // is still the one it set out to clear.
+        let issued = sessionGeneration
         // Both halves, whatever either does: a wipe that stopped at the first failure would
         // leave the server address next to a token it could not delete. A failure is REMEMBERED
         // rather than dropped — a device that believes it is signed out while a credential is
@@ -1284,11 +1349,20 @@ public final class SessionStore {
             // would have half of itself deleted behind it.
             try await credentials.removeAll([Self.tokenAccount, Self.serverAccount])
         } catch {
-            credentialWipeFailed = true
             let detail = String(describing: error)
             MemosLog.session.error(
                 "the stored credential would not delete: \(detail, privacy: .public)"
             )
+            // The complaint belongs to the sign-out that made it. Left unfenced it would be read
+            // out by the NEXT sign-out, about a credential that was never this one's.
+            if owns(issued) { credentialWipeFailed = true }
+        }
+        // A sign-in landed inside the delete and owns the session now. Its client, its
+        // configuration, its settings and its state are not this method's to clear — and
+        // `identity.rotate()` below would empty the image cache it has just filled.
+        guard owns(issued) else {
+            MemosLog.session.info("a sign-out finished for a session already replaced")
+            return
         }
         configuration = nil
         // The account's default belongs to the account. Carrying it into the next sign-in would
@@ -1609,6 +1683,14 @@ public final class SessionStore {
             )
             lastError = Self.renewalStorageWarning
         }
+        // The storage write above is an await, and a sign-out or a sign-in completing inside it
+        // owns the session now. Swapping the credential then would hand a live session a token
+        // minted for one that is over, and every effect below it would be written for the wrong
+        // account. The successor is dropped instead — its predecessor is gone either way.
+        guard owns(generation) else {
+            MemosLog.session.info("a renewal finished for a session that has ended; it is dropped")
+            return .failed
+        }
         credential.replace(with: successor)
         // The token this device presents has MOVED, so every grant taken under the old one names a
         // credential the server has destroyed. The session itself carries on — that is the whole
@@ -1622,12 +1704,14 @@ public final class SessionStore {
         // a proven persist rewrites it with the successor, and a refused one deletes it. The
         // generation is re-read here rather than trusted from before the storage await: a session
         // that ended inside it must not have a file written on its behalf.
-        if generation == sessionGeneration {
-            if storageRefused {
-                forgetLastKnownUser()
-            } else if let user = state.user, let configuration {
-                record(user, of: configuration, boundTo: successor)
-            }
+        if storageRefused {
+            forgetLastKnownUser()
+            // The write threw, so nothing downstream may treat this device as holding a proven
+            // credential again until one is proven (see `persistenceProven`).
+            persistenceProven = false
+        } else if let user = state.user, let configuration {
+            persistenceProven = true
+            record(user, of: configuration, boundTo: successor)
         }
         MemosLog.session.info("POST /api/auth/native/renew -> 200, the device swapped its token")
         // Read back rather than assembled from the renewal's answer: the successor is a new row

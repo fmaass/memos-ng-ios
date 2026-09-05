@@ -120,14 +120,25 @@ public final class Outbox {
         return outbox
     }
 
-    /// Adopt whatever survived the last run, then try to drain. Safe to call on every launch and
-    /// every foreground — the engine refuses to drain twice at once.
-    public func start() async {
+    /// Take over what the last run left behind — WITHOUT sending anything.
+    ///
+    /// Attaching the background session's handler and reading the queue back are not network work
+    /// and need no authority: a chunk the system finished while the app was dead has already been
+    /// sent, and its answer carries the server's own byte count. Discarded, that count is lost and
+    /// the bytes are sent again. So a wake that has no credential to drain with still comes
+    /// through here — only `start` below asks for authority.
+    public func adopt() async {
         if !isStarted {
             isStarted = true
             await attachScheduler?(engine)
         }
         await refresh()
+    }
+
+    /// Adopt whatever survived the last run, then try to drain. Safe to call on every launch and
+    /// every foreground — the engine refuses to drain twice at once.
+    public func start() async {
+        await adopt()
         await engine.drain()
     }
 
@@ -170,23 +181,28 @@ public final class Outbox {
         sources: [StagedSource]
     ) async -> Bool {
         guard let credentials = await credentials.currentCredentials(),
-            // Re-read immediately before the job is written: the binding stamped on it decides
-            // whose account this capture is ever sent into, and an account switch landing between
-            // the acquisition and the write would stamp it with the account that is leaving.
             self.credentials.isCurrent(credentials)
         else {
             enqueueError = "Sign in before writing a memo."
             return false
         }
+        // The binding stamped on the job decides whose account this capture is ever sent into, and
+        // the repository copies every file before it commits one. So the authority travels INTO
+        // that actor and is asked again immediately before the commit, rather than only here.
+        let authority = self.credentials
         do {
             _ = try await repository.enqueue(
                 content: content,
                 visibility: visibility,
                 capturedAt: capturedAt,
                 binding: credentials.binding,
-                sources: sources
+                sources: sources,
+                under: SendAuthority { authority.isCurrent(credentials) }
             )
             enqueueError = nil
+        } catch is SendAuthorityWithdrawn {
+            enqueueError = "Sign in before writing a memo."
+            return false
         } catch {
             enqueueError =
                 "This memo could not be saved on the device: \(error.localizedDescription)"

@@ -69,13 +69,13 @@ public final class TagStore {
                 MemosLog.api.info("GET /api/tags answered for a load that was overtaken")
                 return
             }
-            guard sessionStillCurrent(handle) else {
+            if sessionStillCurrent(handle) {
+                tags = loaded
+                hasLoaded = true
+                lastError = nil
+            } else {
                 MemosLog.api.info("an answer for a session that has ended is not applied")
-                return
             }
-            tags = loaded
-            hasLoaded = true
-            lastError = nil
         } catch {
             guard mine == attempt else { return }
             // The chips already on screen stay. A tag row that empties itself because one read
@@ -88,7 +88,13 @@ public final class TagStore {
             // Neither is a server that never answered. That one belongs to the session, which says
             // it once in a banner; saying it here as well is a second copy of the same sentence
             // over a row nobody can do anything about.
-            if let failure = StoreFailure.transportFailure(error) {
+            // Fenced like every other apply point: an answer for a session that has ended is
+            // not this one's to speak about — see `TimelineStore.report`. It falls THROUGH rather
+            // than returning, because the spinner below is this call's own and nobody else is
+            // coming to take it down.
+            if !sessionStillCurrent(handle) {
+                MemosLog.api.info("a failure for a session that has ended is not reported")
+            } else if let failure = StoreFailure.transportFailure(error) {
                 session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription

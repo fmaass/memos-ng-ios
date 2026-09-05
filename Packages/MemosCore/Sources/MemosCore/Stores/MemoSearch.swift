@@ -255,6 +255,15 @@ public final class MemoSearch {
             _ = await previous?.value
             // Superseded while waiting for the one before it.
             guard !Task.isCancelled else { return }
+            // The handle was taken when this search was OPENED, and the debounce plus the wait
+            // above is long enough for the session to end inside it. A sheet that is still up over
+            // a session that is gone must not send: the refresh below is a request, and the list
+            // it would fill belongs to whoever is signed in now.
+            guard results.sessionIsCurrent(handle) else {
+                outcome = .unavailable
+                results.clearRows()
+                return
+            }
             results.setQuery(query)
             await results.refresh(using: handle, baseURL: baseURL)
             // Cancelled DURING the request — the field was cleared or retyped while it was out.
@@ -358,11 +367,13 @@ public final class MemoSearch {
     /// An empty page is an ANSWER — the query ran, the server replied, nothing matched — and the
     /// only thing that makes it a failure is a failure.
     private static func answer(from results: TimelineStore) -> MemoSearchOutcome {
-        if let error = results.lastError { return .failed(error) }
-        // Before the emptiness test, because an empty list means two different things and only one
-        // of them is an answer: a search the server answered with nothing, and a search that never
-        // reached it.
+        // FIRST, ahead of any sentence left over from a previous query. `lastError` outlives the
+        // request that wrote it — a 500 on one search is still sitting there when the next one
+        // cannot reach the server at all — and reading it first would report that stale refusal
+        // as this search's answer and skip the row clearing that goes with unavailability.
+        // Unreachability is a fact about THIS attempt; the sentence is a fact about an older one.
         if results.serverUnreachable { return .unavailable }
+        if let error = results.lastError { return .failed(error) }
         return results.memos.isEmpty ? .noMatches : .matched
     }
 }

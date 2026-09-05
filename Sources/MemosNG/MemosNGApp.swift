@@ -60,7 +60,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // Synchronous, because that is when the transition happens. What it starts is its own
         // task, and that task re-reads the authority before it drains — a confirmation is not a
         // promise that the session still exists by the time a drain gets a turn.
-        onVerified: { [weak self] in Task { @MainActor in await self?.startOutbox() } }
+        onVerified: { [weak self] in Task { @MainActor in await self?.drainOnConfirmation() } }
     )
     private(set) var outbox: Outbox?
     /// Built from the outbox's own preference store rather than a second one over the same suite:
@@ -126,9 +126,23 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         if session.state.user == nil {
             await session.restore()
         }
-        // No authority, nothing to drain. A background wake whose restore did not settle, or a
-        // session discarded between the confirmation that scheduled this and the turn it got, must
-        // not start a pass: the capture stays queued and the next wake acquires cleanly.
+        // ADOPTION FIRST, and unconditionally. The system woke this process because a chunk
+        // FINISHED: its answer carries the server's own byte count, and a wake that attached no
+        // handler discards it and re-sends bytes the server already holds. Adoption sends nothing,
+        // so it needs no authority.
+        await outbox?.adopt()
+        // Sending does. A wake whose restore did not settle keeps its captures queued and the next
+        // one acquires cleanly.
+        guard session.credentialGrant() != nil else { return }
+        await outbox?.start()
+    }
+
+    /// The drain a confirmation asks for — and NOT a restore.
+    ///
+    /// This runs a turn after the confirmation that scheduled it, which is long enough for the
+    /// session to have ended. Restoring here would put a credential somebody abandoned back on
+    /// screen; the only question worth asking is whether there is authority to drain with NOW.
+    private func drainOnConfirmation() async {
         guard session.credentialGrant() != nil else { return }
         await outbox?.start()
     }
