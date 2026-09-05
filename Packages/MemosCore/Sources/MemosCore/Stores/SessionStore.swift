@@ -196,6 +196,13 @@ public final class SessionStore {
     /// layer above: a capture parked while the phone was off the network needs somebody to try
     /// again, and the only event that says trying is worth it is this one.
     private let onVerified: (@MainActor @Sendable () -> Void)?
+    /// Where a diagnostic line goes, injected the same way the sleeper is.
+    ///
+    /// It exists so the log BOUNDARY can be watched rather than re-derived. A guardrail that
+    /// re-computes what the store ought to have written proves only that the test agrees with
+    /// itself: a line that interpolated the error's own text here would leave it green, and the
+    /// error's own text is precisely what may not be written.
+    private let diagnostics: @Sendable (String) -> Void
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
     // isolation. They are immutable strings, so there is nothing here for the main actor to guard.
@@ -216,7 +223,11 @@ public final class SessionStore {
         account: (any OutboxAccountPublishing)? = nil,
         identity: MediaIdentity = .shared,
         lastKnownUser: (any LastKnownUserStoring)? = nil,
-        onVerified: (@MainActor @Sendable () -> Void)? = nil
+        onVerified: (@MainActor @Sendable () -> Void)? = nil,
+        // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
+        // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
+        // and a named default would have to be public to be referenced from one.
+        diagnostics: (@Sendable (String) -> Void)? = nil
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
@@ -225,6 +236,8 @@ public final class SessionStore {
         self.identity = identity
         self.lastKnownUser = lastKnownUser
         self.onVerified = onVerified
+        self.diagnostics =
+            diagnostics ?? { line in MemosLog.session.error("\(line, privacy: .public)") }
     }
 
     /// The client every feature talks through, or `nil` while signed out.
@@ -429,9 +442,7 @@ public final class SessionStore {
     /// there is one line to read and one rule to break rather than two.
     private func logWhoamiFailure(_ error: any Error) {
         let diagnostic = NativeLoginTransportFailure.diagnostic(for: error)
-        MemosLog.session.error(
-            "GET /api/auth/user did not arrive: \(diagnostic, privacy: .public)"
-        )
+        diagnostics("GET /api/auth/user did not arrive: \(diagnostic)")
     }
 
     /// Writes down that the exchange did not arrive — the classification, the domain and the
