@@ -208,6 +208,28 @@ struct TimelineSnapshotTests {
         #expect(onDisk(root)?.memos.map(\.uid) == ["a"])
     }
 
+    @Test("rows the server sent for one identity are not left on screen for another")
+    func serverLoadedRowsAreDiscardedWhenTheIdentityChanges() async {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let timeline = store(writer: writer(root: root))
+        // Nothing restored: these rows came off the wire, which is exactly the case a switch
+        // between two signed-in identities on one server produces — the screen holding this store
+        // is never torn down, so nothing else empties it.
+        await timeline.refresh(using: page(["a", "b"]), baseURL: Stub.baseURL)
+        #expect(timeline.memos.map(\.uid) == ["a", "b"], "control: the server's rows are up")
+
+        timeline.sessionIdentityChanged(
+            to: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "somebody-else")
+        )
+
+        #expect(timeline.memos.isEmpty, "one account's memos were left on screen for another")
+        #expect(!timeline.hasNewer)
+        // And the withdrawn identity's snapshot is not put back in their place either.
+        await timeline.restoreSnapshot()
+        #expect(timeline.memos.isEmpty, "the outgoing identity's snapshot was rendered")
+    }
+
     @Test("the same identity again changes nothing")
     func theSameIdentityLeavesTheSnapshotAlone() async {
         let root = temporaryRoot()
@@ -879,7 +901,7 @@ struct TimelineSnapshotTests {
         // its own changes from scratch.
         await store(writer: shared).refresh(using: page(["b"]), baseURL: Stub.baseURL)
 
-        #expect(onDisk(root)?.memos.map(\.uid) == ["b"], "the rebuilt screen could not write again")
+        #expect(onDisk(root)?.memos.map(\.uid) == ["b"], "the rebuilt screen cannot write")
     }
 
     @Test("a wipe forgets who was writing and how far they had got")

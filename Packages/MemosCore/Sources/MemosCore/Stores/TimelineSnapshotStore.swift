@@ -120,7 +120,7 @@ public struct TimelineSnapshotStore: Sendable {
     ///     produce by asking the file system nicely.
     public init(
         root: URL,
-        writeData: @escaping @Sendable (Data, URL) throws -> Void = TimelineSnapshotStore.atomically
+        writeData: @escaping @Sendable (Data, URL) throws -> Void = Self.atomically
     ) {
         self.root = root
         self.writeData = writeData
@@ -165,7 +165,7 @@ public struct TimelineSnapshotStore: Sendable {
             return nil
         }
         guard snapshot.formatVersion == TimelineSnapshot.currentFormatVersion else {
-            MemosLog.api.info("a timeline snapshot was written by another version and was not read")
+            MemosLog.api.info("a timeline snapshot of another version was not read")
             return nil
         }
         // The file name is a digest of this very pair, so a mismatch here is a collision or a

@@ -174,18 +174,32 @@ public final class TimelineStore {
         showingSnapshot = true
     }
 
-    /// Who the device is signed in as has changed.
+    /// Who the device is signed in as has changed. Everything this store holds belonged to the
+    /// identity it was built for, and that is no longer who is looking.
     ///
-    /// A snapshot on screen belongs to whoever wrote it, and that is no longer who is looking, so
-    /// it goes; a list the server sent is left alone, because the caller that changed the identity
-    /// owns what happens to the session, not to a page it already answered. Nothing more is written
-    /// either — this store's identity is the one it was built with, and that one has gone.
+    /// Unconditional, and that is the point: rows the SERVER sent are one account's memos exactly
+    /// as much as rows read off the disk are. A store is not torn down by a switch between two
+    /// signed-in identities on the same server — the screen holding it stays in the same branch of
+    /// the root view and keeps its state — so a store that emptied only what it had restored would
+    /// leave the outgoing account's timeline on screen for the incoming one.
+    ///
+    /// The cursors go with the rows: a cursor is a position inside a list this store is no longer
+    /// showing, and a page in flight was asked for by somebody else, so the lineage moves and those
+    /// answers drop on arrival. Nothing more is written either — this store's identity has gone.
     public func sessionIdentityChanged(to identity: TimelineSnapshotIdentity?) {
         guard identity != snapshotIdentity else { return }
         identityWithdrawn = true
-        guard showingSnapshot else { return }
         memos = []
         showingSnapshot = false
+        admittedQuery = nil
+        optimistic.removeAll()
+        snapshotDirty = false
+        nextCursor = nil
+        newerCursor = nil
+        hasMore = true
+        hasNewer = false
+        lastError = nil
+        timelineGeneration += 1
     }
 
     /// The one place the published list changes — and, with it, the picture of it on the disk.
@@ -237,6 +251,13 @@ public final class TimelineStore {
             return
         }
         guard let producer = await claimProducer() else { return }
+        // Taken AGAIN, because the claim above suspends: a tick begun while it was out would
+        // otherwise have its unconfirmed content written by this call, which is the one thing the
+        // check before the await exists to prevent.
+        guard optimistic.isEmpty else {
+            snapshotDirty = true
+            return
+        }
         snapshotDirty = false
         await snapshots.write(
             memos,
