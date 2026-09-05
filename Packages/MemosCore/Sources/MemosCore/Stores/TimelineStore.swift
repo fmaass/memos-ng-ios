@@ -857,6 +857,11 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // Asked HERE, before the send, and not only of the answer below. This runs in a Task of
+        // its own (`deleteAttachment` claims the slot and spawns), so the session can be withdrawn
+        // between the handle being captured and this body starting — and a DELETE is not a read:
+        // an answer discarded afterwards does not put the file back.
+        guard sessionStillCurrent(handle) else { return false }
         do {
             let response = try await client.deleteAttachmentApiAttachmentsUidDelete(
                 .init(path: .init(uid: uid))

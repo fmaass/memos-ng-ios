@@ -283,7 +283,16 @@ public final class SessionStore {
     private func sendAuthority() -> SendAuthority {
         let incarnation = sessionIncarnation
         let granted = incarnation.current
-        return SendAuthority { incarnation.isCurrent(granted) }
+        // The credential goes with it, read through the SAME object the client presents from, so
+        // the send resolves the token at the instant it asks the verdict. A renewal replaces the
+        // value in that object without moving the incarnation — deliberately, because a renewal
+        // does not end anything — so a lane that carried a snapshot would be cleared to send a
+        // token the server destroyed. This closure is the only thing that stops that.
+        let presenting = credential
+        return SendAuthority(
+            { incarnation.isCurrent(granted) },
+            credential: { presenting?.presented().token }
+        )
     }
 
     /// The authority to act as this device's account, assembled from this session's own state in
@@ -833,10 +842,12 @@ public final class SessionStore {
                 discard(error, admitted: admitted, attempt: attempt, host: host)
                 return
             }
-            await wipeCredential()
+            let wiped = await wipeCredential()
             // The wipe is an await of its own, and its tail refuses when something overtook it.
-            // The sentence it leaves behind is one more write and follows the same rule.
-            if owns(generation) || state.user == nil { lastError = error.errorDescription }
+            // The sentence it leaves behind is one more write and follows the same rule — judged
+            // against the generation the WIPE installed, because that is the only number that can
+            // still be current when nothing overtook it.
+            if owns(wiped) { lastError = error.errorDescription }
         } catch let error as APIError {
             // The server answered and refused. Its own sentence is built from a status code and
             // nothing the request carried, so it is the better one. It is never terminal: a
@@ -1009,12 +1020,11 @@ public final class SessionStore {
     @discardableResult
     public func signOut() async -> SignOutOutcome {
         guard let client else {
-            let issued = sessionGeneration
-            await wipeCredential()
-            // Fenced like every other complaint this file writes after a keychain await: a sign-in
-            // completing inside the delete owns the session now, and a sentence about the
+            let wiped = await wipeCredential()
+            // Fenced like every other complaint this file writes after a keychain await: anything
+            // that completed inside the delete owns the session now, and a sentence about the
             // credential this sign-out threw away is not about the one that session is holding.
-            if owns(issued) || state.user == nil { lastError = signOutComplaint }
+            if owns(wiped) { lastError = signOutComplaint }
             return .revoked
         }
         // The revoke is a request, and A's answer to it can land after B has signed in. Every
@@ -1030,11 +1040,11 @@ public final class SessionStore {
             switch response {
             case .noContent:
                 MemosLog.session.info("POST /api/auth/native/logout -> 204")
-                await wipeCredential()
+                let wiped = await wipeCredential()
                 // The `owns(issued)` above fenced the ANSWER; this fences the SENTENCE. The wipe
-                // between them is another await, and a sign-in that completes inside it owns the
+                // between them is another await, and anything that completes inside it owns the
                 // session by the time this line runs.
-                if owns(issued) || state.user == nil { lastError = signOutComplaint }
+                if owns(wiped) { lastError = signOutComplaint }
                 return .revoked
             case .undocumented(let statusCode, _):
                 guard statusCode == 401 else {
@@ -1043,9 +1053,9 @@ public final class SessionStore {
                     return .revokeFailed(error)
                 }
                 MemosLog.session.info("POST /api/auth/native/logout -> 401, token already gone")
-                await wipeCredential()
+                let wiped = await wipeCredential()
                 // Same await, same fence — see the 204 branch above.
-                if owns(issued) || state.user == nil { lastError = signOutComplaint }
+                if owns(wiped) { lastError = signOutComplaint }
                 return .alreadyRevoked
             }
         } catch {
@@ -1062,11 +1072,10 @@ public final class SessionStore {
     /// It exists so that "I could not reach the server, sign me out anyway" is a choice made in
     /// the open, on a screen that also says what it means, rather than the silent default.
     public func signOutWithoutRevoking() async {
-        let issued = sessionGeneration
-        await wipeCredential()
+        let wiped = await wipeCredential()
         // `wipeCredential` refuses its own tail when it was overtaken; the complaint it would
         // leave behind is one more write, and it belongs to the same operation.
-        guard owns(issued) || state.user == nil else { return }
+        guard owns(wiped) else { return }
         lastError = signOutComplaint
     }
 
@@ -1076,9 +1085,8 @@ public final class SessionStore {
     /// nothing to revoke and nothing to keep — this is not the failed-revoke case.
     public func handle(_ error: APIError) async {
         guard error == .unauthorized else { return }
-        let issued = sessionGeneration
-        await wipeCredential()
-        guard owns(issued) || state.user == nil else { return }
+        let wiped = await wipeCredential()
+        guard owns(wiped) else { return }
         // The 401 keeps the headline: a dead token is what the person needs to hear. A wipe that
         // also failed is on the log and in `credentialWipeFailed`, and the next sign-out or
         // restore says so.
@@ -1419,7 +1427,13 @@ public final class SessionStore {
     /// leaves a credential nobody is signed in with, which denies the extension. Credential then
     /// licence: a crash leaves a revoked identity that can still queue captures, and the person
     /// who signed out has no way of knowing.
-    private func wipeCredential() async {
+    /// - Returns: the generation this wipe installed. Every sentence a caller writes AFTER it is
+    ///   fenced on that number and on nothing else: the wipe bumps the generation itself, so the
+    ///   caller's own starting generation can never match, and the `state.user == nil` escape that
+    ///   used to stand in for it was wrong — a NEWER sign-in that failed leaves the user nil too,
+    ///   and its failure is the sentence on the screen.
+    @discardableResult
+    private func wipeCredential() async -> Int {
         clearAccountLicence()
         // INVALIDATE FIRST, before the keychain delete is awaited — see `endIncarnation`. The
         // client goes here rather than at the end so that a request starting inside that await
@@ -1462,7 +1476,7 @@ public final class SessionStore {
         // `identity.rotate()` below would empty the image cache it has just filled.
         guard owns(issued) else {
             MemosLog.session.info("a sign-out finished for a session already replaced")
-            return
+            return issued
         }
         configuration = nil
         // The account's default belongs to the account. Carrying it into the next sign-in would
@@ -1478,6 +1492,7 @@ public final class SessionStore {
         // Whatever the last launch could not confirm, it was about a credential that is now gone.
         restoreFailure = nil
         state = .signedOut
+        return issued
     }
 
     /// Revokes the licence and REMEMBERS a failure to do so, so the next `restore` tries again.
@@ -1866,8 +1881,8 @@ public final class SessionStore {
             MemosLog.session.error(
                 "a renewal rotated and its successor was lost; this device has to sign in again"
             )
-            await wipeCredential()
-            if owns(generation) || state.user == nil { lastError = Self.renewalLostCredential }
+            let wiped = await wipeCredential()
+            if owns(wiped) { lastError = Self.renewalLostCredential }
             return .failed
         } catch {
             guard generation == sessionGeneration else { return .failed }

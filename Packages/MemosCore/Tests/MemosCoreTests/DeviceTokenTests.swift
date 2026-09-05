@@ -746,16 +746,22 @@ struct DeviceTokenTests {
     /// credential once would present the same token twice and this would not move.
     @Test("an SSE reconnect after a rotation presents the successor")
     func sseReconnectPresentsTheSuccessor() async throws {
-        let vault = InMemoryCredentials()
-        try vault.set("memos_pat_first", for: SessionStore.tokenAccount)
-        try vault.set("https://memos.example.invalid", for: SessionStore.serverAccount)
-        // The write a renewal commits, made directly so this test is about the LANE rather than
-        // about the renewal (which `outboxDrainPresentsTheSuccessor` drives for real).
-        let transport = RotatingSSETransport {
-            try? vault.set("memos_pat_next", for: SessionStore.tokenAccount)
-        }
+        // The swap a renewal commits, made against the SESSION rather than the vault, because the
+        // session is where this lane now reads its credential (F1). Made directly so this test is
+        // about the LANE rather than about the renewal (which `outboxDrainPresentsTheSuccessor`
+        // drives for real).
+        let presenting = LockedValue<String>("memos_pat_first")
+        let server = URL(string: "https://memos.example.invalid")!
+        let transport = RotatingSSETransport { presenting.set("memos_pat_next") }
         let client = MediaEventClient.device(
-            credentials: vault,
+            grant: {
+                CredentialGrant(
+                    subject: "fabian",
+                    serverBaseURL: server,
+                    token: presenting.get(),
+                    epoch: 0
+                )
+            },
             identity: MediaIdentity(),
             transport: transport,
             sleeper: RecordingSleeper(budget: 2)

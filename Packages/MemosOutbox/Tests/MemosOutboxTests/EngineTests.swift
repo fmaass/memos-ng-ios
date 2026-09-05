@@ -485,33 +485,45 @@ struct EngineTests {
         #expect(released.holdReason == nil)
     }
 
-    /// N2, the ordering. A cold wake restores the session over the network; a chunk result
-    /// delivered inside that round trip finds no handler and its server-confirmed offset is lost.
-    /// Attachment is what a wake does FIRST, so the result lands on a handler either way.
-    @Test("a result delivered while a restore is still pending is recorded, not dropped")
-    func aResultDuringRestoreIsRecorded() async throws {
-        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
-        defer { harness.cleanUp() }
-        await harness.engine.drain()
-        let identity = try #require(harness.scheduler.uploads.first).identity
+    /// N2, reopened. The background session exists from the moment the app does and can deliver a
+    /// finished chunk's answer in the same turn — before adoption has run, because adoption is a
+    /// task the launch schedules. The delegate used to drop anything that arrived with no handler
+    /// attached, and that answer carries the server's own `bytes_received`: dropped, those bytes
+    /// are uploaded a second time.
+    ///
+    /// Driven through the delegate itself, because that is where the drop was. The previous version
+    /// of this test called `engine.handle` directly, which is downstream of the delegate — it never
+    /// touched the attachment ordering at all and stayed green with the fix taken out.
+    @Test("a chunk result delivered before adoption is replayed, in order, not dropped")
+    func aResultDeliveredBeforeAdoptionIsReplayed() async throws {
+        let delegate = OutboxSessionDelegate()
+        let handler = RecordingChunkHandler()
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0)
 
-        // The wake's own ordering: adopt (attach) first, and only then the long restore. Modelled
-        // by delivering the result while nothing has been signed in yet.
-        harness.credentials.set(nil)
-        await harness.engine.handle(
-            ChunkResult(
-                identity: identity,
-                statusCode: 200,
-                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
-            )
-        )
+        // Both arrive while nothing is attached — the window a launch opens.
+        delegate.deliver(ChunkResult(identity: identity, statusCode: 200, body: Data("1".utf8)))
+        delegate.deliver(ChunkResult(identity: identity, statusCode: 200, body: Data("2".utf8)))
+        #expect(await handler.received.isEmpty, "the premise: nothing was attached yet")
 
-        let saved = try #require(await harness.reload())
+        delegate.attach(handler)
+        for _ in 0..<200 where await handler.received.count < 2 { await Task.yield() }
+
+        let bodies = await handler.received.map { String(decoding: $0.body, as: UTF8.self) }
         #expect(
-            saved.files[0].bytesConfirmed == 400,
-            "the server's own byte count was dropped, so those bytes are sent again"
+            bodies == ["1", "2"],
+            """
+            an answer delivered before adoption was dropped, or replayed out of order — two \
+            answers for one file are a cursor moving forwards
+            """
         )
     }
+}
+
+/// Collects what the delegate hands on, in arrival order.
+actor RecordingChunkHandler: OutboxChunkHandling {
+    private(set) var received: [ChunkResult] = []
+
+    func handle(_ result: ChunkResult) async { received.append(result) }
 }
 
 @Suite("Not letting go too early")

@@ -65,12 +65,26 @@ public protocol OutboxCredentialsProviding: Sendable {
 /// captured earlier can only answer "was it true then".
 public struct SendAuthority: Sendable {
     private let stillCurrent: @Sendable () -> Bool
+    private let currentCredential: @Sendable () -> String?
 
-    public init(_ stillCurrent: @escaping @Sendable () -> Bool) {
+    public init(
+        _ stillCurrent: @escaping @Sendable () -> Bool,
+        credential: @escaping @Sendable () -> String? = { nil }
+    ) {
         self.stillCurrent = stillCurrent
+        self.currentCredential = credential
     }
 
     public func holds() -> Bool { stillCurrent() }
+
+    /// The token to present, read at the SAME instant the verdict is — which is why it lives here
+    /// rather than being handed to a request before the hop.
+    ///
+    /// A renewal moves the token without ending the session, so the incarnation `holds()` answers
+    /// on does not move either: a lane that snapshotted its token before suspending would be
+    /// cleared to send, and would send the one the server has just destroyed. `nil` where the
+    /// lane's credential does not travel this way — the generated client reads its own.
+    public func credential() -> String? { currentCredential() }
 
     /// For the callers with no session behind them — a test double, and the share extension's
     /// lane, which is fenced by the account licence instead.

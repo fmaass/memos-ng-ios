@@ -1140,6 +1140,54 @@ struct InvalidationFenceTests {
         #expect(session.serverBaseURL != nil, "the wipe's tail cleared the wrong session")
     }
 
+    /// F4. The `state.user == nil` escape these fences used to carry was a stand-in for "nothing
+    /// took the session over", and it is not one: a NEWER sign-in that FAILED leaves the user nil
+    /// too, and its own failure is the sentence on the screen. A sign-out resuming afterwards then
+    /// wrote its complaint over it. Fenced on the generation the wipe installed, and on nothing
+    /// else, it writes nothing at all.
+    @Test("a sign-out resuming after a newer sign-in failed leaves that failure on the screen")
+    func aStaleSignOutDoesNotOverwriteANewerFailure() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let armed = LockedValue<Bool>(false)
+        // Separate from `armed`, which the interrupt consumes on its way in: this one has to still
+        // be true while the sign-in it starts is on the wire.
+        let refusing = LockedValue<Bool>(false)
+        let newerFailure = LockedValue<String?>(nil)
+        let credentials = InterruptingCredentials {
+            guard let session = await box.get(), armed.get() else { return }
+            armed.set(false)
+            // A sign-in that FAILS: it bumps the incarnation and leaves the user nil, which is
+            // exactly the state the old escape mistook for "nobody took this over".
+            refusing.set(true)
+            await session.signIn(serverAddress: storedHost, token: "pat-b")
+            refusing.set(false)
+            newerFailure.set(await session.lastError)
+        }
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in
+                    guard refusing.get() else { return Stub.json(Stub.user) }
+                    return Stub.empty(.internalServerError)
+                }
+            }
+        )
+        box.set(session)
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+        #expect(session.state.user != nil)
+
+        armed.set(true)
+        await session.signOutWithoutRevoking()
+
+        let failure = newerFailure.get()
+        #expect(failure != nil, "the premise: the newer sign-in failed and said so")
+        #expect(session.state.user == nil, "and it left nobody signed in — the old escape's shape")
+        #expect(
+            session.lastError == failure,
+            "the sign-out that was overtaken wrote its own sentence over a newer failure"
+        )
+    }
+
     /// R-B2, the residue the audit found. `signOut` fences the ANSWER to its revoke, and then
     /// awaits the keychain delete — and it wrote its closing sentence AFTERWARDS with nothing
     /// asked. For a sign-out that was overtaken that sentence is "nothing went wrong", i.e. nil,

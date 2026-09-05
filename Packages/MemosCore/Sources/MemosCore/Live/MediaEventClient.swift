@@ -177,7 +177,7 @@ public final class MediaEventClient: Sendable {
     /// `DeviceOutboxCredentials` reads it too.
     @MainActor
     public static func device(
-        credentials store: any CredentialStore = DeviceCredentials.keychain(),
+        grant: @escaping @MainActor @Sendable () -> CredentialGrant?,
         identity: MediaIdentity = .shared,
         backoff: SSEBackoff = SSEBackoff(),
         idleReconnectDelay: TimeInterval = 15,
@@ -187,12 +187,14 @@ public final class MediaEventClient: Sendable {
     ) -> MediaEventClient {
         MediaEventClient(
             credentials: {
-                guard let token = try await store.string(for: SessionStore.tokenAccount),
-                    !token.isEmpty,
-                    let address = try await store.string(for: SessionStore.serverAccount),
-                    let configuration = ServerConfiguration(serverAddress: address)
-                else { return nil }
-                return MediaEventCredentials(baseURL: configuration.baseURL, token: token)
+                // From the SESSION, in memory, not from the keychain. The two can disagree: a
+                // sign-in as B whose credential would not store leaves B established here and A's
+                // token in the vault, and a channel reading the vault would then present A's
+                // credential under B's session — the pairing `credentialGrant` exists to make
+                // impossible, since the subject and the token come out of one object in one
+                // instant. Read per connection, so a renewal is simply what the next one carries.
+                guard let grant = await grant(), !grant.token.isEmpty else { return nil }
+                return MediaEventCredentials(baseURL: grant.serverBaseURL, token: grant.token)
             },
             generation: { await identity.generation },
             backoff: backoff,

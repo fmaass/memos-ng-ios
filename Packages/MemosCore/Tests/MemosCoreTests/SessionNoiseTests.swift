@@ -255,6 +255,44 @@ struct SessionNoiseTests {
         #expect(transport.sends == 0, "a request left under an authority the device had withdrawn")
     }
 
+    /// F2. A renewal replaces the token and destroys its predecessor WITHOUT ending the session,
+    /// so the incarnation the authority answers on does not move — correctly, because nothing
+    /// ended. What that means for a lane holding a token it read before suspending is that the
+    /// fence clears it to send the one the server has just destroyed. The token has to be resolved
+    /// where the verdict is: at the send point, from the authority.
+    @Test("a download held across a renewal presents the successor, not the token it set out with")
+    func aHeldDownloadPresentsTheRenewedToken() async {
+        let session = await signedIn(
+            handler: { _, _, operation in
+                switch operation {
+                case whoamiOperation: return Stub.json(Stub.user)
+                case "native_renew_api_auth_native_renew_post":
+                    return Stub.json(Stub.exchange(token: "memos_pat_next"))
+                default: return Stub.json(Stub.nativeToken(name: "Fabian's iPhone"))
+                }
+            }
+        )
+        let transport = HeldDownloadTransport()
+
+        let download = Task { try await session.download(original(), transport: transport) }
+        for _ in 0..<200 where !transport.entered.get() { await Task.yield() }
+        #expect(transport.entered.get(), "the download never reached the send point")
+
+        let outcome = await session.renewDeviceToken()
+        #expect(outcome == .renewed, "the premise: the device really did rotate its token")
+        transport.release.set(true)
+        _ = try? await download.value
+
+        #expect(transport.sends == 1, "the session did not end, so the download had to go out")
+        #expect(
+            transport.presented.get() == "Bearer memos_pat_next",
+            """
+            the request carried a token the server destroyed in the same statement that minted \
+            the one this device is now holding
+            """
+        )
+    }
+
     /// The OTHER guard on the same lane, kept as its own test rather than folded into the one
     /// above: with nobody signed in there is no credential to offer, so the store refuses before it
     /// builds a request at all. Named for what it is, and asserted on the specific error, so it
@@ -389,6 +427,8 @@ final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
     private var count = 0
     let entered = LockedValue<Bool>(false)
     let release = LockedValue<Bool>(false)
+    /// What the request carried at the moment it was sent — the whole point of holding it here.
+    let presented = LockedValue<String?>(nil)
 
     var sends: Int { lock.withLock { count } }
 
@@ -398,9 +438,16 @@ final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
         entered.set(true)
         while !release.get() { await Task.yield() }
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        // The production transport puts the credential on HERE, from the authority, and so does
+        // this: a double that presented what the caller wrote down before suspending could not
+        // tell a fenced lane from an unfenced one.
+        let sending = OriginalMedia.presenting(authority, on: request)
+        presented.set(sending.value(forHTTPHeaderField: "Authorization"))
         lock.withLock { count += 1 }
+        let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try Data("original".utf8).write(to: file)
         return (
-            URL(filePath: "/dev/null"),
+            file,
             HTTPURLResponse(
                 url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
             )!

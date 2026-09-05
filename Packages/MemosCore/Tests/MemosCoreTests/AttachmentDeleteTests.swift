@@ -49,6 +49,45 @@ struct AttachmentDeleteTests {
 
     private static let anchored = MemoQuery(anchor: .day(year: 2026, month: 8, day: 24))
 
+    /// F3. `deleteAttachment` claims its slot and then does the work in a Task of its own, so the
+    /// session can be withdrawn between the handle being captured and that body starting. Only the
+    /// ANSWER was fenced, and for a DELETE that is the wrong half: discarding a 204 afterwards does
+    /// not put the file back on the server. Every sibling write in this store asks synchronously
+    /// before it sends; this one now does too.
+    @Test("a delete whose session was withdrawn before its task ran sends nothing")
+    func aDeleteForAWithdrawnSessionIsNeverSent() async throws {
+        let sends = LockedValue<Int>(0)
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    guard operation != "whoami_api_auth_user_get" else {
+                        return Stub.json(Stub.user)
+                    }
+                    guard operation == deleteAttachmentOperation else {
+                        return Self.page([Self.memo("m1", ["a1", "a2"])])
+                    }
+                    sends.set(sends.get() + 1)
+                    return Stub.empty(.noContent)
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let store = TimelineStore()
+        store.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await store.refresh(using: handle, baseURL: Stub.baseURL)
+        #expect(store.memos.first?.attachments.count == 2, "control: the list landed")
+
+        // Withdrawn AFTER the handle was taken and BEFORE the delete is asked for — the window the
+        // task's own scheduling opens.
+        await session.signOutWithoutRevoking()
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: handle)
+
+        #expect(!removed)
+        #expect(sends.get() == 0, "a DELETE went out for a session this device had left")
+    }
+
     /// The request itself: the right verb at the right path, carrying the credential the middleware
     /// attaches — which is what a hand-written stand-in for the client could never show.
     @Test("the delete goes to that one attachment, with the token on it")

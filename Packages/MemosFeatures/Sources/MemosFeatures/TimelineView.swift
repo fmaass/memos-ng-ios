@@ -638,6 +638,7 @@ public struct TimelineView: View {
         let granted = incarnation.current
         await MediaChannel.consume(
             MediaEventClient.device(
+                grant: { [session] in session.credentialGrant() },
                 authority: SendAuthority { incarnation.isCurrent(granted) }
             ).stream(),
             into: timeline,

@@ -215,19 +215,31 @@ struct MediaEventClientTests {
         #expect(envelope.eventIfCurrent(for: identity) == SSEFixture.liveEvents[2])
     }
 
+    /// What the session hands the channel: the subject and the token out of ONE object, in one
+    /// instant. The channel no longer reads the vault, so this is the only way in.
+    private func grant(
+        token: String = "memos_pat_stored",
+        server: String = "https://memos.stored.invalid"
+    ) -> CredentialGrant {
+        CredentialGrant(
+            subject: "fabian",
+            serverBaseURL: URL(string: server)!,
+            token: token,
+            epoch: 0
+        )
+    }
+
     @Test("every delivered event is stamped with the generation the channel was fenced to")
     @MainActor
     func deliveredEventsCarryTheFence() async throws {
         let identity = MediaIdentity()
         identity.rotate()
         identity.rotate()
-        let store = InMemoryCredentials()
-        try store.set("memos_pat_stored", for: SessionStore.tokenAccount)
-        try store.set("https://memos.stored.invalid", for: SessionStore.serverAccount)
+        let granted = grant()
         let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
         let sleeper = RecordingSleeper(budget: 1)
         let client = MediaEventClient.device(
-            credentials: store,
+            grant: { granted },
             identity: identity,
             transport: transport,
             sleeper: sleeper
@@ -287,16 +299,14 @@ struct MediaEventClientTests {
         #expect(closed, "the open connection outlived the consumer")
     }
 
-    @Test("the device channel presents the stored credential against the stored server")
+    @Test("the device channel presents the session's credential against the session's server")
     @MainActor
     func deviceCredentials() async throws {
-        let store = InMemoryCredentials()
-        try store.set("memos_pat_stored", for: SessionStore.tokenAccount)
-        try store.set("https://memos.stored.invalid", for: SessionStore.serverAccount)
+        let granted = grant()
         let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
         let sleeper = RecordingSleeper(budget: 1)
         let client = MediaEventClient.device(
-            credentials: store,
+            grant: { granted },
             identity: MediaIdentity(),
             transport: transport,
             sleeper: sleeper
@@ -309,13 +319,13 @@ struct MediaEventClientTests {
         #expect(await transport.header("Authorization", of: 0) == "Bearer memos_pat_stored")
     }
 
-    @Test("the device channel with nothing stored never opens a connection")
+    @Test("the device channel with nobody signed in never opens a connection")
     @MainActor
     func deviceWithoutACredential() async {
         let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
         let sleeper = RecordingSleeper(budget: 4)
         let client = MediaEventClient.device(
-            credentials: InMemoryCredentials(),
+            grant: { nil },
             identity: MediaIdentity(),
             transport: transport,
             sleeper: sleeper
@@ -325,23 +335,62 @@ struct MediaEventClientTests {
 
         #expect(items.states.last == .stopped(.signedOut))
         #expect(await transport.connectCount == 0)
-        // Half of the distinction the other half is asserted against: an EMPTY store is an answer,
-        // and the answer is that nobody is signed in. Nothing about that improves by waiting.
+        // Half of the distinction the other half is asserted against: a session with no grant is
+        // an answer, and the answer is that nobody is signed in. Waiting improves nothing.
         #expect(await sleeper.waits.isEmpty, "absent is terminal — there is nothing to retry for")
     }
 
-    @Test("a store that will not answer is a failed connection, not a sign-out")
+    /// F1. The channel used to read the vault itself, and the vault is not the session. Sign in
+    /// as B on a device where the write fails and A's token is still stored — the state
+    /// `.storedNowhere` leaves — and a vault-reading channel presents A's credential under B's
+    /// session. Read from the grant, that state cannot be expressed: the subject and the token
+    /// come out of one object in one instant.
+    @Test("the channel presents the signed-in session's token, not whatever the vault still holds")
+    @MainActor
+    func deviceChannelFollowsTheSessionNotTheVault() async throws {
+        let vault = InMemoryCredentials()
+        try vault.set("memos_pat_a", for: SessionStore.tokenAccount)
+        try vault.set("https://memos.example.invalid", for: SessionStore.serverAccount)
+        let session = SessionStore(
+            credentials: RefusingCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        #expect(session.lastError == SessionStore.storageWarning, "the premise: B did not store")
+        #expect(try vault.string(for: SessionStore.tokenAccount) == "memos_pat_a")
+
+        let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
+        let client = MediaEventClient.device(
+            grant: { [session] in session.credentialGrant() },
+            identity: MediaIdentity(),
+            transport: transport,
+            sleeper: RecordingSleeper(budget: 1)
+        )
+
+        _ = await client.collect()
+
+        #expect(
+            await transport.header("Authorization", of: 0) == "Bearer memos_pat_b",
+            "the channel presented a token belonging to an account this device has left"
+        )
+    }
+
+    @Test("a credential that will not answer is a failed connection, not a sign-out")
     @MainActor
     func unreadableStorageIsNotASignOut() async {
-        // `UnreadableCredentials` throws where `InMemoryCredentials` returns nil, and that is the
-        // whole difference: the token may be sitting on the device, unreachable between a reboot
-        // and the first unlock. Signing the channel out on it would end the channel over a
-        // condition that clears itself the moment somebody unlocks the phone.
+        // A credentials closure that THROWS, where the one above returns nil, and that is the
+        // whole difference: something may be there and unreachable. Signing the channel out on it
+        // would end the channel over a condition that clears itself. Built through the client's
+        // own initialiser rather than through `device`, because `device` reads a session in
+        // memory, which cannot fail this way — the distinction belongs to whatever supplies the
+        // closure, and the client's reaction to it is what is under test.
         let transport = ScriptedSSETransport([.whole(SSEFixture.liveStream)])
         let sleeper = RecordingSleeper(budget: 3)
-        let client = MediaEventClient.device(
-            credentials: UnreadableCredentials(),
-            identity: MediaIdentity(),
+        let client = MediaEventClient(
+            credentials: { throw UnreadableCredentials.Unreadable() },
+            generation: { 0 },
             transport: transport,
             sleeper: sleeper
         )
