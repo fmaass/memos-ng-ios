@@ -1140,9 +1140,87 @@ struct InvalidationFenceTests {
         #expect(session.serverBaseURL != nil, "the wipe's tail cleared the wrong session")
     }
 
+    /// R-B2, the residue the audit found. `signOut` fences the ANSWER to its revoke, and then
+    /// awaits the keychain delete — and it wrote its closing sentence AFTERWARDS with nothing
+    /// asked. For a sign-out that was overtaken that sentence is "nothing went wrong", i.e. nil,
+    /// so the harm is not a wrong sentence on the successor's screen but the successor's OWN
+    /// sentence being wiped off it: here, the sign-in that landed inside the delete could not
+    /// write its credential down, and that is precisely the thing its owner has to be told.
+    ///
+    /// The two sibling paths — `signOutWithoutRevoking` and the 401 rule — already asked.
+    @Test("a sign-out finishing after a sign-in does not erase what that sign-in said")
+    func aSignOutOvertakenBySignInWritesNoSentence() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let signingIn = LockedValue<Bool>(false)
+        let credentials = OvertakingCredentials {
+            guard let session = await box.get(), signingIn.get() else { return }
+            signingIn.set(false)
+            await session.signIn(serverAddress: storedHost, token: "pat-b")
+        }
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, operation in
+                    guard operation == logoutOperation else { return Stub.json(Stub.user) }
+                    return Stub.empty(.noContent)
+                }
+            }
+        )
+        box.set(session)
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+        #expect(session.state.user != nil)
+
+        // From here the vault refuses writes, so the sign-in that lands inside the delete below
+        // ends as `.storedNowhere` and leaves the storage warning behind it. Deletes still work.
+        credentials.refuseWrites()
+        signingIn.set(true)
+        let outcome = await session.signOut()
+
+        #expect(outcome == .revoked)
+        #expect(session.state.user != nil, "the sign-in that landed inside the delete owns this")
+        #expect(
+            session.lastError == SessionStore.storageWarning,
+            "an overtaken sign-out wrote its own 'nothing went wrong' over the successor's sentence"
+        )
+    }
+
 }
 
-/// A credential store that lets something else happen in the middle of its DELETE.
+/// A credential store that lets a sign-in land inside its DELETE, and can be told to refuse writes
+/// from a chosen moment on — so that sign-in is a `.storedNowhere` one and leaves a sentence of its
+/// own, which is what a sign-out finishing afterwards must not be able to erase.
+final class OvertakingCredentials: CredentialStore, @unchecked Sendable {
+    struct Refused: Error {}
+
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+    private var refusing = false
+    private let duringRemove: @Sendable () async -> Void
+
+    init(duringRemove: @escaping @Sendable () async -> Void) {
+        self.duringRemove = duringRemove
+    }
+
+    func refuseWrites() { lock.withLock { refusing = true } }
+
+    func set(_ value: String, for account: String) async throws {
+        if lock.withLock({ refusing }) { throw Refused() }
+        lock.withLock { storage[account] = value }
+    }
+
+    func string(for account: String) async throws -> String? { lock.withLock { storage[account] } }
+
+    func remove(_ account: String) async throws {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
+    }
+
+    func removeAll(_ accounts: [String]) async throws {
+        await duringRemove()
+        lock.withLock { for account in accounts { storage[account] = nil } }
+    }
+}
+
+/// A credential store that lets a sign-in land inside its DELETE.
 final class InterruptingCredentials: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [String: String] = [:]

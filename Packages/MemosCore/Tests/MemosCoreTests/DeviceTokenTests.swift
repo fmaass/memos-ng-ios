@@ -385,6 +385,41 @@ struct DeviceTokenTests {
         #expect(seen.get().last?.authorization == "Bearer memos_pat_next")
     }
 
+    /// The same rule, one await later — the gap the audit found. `performRenewal` fences every
+    /// effect it has on `owns(generation)`, and the storage write it does BEFORE that guard is an
+    /// await of its own. A sign-in completing inside it owns the session, and the warning the
+    /// failed write produced ("Renewed, but the new credential could not be saved…") was being
+    /// written anyway — a sentence about a rotation the account reading it never asked for.
+    @Test("a renewal whose storage failed after the session changed says nothing to the successor")
+    func renewalStorageWarningIsNotWrittenToASuccessor() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let seen = LockedValue<[SeenRequest]>([])
+        let credentials = SupersedingCredentials {
+            guard let store = await box.get() else { return }
+            await store.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        }
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .json(Stub.exchange(token: "memos_pat_next"))
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+        box.set(store)
+        // Only the SUCCESSOR's write interrupts and throws; the sign-in above wrote normally.
+        credentials.arm()
+
+        let outcome = await store.renewDeviceToken()
+
+        #expect(outcome == .failed, "the renewal lost its session, whatever storage did")
+        #expect(store.state.user != nil, "the premise: the sign-in inside the write owns this")
+        #expect(
+            store.lastError == nil,
+            "a renewal that lost its session put its storage warning on the successor's screen"
+        )
+        #expect(store.deviceTokenNotice == nil, "and nothing on the successor's row either")
+    }
+
     /// A renewal is a mint, and a mint that lands after the session ended must not be written
     /// anywhere: the credential slot belongs to whoever is signed in NOW, and the successor's
     /// predecessor was destroyed for a session that no longer exists.
@@ -866,5 +901,45 @@ enum HTTPResponseLike: Sendable {
         case .detail(let detail, let status): Stub.detail(detail, status: status)
         case .validation(let message): Stub.validationError(message)
         }
+    }
+}
+
+/// A credential store whose single-item write, once armed, lets a sign-in complete inside it and
+/// THEN refuses — the renewal's own failure shape, with the session changing underneath it.
+///
+/// `setAll` is left to the protocol default so that the sign-in landing inside this write stores
+/// normally: what is under test is the sentence the renewal writes afterwards, not the sign-in.
+final class SupersedingCredentials: CredentialStore, @unchecked Sendable {
+    struct Refused: Error {}
+
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+    private var armed = false
+    private let duringWrite: @Sendable () async -> Void
+
+    init(duringWrite: @escaping @Sendable () async -> Void) {
+        self.duringWrite = duringWrite
+    }
+
+    func arm() { lock.withLock { armed = true } }
+
+    func set(_ value: String, for account: String) async throws {
+        let fire: Bool = lock.withLock {
+            guard armed else { return false }
+            armed = false
+            return true
+        }
+        guard fire else {
+            lock.withLock { storage[account] = value }
+            return
+        }
+        await duringWrite()
+        throw Refused()
+    }
+
+    func string(for account: String) async throws -> String? { lock.withLock { storage[account] } }
+
+    func remove(_ account: String) async throws {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
     }
 }

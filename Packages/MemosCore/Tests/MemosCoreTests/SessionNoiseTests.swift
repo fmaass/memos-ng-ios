@@ -212,25 +212,61 @@ struct SessionNoiseTests {
         #expect(timeline.lastError == nil, "and wrote A's sentence over B's list")
     }
 
+    private func original() -> MemoAttachment {
+        MemoAttachment(
+            uid: "a1",
+            mime: "image/jpeg",
+            status: .ready,
+            downloadURL: URL(string: "https://memos.example.invalid/x/original")!
+        )
+    }
+
     /// The download lane. An original is the longest-lived REQUEST this app makes, and it is the
     /// one request that carries the device token outside the generated client — so the transport
     /// asks the authority itself rather than trusting the fences the caller puts either side of it.
-    @Test("a download for a session that has ended is never sent")
+    ///
+    /// The session is ended the way the app ends one, by signing in as somebody else, and the
+    /// download is held at the send point while that happens. Both halves matter. Held, because
+    /// the window this fence covers is between the authority being read on the main actor and the
+    /// request leaving on another executor, and a test that never enters that window is not about
+    /// the fence at all. And a sign-in rather than a sign-out, because a sign-out leaves
+    /// `configuration` and `credential` nil and the store then refuses at its own signed-out guard
+    /// long before the transport is reached — an earlier version of this test did exactly that and
+    /// passed with the whole authority removed.
+    @Test("a download held at the send point is not sent once another account owns the session")
     func aDownloadForAnEndedSessionIsNeverSent() async {
+        let session = await signedIn(handler: { _, _, _ in Stub.json(Stub.user) })
+        let transport = HeldDownloadTransport()
+        let attachment = original()
+
+        let download = Task { try await session.download(attachment, transport: transport) }
+        for _ in 0..<200 where !transport.entered.get() { await Task.yield() }
+        #expect(transport.entered.get(), "the download never reached the send point")
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        #expect(session.state.user != nil, "the premise: somebody is signed in")
+        #expect(
+            session.serverBaseURL != nil,
+            "and the lane is reachable — the signed-out guard is not what is being tested here"
+        )
+        transport.release.set(true)
+
+        await #expect(throws: OriginalMediaError.superseded) { try await download.value }
+        #expect(transport.sends == 0, "a request left under an authority the device had withdrawn")
+    }
+
+    /// The OTHER guard on the same lane, kept as its own test rather than folded into the one
+    /// above: with nobody signed in there is no credential to offer, so the store refuses before it
+    /// builds a request at all. Named for what it is, and asserted on the specific error, so it
+    /// cannot be mistaken for evidence about the authority.
+    @Test("a download with nobody signed in is refused before a request is built")
+    func aDownloadWithNoCredentialIsRefused() async {
         let session = await signedIn(handler: { _, _, _ in Stub.json(Stub.user) })
         let transport = RecordingDownloadTransport()
         await session.signOutWithoutRevoking()
 
-        await #expect(throws: (any Error).self) {
-            try await session.download(
-                MemoAttachment(
-                    uid: "a1",
-                    mime: "image/jpeg",
-                    status: .ready,
-                    downloadURL: URL(string: "https://memos.example.invalid/x/original")!
-                ),
-                transport: transport
-            )
+        await #expect(throws: OriginalMediaError.notSignedIn) {
+            try await session.download(original(), transport: transport)
         }
 
         #expect(transport.sends == 0, "a request went out for a session nobody is signed in to")
@@ -339,6 +375,36 @@ struct SessionNoiseTests {
         await timeline.refresh(using: held, baseURL: Stub.baseURL)
 
         #expect(timeline.memos.isEmpty)
+    }
+}
+
+/// A download that waits at the SEND POINT, so a test can end the session while the request is on
+/// its way to the wire.
+///
+/// It asks the authority where the real transport asks it — on the executor that sends, with
+/// nothing between the answer and the send — and it counts only what got past that question, so
+/// "no request was sent" stays a fact rather than an inference from an error.
+final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    let entered = LockedValue<Bool>(false)
+    let release = LockedValue<Bool>(false)
+
+    var sends: Int { lock.withLock { count } }
+
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
+        entered.set(true)
+        while !release.get() { await Task.yield() }
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        lock.withLock { count += 1 }
+        return (
+            URL(filePath: "/dev/null"),
+            HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+        )
     }
 }
 

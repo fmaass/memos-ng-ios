@@ -1009,8 +1009,12 @@ public final class SessionStore {
     @discardableResult
     public func signOut() async -> SignOutOutcome {
         guard let client else {
+            let issued = sessionGeneration
             await wipeCredential()
-            lastError = signOutComplaint
+            // Fenced like every other complaint this file writes after a keychain await: a sign-in
+            // completing inside the delete owns the session now, and a sentence about the
+            // credential this sign-out threw away is not about the one that session is holding.
+            if owns(issued) || state.user == nil { lastError = signOutComplaint }
             return .revoked
         }
         // The revoke is a request, and A's answer to it can land after B has signed in. Every
@@ -1027,7 +1031,10 @@ public final class SessionStore {
             case .noContent:
                 MemosLog.session.info("POST /api/auth/native/logout -> 204")
                 await wipeCredential()
-                lastError = signOutComplaint
+                // The `owns(issued)` above fenced the ANSWER; this fences the SENTENCE. The wipe
+                // between them is another await, and a sign-in that completes inside it owns the
+                // session by the time this line runs.
+                if owns(issued) || state.user == nil { lastError = signOutComplaint }
                 return .revoked
             case .undocumented(let statusCode, _):
                 guard statusCode == 401 else {
@@ -1037,7 +1044,8 @@ public final class SessionStore {
                 }
                 MemosLog.session.info("POST /api/auth/native/logout -> 401, token already gone")
                 await wipeCredential()
-                lastError = signOutComplaint
+                // Same await, same fence — see the 204 branch above.
+                if owns(issued) || state.user == nil { lastError = signOutComplaint }
                 return .alreadyRevoked
             }
         } catch {
@@ -1773,7 +1781,6 @@ public final class SessionStore {
             MemosLog.session.error(
                 "the renewed credential could not be stored: \(detail, privacy: .public)"
             )
-            lastError = Self.renewalStorageWarning
         }
         // The storage write above is an await, and a sign-out or a sign-in completing inside it
         // owns the session now. Swapping the credential then would hand a live session a token
@@ -1783,6 +1790,10 @@ public final class SessionStore {
             MemosLog.session.info("a renewal finished for a session that has ended; it is dropped")
             return .failed
         }
+        // AFTER the guard, not in the catch that set the flag. The write is an await, and a
+        // sentence about a renewal this session did not make belongs on nobody else's screen —
+        // the same rule the notice below it already followed.
+        if storageRefused { lastError = Self.renewalStorageWarning }
         credential.replace(with: successor)
         // The token this device presents has MOVED, so every grant taken under the old one names a
         // credential the server has destroyed. The session itself carries on — that is the whole
