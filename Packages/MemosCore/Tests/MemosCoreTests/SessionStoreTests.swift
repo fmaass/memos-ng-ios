@@ -319,6 +319,47 @@ private let streamErrorCodeKey = "_kCFStreamErrorCodeKey"
 /// Network permission sheet is up.
 private let networkIsDown = 50
 
+/// A coding key, so a decoding failure can be built here rather than borrowed from the store.
+private struct StubKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+
+    init(_ stringValue: String) { self.stringValue = stringValue }
+    init?(stringValue: String) { self.init(stringValue) }
+    init?(intValue: Int) { return nil }
+}
+
+/// The decoding failure the generated client raises for a body missing a required property, built
+/// independently of any store, wrapped the way the client wraps it.
+///
+/// It is the shape observed from the real decoder against `{"nope":1}` and `UserOut`:
+/// `DecodingError.keyNotFound` on `auth_kind`.
+private let rawDecodeFailure = ClientError(
+    operationID: "whoami_api_auth_user_get",
+    operationInput: "",
+    causeDescription: "Unknown",
+    underlyingError: DecodingError.keyNotFound(
+        StubKey("auth_kind"),
+        DecodingError.Context(
+            codingPath: [],
+            debugDescription: "No value associated with key auth_kind"
+        )
+    )
+)
+
+/// What the classifier renders for that failure — the domain and the code, nothing else.
+///
+/// Derived from the fixture above rather than from the store, so a store that leaked the decoder's
+/// own words into its descriptor could not make its own expectation move with it. The assertions
+/// that this really is sanitized, and that the raw error really did carry the decoder's words,
+/// live in the tests that use it.
+private var classifiedDecodeDetail: String {
+    guard case .other(let detail) = NativeLoginTransportFailure.classify(rawDecodeFailure) else {
+        return "<not classified as other>"
+    }
+    return detail
+}
+
 /// One launch failure: what the transport threw, the sentence it has to become, and the value the
 /// screen decides its Settings button from.
 struct LaunchFailureCase: Sendable, CustomTestStringConvertible {
@@ -384,6 +425,7 @@ let launchFailureCases = [
 @Suite("The launch failure's sentence")
 struct SessionRestoreClassificationTests {
     private func restored(
+        diagnostics: @escaping @Sendable (String) -> Void = { _ in },
         handler: @escaping StubTransport.Handler
     ) async -> (session: SessionStore, credentials: InMemoryCredentials) {
         let credentials = InMemoryCredentials()
@@ -391,7 +433,8 @@ struct SessionRestoreClassificationTests {
         try? credentials.set("https://\(storedHost)", for: SessionStore.serverAccount)
         let session = SessionStore(
             credentials: credentials,
-            makeClient: { _, token in Stub.client(token: token, handler: handler) }
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            diagnostics: diagnostics
         )
         await session.restore()
         return (session, credentials)
@@ -431,18 +474,22 @@ struct SessionRestoreClassificationTests {
 
     @Test("a body the client cannot decode reads as the host being unreachable")
     func decodeFailureNamesTheHost() async {
+        // Control: the decoder's own words — the missing key and the case — really are in the
+        // error the client throws, so their absence below is a fact about the descriptor.
+        let rawText = String(describing: rawDecodeFailure)
+        #expect(rawText.contains("auth_kind"))
+        #expect(rawText.contains("keyNotFound"))
+        // And the classifier's answer for that same error, computed here rather than read back
+        // from the store, is a domain and a code and nothing else.
+        let expected = classifiedDecodeDetail
+        #expect(!expected.contains("auth_kind"))
+        #expect(!expected.contains("keyNotFound"))
+        #expect(expected.split(separator: " ").count == 2, "a descriptor is a domain and a code")
+
         let (session, _) = await restored { _, _, _ in Stub.json(#"{"nope":1}"#) }
 
-        let message = sentence(of: session)
-        #expect(message.hasPrefix("Can't reach \(storedHost) ("))
-        #expect(message.hasSuffix(retryHint))
-        guard let failure = session.restoreFailure,
-            case .unreachable(let host, _) = failure
-        else {
-            Issue.record("expected .unreachable, got \(String(describing: session.restoreFailure))")
-            return
-        }
-        #expect(host == storedHost)
+        #expect(sentence(of: session) == "Can't reach \(storedHost) (\(expected)). \(retryHint)")
+        #expect(session.restoreFailure == .unreachable(host: storedHost, detail: expected))
     }
 
     @Test("nothing the launch shows or logs carries the request or the token")
@@ -471,13 +518,22 @@ struct SessionRestoreClassificationTests {
             #expect(control.contains(marker), "the control error must carry \(marker)")
         }
 
-        let (session, _) = await restored { _, _, _ in throw URLError(.timedOut) }
+        // The log is WATCHED, not re-derived: this is the line the store actually handed its
+        // logger, so a `logWhoamiFailure` that interpolated the error itself would be seen here.
+        let logged = LockedValue<[String]>([])
+        let (session, _) = await restored(
+            diagnostics: { line in logged.set(logged.get() + [line]) }
+        ) { _, _, _ in throw URLError(.timedOut) }
 
         // What the screen gets, and what the log gets, are the two things that leave the store.
-        let produced = [sentence(of: session), NativeLoginTransportFailure.diagnostic(for: raw)]
+        let written = logged.get()
+        #expect(written.count == 1, "the failure is written down once")
+        let produced = [sentence(of: session)] + written
         // Second control: both were produced, are not empty, and were read.
         #expect(produced[0].contains(storedHost))
-        #expect(produced[1] == "other (NSURLErrorDomain -1001)")
+        #expect(
+            written.first == "GET /api/auth/user did not arrive: other (NSURLErrorDomain -1001)"
+        )
         for text in produced {
             #expect(!text.isEmpty)
             for marker in leaks {
@@ -553,12 +609,14 @@ private let signInFailureCases = [
 @Suite("The pasted-token sign-in's sentence")
 struct SignInFailureClassificationTests {
     private func attempted(
+        diagnostics: @escaping @Sendable (String) -> Void = { _ in },
         handler: @escaping StubTransport.Handler
     ) async -> (session: SessionStore, credentials: InMemoryCredentials) {
         let credentials = InMemoryCredentials()
         let session = SessionStore(
             credentials: credentials,
-            makeClient: { _, token in Stub.client(token: token, handler: handler) }
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            diagnostics: diagnostics
         )
         await session.signIn(serverAddress: storedHost, token: storedToken)
         return (session, credentials)
@@ -587,14 +645,20 @@ struct SignInFailureClassificationTests {
 
     @Test("a body the client cannot decode is reported as a transport failure, not as its text")
     func decodeFailureIsNamedByDomainAndCode() async {
+        // Same two controls as the launch case: the decoder's words are in the raw error, and the
+        // classifier's answer for that same error — computed here, not read back — has none.
+        let rawText = String(describing: rawDecodeFailure)
+        #expect(rawText.contains("auth_kind"))
+        #expect(rawText.contains("keyNotFound"))
+        let expected = classifiedDecodeDetail
+        #expect(!expected.contains("auth_kind"))
+        #expect(!expected.contains("keyNotFound"))
+        #expect(expected.split(separator: " ").count == 2, "a descriptor is a domain and a code")
+
         let (session, _) = await attempted { _, _, _ in Stub.json(#"{"nope":1}"#) }
 
-        guard case .transport(.other(let detail))? = session.lastFailure else {
-            Issue.record("expected .transport(.other), got \(session.lastError ?? "nothing")")
-            return
-        }
-        #expect(session.lastError == "The sign-in could not reach the server: \(detail)")
-        #expect(!detail.contains("nope"))
+        #expect(session.lastFailure == .transport(.other(expected)))
+        #expect(session.lastError == "The sign-in could not reach the server: \(expected)")
     }
 
     @Test("nothing the sign-in shows or logs carries the request or the token")
@@ -618,14 +682,19 @@ struct SignInFailureClassificationTests {
             #expect(control.contains(marker), "the control error must carry \(marker)")
         }
 
-        let (session, _) = await attempted { _, _, _ in throw URLError(.timedOut) }
+        // The log is WATCHED, not re-derived — see the launch case.
+        let logged = LockedValue<[String]>([])
+        let (session, _) = await attempted(
+            diagnostics: { line in logged.set(logged.get() + [line]) }
+        ) { _, _, _ in throw URLError(.timedOut) }
 
-        let produced = [
-            session.lastError ?? "",
-            NativeLoginTransportFailure.diagnostic(for: raw),
-        ]
+        let written = logged.get()
+        #expect(written.count == 1, "the failure is written down once")
+        let produced = [session.lastError ?? ""] + written
         #expect(produced[0].contains("NSURLErrorDomain -1001"))
-        #expect(produced[1] == "other (NSURLErrorDomain -1001)")
+        #expect(
+            written.first == "GET /api/auth/user did not arrive: other (NSURLErrorDomain -1001)"
+        )
         for text in produced {
             #expect(!text.isEmpty)
             for marker in leaks {
