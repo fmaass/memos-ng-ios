@@ -44,13 +44,12 @@ public protocol OutboxCredentialsProviding: Sendable {
 
     /// Whether credentials acquired earlier still belong to the session this device is in.
     ///
+    /// A REQUIREMENT rather than a defaulted extension. A default of `true` would mean a provider
+    /// that simply forgot this silently defeats every `mayStillSend` site in the drain, and the
+    /// compiler would say nothing — the one shape of mistake this fence exists to make impossible.
+    ///
     /// SYNCHRONOUS on purpose, and asked immediately before a request goes out. An `await` here
     /// would be one more instant for an account switch to land in — which is the whole of what
     /// this exists to catch, since a drain pass outlives the switch that happens during it.
     func isCurrent(_ credentials: OutboxCredentials) -> Bool
-}
-
-extension OutboxCredentialsProviding {
-    /// A provider with no session behind it cannot be superseded by one.
-    public func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
 }

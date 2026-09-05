@@ -1187,6 +1187,12 @@ public final class TimelineStore {
             )
             switch response {
             case .ok(let ok):
+                // The one apply point in this store that had no fence, and the one behind the
+                // most entry points: `save`, `setVisibility` and `setArchived` are all this
+                // method. An edit issued under one session and answered after a switch would
+                // otherwise land in the next one — clearing ITS error line and telling the sheet
+                // the save went through, for a session that no longer exists.
+                guard sessionStillCurrent(handle) else { return false }
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true

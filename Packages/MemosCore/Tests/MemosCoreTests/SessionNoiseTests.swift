@@ -169,6 +169,38 @@ struct SessionNoiseTests {
         #expect(!tags.hasLoaded)
     }
 
+    /// The PATCH family — `save`, `setVisibility`, `setArchived` are all one method — across a
+    /// session end. It is the apply point with the most entry points behind it, and the one that
+    /// had no fence: an edit issued under A and answered after a switch to B would land in B,
+    /// clear B's error line and tell the sheet the save went through for a session that is gone.
+    @Test("an edit answered after the session ended is applied to nobody")
+    func aPatchFromAnEndedSessionIsNotApplied() async throws {
+        let session = await signedIn(
+            handler: { _, _, operation in
+                switch operation {
+                case whoamiOperation: return Stub.json(Stub.user)
+                case "patch_memo_api_memos__uid__patch":
+                    return Stub.json(Stub.memo(uid: "a", content: "after"))
+                default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+                }
+            }
+        )
+        let timeline = TimelineStore()
+        timeline.reports(to: session)
+        let underA = try #require(session.activeHandle)
+        await timeline.refresh(using: underA, baseURL: Stub.baseURL)
+        #expect(timeline.memos.first?.content == "hello", "the premise: A's row is on screen")
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        let saved = await timeline.setArchived(
+            true, uid: "a", using: underA, baseURL: Stub.baseURL
+        )
+
+        #expect(!saved, "a save that landed nowhere did not succeed")
+        #expect(timeline.memos.first?.content == "hello", "and nothing of it was applied")
+        #expect(timeline.lastError == nil, "nor was an error written for it")
+    }
+
     /// And the other half of B3: a store whose session has been withdrawn entirely terminates,
     /// rather than reading "no session" as "still current".
     @Test("a retry after the session was withdrawn applies nothing")

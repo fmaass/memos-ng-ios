@@ -1206,7 +1206,16 @@ public final class SessionStore {
         )
     }
 
+    /// Restored under a FRESH incarnation, never the one the snapshot was taken in.
+    ///
+    /// A sign-in attempt intervened between the two, and anything still in flight under the
+    /// pre-attempt generation has been through that: it may have been issued with a client this
+    /// method is now putting back, but it belongs to a session the attempt already interrupted.
+    /// Today every reachable `previous.client` happens to be nil, so nothing is resurrected — but
+    /// that is an accident of which paths reach here, not a property of this method, and the next
+    /// path that reaches it with a live client would silently make it one.
     private func putBack(_ snapshot: SessionSnapshot) {
+        endIncarnation()
         state = snapshot.state
         client = snapshot.client
         credential = snapshot.credential

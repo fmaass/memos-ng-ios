@@ -370,6 +370,9 @@ struct StaticCredentials: OutboxCredentialsProviding {
     var credentials: OutboxCredentials?
 
     func currentCredentials() async -> OutboxCredentials? { credentials }
+
+    /// Nothing moves under this one, so what it granted always still stands.
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
 }
 
 enum Fixture {
