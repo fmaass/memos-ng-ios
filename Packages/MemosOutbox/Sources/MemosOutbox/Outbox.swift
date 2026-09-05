@@ -169,7 +169,12 @@ public final class Outbox {
         capturedAt: Date = Date(),
         sources: [StagedSource]
     ) async -> Bool {
-        guard let credentials = await credentials.currentCredentials() else {
+        guard let credentials = await credentials.currentCredentials(),
+            // Re-read immediately before the job is written: the binding stamped on it decides
+            // whose account this capture is ever sent into, and an account switch landing between
+            // the acquisition and the write would stamp it with the account that is leaving.
+            self.credentials.isCurrent(credentials)
+        else {
             enqueueError = "Sign in before writing a memo."
             return false
         }

@@ -331,6 +331,8 @@ final class MutableClock: @unchecked Sendable {
 final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendable {
     private let lock = NSLock()
     private var current: OutboxCredentials?
+    private var epoch = 0
+    private var supersedeOnAcquire = false
 
     init(_ current: OutboxCredentials?) { self.current = current }
 
@@ -338,7 +340,26 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
         lock.withLock { current = credentials }
     }
 
-    func currentCredentials() async -> OutboxCredentials? { lock.withLock { current } }
+    /// Somebody signs in as somebody else the instant AFTER a pass acquires its credential — the
+    /// window the acquisition itself cannot close, and the one every request in that pass is then
+    /// inside of.
+    func supersedeAfterNextAcquisition() { lock.withLock { supersedeOnAcquire = true } }
+
+    func currentCredentials() async -> OutboxCredentials? {
+        lock.withLock {
+            guard var acquired = current else { return nil }
+            acquired.epoch = epoch
+            if supersedeOnAcquire {
+                epoch += 1
+                supersedeOnAcquire = false
+            }
+            return acquired
+        }
+    }
+
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        lock.withLock { epoch == credentials.epoch }
+    }
 }
 
 struct StaticCredentials: OutboxCredentialsProviding {

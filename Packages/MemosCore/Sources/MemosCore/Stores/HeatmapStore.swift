@@ -34,11 +34,20 @@ public final class HeatmapStore {
     /// just-deleted day's square back.
     private var attempt = 0
 
+    /// Where a failure that never reached the server goes instead of `lastError` — its twin's
+    /// sink, for its twin's reason (`TagStore`).
+    private var session: (any SessionReporting)?
+
     public init() {}
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
 
     public func load(using client: any APIProtocol) async {
         attempt += 1
         let mine = attempt
+        // Taken when the request is ISSUED, not when it lands (`SessionReporting`).
+        let issued = session?.handle?.generation
         isLoading = true
         do {
             let loaded: [String: Int]
@@ -63,8 +72,11 @@ public final class HeatmapStore {
             // refresh failed says the household wrote nothing, which is a worse lie than a
             // heatmap that is a few minutes stale.
             //
-            // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180).
-            if let apiError = StoreFailure.reportable(error) {
+            // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180). Nor
+            // is a server that never answered: that one is the session's to say, once, in a banner.
+            if let failure = StoreFailure.transportFailure(error) {
+                if let issued { session?.noteTransportFailure(failure, issuedUnder: issued) }
+            } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }
         }

@@ -47,8 +47,18 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     static let refreshIdentifier = "live.discomarder.memosng.outbox-refresh"
 
     // The account store is composed here, not defaulted inside the session: it writes into the
-    // app group, which only a real app has, and the share extension reads what it publishes.
-    let session = SessionStore(account: OutboxAccountStore.live())
+    // app group, which only a real app has, and the share extension reads what it publishes. The
+    // last-known-user file is composed here for the same reason — it is a real container's file,
+    // and a test that got one by default would write into it.
+    //
+    // `lazy` because `onVerified` reaches back into this object: the outbox restart is the one
+    // thing the session cannot do for itself, and the moment worth restarting on — a credential
+    // going from unconfirmed to confirmed — is a moment only the session knows.
+    private(set) lazy var session = SessionStore(
+        account: OutboxAccountStore.live(),
+        lastKnownUser: LastKnownUserFile.live(),
+        onVerified: { [weak self] in await self?.startOutbox() }
+    )
     private(set) var outbox: Outbox?
     /// Built from the outbox's own preference store rather than a second one over the same suite:
     /// the drain acts on the object it was given, and a switch it never hears about is a switch
@@ -60,9 +70,15 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         let session = session
+        // The session is the ONE source of the outbox's authority: who it may upload as and the
+        // token it presents come from `credentialGrant()` as a single value, never assembled here
+        // out of the keychain and the session separately. The epoch box is what the drain reads
+        // synchronously before each request — a hop to the main actor there would be one more
+        // instant for an account switch to land in.
+        let epoch = session.epoch
         outbox = try? Outbox.live(
-            credentials: DeviceOutboxCredentials {
-                await MainActor.run { session.state.user?.subject }
+            credentials: DeviceOutboxCredentials(epoch: { epoch.current }) {
+                await MainActor.run { session.credentialGrant() }
             }
         )
         uploadSettings = outbox.map { UploadSettings(preferences: $0.uploadPreferences) }

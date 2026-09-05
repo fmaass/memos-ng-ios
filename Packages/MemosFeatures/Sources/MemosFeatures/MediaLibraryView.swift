@@ -68,6 +68,9 @@ struct MediaLibraryView: View {
                     }
                 )
             }
+            // A failure that never reached the server belongs to the session's one banner, not to
+            // an error card over this grid (`SessionReporting`).
+            library?.reports(to: session)
             await load()
         }
     }

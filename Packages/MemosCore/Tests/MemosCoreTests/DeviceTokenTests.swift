@@ -673,8 +673,8 @@ struct DeviceTokenTests {
     }
 
     /// The outbox reaches the server with its own requests, not through the generated client, so
-    /// the middleware's fence never sees them. It does not need to: the credential is read from
-    /// the vault once per drain and never written into a queued job, so the rotation a renewal
+    /// the middleware's fence never sees them. It does not need to: the credential is granted by
+    /// the session once per drain and never written into a queued job, so the rotation a renewal
     /// commits is simply what the next attempt picks up. Driven through the REAL renewal here,
     /// because that is the write whose effect is being claimed.
     @Test("a queued outbox attempt after a renewal presents the successor")
@@ -688,7 +688,9 @@ struct DeviceTokenTests {
             default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
             }
         }
-        let outbox = DeviceOutboxCredentials(credentials: vault, owner: { "fabian" })
+        let outbox = DeviceOutboxCredentials(epoch: { store.epoch.current }) {
+            await MainActor.run { store.credentialGrant() }
+        }
         let before = await outbox.currentCredentials()
         #expect(before?.token == "memos_pat_first", "the premise: it was holding the old one")
 
@@ -697,6 +699,10 @@ struct DeviceTokenTests {
 
         let after = await outbox.currentCredentials()
         #expect(after?.token == "memos_pat_next")
+        // And a grant taken BEFORE the rotation stops standing at the drain's next synchronous
+        // check: it names a token the server destroyed in the same statement that minted this one.
+        let granted = try #require(before)
+        #expect(!outbox.isCurrent(granted))
     }
 
     /// The live channel is the other one. It builds its own request per CONNECTION and reads the

@@ -130,6 +130,13 @@ public final class MemoSearch {
         )
     }
 
+    /// Names the session the results list's transport failures belong to.
+    ///
+    /// Forwarded rather than taken at construction, because the store this search owns is the
+    /// SECOND `TimelineStore` in the app and its failures are as much the session's as the
+    /// timeline's are (`SessionReporting`).
+    public func reports(to session: any SessionReporting) { results.reports(to: session) }
+
     /// What the field now holds.
     ///
     /// Called on every keystroke, including the one that empties it: clearing is not a separate

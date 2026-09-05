@@ -58,6 +58,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// size, so a store built with a different one moves the trigger with it.
     public let pageSize: Int
     private let onUnauthorized: @MainActor @Sendable () async -> Void
+    /// Where a failure that never reached the server goes instead of `lastError`, and the seam
+    /// this store reads the session's incarnation from — its twin's, for its twin's reason
+    /// (`TimelineStore`).
+    private var session: (any SessionReporting)?
 
     public init(
         pageSize: Int = 60,
@@ -70,6 +74,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         self.order = order
         self.onUnauthorized = onUnauthorized
     }
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
 
     /// Switches tab.
     ///
@@ -128,6 +135,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     private var loadingLineage: Lineage?
 
     public func refresh(using client: any APIProtocol, baseURL: URL) async {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         let lineage = self.lineage
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
@@ -167,7 +177,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
                 return
             }
-            await report(error)
+            await report(error, issuedUnder: issued)
         }
     }
 
@@ -178,6 +188,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// and a tile already on screen does not appear a second time, so a reader sitting at the end
     /// of the grid would wait for a page this store had decided to throw away.
     public func loadMore(using client: any APIProtocol, baseURL: URL) async {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -196,6 +209,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 )
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/attachments answered for a list that has moved on")
+                    // Never reissued with a client whose session is over — see the same guard in
+                    // `TimelineStore.loadMore`.
+                    guard sessionStillCurrent(issued) else { return }
                     continue
                 }
                 items = Self.merged(items, with: page.items, filter: lineage.filter)
@@ -206,9 +222,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             } catch {
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
+                    guard sessionStillCurrent(issued) else { return }
                     continue
                 }
-                await report(error)
+                await report(error, issuedUnder: issued)
                 return
             }
         }
@@ -249,13 +266,27 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Says what went wrong — unless what went wrong was this app cancelling its own request.
     /// Same rule, same helper, as `TimelineStore.report`: a supersede cancels the transport before
     /// it moves the lineage, so the fence above cannot tell that `-999` from a real failure.
-    private func report(_ error: any Error) async {
+    private func report(_ error: any Error, issuedUnder generation: Int?) async {
+        // A server that never answered goes to the session and nowhere else — the same rule, and
+        // the same reason, as `TimelineStore.report`.
+        if let failure = StoreFailure.transportFailure(error) {
+            guard let generation else { return }
+            session?.noteTransportFailure(failure, issuedUnder: generation)
+            return
+        }
         guard let apiError = StoreFailure.reportable(error) else {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
         lastError = apiError.errorDescription
         if apiError == .unauthorized { await onUnauthorized() }
+    }
+
+    /// Whether the session that ISSUED an operation is still the one this device is running — the
+    /// same guard, for the same reason, as `TimelineStore.sessionStillCurrent`.
+    private func sessionStillCurrent(_ issued: Int?) -> Bool {
+        guard let issued, let current = session?.handle?.generation else { return true }
+        return issued == current
     }
 
     /// One page of the library.

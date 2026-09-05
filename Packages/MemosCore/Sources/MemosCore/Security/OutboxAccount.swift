@@ -2,52 +2,66 @@ import Foundation
 import MemosAPI
 import MemosOutbox
 
-/// What the outbox is allowed to upload as, read from the same places the session reads.
+/// What the outbox is allowed to upload as — the session's own authority, handed over as one
+/// value.
 ///
 /// The outbox deliberately knows nothing about sessions, keychains or servers, so the one thing it
 /// does need — a base URL, who is signed in, and a bearer token — is handed to it through this.
 /// The token is fetched per drain and never stored in a queued job: a credential written into a
 /// queue file is a credential in the next backup.
+///
+/// It used to assemble those three facts itself, from two places: the subject from the session and
+/// the token and address from the keychain. That is what this no longer does, and the reason is
+/// not the number of awaits. Three reads across two sources can produce a pair that was never
+/// true — a sign-in as B whose credential would not store leaves B established in memory and A's
+/// token in the keychain, and an assembly across them hands the drain B's identity with A's
+/// credential. An incarnation counter cannot see it: nothing changed between the reads. So the
+/// authority has ONE source, `SessionStore.credentialGrant()`, which builds it from one object
+/// graph in one instant.
+///
+/// The app is the only process that drains (`ShareRootView` enqueues and stops there), so there is
+/// no session-free caller of this left: the share extension's own path reads the account licence
+/// and never comes through here.
 public struct DeviceOutboxCredentials: OutboxCredentialsProviding {
-    private let credentials: any CredentialStore
-    private let owner: @Sendable () async -> String?
+    /// The session's grant, or nil when it has no authority to give.
+    private let grant: @Sendable () async -> CredentialGrant?
+    /// The authority epoch, read SYNCHRONOUSLY — which is what `isCurrent` has to be, and what a
+    /// hop to the main actor could not be.
+    private let epoch: @Sendable () -> Int
 
-    /// - Parameter owner: the signed-in user's subject, or nil when nobody is signed in. It comes
-    ///   from the session rather than from storage because the session is what knows whether the
-    ///   stored token has been validated.
+    /// - Parameters:
+    ///   - epoch: `SessionStore.epoch`, whose value moves whenever the identity or the presented
+    ///     credential changes.
+    ///   - grant: `SessionStore.credentialGrant()`, hopped to the main actor once per acquisition.
     public init(
-        credentials: any CredentialStore = DeviceCredentials.keychain(),
-        owner: @escaping @Sendable () async -> String?
+        epoch: @escaping @Sendable () -> Int,
+        grant: @escaping @Sendable () async -> CredentialGrant?
     ) {
-        self.credentials = credentials
-        self.owner = owner
+        self.epoch = epoch
+        self.grant = grant
     }
 
-    /// Reads the credential through the one vault the app has, which is what serializes this
-    /// read against a sign-out happening at the same moment.
-    ///
-    /// A storage failure ends in "nothing drains", because there is nothing else this layer can
-    /// do with one — but it is logged rather than swallowed: a queue that refuses every capture
-    /// while the keychain is answering with errors is exactly the silence that hid the last one.
+    /// One hop, one value. Nothing is assembled here: what comes back was already coherent when
+    /// the session built it.
     public func currentCredentials() async -> OutboxCredentials? {
-        guard let subject = await owner(), !subject.isEmpty else { return nil }
-        do {
-            guard let token = try await credentials.string(for: SessionStore.tokenAccount),
-                !token.isEmpty,
-                let address = try await credentials.string(for: SessionStore.serverAccount),
-                let configuration = ServerConfiguration(serverAddress: address)
-            else { return nil }
-            return OutboxCredentials(
-                serverBaseURL: configuration.baseURL,
-                ownerSubject: subject,
-                token: token
-            )
-        } catch {
-            let detail = String(describing: error)
-            MemosLog.session.error(
-                "the outbox could not read the device credential: \(detail, privacy: .public)"
-            )
-            return nil
-        }
+        guard let grant = await grant() else { return nil }
+        return OutboxCredentials(
+            serverBaseURL: grant.serverBaseURL,
+            ownerSubject: grant.subject,
+            token: grant.token,
+            epoch: grant.epoch
+        )
+    }
+
+    /// Whether a grant taken earlier still stands — asked immediately before every request the
+    /// drain sends with it.
+    ///
+    /// Read from the lock-protected box rather than by asking the session again, because the
+    /// answer has to arrive without a suspension: an `await` here is one more instant for the
+    /// switch this exists to catch. Every withdrawal and every replacement of authority moves that
+    /// number in the same synchronous step, so an unchanged epoch IS the session saying the grant
+    /// still names what it named.
+    public func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        epoch() == credentials.epoch
     }
 }

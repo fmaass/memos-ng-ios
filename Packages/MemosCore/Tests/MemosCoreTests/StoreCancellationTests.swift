@@ -131,12 +131,17 @@ struct StoreCancellationTests {
         }
     }
 
-    /// The other direction, and the one that must never be lost: a search that really could not
-    /// reach the server still says so.
+    /// The other direction, and the one that must never be lost: a search the SERVER refused
+    /// still says so.
+    ///
+    /// The refusal is a 500 rather than a phone with no network, and that is the rule rather than
+    /// a detail of this test: a failure that never reached the server belongs to the session's one
+    /// banner and to no store's `lastError` (`SessionNoiseTests`). What is left here is the class
+    /// this test has always been about — a real answer, reported where the person asked.
     @Test("a search that genuinely fails still says so")
     func aFailedSearchStillReports() async {
         let search = MemoSearch(
-            client: Stub.client { _, _, _ in throw URLError(.notConnectedToInternet) },
+            client: Stub.client { _, _, _ in Stub.empty(.init(code: 500)) },
             baseURL: Stub.baseURL,
             coalescing: .milliseconds(1)
         )
@@ -144,9 +149,9 @@ struct StoreCancellationTests {
         search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
         await search.settled()
 
-        #expect(search.results.lastError != nil, "an unreachable server said nothing")
+        #expect(search.results.lastError != nil, "a server that refused said nothing")
         guard case .failed = search.outcome else {
-            Issue.record("an unreachable server left the search in \(search.outcome)")
+            Issue.record("a server that refused left the search in \(search.outcome)")
             return
         }
     }
@@ -154,6 +159,10 @@ struct StoreCancellationTests {
     /// The whole class, one store at a time. Each of these fences or supersedes a fetch, so each
     /// of them can be handed its own cancellation — and all five now decide what to say about it
     /// in one place rather than in five that drift.
+    ///
+    /// The control is a server that ANSWERED, because that is now the only failure a store reports
+    /// at all: one that never reached the server goes to the session instead, once, and
+    /// `SessionNoiseTests` is where that half is pinned.
     @Test("no fenced store reports a cancellation, and every one still reports a real failure")
     func noFencedStoreReportsACancellation() async {
         for cancelled in [true, false] {
@@ -168,7 +177,7 @@ struct StoreCancellationTests {
                         throw URLError(.cancelled)
                     }
                 }
-                throw URLError(.notConnectedToInternet)
+                return Stub.empty(.init(code: 500))
             }
 
             let timeline = TimelineStore()
@@ -211,7 +220,7 @@ struct StoreCancellationTests {
                     // The control, store by store: the same read against a server it cannot reach
                     // DOES say so, so the silence above is the cancellation and not a store that
                     // never speaks.
-                    #expect(reported() != nil, "\(name) went quiet about an unreachable server")
+                    #expect(reported() != nil, "\(name) went quiet about a server that refused")
                 }
             }
         }

@@ -150,6 +150,9 @@ public struct TimelineView: View {
                     search: raised.search,
                     loadHeatmap: { store in
                         guard let client = session.api else { return }
+                        // Named before the read, so a failure that never reached the server lands
+                        // in the session's one banner instead of on this card.
+                        store.reports(to: session)
                         await store.load(using: client)
                     },
                     chose: { choice in
@@ -164,6 +167,7 @@ public struct TimelineView: View {
                     },
                     loadTags: { store in
                         guard let client = session.api else { return }
+                        store.reports(to: session)
                         await store.load(using: client)
                     },
                     runSearch: { query, text in raised.search.run(query, showing: text) },
@@ -201,6 +205,17 @@ public struct TimelineView: View {
         // Decoded once, here, because the toolbar shows it on every frame of the timeline and the
         // Settings screen shows it again — one decode, handed to both.
         .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
+        // The foreground trigger, and one of only two the re-validation has. `initial: true`
+        // because a timeline created while the app is ALREADY active never sees a change — which
+        // is every launch — and the session's single-flight absorbs the overlap with the launch
+        // check this joins.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            switch phase {
+            case .active: Task { await session.enteredForeground() }
+            case .background, .inactive: session.enteredBackground()
+            @unknown default: break
+            }
+        }
         .task {
             if timeline == nil {
                 timeline = TimelineStore(
@@ -214,6 +229,9 @@ public struct TimelineView: View {
                     }
                 )
             }
+            // A failure that never reached the server belongs to the session's one banner, not to
+            // an error card over this list (`SessionReporting`).
+            timeline?.reports(to: session)
             await load()
             // What "Default" resolves to is the account's setting, not something the app can
             // guess. It is fetched here rather than during sign-in so a slow or missing
@@ -535,13 +553,15 @@ public struct TimelineView: View {
     /// opened an empty sheet would be the only control on the screen that pretended to work.
     private func openSearch() {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        searchPresentation.open(
-            MemoSearch(
-                client: client,
-                baseURL: baseURL,
-                onUnauthorized: { [session] in await session.handle(.unauthorized) }
-            )
+        let search = MemoSearch(
+            client: client,
+            baseURL: baseURL,
+            onUnauthorized: { [session] in await session.handle(.unauthorized) }
         )
+        // The second `TimelineStore` in the app, and its failures are as much the session's as the
+        // first one's (`SessionReporting`).
+        search.reports(to: session)
+        searchPresentation.open(search)
     }
 
     /// Every way the sheet closes funnels through here.

@@ -9,11 +9,19 @@ public struct OutboxCredentials: Sendable, Equatable {
     public var serverBaseURL: URL
     public var ownerSubject: String
     public var token: String
+    /// Which incarnation of the signed-in session these were acquired under.
+    ///
+    /// The outbox has no idea what a session is, and it does not need one: this is an opaque
+    /// number it carries from the acquisition to the request, and hands back to whoever issued it
+    /// to be told whether it still stands. Zero for a provider that has no session behind it — the
+    /// share extension, which is fenced by the account licence instead.
+    public var epoch: Int
 
-    public init(serverBaseURL: URL, ownerSubject: String, token: String) {
+    public init(serverBaseURL: URL, ownerSubject: String, token: String, epoch: Int = 0) {
         self.serverBaseURL = serverBaseURL
         self.ownerSubject = ownerSubject
         self.token = token
+        self.epoch = epoch
     }
 
     public var binding: AccountBinding {
@@ -33,4 +41,16 @@ extension OutboxCredentials: CustomStringConvertible, CustomDebugStringConvertib
 public protocol OutboxCredentialsProviding: Sendable {
     /// The signed-in credential, or nil when nobody is signed in — in which case nothing drains.
     func currentCredentials() async -> OutboxCredentials?
+
+    /// Whether credentials acquired earlier still belong to the session this device is in.
+    ///
+    /// SYNCHRONOUS on purpose, and asked immediately before a request goes out. An `await` here
+    /// would be one more instant for an account switch to land in — which is the whole of what
+    /// this exists to catch, since a drain pass outlives the switch that happens during it.
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool
+}
+
+extension OutboxCredentialsProviding {
+    /// A provider with no session behind it cannot be superseded by one.
+    public func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
 }

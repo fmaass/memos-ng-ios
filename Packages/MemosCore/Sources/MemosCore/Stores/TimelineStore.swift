@@ -76,6 +76,12 @@ public final class TimelineStore {
     /// a chosen day becomes on the wire is decided by a time zone a test can name.
     private let calendar: Calendar
     private let onUnauthorized: @MainActor @Sendable () async -> Void
+    /// Where a failure that never reached the server goes instead of `lastError`, and the seam
+    /// this store reads the session's incarnation from (`SessionReporting`).
+    ///
+    /// Named by the owner rather than taken at construction, because the search screen builds one
+    /// of these inside `MemoSearch` and the timeline builds its own from a `.task`.
+    private var session: (any SessionReporting)?
 
     /// What this list is asking the server for. `.empty` is the plain timeline, and it is the
     /// default: a store nobody has filtered sends exactly what it always sent.
@@ -92,6 +98,9 @@ public final class TimelineStore {
         self.calendar = calendar
         self.onUnauthorized = onUnauthorized
     }
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
 
     /// Asks for a different list.
     ///
@@ -136,6 +145,9 @@ public final class TimelineStore {
     private var loadingLineage: Lineage?
 
     public func refresh(using client: any APIProtocol, baseURL: URL) async {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         let lineage = self.lineage
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
@@ -183,7 +195,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
                 return
             }
-            await report(error)
+            await report(error, issuedUnder: issued)
         }
     }
 
@@ -202,6 +214,9 @@ public final class TimelineStore {
     /// per change, with never more than one in flight. A refresh already running is left to
     /// finish instead: it is about to replace the list, cursor and all.
     public func loadMore(using client: any APIProtocol, baseURL: URL) async {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -222,6 +237,11 @@ public final class TimelineStore {
                 // a memo the delete removed, and its cursor walks a lineage nobody is reading.
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/memos answered for a list that has moved on")
+                    // The loop asks again — with the client this call was handed, which belongs to
+                    // the session that started it. If that session is over, asking again would
+                    // reissue a superseded credential's request under the new one's number, and
+                    // its rows would merge into a list belonging to somebody else.
+                    guard sessionStillCurrent(issued) else { return }
                     continue
                 }
                 // A cursor page can overlap the one before it when a memo moved; appending blindly
@@ -238,9 +258,10 @@ public final class TimelineStore {
                 // the page that follows the list as it stands.
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/memos failed for a list that has moved on")
+                    guard sessionStillCurrent(issued) else { return }
                     continue
                 }
-                await report(error)
+                await report(error, issuedUnder: issued)
                 return
             }
         }
@@ -279,6 +300,9 @@ public final class TimelineStore {
     ///   hazard every prepend has (`TimelineView`).
     @discardableResult
     public func loadNewer(using client: any APIProtocol, baseURL: URL) async -> String? {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         guard !isLoadingNewer, !isLoading, hasNewer else { return nil }
         isLoadingNewer = true
         defer { isLoadingNewer = false }
@@ -337,7 +361,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
                 return nil
             }
-            await report(error)
+            await report(error, issuedUnder: issued)
             return nil
         }
     }
@@ -355,13 +379,32 @@ public final class TimelineStore {
     /// moves the lineage, so the cancelled request is still the current one when its `-999` lands
     /// (MEMNG-180). `StoreFailure` recognises the cancellation itself, and it is the same
     /// recognition in every store rather than five that drift apart.
-    private func report(_ error: any Error) async {
+    private func report(_ error: any Error, issuedUnder generation: Int?) async {
+        // A server that never answered is the SESSION's to say, once, in a banner — never this
+        // store's. Saying it here as well is what painted an error card under that banner on every
+        // load, refresh and tag fetch of an offline launch, and no ordering fixes it from in here:
+        // a list's request can fail BEFORE the launch check does, so the later transition to
+        // `.unverified` has nothing to clear the card it wrote.
+        if let failure = StoreFailure.transportFailure(error) {
+            guard let generation else { return }
+            session?.noteTransportFailure(failure, issuedUnder: generation)
+            return
+        }
         guard let apiError = StoreFailure.reportable(error) else {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
         lastError = apiError.errorDescription
         if apiError == .unauthorized { await onUnauthorized() }
+    }
+
+    /// Whether the session that ISSUED an operation is still the one this device is running.
+    ///
+    /// A store with no session named to it answers yes: a preview and a suite that is about paging
+    /// have no incarnation to be wrong about.
+    private func sessionStillCurrent(_ issued: Int?) -> Bool {
+        guard let issued, let current = session?.handle?.generation else { return true }
+        return issued == current
     }
 
     // MARK: - writes
@@ -381,6 +424,9 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         do {
             let response = try await client.createMemoApiMemosPost(
                 .init(body: .json(.init(content: content, visibility: visibility?.generated)))
@@ -407,7 +453,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error)
+            await report(error, issuedUnder: issued)
             return false
         }
     }
@@ -440,6 +486,9 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         let key = editKey(
             for: MemoEditAttempt(
                 uid: uid, content: content, createdAt: createdAt, files: files
@@ -452,7 +501,7 @@ public final class TimelineStore {
             } catch {
                 // This invocation is over, and it failed: the key stays behind for the retry.
                 finishEdit(key: key, saved: false)
-                await report(error)
+                await report(error, issuedUnder: issued)
                 return false
             }
         }
@@ -591,6 +640,9 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         do {
             // Each response is switched on rather than reached through the generated throwing
             // accessors: those throw an untyped "unexpected status" error, and a 401 that does not
@@ -620,7 +672,7 @@ public final class TimelineStore {
             lastError = nil
             return true
         } catch {
-            await report(error)
+            await report(error, issuedUnder: issued)
             return false
         }
     }
@@ -629,6 +681,9 @@ public final class TimelineStore {
     /// failed and left the row on screen is recoverable, one that vanished optimistically is not.
     @discardableResult
     public func delete(uid: String, using client: any APIProtocol) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         do {
             let response = try await client.deleteMemoApiMemosUidDelete(
                 .init(path: .init(uid: uid))
@@ -648,7 +703,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error)
+            await report(error, issuedUnder: issued)
             return false
         }
     }
@@ -693,6 +748,9 @@ public final class TimelineStore {
         from memoUID: String,
         using client: any APIProtocol
     ) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         do {
             let response = try await client.deleteAttachmentApiAttachmentsUidDelete(
                 .init(path: .init(uid: uid))
@@ -713,7 +771,7 @@ public final class TimelineStore {
             lastError = nil
             return true
         } catch {
-            await report(error)
+            await report(error, issuedUnder: issued)
             return false
         }
     }
@@ -974,6 +1032,9 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
         let original = memos[position]
         let toggled = MemosCore.toggleTask(original.content, at: index)
@@ -1018,7 +1079,7 @@ public final class TimelineStore {
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
                 memos[current] = admitted(original)
             }
-            await report(error)
+            await report(error, issuedUnder: issued)
             return false
         }
     }
@@ -1029,6 +1090,9 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Taken when the request is ISSUED, so a failure that lands after the session has
+        // moved on is reported to the one that ASKED (`SessionReporting`).
+        let issued = session?.handle?.generation
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(body))
@@ -1058,7 +1122,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error)
+            await report(error, issuedUnder: issued)
             return false
         }
     }

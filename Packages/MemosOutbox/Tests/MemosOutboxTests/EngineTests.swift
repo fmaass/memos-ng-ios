@@ -124,6 +124,24 @@ struct EngineTests {
         #expect(saved.state == .uploading)
     }
 
+    /// A drain pass outlives the account switch that happens during it: the credential was
+    /// acquired under A and every request after the switch would be sent as A into B's session.
+    /// The pass is ABANDONED rather than the job held — nothing is wrong with the capture, and the
+    /// next pass acquires under whoever is signed in then.
+    @Test("a pass whose session ended sends nothing and leaves the capture queued")
+    func aSupersededPassSendsNothing() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        harness.credentials.supersedeAfterNextAcquisition()
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests.isEmpty, "not even the health probe is a request to send")
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .waiting, "the capture waits for a pass that belongs to it")
+    }
+
     @Test("an unreachable server costs one small request and never a chunk")
     func healthProbeGuardsTheDrain() async throws {
         let harness = try await Harness.make(bytes: 1000, http: .standard(health: 503))

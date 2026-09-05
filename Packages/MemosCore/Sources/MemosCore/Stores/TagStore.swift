@@ -27,11 +27,23 @@ public final class TagStore {
     /// put a deleted tag back.
     private var attempt = 0
 
+    /// Where a failure that never reached the server goes instead of `lastError`.
+    ///
+    /// Named by the owner rather than taken at construction, because this store is a view's
+    /// `@State` initial value and there is no environment to read when that is built.
+    private var session: (any SessionReporting)?
+
     public init() {}
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
 
     public func load(using client: any APIProtocol) async {
         attempt += 1
         let mine = attempt
+        // Taken when the request is ISSUED. A failure reported under the session running when it
+        // LANDS could be a failure of somebody else's session (`SessionReporting`).
+        let issued = session?.handle?.generation
         isLoading = true
         do {
             let loaded: [MemoTag]
@@ -58,7 +70,13 @@ public final class TagStore {
             // A cancellation is not a read that failed. This store's `.task` is torn down every
             // time the sheet goes away, and the `-999` that unwinds out of it is this app's own
             // doing — `StoreFailure` is where that is decided, once, for every store (MEMNG-180).
-            if let apiError = StoreFailure.reportable(error) {
+            //
+            // Neither is a server that never answered. That one belongs to the session, which says
+            // it once in a banner; saying it here as well is a second copy of the same sentence
+            // over a row nobody can do anything about.
+            if let failure = StoreFailure.transportFailure(error) {
+                if let issued { session?.noteTransportFailure(failure, issuedUnder: issued) }
+            } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }
         }

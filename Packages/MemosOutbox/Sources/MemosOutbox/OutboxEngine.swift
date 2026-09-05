@@ -134,6 +134,11 @@ public actor OutboxEngine: OutboxChunkHandling {
             await onChange()
             return
         }
+        // The probe is itself a request, and the session that these credentials were acquired
+        // under can have ended since — an account switch is two writes and this pass runs across
+        // both. The pass is ABANDONED rather than the jobs held: nothing is wrong with them, and
+        // the next pass acquires under whoever is signed in then.
+        guard self.credentials.isCurrent(credentials) else { return }
         guard await isReachable(credentials) else {
             await onChange()
             return
@@ -154,6 +159,10 @@ public actor OutboxEngine: OutboxChunkHandling {
     private func advance(_ job: UploadJob, credentials: OutboxCredentials) async {
         var current = job
         for _ in 0..<Self.maxStepsPerPass {
+            // Asked again for every step, beside `permitsNetwork` and for the same reason: the
+            // only honest moment is the moment before a request would go out, and each of the
+            // three actions below produces one.
+            guard self.credentials.isCurrent(credentials) else { return }
             switch OutboxPlanner.nextAction(
                 for: current, credentials: credentials, now: clock()
             ) {
@@ -428,8 +437,10 @@ public actor OutboxEngine: OutboxChunkHandling {
         await onChange()
         guard persisted else { return }
         // Nobody is signed in yet (a cold background wake, before the session is restored). What
-        // the server said is on disk; the next drain carries on from there.
-        guard let credentials else { return }
+        // the server said is on disk; the next drain carries on from there. The same is true of a
+        // session that ENDED while the chunk was in flight: the answer is recorded, and the next
+        // pass carries on under whoever is signed in then.
+        guard let credentials, self.credentials.isCurrent(credentials) else { return }
         await advance(next, credentials: credentials)
         await onChange()
     }
