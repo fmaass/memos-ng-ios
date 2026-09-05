@@ -608,7 +608,7 @@ if [ -e "$target" ]; then
   fi
 fi
 echo "GATE_REAP data volume before:"
-df -h "$gate_root" || exit 2
+df -h "$gate_root" | sed 's/^/GATE_REAP /' || exit 2
 if [ "$origin_fetched" -eq 1 ]; then
   survivors_file="$(mktemp "${TMPDIR:-/tmp}/gate-survivors-XXXXXX")" || exit 2
   trap 'rm -f "$survivors_file"' EXIT
@@ -621,7 +621,7 @@ else
   echo "GATE_REAP skipped: $reap_skip_reason"
 fi
 echo "GATE_REAP data volume after:"
-df -h "$gate_root" || exit 2
+df -h "$gate_root" | sed 's/^/GATE_REAP /' || exit 2
 mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
 # The lock is a directory, because mkdir is the one atomic "claim it or find it claimed" this
 # host has in every shell it runs: /bin/bash here is 3.2 and has no flock. It is taken now,
@@ -647,6 +647,9 @@ PRE_EOF
 )"
 preflight_rc=$?
 printf '%s\n' "$preflight_out" | tee -a "$log" >/dev/null
+while IFS= read -r preflight_line; do
+  case "$preflight_line" in GATE_REAP*) say "$preflight_line" ;; esac
+done <<< "$preflight_out"
 if [ "$preflight_rc" -ne 0 ]; then
   printf '%s\n' "$preflight_out" >&2
   exit 2
@@ -850,6 +853,8 @@ say "--- step: remote ---"
   printf "GATE_DEVICE_TYPE='%s'\n" "$(esc "$DEVICE_TYPE")"
   printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
+  printf "GATE_BRANCH='%s'\n" "$(esc "$branch")"
+  cat "$repo_root/scripts/reap-gate-lanes.sh"
   cat <<'REMOTE_EOF'
 set -uo pipefail
 
@@ -899,6 +904,8 @@ DERIVED="$GATE_WORK/DerivedData"
 # far more often than that. Locks are NEVER sweep targets — they are owned by the runs that hold
 # them and clean themselves up through the trap; deleting one from the side would strip a live
 # run of its serialization.
+HYGIENE_GATE_ROOT="${GATE_TARGET%/"$GATE_BRANCH"}"
+HYGIENE_WORK_ROOT="${GATE_WORK%/"$GATE_BRANCH"}"
 touch "$GATE_TARGET" "$GATE_WORK" 2>/dev/null
 for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
   find "$hygiene_root" -mindepth 2 -maxdepth 2 -type d -mtime +3 \
@@ -907,15 +914,15 @@ for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
         case "$stale" in
           *.lock*) continue ;;
         esac
+        gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$stale" || continue
         rm -rf "$stale" && echo "GATE_HYGIENE swept stale tree $stale"
       done
 done
 # Age alone is not enough on a busy day: five concurrent branches at ~3G each filled the host
 # to ENOSPC while every tree was hours old. Under PRESSURE the age rule yields — when free
 # space is below 15G, the oldest-stamped sibling trees go, newest-stamped last, until 20G is
-# free or nothing sweepable remains. The current run's trees and every lock stay untouchable;
-# a still-active sibling loses only an incremental cache it will rebuild, which is the right
-# trade against every gate on the host dying on a full disk.
+# free or nothing sweepable remains. Locked siblings may be waiting or building, so their
+# trees must survive even under pressure; an unlocked sibling can rebuild its cache next run.
 free_kb() { df -k / | awk 'NR==2 {print $4}'; }
 # The 2026-09-05 mid-run ENOSPC needs more headroom for DerivedData and warnings rebuilds.
 if [ "$(free_kb)" -lt 15728640 ]; then
@@ -927,6 +934,7 @@ if [ "$(free_kb)" -lt 15728640 ]; then
         "$GATE_TARGET"|"$GATE_WORK"|*.lock*) continue ;;
       esac
       [ "$(free_kb)" -ge 20971520 ] && break
+      gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$victim" || continue
       rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
     done
   done

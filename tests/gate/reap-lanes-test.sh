@@ -88,6 +88,23 @@ if [ "$fails" -eq 0 ]; then
   done < "$tmp/reap.log"
   [ "$logged" -eq 4 ] || { echo "FAIL expected four sized directory logs, got $logged"; fails=$((fails + 1)); }
 fi
+# Both sweeps use this predicate after selecting a victim; stamps cannot prove a run is dead.
+mkdir -p "$gate/fix/sweep-stale" "$work/fix/sweep-stale"
+touch -t 202001010000 "$gate/fix/sweep-stale" "$work/fix/sweep-stale" || exit 1
+for root in "$gate" "$work"; do
+  for branch in fix/old-lock fix/sweep-stale; do
+    aged="$(find "$root/$branch" -maxdepth 0 -type d -mtime +3 -print)" || exit 1
+    [ -n "$aged" ] || { echo "FAIL sweep fixture is not older than three days"; fails=$((fails + 1)); }
+  done
+  if gate_lane_is_unlocked "$gate" "$work" "$root/fix/old-lock"; then
+    echo "FAIL hygiene predicate admitted a locked stale lane: $root/fix/old-lock"
+    fails=$((fails + 1))
+  fi
+  if ! gate_lane_is_unlocked "$gate" "$work" "$root/fix/sweep-stale"; then
+    echo "FAIL hygiene predicate rejected an unlocked stale lane: $root/fix/sweep-stale"
+    fails=$((fails + 1))
+  fi
+done
 if [ "$fails" -ne 0 ]; then
   echo "REAP-LANES-TEST FAIL: $fails assertion(s) failed"
   exit 1
@@ -96,4 +113,5 @@ echo "ok   removed both unlocked, absent branches older than 24 hours, including
 echo "ok   preserved fresh, old, and ownerless locks and their lanes"
 echo "ok   preserved local-only, origin, current, and younger-than-24-hour lanes"
 echo "ok   logged all four removed directories with sizes"
+echo "ok   shared hygiene predicate protects old locked gate/work lanes and admits unlocked ones"
 echo "REAP-LANES-TEST ok"
