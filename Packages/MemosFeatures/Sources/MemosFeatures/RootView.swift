@@ -82,6 +82,14 @@ struct UnreachableView: View {
                 systemImage: "wifi.exclamationmark",
                 description: Text(message)
             )
+            // One launch failure has a switch behind it, and it is the one a phone on a home LAN
+            // trips over: the app cannot ask for the Local Network permission a second time, so
+            // the only way forward is the Settings page it lives on. Retrying is what every other
+            // failure here needs, and it stays the prominent button below.
+            if restoreErrorAction(for: session.restoreFailure) == .openSettings {
+                Button("Open Settings", action: openSettings)
+                    .font(.footnote.weight(.semibold))
+            }
             Button("Try again") { Task { await session.restore() } }
                 .buttonStyle(.borderedProminent)
                 .tint(DesignTokens.accent)
@@ -106,5 +114,12 @@ struct UnreachableView: View {
                     + " revoked from the web app."
             )
         }
+    }
+
+    /// The one place UIKit is touched for this: the decision is a pure function, and what is left
+    /// here is the door it names.
+    private func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 }

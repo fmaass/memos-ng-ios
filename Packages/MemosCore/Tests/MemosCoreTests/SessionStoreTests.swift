@@ -2,6 +2,7 @@ import Foundation
 import MemosAPI
 @testable import MemosCore
 import MemosOutbox
+import OpenAPIRuntime
 import Testing
 
 // The transport is handed the contract's own operationId, not the generated Swift method name.
@@ -305,6 +306,332 @@ extension SessionStoreTests {
             return
         }
         #expect(!credentials.isEmpty, "an unconfirmed token is kept for the retry")
+    }
+}
+
+/// The token and the address the launch cases restore from, so a leak has something recognisable
+/// to be found by.
+private let storedToken = "memos_pat_stored_secret"
+private let storedHost = "memos.example.invalid"
+private let retryHint = "Join your home wifi (or turn on NetBird) and tap Try again."
+private let streamErrorCodeKey = "_kCFStreamErrorCodeKey"
+/// ENETDOWN at connect: what iOS fails the first connection to a LAN host with while the Local
+/// Network permission sheet is up.
+private let networkIsDown = 50
+
+/// One launch failure: what the transport threw, the sentence it has to become, and the value the
+/// screen decides its Settings button from.
+struct LaunchFailureCase: Sendable, CustomTestStringConvertible {
+    let name: String
+    let thrown: URLError
+    let sentence: String
+    let failure: SessionRestoreFailure
+
+    var testDescription: String { name }
+}
+
+let launchFailureCases = [
+    LaunchFailureCase(
+        name: "a DNS failure",
+        thrown: URLError(.cannotFindHost),
+        sentence: "Can't reach \(storedHost) (NSURLErrorDomain -1003). \(retryHint)",
+        failure: .unreachable(host: storedHost, detail: "NSURLErrorDomain -1003")
+    ),
+    LaunchFailureCase(
+        name: "a refused connection",
+        thrown: URLError(.cannotConnectToHost),
+        sentence: "Can't reach \(storedHost) (NSURLErrorDomain -1004). \(retryHint)",
+        failure: .unreachable(host: storedHost, detail: "NSURLErrorDomain -1004")
+    ),
+    LaunchFailureCase(
+        name: "a timeout",
+        thrown: URLError(.timedOut),
+        sentence: "Can't reach \(storedHost) (NSURLErrorDomain -1001). \(retryHint)",
+        failure: .unreachable(host: storedHost, detail: "NSURLErrorDomain -1001")
+    ),
+    LaunchFailureCase(
+        name: "a TLS failure",
+        thrown: URLError(.secureConnectionFailed),
+        sentence: "Can't reach \(storedHost) (NSURLErrorDomain -1200). \(retryHint)",
+        failure: .unreachable(host: storedHost, detail: "NSURLErrorDomain -1200")
+    ),
+    LaunchFailureCase(
+        name: "an offline phone",
+        thrown: URLError(.notConnectedToInternet),
+        sentence: "Can't reach \(storedHost). This phone looks offline. \(retryHint)",
+        failure: .offline(host: storedHost)
+    ),
+    LaunchFailureCase(
+        name: "the Local Network denial",
+        thrown: URLError(
+            .notConnectedToInternet,
+            userInfo: [streamErrorCodeKey: networkIsDown]
+        ),
+        sentence: "This phone is not letting the app reach your home network. Allow Local "
+            + "Network for memosng in Settings, then tap Try again.",
+        failure: .localNetworkDenied
+    ),
+]
+
+/// What a launch that could not confirm its stored credential puts on screen.
+///
+/// Every case here runs through the REAL generated client over `StubTransport`, so what the store
+/// classifies is the `ClientError` the client actually builds — the one whose description is the
+/// operation, its `operationInput` and the request that presented the bearer token. Substituting
+/// the store, or the client, would leave that error out of the test and prove nothing about the
+/// defect these cases exist for.
+@MainActor
+@Suite("The launch failure's sentence")
+struct SessionRestoreClassificationTests {
+    private func restored(
+        handler: @escaping StubTransport.Handler
+    ) async -> (session: SessionStore, credentials: InMemoryCredentials) {
+        let credentials = InMemoryCredentials()
+        try? credentials.set(storedToken, for: SessionStore.tokenAccount)
+        try? credentials.set("https://\(storedHost)", for: SessionStore.serverAccount)
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in Stub.client(token: token, handler: handler) }
+        )
+        await session.restore()
+        return (session, credentials)
+    }
+
+    private func sentence(of session: SessionStore) -> String {
+        guard case .unreachable(let message) = session.state else {
+            Issue.record("expected .unreachable, got \(session.state)")
+            return ""
+        }
+        return message
+    }
+
+    @Test("each transport failure becomes its own sentence", arguments: launchFailureCases)
+    func transportFailureBecomesASentence(_ scenario: LaunchFailureCase) async {
+        let (session, credentials) = await restored { _, _, _ in throw scenario.thrown }
+
+        #expect(sentence(of: session) == scenario.sentence)
+        #expect(session.restoreFailure == scenario.failure)
+        #expect(!credentials.isEmpty, "an unconfirmed token is kept for the retry")
+    }
+
+    /// A preserved-behaviour regression pin, not a red-first case: `main` already produced this
+    /// sentence for a 5xx, because `whoami` throws an `APIError` there and the pre-fix catch used
+    /// `APIError.errorDescription` too. What is new is the VALUE beside it, which is what the
+    /// screen decides its affordance from, and that is what a mutation of the catch site removes.
+    @Test("a server that answered keeps its own sentence")
+    func serverErrorKeepsItsSentence() async {
+        let (session, credentials) = await restored { _, _, _ in
+            Stub.empty(.internalServerError)
+        }
+
+        #expect(sentence(of: session) == "The server returned an error (HTTP 500).")
+        #expect(session.restoreFailure == .server(.server(status: 500)))
+        #expect(!credentials.isEmpty)
+    }
+
+    @Test("a body the client cannot decode reads as the host being unreachable")
+    func decodeFailureNamesTheHost() async {
+        let (session, _) = await restored { _, _, _ in Stub.json(#"{"nope":1}"#) }
+
+        let message = sentence(of: session)
+        #expect(message.hasPrefix("Can't reach \(storedHost) ("))
+        #expect(message.hasSuffix(retryHint))
+        guard let failure = session.restoreFailure,
+            case .unreachable(let host, _) = failure
+        else {
+            Issue.record("expected .unreachable, got \(String(describing: session.restoreFailure))")
+            return
+        }
+        #expect(host == storedHost)
+    }
+
+    @Test("nothing the launch shows or logs carries the request or the token")
+    func nothingProducedCarriesTheRequest() async {
+        let leaks = [
+            "operationInput", "requestBody", "Client encountered an error invoking",
+            "whoami_api_auth_user_get", storedToken,
+        ]
+        // A real `ClientError`, built the way swift-openapi-runtime builds one, with every field
+        // it prints populated.
+        let raw = ClientError(
+            operationID: "whoami_api_auth_user_get",
+            operationInput: storedToken,
+            requestBody: HTTPBody(storedToken),
+            baseURL: URL(string: "https://\(storedHost)")!,
+            causeDescription: "Transport threw an error.",
+            underlyingError: URLError(.timedOut)
+        )
+        // Positive control: between the two texts that type produces, every marker below is
+        // present — so an assertion that finds none of them downstream is looking for something
+        // this test could actually see. `description` spells out the input and the body;
+        // `localizedDescription` is the "Client encountered an error invoking …" line that reached
+        // the owner's screen (runtime 1.12.0; the same phrase is quoted at StoreFailure.swift:12).
+        let control = String(describing: raw) + " " + raw.localizedDescription
+        for marker in leaks {
+            #expect(control.contains(marker), "the control error must carry \(marker)")
+        }
+
+        let (session, _) = await restored { _, _, _ in throw URLError(.timedOut) }
+
+        // What the screen gets, and what the log gets, are the two things that leave the store.
+        let produced = [sentence(of: session), NativeLoginTransportFailure.diagnostic(for: raw)]
+        // Second control: both were produced, are not empty, and were read.
+        #expect(produced[0].contains(storedHost))
+        #expect(produced[1] == "other (NSURLErrorDomain -1001)")
+        for text in produced {
+            #expect(!text.isEmpty)
+            for marker in leaks {
+                #expect(!text.contains(marker), "\(text) carries \(marker)")
+            }
+        }
+    }
+}
+
+/// One pasted-token sign-in failure: what the transport threw and the sentence the sign-in screen
+/// has to show for it.
+struct SignInFailureCase: Sendable, CustomTestStringConvertible {
+    let name: String
+    let thrown: URLError
+    let sentence: String
+    let failure: NativeLoginError
+
+    var testDescription: String { name }
+}
+
+private let signInDetail = "The sign-in could not reach the server: NSURLErrorDomain "
+private let signInFailureCases = [
+    SignInFailureCase(
+        name: "a DNS failure",
+        thrown: URLError(.cannotFindHost),
+        sentence: "\(signInDetail)-1003",
+        failure: .transport(.other("NSURLErrorDomain -1003"))
+    ),
+    SignInFailureCase(
+        name: "a refused connection",
+        thrown: URLError(.cannotConnectToHost),
+        sentence: "\(signInDetail)-1004",
+        failure: .transport(.other("NSURLErrorDomain -1004"))
+    ),
+    SignInFailureCase(
+        name: "a timeout",
+        thrown: URLError(.timedOut),
+        sentence: "\(signInDetail)-1001",
+        failure: .transport(.other("NSURLErrorDomain -1001"))
+    ),
+    SignInFailureCase(
+        name: "a TLS failure",
+        thrown: URLError(.secureConnectionFailed),
+        sentence: "\(signInDetail)-1200",
+        failure: .transport(.other("NSURLErrorDomain -1200"))
+    ),
+    SignInFailureCase(
+        name: "an offline phone",
+        thrown: URLError(.notConnectedToInternet),
+        sentence: "This phone looks offline. Join your home wifi (or turn on NetBird) and try "
+            + "again.",
+        failure: .transport(.offline)
+    ),
+    SignInFailureCase(
+        name: "the Local Network denial",
+        thrown: URLError(
+            .notConnectedToInternet,
+            userInfo: [streamErrorCodeKey: networkIsDown]
+        ),
+        sentence: "This phone is not letting the app reach your home network. Allow Local Network "
+            + "for memosng in Settings, then tap Sign in again.",
+        failure: .transport(.localNetworkDenied)
+    ),
+]
+
+/// What a PASTED-TOKEN sign-in says when the check it runs first does not arrive.
+///
+/// The same defect as the launch screen's, in the same file: this catch stored the `ClientError`'s
+/// own text. It is answered with the classification the NATIVE sign-in leg already applies, so the
+/// two ways into this app cannot say different things about one failure — and so the Local Network
+/// denial keeps the Settings button `SignInView` already draws from `lastFailure`.
+@MainActor
+@Suite("The pasted-token sign-in's sentence")
+struct SignInFailureClassificationTests {
+    private func attempted(
+        handler: @escaping StubTransport.Handler
+    ) async -> (session: SessionStore, credentials: InMemoryCredentials) {
+        let credentials = InMemoryCredentials()
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in Stub.client(token: token, handler: handler) }
+        )
+        await session.signIn(serverAddress: storedHost, token: storedToken)
+        return (session, credentials)
+    }
+
+    @Test("each transport failure becomes its own sentence", arguments: signInFailureCases)
+    func transportFailureBecomesASentence(_ scenario: SignInFailureCase) async {
+        let (session, credentials) = await attempted { _, _, _ in throw scenario.thrown }
+
+        #expect(session.lastError == scenario.sentence)
+        #expect(session.lastFailure == scenario.failure)
+        #expect(session.state == .signedOut)
+        #expect(credentials.isEmpty, "a token that was never confirmed is never stored")
+    }
+
+    /// A preserved-behaviour regression pin, not a red-first case: `main` already produced this
+    /// sentence for a 5xx, because `whoami` throws an `APIError` and the pre-fix catch read
+    /// `APIError.errorDescription`. What is new is the value beside it.
+    @Test("a server that answered keeps its own sentence")
+    func serverErrorKeepsItsSentence() async {
+        let (session, _) = await attempted { _, _, _ in Stub.empty(.internalServerError) }
+
+        #expect(session.lastError == "The server returned an error (HTTP 500).")
+        #expect(session.lastFailure == .api(.server(status: 500)))
+    }
+
+    @Test("a body the client cannot decode is reported as a transport failure, not as its text")
+    func decodeFailureIsNamedByDomainAndCode() async {
+        let (session, _) = await attempted { _, _, _ in Stub.json(#"{"nope":1}"#) }
+
+        guard case .transport(.other(let detail))? = session.lastFailure else {
+            Issue.record("expected .transport(.other), got \(session.lastError ?? "nothing")")
+            return
+        }
+        #expect(session.lastError == "The sign-in could not reach the server: \(detail)")
+        #expect(!detail.contains("nope"))
+    }
+
+    @Test("nothing the sign-in shows or logs carries the request or the token")
+    func nothingProducedCarriesTheRequest() async {
+        let leaks = [
+            "operationInput", "requestBody", "Client encountered an error invoking",
+            "whoami_api_auth_user_get", storedToken,
+        ]
+        let raw = ClientError(
+            operationID: "whoami_api_auth_user_get",
+            operationInput: storedToken,
+            requestBody: HTTPBody(storedToken),
+            baseURL: URL(string: "https://\(storedHost)")!,
+            causeDescription: "Transport threw an error.",
+            underlyingError: URLError(.timedOut)
+        )
+        // Positive control: between them, the two texts a real `ClientError` produces carry every
+        // marker below — so finding none of them downstream is a fact, not an empty grep.
+        let control = String(describing: raw) + " " + raw.localizedDescription
+        for marker in leaks {
+            #expect(control.contains(marker), "the control error must carry \(marker)")
+        }
+
+        let (session, _) = await attempted { _, _, _ in throw URLError(.timedOut) }
+
+        let produced = [
+            session.lastError ?? "",
+            NativeLoginTransportFailure.diagnostic(for: raw),
+        ]
+        #expect(produced[0].contains("NSURLErrorDomain -1001"))
+        #expect(produced[1] == "other (NSURLErrorDomain -1001)")
+        for text in produced {
+            #expect(!text.isEmpty)
+            for marker in leaks {
+                #expect(!text.contains(marker), "\(text) carries \(marker)")
+            }
+        }
     }
 }
 
