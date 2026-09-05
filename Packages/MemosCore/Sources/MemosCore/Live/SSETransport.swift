@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 
 /// One open event stream: what the server answered, and the bytes it is sending.
 ///

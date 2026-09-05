@@ -44,7 +44,10 @@ private struct FailingDownloads: MediaDownloadTransport {
     struct Offline: Error {}
 
     func download(_ request: URLRequest, under authority: SendAuthority) async throws
-        -> (URL, URLResponse) { throw Offline() }
+        -> (URL, URLResponse)
+    {
+        throw Offline()
+    }
 }
 
 /// A download that answers with a file that is not there.
