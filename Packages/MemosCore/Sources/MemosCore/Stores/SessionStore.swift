@@ -78,6 +78,13 @@ public final class SessionStore {
     /// switch behind it — and matching on a sentence to find out which failure it is would make
     /// the wording of an error message load-bearing.
     public private(set) var lastFailure: NativeLoginError?
+    /// Why `restore()` parked, as a VALUE beside the sentence `state` carries — `nil` unless the
+    /// state is `.unreachable`.
+    ///
+    /// Same reason `lastFailure` exists one line up: the launch screen can act on exactly one of
+    /// these failures, the Local Network denial, and finding it by matching on the sentence would
+    /// make the wording of an error message load-bearing.
+    public private(set) var restoreFailure: SessionRestoreFailure?
     public private(set) var configuration: ServerConfiguration?
     /// Who sees a memo when nobody says otherwise — the account's own setting, not a guess.
     ///
@@ -145,6 +152,13 @@ public final class SessionStore {
     /// The wait between the exchange's two attempts. Injected so a test can take it away: a
     /// suite that really slept would pay 1.5 s per retry case for nothing.
     private let sleeper: @Sendable (Duration) async throws -> Void
+    /// Where a diagnostic line goes, injected the same way the sleeper is.
+    ///
+    /// It exists so the log BOUNDARY can be watched rather than re-derived. A guardrail that
+    /// re-computes what the store ought to have written proves only that the test agrees with
+    /// itself: a line that interpolated the error's own text here would leave it green, and the
+    /// error's own text is precisely what may not be written.
+    private let diagnostics: @Sendable (String) -> Void
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
     // isolation. They are immutable strings, so there is nothing here for the main actor to guard.
@@ -163,13 +177,19 @@ public final class SessionStore {
             try await Task.sleep(for: $0)
         },
         account: (any OutboxAccountPublishing)? = nil,
-        identity: MediaIdentity = .shared
+        identity: MediaIdentity = .shared,
+        // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
+        // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
+        // and a named default would have to be public to be referenced from one.
+        diagnostics: (@Sendable (String) -> Void)? = nil
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
         self.sleeper = sleeper
         self.account = account
         self.identity = identity
+        self.diagnostics =
+            diagnostics ?? { line in MemosLog.session.error("\(line, privacy: .public)") }
     }
 
     /// The client every feature talks through, or `nil` while signed out.
@@ -316,6 +336,14 @@ public final class SessionStore {
         }
     }
 
+    /// Writes down that the credential check did not arrive — the classification, the domain and
+    /// the code, and NOTHING else. Both legs that ask `whoami` about a credential write it, so
+    /// there is one line to read and one rule to break rather than two.
+    private func logWhoamiFailure(_ error: any Error) {
+        let diagnostic = NativeLoginTransportFailure.diagnostic(for: error)
+        diagnostics("GET /api/auth/user did not arrive: \(diagnostic)")
+    }
+
     /// Writes down that the exchange did not arrive — the classification, the domain and the
     /// code, and NOTHING else. The error's own description carries the request body.
     private func log(failure error: any Error) {
@@ -366,11 +394,21 @@ public final class SessionStore {
                 )
                 lastError = Self.storageWarning
             }
+        } catch let error as APIError {
+            // The server answered and refused. Its sentence is built from a status code and
+            // nothing the request carried.
+            failSignIn(.api(error))
         } catch {
-            state = .signedOut
-            self.client = nil
-            self.credential = nil
-            lastError = (error as? APIError)?.errorDescription ?? error.localizedDescription
+            // The same classification the NATIVE leg already applies to its own transport failures
+            // (`signInNatively`'s generic catch), for the same reason and against the same rule:
+            // what is caught here is the generated client's `ClientError`, whose `description`
+            // spells out the operation, the `operationInput`, the request and the `requestBody`,
+            // and whose `localizedDescription` is the "Client encountered an error invoking …"
+            // line. Neither may be displayed, stored or logged. This leg used to store the second
+            // one, which is how the two sign-in paths came to say different things about the same
+            // failure.
+            logWhoamiFailure(error)
+            failSignIn(.transport(NativeLoginTransportFailure.classify(error)))
         }
     }
 
@@ -419,8 +457,12 @@ public final class SessionStore {
 
         state = .signingIn
         lastError = nil
+        restoreFailure = nil
         let credential = PresentedCredential(storedToken)
         let client = makeClient(configuration, credential)
+        // Read before the request, because after it the only thing in hand is an error whose text
+        // may not be read.
+        let host = configuration.baseURL.host() ?? configuration.baseURL.absoluteString
         do {
             let user = try await Self.whoami(client)
             adopt(
@@ -432,14 +474,35 @@ public final class SessionStore {
         } catch let error as APIError where error == .unauthorized {
             await wipeCredential()
             lastError = error.errorDescription
+        } catch let error as APIError {
+            // The server answered and refused. Its own sentence is built from a status code and
+            // nothing the request carried, so it is the better one.
+            park(.server(error))
         } catch {
             // The token was neither confirmed nor rejected. Park, keep, retry — see `unreachable`.
-            self.client = nil
-            self.credential = nil
-            state = .unreachable(
-                (error as? APIError)?.errorDescription ?? error.localizedDescription
-            )
+            //
+            // What arrives here is the generated client's `ClientError`. Its `description` spells
+            // out the operation, the `operationInput`, the request and the `requestBody`, and its
+            // `localizedDescription` is the "Client encountered an error invoking …" line the
+            // owner read off a launch screen. Neither may be displayed, stored or logged, so
+            // nothing here reads either: the error is classified into a value, the screen gets
+            // that sentence, and the log gets the domain and the code.
+            logWhoamiFailure(error)
+            park(SessionRestoreFailure(NativeLoginTransportFailure.classify(error), host: host))
         }
+    }
+
+    /// Parks the session on a classified failure: the credential is kept, the client is not.
+    ///
+    /// The sentence the state carries and the value behind it are assigned together, in one hop,
+    /// so no screen can ever read one against the other one's failure — the affordance a denial
+    /// earns is decided from the value, and a value that disagreed with the sentence beside it
+    /// would offer a Settings button over somebody else's timeout.
+    private func park(_ failure: SessionRestoreFailure) {
+        client = nil
+        credential = nil
+        restoreFailure = failure
+        state = .unreachable(failure.message)
     }
 
     // MARK: - signing out
@@ -675,6 +738,8 @@ public final class SessionStore {
         deviceTokenNotice = nil
         sessionGeneration += 1
         identity.rotate()
+        // Whatever the last launch could not confirm, it was about a credential that is now gone.
+        restoreFailure = nil
         state = .signedOut
     }
 

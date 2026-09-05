@@ -143,4 +143,33 @@ struct NativeLoginTransportFailureTests {
             }
         }
     }
+
+    /// The launch leg writes the same diagnostic about `GET /api/auth/user`, and that request
+    /// presents the stored personal access token rather than a one-shot handoff code. The host is
+    /// checked too: an address is the one thing a log line here could plausibly acquire, and the
+    /// screen is where it belongs.
+    @Test("the diagnostic names neither the server it was talking to nor the token it presented")
+    func diagnosticCarriesNeitherHostNorToken() {
+        let token = "memos_pat_stored_secret"
+        let host = "memos.example.invalid"
+        let raw = ClientError(
+            operationID: "whoami_api_auth_user_get",
+            operationInput: "\(host) \(token)",
+            causeDescription: "Transport threw an error.",
+            underlyingError: URLError(.timedOut)
+        )
+        // Positive control: the error itself carries both, so their absence below is a fact about
+        // the diagnostic and not about the fixture.
+        let rawText = String(describing: raw)
+        #expect(rawText.contains(host))
+        #expect(rawText.contains(token))
+
+        let text = NativeLoginTransportFailure.diagnostic(for: raw)
+        #expect(text == "other (NSURLErrorDomain -1001)")
+        #expect(!text.contains(host))
+        #expect(!text.contains(token))
+        #expect(!text.contains("Client encountered an error invoking"))
+        #expect(!text.contains("operationInput"))
+        #expect(!text.contains("requestBody"))
+    }
 }

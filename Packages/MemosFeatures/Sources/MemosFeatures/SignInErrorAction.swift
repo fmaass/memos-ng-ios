@@ -19,3 +19,12 @@ enum SignInErrorAction: Equatable {
 func signInErrorAction(for failure: NativeLoginError?) -> SignInErrorAction {
     failure == .transport(.localNetworkDenied) ? .openSettings : .nothing
 }
+
+/// The same decision for the launch screen, which parks on a different failure type.
+///
+/// A sibling rather than an overload of the one above: `nil` is a real input on both screens, and
+/// two functions of the same name taking two optionals would make `signInErrorAction(for: nil)`
+/// ambiguous at every call site that has no other way to say which flow it means.
+func restoreErrorAction(for failure: SessionRestoreFailure?) -> SignInErrorAction {
+    failure == .localNetworkDenied ? .openSettings : .nothing
+}
