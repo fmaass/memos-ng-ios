@@ -139,7 +139,7 @@ struct OfflineSessionTests {
         account: SpyAccountStore? = nil,
         identity: MediaIdentity = MediaIdentity(),
         sleeper: RetryLadderSleeper = RetryLadderSleeper(),
-        onVerified: (@MainActor @Sendable () async -> Void)? = nil,
+        onVerified: (@MainActor @Sendable () -> Void)? = nil,
         handler: @escaping StubTransport.Handler
     ) -> SessionStore {
         SessionStore(
@@ -363,6 +363,7 @@ struct OfflineSessionTests {
             guard answering.get() else { throw offline() }
             throw CredentialSuperseded()
         }
+        await session.enteredForeground()
 
         await session.restore()
         let before = calls.count
@@ -389,6 +390,7 @@ struct OfflineSessionTests {
                 guard answering.get() else { throw offline() }
                 return Stub.empty(.init(code: status))
             }
+            await session.enteredForeground()
 
             await session.restore()
             answering.set(true)
@@ -433,6 +435,7 @@ struct OfflineSessionTests {
             if calls.count == 1 { throw CancellationError() }
             return Stub.json(Stub.user)
         }
+        await session.enteredForeground()
 
         await session.restore()
         await settle(until: { session.verification == .verified })
@@ -476,6 +479,7 @@ struct OfflineSessionTests {
             file: boundFile(),
             sleeper: sleeper
         ) { _, _, _ in throw offline() }
+        await session.enteredForeground()
 
         await session.restore()
         // The ladder runs itself: each failed retry schedules the next, and the sleeper stops it.
@@ -500,11 +504,31 @@ struct OfflineSessionTests {
             file: boundFile(),
             sleeper: sleeper
         ) { _, _, _ in throw offline() }
+        await session.enteredForeground()
 
         session.enteredBackground()
         await session.restore()
 
         #expect(sleeper.recorded.isEmpty, "a phone in a pocket has nobody to show an answer to")
+    }
+
+    /// B6. A process the system woke to finish an upload has no scene at all. Nothing here has
+    /// ever reported itself active, so nothing may schedule a ladder against a window that does
+    /// not exist — the default has to be "no scene", not "in front of somebody".
+    @Test("a headless launch schedules no retries at all")
+    func aHeadlessLaunchSchedulesNothing() async {
+        let sleeper = RetryLadderSleeper(stoppingAfter: 4)
+        let session = makeSession(
+            credentials: credentials(),
+            file: boundFile(),
+            sleeper: sleeper
+        ) { _, _, _ in throw offline() }
+
+        await session.restore()
+        await settle(until: { !sleeper.recorded.isEmpty }, turns: 40)
+
+        #expect(session.state.user != nil, "the launch still opened the app for the outbox")
+        #expect(sleeper.recorded.isEmpty, "and asked for no ladder behind a window nobody has")
     }
 
     // MARK: - the file's own rules
@@ -679,6 +703,44 @@ struct OfflineSessionTests {
         #expect(account.published?.ownerSubject == "fabian")
         #expect(file.stored != nil)
     }
+
+    /// B5. The renewal moves the token while the LAUNCH CHECK is in the air. The 200 that lands
+    /// names the PREDECESSOR, and writing its fingerprint would name a token the server destroyed
+    /// in the same statement that minted the one this device now holds — so the next launch would
+    /// decline to admit a device that did everything right.
+    @Test("a check answered for a replaced credential does not rewrite the fingerprint")
+    func aStaleSuccessKeepsTheSuccessorsFingerprint() async throws {
+        let vault = FlakyCredentials()
+        try await vault.set(storedToken, for: SessionStore.tokenAccount)
+        try await vault.set(storedAddress, for: SessionStore.serverAccount)
+        let file = boundFile()
+        let box = LockedValue<SessionStore?>(nil)
+        let renewing = LockedValue<Bool>(true)
+        let session = makeSession(credentials: vault, file: file) { _, _, operation in
+            switch operation {
+            case renewOperation: return Stub.json(Stub.exchange(token: "pat-successor"))
+            case tokenRowOperation: return Stub.json(Stub.nativeToken(name: "iPhone"))
+            default:
+                // The rotation happens WHILE the launch check is on the wire, so the 200 below is
+                // an answer about a token that no longer exists by the time it lands.
+                if renewing.get(), let session = box.get() {
+                    renewing.set(false)
+                    _ = await session.renewDeviceToken()
+                }
+                return Stub.json(Stub.user)
+            }
+        }
+        box.set(session)
+
+        await session.restore()
+
+        let stored = try #require(file.stored)
+        #expect(
+            stored.credentialFingerprint == CredentialFingerprint.of("pat-successor"),
+            "a stale 200 rewrote the file with a token the server had already destroyed"
+        )
+        #expect(session.state.user != nil, "and the session itself is untouched by it")
+    }
 }
 
 /// A server that answers whoami, the settings read and the native exchange — so a test can prove
@@ -767,5 +829,137 @@ struct RefusedSignInTests {
             session.defaultVisibility != nil,
             "a refusal that had withdrawn the client would leave a session that cannot read"
         )
+    }
+}
+
+/// Two sign-ins are two intents, and a session has one identity.
+@MainActor
+@Suite("A sign-in is single-flight")
+struct SignInSingleFlightTests {
+    /// A third sign-in completing while a second was in flight is what let a state belonging to
+    /// the FIRST account be put back beside a client belonging to the third. Refused rather than
+    /// joined: the second caller wants a different token, possibly a different account, and
+    /// handing it the first one's answer would be a lie about which account it is now signed in as.
+    @Test("a sign-in that arrives while one is running is refused, with nothing sent")
+    func aSecondSignInIsRefused() async {
+        let calls = Counter()
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in
+                    calls.increment()
+                    entered.set(true)
+                    // BOUNDED. Under the mutation that removes the refusal, the second sign-in
+                    // reaches this too and nothing would ever release it — a test that HANGS
+                    // instead of failing proves nothing and takes the suite with it.
+                    for _ in 0..<5000 where !release.get() { await Task.yield() }
+                    return Stub.json(Stub.user)
+                }
+            }
+        )
+
+        let first = Task { await session.signIn(serverAddress: storedHost, token: "pat-a") }
+        for _ in 0..<5000 where !entered.get() { await Task.yield() }
+        #expect(entered.get(), "the premise: the first sign-in is on the wire")
+        await session.signIn(serverAddress: storedHost, token: "pat-b")
+        let refusedAt = calls.count
+        release.set(true)
+        await first.value
+
+        #expect(refusedAt == 1, "the second sign-in put nothing on the wire")
+        #expect(session.credentialGrant()?.token == "pat-a", "the first one is what landed")
+    }
+
+    /// The other half: a sign-in the licence REFUSED puts the whole session back, not pieces of
+    /// it. The grant is read as one value, so a subject from one account beside a token from
+    /// another is a state this assertion can see.
+    @Test("a refused switch puts back a session whose subject and token still belong together")
+    func aRefusedSwitchRestoresOneSession() async throws {
+        let account = SpyAccountStore()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            account: account
+        )
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+        let before = try #require(session.credentialGrant())
+        account.refuseNextClears(1)
+
+        await session.signIn(serverAddress: storedHost, token: "pat-b")
+
+        #expect(session.lastError == SessionStore.licenceBlockedSignIn)
+        let after = try #require(session.credentialGrant())
+        #expect(after.subject == before.subject)
+        #expect(after.token == before.token, "A's subject beside B's token is the state to prevent")
+        #expect(after.serverBaseURL == before.serverBaseURL)
+    }
+}
+
+/// Nothing an installation or a check does may land on a session that ended inside its await.
+@MainActor
+@Suite("Invalidate-first fences the whole operation")
+struct InvalidationFenceTests {
+    /// B2. The wipe starts while the credential is being STORED — inside `persist`'s own await —
+    /// so the sign-in resumes into a session that is already over.
+    @Test("a wipe started mid-installation leaves nothing of that installation behind")
+    func aWipeMidInstallationLandsNothing() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let file = StubLastKnownUser()
+        let account = SpyAccountStore()
+        let restarts = Counter()
+        let credentials = WipingCredentials { await box.get()?.signOutWithoutRevoking() }
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            account: account,
+            lastKnownUser: file,
+            onVerified: { restarts.increment() }
+        )
+        box.set(session)
+
+        await session.signIn(serverAddress: storedHost, token: "pat-a")
+
+        #expect(session.state == .signedOut)
+        #expect(file.stored == nil, "no identity was written for a session that had ended")
+        #expect(account.published == nil, "and no licence was published for it")
+        #expect(restarts.count == 0, "and no drain was started on its behalf")
+    }
+}
+
+/// A credential store that lets somebody sign out in the middle of the write.
+final class WipingCredentials: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+    private let duringWrite: @Sendable () async -> Void
+    private var fired = false
+
+    init(duringWrite: @escaping @Sendable () async -> Void) {
+        self.duringWrite = duringWrite
+    }
+
+    func setAll(_ values: [String: String]) async throws {
+        let first: Bool = lock.withLock {
+            guard !fired else { return false }
+            fired = true
+            return true
+        }
+        if first { await duringWrite() }
+        lock.withLock { for (k, v) in values { storage[k] = v } }
+    }
+
+    func set(_ value: String, for account: String) async throws {
+        lock.withLock { storage[account] = value }
+    }
+
+    func string(for account: String) async throws -> String? { lock.withLock { storage[account] } }
+
+    func remove(_ account: String) async throws {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
     }
 }

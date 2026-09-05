@@ -64,9 +64,9 @@ struct AttachmentDeleteTests {
             return Stub.empty(.noContent)
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
 
         #expect(removed)
         #expect(seen.get() == ["DELETE /api/attachments/a1"], "the store sent \(seen.get())")
@@ -85,9 +85,9 @@ struct AttachmentDeleteTests {
                 ])
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client.handle)
 
         #expect(removed)
         #expect(store.memos.map(\.uid) == ["m1", "m2", "m3"], "the memo moved in the list")
@@ -107,9 +107,9 @@ struct AttachmentDeleteTests {
                 : Self.page([Self.memo("m1", ["a1", "a2"])])
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
 
         #expect(removed)
         #expect(store.memos[0].attachments.map(\.uid) == ["a2"])
@@ -124,9 +124,9 @@ struct AttachmentDeleteTests {
                 : Self.page([Self.memo("m1", ["a1", "a2"])])
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
 
         #expect(!removed)
         #expect(
@@ -155,12 +155,13 @@ struct AttachmentDeleteTests {
             return Stub.empty(.noContent)
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         // Both are started before anything is awaited, so the second reaches the store while the
         // first is still on the wire — which is the interleaving the join exists for.
-        let first = Task { await store.deleteAttachment(uid: "a1", from: "m1", using: client) }
-        let second = Task { await store.deleteAttachment(uid: "a1", from: "m1", using: client) }
+        let handle = client.handle
+        let first = Task { await store.deleteAttachment(uid: "a1", from: "m1", using: handle) }
+        let second = Task { await store.deleteAttachment(uid: "a1", from: "m1", using: handle) }
         while !entered.get() {
             await Task.yield()
         }
@@ -194,13 +195,16 @@ struct AttachmentDeleteTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let read = Task { await store.refreshMemo(uid: "m1", using: client, baseURL: Stub.baseURL) }
+        let handle = client.handle
+        let read = Task {
+            await store.refreshMemo(uid: "m1", using: handle, baseURL: Stub.baseURL)
+        }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         release.set(true)
         let reached = await read.value
 
@@ -240,15 +244,20 @@ struct AttachmentDeleteTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         let edit = Task {
-            await store.edit(uid: "m1", content: "after", using: client, baseURL: Stub.baseURL)
+            await store.edit(
+                uid: "m1",
+                content: "after",
+                using: client.handle,
+                baseURL: Stub.baseURL
+            )
         }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         release.set(true)
         let saved = await edit.value
 
@@ -275,13 +284,13 @@ struct AttachmentDeleteTests {
             return Self.page([Self.memo("m1", ["a1", "a2"])])
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let page = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        let page = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         release.set(true)
         await page.value
 
@@ -314,13 +323,16 @@ struct AttachmentDeleteTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let fetch = Task { await store.fetchMemo(uid: "m1", using: client, baseURL: Stub.baseURL) }
+        let handle = client.handle
+        let fetch = Task {
+            await store.fetchMemo(uid: "m1", using: handle, baseURL: Stub.baseURL)
+        }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         release.set(true)
         let fetched = await fetch.value
 
@@ -367,15 +379,15 @@ struct AttachmentDeleteTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         let tick = Task {
-            await store.toggleTask(at: 0, in: "m1", using: client, baseURL: Stub.baseURL)
+            await store.toggleTask(at: 0, in: "m1", using: client.handle, baseURL: Stub.baseURL)
         }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         release.set(true)
         let ticked = await tick.value
 
@@ -413,15 +425,15 @@ struct AttachmentDeleteTests {
             return Stub.json(Stub.page([Self.memo("m2", ["a1", "a2"])]))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasMore)
 
-        let page = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let page = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
         // The memo this attachment is on is not loaded yet; the delete is still a fact about it.
-        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client.handle)
         release.set(true)
         await page.value
 
@@ -467,14 +479,14 @@ struct AttachmentDeleteTests {
             )
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasNewer, "control: an anchored list has something above it")
 
-        let above = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        let above = Task { await store.loadNewer(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m2", using: client.handle)
         release.set(true)
         _ = await above.value
 
@@ -513,11 +525,15 @@ struct AttachmentDeleteTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         #expect(removed)
 
-        let created = await store.create(content: "new", using: client, baseURL: Stub.baseURL)
+        let created = await store.create(
+            content: "new",
+            using: client.handle,
+            baseURL: Stub.baseURL
+        )
 
         #expect(created)
         #expect(store.memos.map(\.uid) == ["m2", "m1"], "control: the created memo was placed")
@@ -545,15 +561,18 @@ struct AttachmentDeleteTests {
             return Stub.empty(.noContent)
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let deletion = Task { await store.deleteAttachment(uid: "a1", from: "m1", using: client) }
+        let handle = client.handle
+        let deletion = Task {
+            await store.deleteAttachment(uid: "a1", from: "m1", using: handle)
+        }
         while !entered.get() {
             await Task.yield()
         }
         // A whole refresh, start to finish, while the delete is on the wire: a new lineage, and a
         // page that still has the picture on it.
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(
             store.memos[0].attachments.map(\.uid) == ["a1", "a2"],
             "control: the refresh landed"

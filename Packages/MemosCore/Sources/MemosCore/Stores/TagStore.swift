@@ -35,15 +35,25 @@ public final class TagStore {
 
     public init() {}
 
+    /// Whether the session that ISSUED an operation is still the one this device is running — the
+    /// same rule, for the same reason, as `TimelineStore.sessionStillCurrent`.
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
+    }
+
     /// Names the session this store's transport failures belong to. Idempotent.
     public func reports(to session: any SessionReporting) { self.session = session }
 
-    public func load(using client: any APIProtocol) async {
+    public func load(using handle: SessionHandle) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         attempt += 1
         let mine = attempt
-        // Taken when the request is ISSUED. A failure reported under the session running when it
-        // LANDS could be a failure of somebody else's session (`SessionReporting`).
-        let issued = session?.handle?.generation
         isLoading = true
         do {
             let loaded: [MemoTag]
@@ -57,6 +67,10 @@ public final class TagStore {
             // this returns rather than falling through to clear it.
             guard mine == attempt else {
                 MemosLog.api.info("GET /api/tags answered for a load that was overtaken")
+                return
+            }
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("an answer for a session that has ended is not applied")
                 return
             }
             tags = loaded
@@ -75,7 +89,7 @@ public final class TagStore {
             // it once in a banner; saying it here as well is a second copy of the same sentence
             // over a row nobody can do anything about.
             if let failure = StoreFailure.transportFailure(error) {
-                if let issued { session?.noteTransportFailure(failure, issuedUnder: issued) }
+                session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }

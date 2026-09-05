@@ -40,14 +40,25 @@ public final class HeatmapStore {
 
     public init() {}
 
+    /// Whether the session that ISSUED an operation is still the one this device is running — the
+    /// same rule, for the same reason, as `TimelineStore.sessionStillCurrent`.
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
+    }
+
     /// Names the session this store's transport failures belong to. Idempotent.
     public func reports(to session: any SessionReporting) { self.session = session }
 
-    public func load(using client: any APIProtocol) async {
+    public func load(using handle: SessionHandle) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         attempt += 1
         let mine = attempt
-        // Taken when the request is ISSUED, not when it lands (`SessionReporting`).
-        let issued = session?.handle?.generation
         isLoading = true
         do {
             let loaded: [String: Int]
@@ -63,6 +74,10 @@ public final class HeatmapStore {
                 MemosLog.api.info("GET /api/stats/heatmap answered for a load that was overtaken")
                 return
             }
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("an answer for a session that has ended is not applied")
+                return
+            }
             counts = loaded
             hasLoaded = true
             lastError = nil
@@ -75,7 +90,7 @@ public final class HeatmapStore {
             // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180). Nor
             // is a server that never answered: that one is the session's to say, once, in a banner.
             if let failure = StoreFailure.transportFailure(error) {
-                if let issued { session?.noteTransportFailure(failure, issuedUnder: issued) }
+                session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }

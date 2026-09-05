@@ -340,6 +340,10 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
         lock.withLock { current = credentials }
     }
 
+    /// Somebody signs in as somebody else RIGHT NOW — driven from inside the scripted server, so
+    /// a test can put the switch between two sends rather than only before the first.
+    func supersede() { lock.withLock { epoch += 1 } }
+
     /// Somebody signs in as somebody else the instant AFTER a pass acquires its credential — the
     /// window the acquisition itself cannot close, and the one every request in that pass is then
     /// inside of.

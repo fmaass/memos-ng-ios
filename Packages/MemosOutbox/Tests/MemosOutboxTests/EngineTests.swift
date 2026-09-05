@@ -142,6 +142,56 @@ struct EngineTests {
         #expect(saved.state == .waiting, "the capture waits for a pass that belongs to it")
     }
 
+    /// The switch lands BETWEEN the probe and the first send — the window a check taken once at
+    /// the start of the pass cannot see, because the probe is itself an await.
+    @Test("a switch between the probe and the first send stops the pass there")
+    func aSwitchAfterTheProbeStopsThePass() async throws {
+        let switched = CredentialsBox()
+        let http = ScriptedHTTP { request in
+            // The switch lands INSIDE the probe, so the pass resumes into a session that is over.
+            if request.httpMethod == "GET" {
+                switched.value?.supersede()
+                return OutboxHTTPResponse(statusCode: 200)
+            }
+            return ScriptedHTTP.session(uid: "u1", chunkSize: 400, received: 0)
+        }
+        let harness = try await Harness.make(bytes: 1000, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests(method: "GET").count == 1, "the probe went out")
+        #expect(harness.http.requests(method: "POST").isEmpty, "and nothing after it did")
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .waiting)
+    }
+
+    /// And between two chunk sends: the first chunk is already with the background session, its
+    /// answer comes back, and the pass that would send the SECOND one no longer has the authority
+    /// the first was sent with.
+    @Test("a switch between two chunks stops before the second one")
+    func aSwitchBetweenChunksStopsTheNextSend() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        #expect(harness.scheduler.uploads.count == 1, "the premise: one chunk is on its way")
+
+        // The switch lands after this pass re-acquires and before it sends the next chunk — the
+        // window a check taken at acquisition time cannot see.
+        harness.credentials.supersedeAfterNextAcquisition()
+        await harness.engine.handle(
+            ChunkResult(
+                identity: harness.scheduler.uploads[0].identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        #expect(harness.scheduler.uploads.count == 1, "the second chunk was never scheduled")
+    }
+
     @Test("an unreachable server costs one small request and never a chunk")
     func healthProbeGuardsTheDrain() async throws {
         let harness = try await Harness.make(bytes: 1000, http: .standard(health: 503))
@@ -901,5 +951,17 @@ struct NetworkPolicyDrainTests {
         let saved = try #require(await harness.reload())
         #expect(saved.state == .uploading)
         #expect(saved.waitReason == nil)
+    }
+}
+
+/// Hands the scripted server the credentials it has to supersede, which do not exist yet when the
+/// server is built.
+final class CredentialsBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: SwitchableCredentials?
+
+    var value: SwitchableCredentials? {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
     }
 }

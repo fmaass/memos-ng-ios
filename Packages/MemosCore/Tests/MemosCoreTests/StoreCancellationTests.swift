@@ -104,7 +104,7 @@ struct StoreCancellationTests {
         let entered = Latch()
         let release = Latch()
         let search = MemoSearch(
-            client: Stub.client { _, _, _ in
+            handle: Stub.client { _, _, _ in
                 // What URLSession does to a transfer whose task is cancelled.
                 do {
                     try await Self.hold(entered: entered, until: release)
@@ -112,7 +112,7 @@ struct StoreCancellationTests {
                     throw URLError(.cancelled)
                 }
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL
         )
 
@@ -141,7 +141,7 @@ struct StoreCancellationTests {
     @Test("a search that genuinely fails still says so")
     func aFailedSearchStillReports() async {
         let search = MemoSearch(
-            client: Stub.client { _, _, _ in Stub.empty(.init(code: 500)) },
+            handle: Stub.client { _, _, _ in Stub.empty(.init(code: 500)) }.handle,
             baseURL: Stub.baseURL,
             coalescing: .milliseconds(1)
         )
@@ -187,14 +187,14 @@ struct StoreCancellationTests {
             let reads: [(String, @MainActor () async -> Void, @MainActor () -> String?)] = [
                 (
                     "timeline",
-                    { await timeline.refresh(using: client, baseURL: Stub.baseURL) },
+                    { await timeline.refresh(using: client.handle, baseURL: Stub.baseURL) },
                     { timeline.lastError }
                 ),
-                ("tags", { await tags.load(using: client) }, { tags.lastError }),
-                ("heatmap", { await heatmap.load(using: client) }, { heatmap.lastError }),
+                ("tags", { await tags.load(using: client.handle) }, { tags.lastError }),
+                ("heatmap", { await heatmap.load(using: client.handle) }, { heatmap.lastError }),
                 (
                     "library",
-                    { await library.refresh(using: client, baseURL: Stub.baseURL) },
+                    { await library.refresh(using: client.handle, baseURL: Stub.baseURL) },
                     { library.lastError }
                 ),
             ]

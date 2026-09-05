@@ -85,9 +85,10 @@ struct SearchResultsView: View {
                             guard let index = positions[memo.uid],
                                 search.results.shouldLoadMore(after: index)
                             else { return }
-                            guard let client = session.api, let baseURL = session.serverBaseURL
+                            guard let handle = session.activeHandle,
+                                let baseURL = session.serverBaseURL
                             else { return }
-                            await search.results.loadMore(using: client, baseURL: baseURL)
+                            await search.results.loadMore(using: handle, baseURL: baseURL)
                         }
                     }
                 } header: {
@@ -105,15 +106,25 @@ struct SearchResultsView: View {
         }
     }
 
-    /// Nothing found is an answer, and it is drawn as one. The sentence about whole words is the
-    /// outcome's own, so this screen and the sheet say it identically.
+    /// Nothing found is an answer, and it is drawn as one — but only when it IS one. A search that
+    /// never reached the server has no answer at all, and drawing "No memos matched" over it tells
+    /// somebody their memo does not exist. Which of the two this is, is
+    /// `SearchResultsEmptyState`'s to say, so it is a decision a test can read back rather than a
+    /// pair of conditions inside a view body. The sentences are the outcome's own, so this screen
+    /// and the sheet say them identically.
     @ViewBuilder
     private var empty: some View {
-        if search.results.memos.isEmpty, search.outcome == .noMatches {
+        if let state = SearchResultsEmptyState.outcome(
+            for: search.outcome, rows: search.results.memos.count
+        ) {
             ContentUnavailableView {
-                Label(MemoSearchOutcome.noMatches.title ?? "", systemImage: "magnifyingglass")
+                Label(
+                    state.title ?? "",
+                    systemImage: state == .unavailable
+                        ? "wifi.exclamationmark" : "magnifyingglass"
+                )
             } description: {
-                Text(MemoSearchOutcome.noMatches.detail ?? "")
+                Text(state.detail ?? "")
             }
         }
     }

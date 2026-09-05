@@ -207,6 +207,18 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     // MARK: - the network the phone is on
 
+    /// Whether the grant these credentials were acquired under still stands.
+    ///
+    /// Asked immediately before EVERY send, and after every await that precedes one — building a
+    /// request, slicing a chunk, writing a manifest. Each of those is an instant an account switch
+    /// can land in, and a pass that checked only once at its start would spend the rest of itself
+    /// sending one account's bytes with another account's authority. Synchronous by construction
+    /// (`OutboxCredentialsProviding.isCurrent`), so there is no instant between the answer and the
+    /// send it guards.
+    private func mayStillSend(_ credentials: OutboxCredentials) -> Bool {
+        self.credentials.isCurrent(credentials)
+    }
+
     /// Whether bytes may leave this device RIGHT NOW.
     ///
     /// Read fresh at every step rather than once per pass: a drain that started on the home wifi
@@ -230,6 +242,7 @@ public actor OutboxEngine: OutboxChunkHandling {
     // MARK: - the four calls
 
     private func isReachable(_ credentials: OutboxCredentials) async -> Bool {
+        guard mayStillSend(credentials) else { return false }
         let request = OutboxRequests.health(baseURL: credentials.serverBaseURL)
         guard let response = try? await http.perform(request) else { return false }
         return response.isSuccess
@@ -250,6 +263,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             await save(job.held(.serverRefused, error: error.localizedDescription))
             return nil
         }
+        guard mayStillSend(credentials) else { return nil }
         guard let response = try? await http.perform(request) else {
             await save(job.backingOff(at: clock(), error: "The server could not be reached."))
             return nil
@@ -289,6 +303,9 @@ public actor OutboxEngine: OutboxChunkHandling {
             offset: offset
         )
         let identity = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: offset)
+        // The slice above was an await, and a chunk handed to the background session outlives this
+        // pass entirely — it is the one send that cannot be taken back.
+        guard mayStillSend(credentials) else { return }
         await scheduler.upload(request, fromFile: chunk, identity: identity)
         // The chunk is already with the background session, and this write only records that. Its
         // failure is reported, not acted on: the answer is applied against the manifest as it
@@ -306,6 +323,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         let request = OutboxRequests.offset(
             baseURL: credentials.serverBaseURL, token: credentials.token, uploadUID: uploadUID
         )
+        guard mayStillSend(credentials) else { return nil }
         guard let response = try? await http.perform(request) else { return nil }
         if response.statusCode == 404 {
             // The session expired or was reaped. The ORIGINAL is untouched — it starts again.
@@ -326,6 +344,8 @@ public actor OutboxEngine: OutboxChunkHandling {
         // Nothing is created against a queue that could not be written: the capture waits, whole,
         // rather than being sent while the disk has no record that it was ever tried.
         guard await save(current) else { return nil }
+        // The manifest write above was an await; the create is the send it precedes.
+        guard mayStillSend(credentials) else { return nil }
         switch await completion.create(job: current, credentials: credentials) {
         case .created:
             // The one exit. Everything the capture owns goes with it.

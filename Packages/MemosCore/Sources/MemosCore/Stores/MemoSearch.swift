@@ -18,6 +18,13 @@ public enum MemoSearchOutcome: Sendable, Equatable {
     /// that is simply wrong.
     case matched
     case noMatches
+    /// The request never reached the server, so there is no answer at all — not an empty one.
+    ///
+    /// It is a case of its own because the alternative is a lie a person acts on: an offline
+    /// search that renders `noMatches` says the memo they are looking for does not exist, and the
+    /// hint underneath it explains why their WORD did not match. It carries no text of its own
+    /// from the failure — what went wrong is the session's one line, on the banner above.
+    case unavailable
     case failed(String)
 
     /// Why a search that found nothing is not the same as a memo that is gone.
@@ -36,6 +43,7 @@ public enum MemoSearchOutcome: Sendable, Equatable {
         case .searching: "Searching…"
         case .matched: "Show results"
         case .noMatches: "No memos matched"
+        case .unavailable: "Can't search right now"
         case .failed: "Search failed"
         }
     }
@@ -47,7 +55,24 @@ public enum MemoSearchOutcome: Sendable, Equatable {
         case .searching: nil
         case .matched: nil
         case .noMatches: Self.wholeWordHint
+        case .unavailable: "This needs the server, and it can't be reached at the moment."
         case .failed(let why): why
+        }
+    }
+}
+
+/// What a results screen with no rows on it says.
+///
+/// A pure function rather than a pair of conditions inside a view body, because the two empty
+/// states it distinguishes are the whole point: "the server answered and nothing matched" and "the
+/// question never reached the server" look identical on screen and mean opposite things. `nil` is
+/// a screen that says nothing at all, because it has rows.
+public enum SearchResultsEmptyState {
+    public static func outcome(for outcome: MemoSearchOutcome, rows: Int) -> MemoSearchOutcome? {
+        guard rows == 0 else { return nil }
+        switch outcome {
+        case .noMatches, .unavailable: return outcome
+        default: return nil
         }
     }
 }
@@ -95,7 +120,13 @@ public final class MemoSearch {
     /// The results, as their own list. Public because the results screen reads and pages it.
     public let results: TimelineStore
 
-    private let client: any APIProtocol
+    /// The client and the incarnation it belongs to, as ONE value.
+    ///
+    /// A retained bare client is what this used to hold, and it is the thing that outlives a
+    /// session: the sheet is built once and reads for as long as it is up, so a client kept here
+    /// could still be sending requests for an account this device has left. Held as a handle, the
+    /// list it writes into refuses anything issued under a session that has ended.
+    private let handle: SessionHandle
     private let baseURL: URL
     private let pause: Duration
     /// How the debounce waits — the real `Task.sleep` in the app, a clock a test can hold
@@ -111,7 +142,7 @@ public final class MemoSearch {
     private var asked: MemoQuery?
 
     public init(
-        client: any APIProtocol,
+        handle: SessionHandle,
         baseURL: URL,
         coalescing: Duration = MemoSearch.coalescingPause,
         pageSize: Int = 20,
@@ -119,7 +150,7 @@ public final class MemoSearch {
         sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
         onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
-        self.client = client
+        self.handle = handle
         self.baseURL = baseURL
         self.pause = coalescing
         self.sleep = sleep
@@ -225,11 +256,17 @@ public final class MemoSearch {
             // Superseded while waiting for the one before it.
             guard !Task.isCancelled else { return }
             results.setQuery(query)
-            await results.refresh(using: client, baseURL: baseURL)
+            await results.refresh(using: handle, baseURL: baseURL)
             // Cancelled DURING the request — the field was cleared or retyped while it was out.
             // Saying anything now would be an answer to a question nobody is still asking.
             guard !Task.isCancelled else { return }
-            outcome = Self.answer(from: results)
+            let answer = Self.answer(from: results)
+            // The rows on screen belong to the question BEFORE this one. Left there under "can't
+            // search right now" they read as this question's answer, which is the same lie as
+            // `noMatches` in a different shape. The plain timeline deliberately does the opposite
+            // — see `clearRows`.
+            if answer == .unavailable { results.clearRows() }
+            outcome = answer
         }
     }
 
@@ -283,7 +320,7 @@ public final class MemoSearch {
     /// which is what makes it safe to take at every appearance.
     public func resultsAppeared() async {
         await settled()
-        await MediaChannel.reconcile(results, using: client, baseURL: baseURL)
+        await MediaChannel.reconcile(results, using: handle, baseURL: baseURL)
     }
 
     /// Cancels the pause and the request it had become, and forgets what it was for — but
@@ -322,6 +359,10 @@ public final class MemoSearch {
     /// only thing that makes it a failure is a failure.
     private static func answer(from results: TimelineStore) -> MemoSearchOutcome {
         if let error = results.lastError { return .failed(error) }
+        // Before the emptiness test, because an empty list means two different things and only one
+        // of them is an answer: a search the server answered with nothing, and a search that never
+        // reached it.
+        if results.serverUnreachable { return .unavailable }
         return results.memos.isEmpty ? .noMatches : .matched
     }
 }

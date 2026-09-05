@@ -57,7 +57,10 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     private(set) lazy var session = SessionStore(
         account: OutboxAccountStore.live(),
         lastKnownUser: LastKnownUserFile.live(),
-        onVerified: { [weak self] in await self?.startOutbox() }
+        // Synchronous, because that is when the transition happens. What it starts is its own
+        // task, and that task re-reads the authority before it drains — a confirmation is not a
+        // promise that the session still exists by the time a drain gets a turn.
+        onVerified: { [weak self] in Task { @MainActor in await self?.startOutbox() } }
     )
     private(set) var outbox: Outbox?
     /// Built from the outbox's own preference store rather than a second one over the same suite:
@@ -123,6 +126,10 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         if session.state.user == nil {
             await session.restore()
         }
+        // No authority, nothing to drain. A background wake whose restore did not settle, or a
+        // session discarded between the confirmation that scheduled this and the turn it got, must
+        // not start a pass: the capture stays queued and the next wake acquires cleanly.
+        guard session.credentialGrant() != nil else { return }
         await outbox?.start()
     }
 

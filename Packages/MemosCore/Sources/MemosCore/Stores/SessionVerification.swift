@@ -107,7 +107,7 @@ public final class SessionEpoch: @unchecked Sendable {
 @MainActor
 public protocol SessionReporting: AnyObject {
     /// The client and the incarnation it belongs to, in one read.
-    var handle: SessionHandle? { get }
+    var activeHandle: SessionHandle? { get }
 
     /// A failure that never reached the server, judged against the incarnation that ISSUED the
     /// request rather than the one running now.

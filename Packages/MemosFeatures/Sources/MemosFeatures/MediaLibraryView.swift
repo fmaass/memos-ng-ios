@@ -194,17 +194,17 @@ struct MediaLibraryView: View {
     }
 
     private func load() async {
-        guard let library, let client = session.api, let baseURL = session.serverBaseURL else {
-            return
-        }
-        await library.refresh(using: client, baseURL: baseURL)
+        guard let library, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL
+        else { return }
+        await library.refresh(using: handle, baseURL: baseURL)
     }
 
     private func loadMore() async {
-        guard let library, let client = session.api, let baseURL = session.serverBaseURL else {
-            return
-        }
-        await library.loadMore(using: client, baseURL: baseURL)
+        guard let library, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL
+        else { return }
+        await library.loadMore(using: handle, baseURL: baseURL)
     }
 }
 

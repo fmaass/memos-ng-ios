@@ -134,10 +134,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// flight is exactly what somebody changing tabs is waiting for the end of.
     private var loadingLineage: Lineage?
 
-    public func refresh(using client: any APIProtocol, baseURL: URL) async {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+    public func refresh(using handle: SessionHandle, baseURL: URL) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         let lineage = self.lineage
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
@@ -163,6 +165,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("GET /api/attachments answered for a list that has moved on")
                 return
             }
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("a page answered for a session that has ended is not applied")
+                return
+            }
             items = Self.merged([], with: page.items, filter: lineage.filter)
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
@@ -177,7 +183,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
                 return
             }
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
         }
     }
 
@@ -187,10 +193,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// The second read has to happen here: the next page is asked for when the last tile appears,
     /// and a tile already on screen does not appear a second time, so a reader sitting at the end
     /// of the grid would wait for a page this store had decided to throw away.
-    public func loadMore(using client: any APIProtocol, baseURL: URL) async {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+    public func loadMore(using handle: SessionHandle, baseURL: URL) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -211,8 +219,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     MemosLog.api.info("GET /api/attachments answered for a list that has moved on")
                     // Never reissued with a client whose session is over — see the same guard in
                     // `TimelineStore.loadMore`.
-                    guard sessionStillCurrent(issued) else { return }
+                    guard sessionStillCurrent(handle) else { return }
                     continue
+                }
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("a page answered for a session that has ended is not merged")
+                    return
                 }
                 items = Self.merged(items, with: page.items, filter: lineage.filter)
                 nextCursor = page.nextCursor
@@ -222,10 +234,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             } catch {
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
-                    guard sessionStillCurrent(issued) else { return }
+                    guard sessionStillCurrent(handle) else { return }
                     continue
                 }
-                await report(error, issuedUnder: issued)
+                await report(error, issuedUnder: handle.generation)
                 return
             }
         }
@@ -284,9 +296,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
 
     /// Whether the session that ISSUED an operation is still the one this device is running — the
     /// same guard, for the same reason, as `TimelineStore.sessionStillCurrent`.
-    private func sessionStillCurrent(_ issued: Int?) -> Bool {
-        guard let issued, let current = session?.handle?.generation else { return true }
-        return issued == current
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
     }
 
     /// One page of the library.

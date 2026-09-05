@@ -149,11 +149,11 @@ public struct TimelineView: View {
                 SearchSheet(
                     search: raised.search,
                     loadHeatmap: { store in
-                        guard let client = session.api else { return }
+                        guard let handle = session.activeHandle else { return }
                         // Named before the read, so a failure that never reached the server lands
                         // in the session's one banner instead of on this card.
                         store.reports(to: session)
-                        await store.load(using: client)
+                        await store.load(using: handle)
                     },
                     chose: { choice in
                         jump(to: choice.anchor)
@@ -166,9 +166,9 @@ public struct TimelineView: View {
                         searchPresentation.chose(choice)
                     },
                     loadTags: { store in
-                        guard let client = session.api else { return }
+                        guard let handle = session.activeHandle else { return }
                         store.reports(to: session)
-                        await store.load(using: client)
+                        await store.load(using: handle)
                     },
                     runSearch: { query, text in raised.search.run(query, showing: text) },
                     close: { searchPresentation.close() },
@@ -292,11 +292,12 @@ public struct TimelineView: View {
         case .push:
             path.append(MemoRoute(uid: uid))
         case .fetchThenPush:
-            guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+            else { return }
             let outcome = await timeline.jump(
                 to: uid,
                 calendar: HeatmapDateJump.anchorCalendar,
-                using: client,
+                using: handle,
                 baseURL: baseURL
             )
             switch outcome {
@@ -468,9 +469,10 @@ public struct TimelineView: View {
                             guard let index = positions[memo.uid],
                                 timeline.shouldLoadMore(after: index)
                             else { return }
-                            guard let client = session.api, let baseURL = session.serverBaseURL
+                            guard let handle = session.activeHandle,
+                                let baseURL = session.serverBaseURL
                             else { return }
-                            await timeline.loadMore(using: client, baseURL: baseURL)
+                            await timeline.loadMore(using: handle, baseURL: baseURL)
                         }
                     }
                 } header: {
@@ -506,11 +508,11 @@ public struct TimelineView: View {
             ForEach(MemoVisibility.allCases, id: \.self) { option in
                 Button {
                     Task {
-                        guard let client = session.api,
+                        guard let handle = session.activeHandle,
                             let baseURL = session.serverBaseURL
                         else { return }
                         await timeline.setVisibility(
-                            option, uid: memo.uid, using: client, baseURL: baseURL
+                            option, uid: memo.uid, using: handle, baseURL: baseURL
                         )
                     }
                 } label: {
@@ -552,9 +554,9 @@ public struct TimelineView: View {
     /// without a session is not a search: signed out there is no timeline either, and a loupe that
     /// opened an empty sheet would be the only control on the screen that pretended to work.
     private func openSearch() {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
         let search = MemoSearch(
-            client: client,
+            handle: handle,
             baseURL: baseURL,
             onUnauthorized: { [session] in await session.handle(.unauthorized) }
         )
@@ -626,28 +628,28 @@ public struct TimelineView: View {
     private func runMediaChannel() async {
         guard mediaChannelRuns,
             let timeline,
-            let client = session.api,
+            let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
         else { return }
         await MediaChannel.consume(
             MediaEventClient.device().stream(),
             into: timeline,
             alongside: { [searchPresentation] in searchPresentation.liveResults },
-            using: client,
+            using: handle,
             baseURL: baseURL
         )
     }
 
     private func delete(_ memo: Memo, in timeline: TimelineStore) async {
-        guard let client = session.api else { return }
-        if await timeline.delete(uid: memo.uid, using: client) {
+        guard let handle = session.activeHandle else { return }
+        if await timeline.delete(uid: memo.uid, using: handle) {
             feedback.fire(.deleted)
         }
     }
 
     private func setPinned(_ pinned: Bool, on memo: Memo, in timeline: TimelineStore) async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        guard await timeline.setPinned(pinned, uid: memo.uid, using: client, baseURL: baseURL)
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        guard await timeline.setPinned(pinned, uid: memo.uid, using: handle, baseURL: baseURL)
         else { return }
         feedback.fire(pinned ? .pinned : .unpinned)
     }
@@ -673,7 +675,7 @@ public struct TimelineView: View {
                 sources: submission.attachments.map(\.stagedSource)
             )
         case .edit(let uid, _, let createdAt):
-            guard let client = session.api, let baseURL = session.serverBaseURL else {
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return false
             }
             posted = await timeline.edit(
@@ -686,7 +688,7 @@ public struct TimelineView: View {
                 // the outbox above owns new captures, and a queued edit cannot be retried safely
                 // until an edit key exists to make the retry idempotent.
                 attaching: submission.attachments.map(\.stagedSource),
-                using: client,
+                using: handle,
                 baseURL: baseURL
             )
         }
@@ -702,8 +704,8 @@ public struct TimelineView: View {
     /// of (MEMNG-166); it belongs to the search sheet now and is read when that opens
     /// (MEMNG-126).
     private func load() async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        await timeline?.refresh(using: client, baseURL: baseURL)
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        await timeline?.refresh(using: handle, baseURL: baseURL)
     }
 
     /// A day chosen on the sheet: the list comes back anchored at that day.
@@ -745,8 +747,8 @@ public struct TimelineView: View {
     /// out, so arriving at the top repeatedly costs one request, not one per frame.
     private func loadNewer(in timeline: TimelineStore) async {
         guard timeline.shouldLoadNewer(before: 0) else { return }
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        guard let top = await timeline.loadNewer(using: client, baseURL: baseURL) else { return }
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        guard let top = await timeline.loadNewer(using: handle, baseURL: baseURL) else { return }
         restoreTop = top
         restores += 1
     }

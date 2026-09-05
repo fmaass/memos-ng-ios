@@ -160,9 +160,20 @@ public final class SessionStore {
     /// The retry waiting to run, if the session is unconfirmed and the app is in front of
     /// somebody.
     private var retryInFlight: Task<Void, Never>?
-    /// Whether the app is in the foreground. Retries only run there: a phone in a pocket asking
-    /// every 45 seconds is a battery cost with nobody to read the answer.
-    private var isForegrounded = true
+    /// Whether a SCENE has reported itself active. Retries only run then: a phone in a pocket
+    /// asking every 45 seconds is a battery cost with nobody to read the answer, and a process the
+    /// system woke to finish an upload has no scene at all — it must not start a ladder nobody
+    /// will ever see the end of. False until a scene says otherwise, because a headless launch is
+    /// the state this app is in more often than not.
+    private var isForegrounded = false
+    /// Whether a sign-in is running. A second one is REFUSED, not joined.
+    ///
+    /// Joined would be wrong: two sign-ins are two different intents — a different token, possibly
+    /// a different account — and the second caller would be told the first one's answer. Refused,
+    /// the person taps again after the first settles. What it prevents is worse than a confusing
+    /// answer: a third sign-in completing while a second was in flight let the second's abandon
+    /// path put back a state belonging to the first, beside a client belonging to the third.
+    private var signingIn = false
     private var client: (any APIProtocol)?
     /// The credential the client presents — the SAME object its middleware reads, not a copy.
     ///
@@ -184,7 +195,7 @@ public final class SessionStore {
     /// It is a handler rather than something this store calls directly because the queue lives a
     /// layer above: a capture parked while the phone was off the network needs somebody to try
     /// again, and the only event that says trying is worth it is this one.
-    private let onVerified: (@MainActor @Sendable () async -> Void)?
+    private let onVerified: (@MainActor @Sendable () -> Void)?
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
     // isolation. They are immutable strings, so there is nothing here for the main actor to guard.
@@ -205,7 +216,7 @@ public final class SessionStore {
         account: (any OutboxAccountPublishing)? = nil,
         identity: MediaIdentity = .shared,
         lastKnownUser: (any LastKnownUserStoring)? = nil,
-        onVerified: (@MainActor @Sendable () async -> Void)? = nil
+        onVerified: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
@@ -221,7 +232,7 @@ public final class SessionStore {
 
     /// The client and the incarnation it belongs to, read as ONE value — what a store captures at
     /// the start of an operation and carries through every retry of it.
-    public var handle: SessionHandle? {
+    public var activeHandle: SessionHandle? {
         client.map { SessionHandle(client: $0, generation: sessionGeneration) }
     }
 
@@ -291,7 +302,14 @@ public final class SessionStore {
             return false
         }
 
-        let previousState = state
+        guard !signingIn else {
+            lastError = Self.signInAlreadyRunning
+            return false
+        }
+        signingIn = true
+        defer { signingIn = false }
+
+        let previous = snapshot
         state = .signingIn
         lastError = nil
         lastFailure = nil
@@ -310,8 +328,15 @@ public final class SessionStore {
             )
             let token = exchanged.token
             let persistence = await persist(token: token, configuration: configuration)
-            guard persistence != .licenceNotRevoked else {
-                abandonSignIn(restoring: previousState)
+            guard persistence.outcome != .licenceNotRevoked else {
+                abandonSignIn(restoring: previous)
+                return false
+            }
+            // Synchronously, immediately before the first effect: a wipe or another installation
+            // that landed inside the keychain write owns the session now, and building this one on
+            // top of it would publish a licence and a file for an account that is already gone.
+            guard persistence.installing == sessionGeneration else {
+                MemosLog.session.info("a sign-in was overtaken while its credential was stored")
                 return false
             }
             let credential = PresentedCredential(token)
@@ -322,7 +347,7 @@ public final class SessionStore {
                 credential: credential
             )
             enterVerified()
-            if persistence == .storedNowhere {
+            if persistence.outcome == .storedNowhere {
                 lastError = Self.storageWarning
                 forgetLastKnownUser()
             } else {
@@ -334,7 +359,7 @@ public final class SessionStore {
             // its way in is put back rather than torn down: the FIRST attempt is still running,
             // still showing its browser view, and `failSignIn` here would sign its screen out
             // from under it and leave an error notice on a sign-in that then succeeds.
-            abandonSignIn(restoring: previousState)
+            abandonSignIn(restoring: previous)
             return false
         } catch let error as NativeLoginError {
             failSignIn(error)
@@ -431,7 +456,14 @@ public final class SessionStore {
             return
         }
 
-        let previousState = state
+        guard !signingIn else {
+            lastError = Self.signInAlreadyRunning
+            return
+        }
+        signingIn = true
+        defer { signingIn = false }
+
+        let previous = snapshot
         state = .signingIn
         lastError = nil
         lastFailure = nil
@@ -439,9 +471,18 @@ public final class SessionStore {
         let client = makeClient(configuration, credential)
         do {
             let user = try await Self.whoami(client)
-            switch await persist(token: trimmed, configuration: configuration) {
+            let persistence = await persist(token: trimmed, configuration: configuration)
+            if persistence.outcome == .licenceNotRevoked {
+                abandonSignIn(restoring: previous)
+                return
+            }
+            // Synchronously, immediately before the first effect — see the native leg.
+            guard persistence.installing == sessionGeneration else {
+                MemosLog.session.info("a sign-in was overtaken while its credential was stored")
+                return
+            }
+            switch persistence.outcome {
             case .licenceNotRevoked:
-                abandonSignIn(restoring: previousState)
                 return
             case .stored:
                 establish(
@@ -540,6 +581,10 @@ public final class SessionStore {
     }
 
     private func performRestore() async {
+        // Taken BEFORE the first read, not after it: the credential read is an await, and a wipe
+        // or a sign-in landing inside it owns the session by the time it returns. Checked again
+        // the moment it does.
+        let issued = sessionGeneration
         let stored: StoredCredential?
         do {
             stored = try await storedCredential()
@@ -553,6 +598,10 @@ public final class SessionStore {
                 "the stored device credential would not read: \(detail, privacy: .public)"
             )
             lastError = Self.storageUnreadable
+            return
+        }
+        guard issued == sessionGeneration else {
+            MemosLog.session.info("a launch check was overtaken while it read the credential")
             return
         }
         guard let stored,
@@ -651,7 +700,14 @@ public final class SessionStore {
                     credential: credential
                 )
             }
-            record(user, of: configuration, boundTo: presented.token)
+            // The credential this answer was made FOR may have been replaced while it was on the
+            // wire. Writing its fingerprint then would name a token the server destroyed, and the
+            // next launch would decline to admit a device that did everything right.
+            if credential.isCurrent(presented.epoch) {
+                record(user, of: configuration, boundTo: presented.token)
+            } else {
+                MemosLog.session.info("a check answered for a credential this device replaced")
+            }
             enterVerified()
         } catch let error as APIError where error == .unauthorized {
             guard generation == sessionGeneration else { return }
@@ -798,11 +854,16 @@ public final class SessionStore {
         await revalidate(attempt: 0)
     }
 
-    /// The app went away. Nothing is scheduled behind it.
+    /// The app went away. Nothing is scheduled behind it, and nothing is left running.
+    ///
+    /// The check in flight is cancelled too: it is a request nobody is waiting for, and the system
+    /// is about to suspend the process around it anyway. A cancelled check is neither outcome, so
+    /// the session it belongs to stands exactly as it was and the next foreground asks again.
     public func enteredBackground() {
         isForegrounded = false
         retryInFlight?.cancel()
         retryInFlight = nil
+        validationInFlight?.cancel()
     }
 
     /// Parks the session on a classified failure: the credential is kept, the client is not.
@@ -965,7 +1026,12 @@ public final class SessionStore {
         retryInFlight?.cancel()
         retryInFlight = nil
         guard wasUnconfirmed, let onVerified else { return }
-        Task { @MainActor in await onVerified() }
+        // Called HERE, not from a task this method leaves behind. A deferred call runs after an
+        // arbitrary amount of other work, including a sign-out — and it would then start a drain
+        // for a session that no longer exists. The handler is synchronous for exactly that reason:
+        // whatever it wants to do asynchronously, it starts itself and re-reads the authority
+        // (`credentialGrant`) when it gets there.
+        onVerified()
     }
 
     /// Ends the incarnation the session is in — synchronously, and BEFORE the caller's first
@@ -1058,10 +1124,22 @@ public final class SessionStore {
     /// — so A's licence would sit next to B's credential until some later publish happened to
     /// overwrite it, and for good if that publish failed too. A sign-in someone can retry is a
     /// far smaller harm than a capture posted into the wrong account.
+    /// How a sign-in's two writes went, and the incarnation they were made under.
+    private struct Persistence {
+        let outcome: CredentialPersistence
+        /// The incarnation this installation withdrew the previous session into, taken
+        /// SYNCHRONOUSLY before the write. Anything that moved it since is a wipe or another
+        /// installation that landed inside the write, and this one must not be built on top of it.
+        let installing: Int
+    }
+
     private func persist(
         token: String, configuration: ServerConfiguration
-    ) async -> CredentialPersistence {
-        guard clearAccountLicence() else { return .licenceNotRevoked }
+    ) async -> Persistence {
+        guard clearAccountLicence() else {
+            // Nothing was withdrawn, so the incarnation is the one the caller is still in.
+            return Persistence(outcome: .licenceNotRevoked, installing: sessionGeneration)
+        }
         // INVALIDATE FIRST, before the write is awaited. A request that starts inside the keychain
         // await belongs to the account being replaced; finding no client is right, and finding the
         // previous one is how an answer about A lands in B's session. The last-known identity goes
@@ -1069,6 +1147,7 @@ public final class SessionStore {
         client = nil
         credential = nil
         endIncarnation()
+        let installing = sessionGeneration
         invalidateIdentityScopedState()
         do {
             // ONE call. Two awaits are two critical sections with a gap between them, and this
@@ -1079,14 +1158,49 @@ public final class SessionStore {
                 Self.tokenAccount: token,
                 Self.serverAccount: configuration.baseURL.absoluteString,
             ])
-            return .stored
+            // PROVEN: the vault writes and then reads back to verify, and a throw from either half
+            // reaches the catch below. Only this branch may write the last-known identity.
+            return Persistence(outcome: .stored, installing: installing)
         } catch {
             let detail = String(describing: error)
             MemosLog.session.error(
                 "the device credential could not be stored: \(detail, privacy: .public)"
             )
-            return .storedNowhere
+            return Persistence(outcome: .storedNowhere, installing: installing)
         }
+    }
+
+    /// Everything a sign-in that touched nothing has to put back, as ONE value.
+    ///
+    /// Restored piecemeal it is not a restore at all. `abandonSignIn` used to put `state` back and
+    /// leave whatever else the attempt had installed, which is how a state belonging to one
+    /// account could end up beside a credential belonging to another — the mixed grant the
+    /// fingerprint exists to make impossible. Taken and put back as one value, no interleaving can
+    /// express that.
+    private struct SessionSnapshot {
+        let state: SessionState
+        let client: (any APIProtocol)?
+        let credential: PresentedCredential?
+        let configuration: ServerConfiguration?
+        let verification: SessionVerification
+    }
+
+    private var snapshot: SessionSnapshot {
+        SessionSnapshot(
+            state: state,
+            client: client,
+            credential: credential,
+            configuration: configuration,
+            verification: verification
+        )
+    }
+
+    private func putBack(_ snapshot: SessionSnapshot) {
+        state = snapshot.state
+        client = snapshot.client
+        credential = snapshot.credential
+        configuration = snapshot.configuration
+        verification = snapshot.verification
     }
 
     /// The pair a restore needs, read through one seam so a failure to READ is distinguishable
@@ -1108,13 +1222,17 @@ public final class SessionStore {
         "The account already on this device could not be cleared, so nothing was changed. "
         + "Try signing in again."
 
-    /// Puts the session back where the sign-in found it. Nothing was written, so there is nothing
-    /// to undo — only the `.signingIn` this attempt announced.
-    private func abandonSignIn(restoring previous: SessionState) {
-        state = previous
+    /// Puts the session back where the sign-in found it — all of it, in one step.
+    private func abandonSignIn(restoring previous: SessionSnapshot) {
+        putBack(previous)
         lastError = Self.licenceBlockedSignIn
         lastFailure = nil
     }
+
+    /// What a sign-in says when one is already running.
+    public static let signInAlreadyRunning =
+        "A sign-in is already in progress on this device. "
+        + "Wait for it to finish and try again."
 
     /// Forgets the credential — and revokes the share extension's licence FIRST.
     ///

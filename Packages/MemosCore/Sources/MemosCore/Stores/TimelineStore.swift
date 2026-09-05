@@ -39,6 +39,14 @@ public final class TimelineStore {
     /// A page towards now is in flight.
     public private(set) var isLoadingNewer = false
     public private(set) var lastError: String?
+    /// Whether the last read of this list never reached the server.
+    ///
+    /// It is not an error message and it is deliberately not one: the sentence about an
+    /// unreachable server belongs to the session, once, on its banner. What this carries is the
+    /// FACT, for the one reader that has to tell "the server said nothing matched" from "nobody
+    /// asked the server" — a search, whose empty list would otherwise read as an answer
+    /// (`MemoSearchOutcome.unavailable`).
+    public private(set) var serverUnreachable = false
     public private(set) var hasMore = true
     /// Whether anything is believed to sit ABOVE the loaded rows.
     ///
@@ -144,10 +152,12 @@ public final class TimelineStore {
     /// refresh of the lineage ALREADY being read; a refresh of a different one is the whole point.
     private var loadingLineage: Lineage?
 
-    public func refresh(using client: any APIProtocol, baseURL: URL) async {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+    public func refresh(using handle: SessionHandle, baseURL: URL) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         let lineage = self.lineage
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
@@ -176,6 +186,11 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos answered for a list that has moved on")
                 return
             }
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("a page answered for a session that has ended is not applied")
+                return
+            }
+            serverUnreachable = false
             memos = admitted(page.memos)
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
@@ -195,7 +210,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
                 return
             }
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
         }
     }
 
@@ -213,10 +228,12 @@ public final class TimelineStore {
     /// follows the list as it stands NOW — so a list changing under a reader costs one extra read
     /// per change, with never more than one in flight. A refresh already running is left to
     /// finish instead: it is about to replace the list, cursor and all.
-    public func loadMore(using client: any APIProtocol, baseURL: URL) async {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+    public func loadMore(using handle: SessionHandle, baseURL: URL) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -241,9 +258,14 @@ public final class TimelineStore {
                     // the session that started it. If that session is over, asking again would
                     // reissue a superseded credential's request under the new one's number, and
                     // its rows would merge into a list belonging to somebody else.
-                    guard sessionStillCurrent(issued) else { return }
+                    guard sessionStillCurrent(handle) else { return }
                     continue
                 }
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("a page answered for a session that has ended is not merged")
+                    return
+                }
+                serverUnreachable = false
                 // A cursor page can overlap the one before it when a memo moved; appending blindly
                 // would show the same memo twice and break SwiftUI's identity.
                 let known = Set(memos.map(\.uid))
@@ -258,10 +280,10 @@ public final class TimelineStore {
                 // the page that follows the list as it stands.
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/memos failed for a list that has moved on")
-                    guard sessionStillCurrent(issued) else { return }
+                    guard sessionStillCurrent(handle) else { return }
                     continue
                 }
-                await report(error, issuedUnder: issued)
+                await report(error, issuedUnder: handle.generation)
                 return
             }
         }
@@ -299,10 +321,12 @@ public final class TimelineStore {
     ///   still finger throws the reader down the page by exactly as much as it grew, which is the
     ///   hazard every prepend has (`TimelineView`).
     @discardableResult
-    public func loadNewer(using client: any APIProtocol, baseURL: URL) async -> String? {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+    public func loadNewer(using handle: SessionHandle, baseURL: URL) async -> String? {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         guard !isLoadingNewer, !isLoading, hasNewer else { return nil }
         isLoadingNewer = true
         defer { isLoadingNewer = false }
@@ -340,6 +364,11 @@ public final class TimelineStore {
                     MemosLog.api.info("GET /api/memos answered for a list that has moved on")
                     return nil
                 }
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("a page answered for a session that has ended is not merged")
+                    return nil
+                }
+                serverUnreachable = false
                 // The server says whether it was the last page, exactly as it does downwards.
                 // Read BEFORE the emptiness check, because an upward page that adds nothing new
                 // is still the server saying there is nothing above.
@@ -361,7 +390,7 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos failed for a list that has moved on")
                 return nil
             }
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return nil
         }
     }
@@ -386,6 +415,7 @@ public final class TimelineStore {
         // a list's request can fail BEFORE the launch check does, so the later transition to
         // `.unverified` has nothing to clear the card it wrote.
         if let failure = StoreFailure.transportFailure(error) {
+            serverUnreachable = true
             guard let generation else { return }
             session?.noteTransportFailure(failure, issuedUnder: generation)
             return
@@ -394,17 +424,42 @@ public final class TimelineStore {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
+        // The server ANSWERED, so whatever this list last said about being unable to reach it is
+        // out of date.
+        serverUnreachable = false
         lastError = apiError.errorDescription
         if apiError == .unauthorized { await onUnauthorized() }
+    }
+
+    /// Empties the loaded list.
+    ///
+    /// The timeline never does this — a list that blanks because one refresh failed is a worse lie
+    /// than a stale one — but a SEARCH is a different case: its rows are the answer to a question,
+    /// and rows from the previous question left under "can't search right now" read as this
+    /// question's answer. The lineage moves with them, so a page still in the air cannot put them
+    /// back.
+    public func clearRows() {
+        memos = []
+        nextCursor = nil
+        hasMore = true
+        hasNewer = false
+        newerCursor = nil
+        timelineGeneration += 1
     }
 
     /// Whether the session that ISSUED an operation is still the one this device is running.
     ///
     /// A store with no session named to it answers yes: a preview and a suite that is about paging
     /// have no incarnation to be wrong about.
-    private func sessionStillCurrent(_ issued: Int?) -> Bool {
-        guard let issued, let current = session?.handle?.generation else { return true }
-        return issued == current
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        // A store with no session named to it has nothing to be wrong about — a preview, and the
+        // suites that are about paging. A store that HAS one and finds it holding no client is
+        // looking at a session that has been WITHDRAWN, and that answers no: the whole point of
+        // the withdrawal is that nothing issued under it may land. Answering "still current"
+        // there is the bug, not the safe default.
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
     }
 
     // MARK: - writes
@@ -421,18 +476,21 @@ public final class TimelineStore {
     public func create(
         content: String,
         visibility: MemoVisibility? = nil,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         do {
             let response = try await client.createMemoApiMemosPost(
                 .init(body: .json(.init(content: content, visibility: visibility?.generated)))
             )
             switch response {
             case .created(let created):
+                guard sessionStillCurrent(handle) else { return false }
                 let memo = admitted(Memo(try created.body.json, baseURL: baseURL))
                 memos = Self.placed(memo, in: memos, tie: .justCreated)
                 lastError = nil
@@ -453,7 +511,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return false
         }
     }
@@ -483,12 +541,14 @@ public final class TimelineStore {
         content: String,
         createdAt: Date? = nil,
         attaching files: [StagedSource] = [],
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         let key = editKey(
             for: MemoEditAttempt(
                 uid: uid, content: content, createdAt: createdAt, files: files
@@ -501,7 +561,7 @@ public final class TimelineStore {
             } catch {
                 // This invocation is over, and it failed: the key stays behind for the retry.
                 finishEdit(key: key, saved: false)
-                await report(error, issuedUnder: issued)
+                await report(error, issuedUnder: handle.generation)
                 return false
             }
         }
@@ -510,7 +570,7 @@ public final class TimelineStore {
             .init(
                 content: content, createdAt: createdAt, editKey: key, uploadUids: uploadUIDs
             ),
-            using: client,
+            using: handle,
             baseURL: baseURL
         )
         finishEdit(key: key, saved: saved)
@@ -601,11 +661,11 @@ public final class TimelineStore {
     public func setVisibility(
         _ visibility: MemoVisibility,
         uid: String,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
         await patch(
-            uid: uid, .init(visibility: visibility.generated), using: client, baseURL: baseURL
+            uid: uid, .init(visibility: visibility.generated), using: handle, baseURL: baseURL
         )
     }
 
@@ -625,10 +685,10 @@ public final class TimelineStore {
     public func setArchived(
         _ archived: Bool,
         uid: String,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        await patch(uid: uid, .init(archived: archived), using: client, baseURL: baseURL)
+        await patch(uid: uid, .init(archived: archived), using: handle, baseURL: baseURL)
     }
 
     /// Pins or unpins through the server's own routes rather than by patching the flag: pinning
@@ -637,12 +697,14 @@ public final class TimelineStore {
     public func setPinned(
         _ pinned: Bool,
         uid: String,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         do {
             // Each response is switched on rather than reached through the generated throwing
             // accessors: those throw an untyped "unexpected status" error, and a 401 that does not
@@ -667,12 +729,13 @@ public final class TimelineStore {
             // whose re-place branch bumps the generation, so a page in flight measured against
             // the old order drops on arrival instead of merging around the moved memo (review
             // round: `placed` called here directly bypassed exactly that fence).
+            guard sessionStillCurrent(handle) else { return false }
             let updated = Memo(json, baseURL: baseURL)
             apply(updated)
             lastError = nil
             return true
         } catch {
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return false
         }
     }
@@ -680,16 +743,19 @@ public final class TimelineStore {
     /// Deletes a memo. The row goes when the server says it is gone, not before: a delete that
     /// failed and left the row on screen is recoverable, one that vanished optimistically is not.
     @discardableResult
-    public func delete(uid: String, using client: any APIProtocol) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+    public func delete(uid: String, using handle: SessionHandle) async -> Bool {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         do {
             let response = try await client.deleteMemoApiMemosUidDelete(
                 .init(path: .init(uid: uid))
             )
             switch response {
             case .noContent:
+                guard sessionStillCurrent(handle) else { return false }
                 memos.removeAll { $0.uid == uid }
                 // The memo is gone from the server as well, so any page still in flight — read
                 // while the memo was still there, and cursor pages overlap — would put it back on
@@ -703,7 +769,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return false
         }
     }
@@ -727,11 +793,13 @@ public final class TimelineStore {
     public func deleteAttachment(
         uid: String,
         from memoUID: String,
-        using client: any APIProtocol
+        using handle: SessionHandle
     ) async -> Bool {
         if let running = attachmentDeletions[uid] { return await running.value }
         let deletion = Task { [self] in
-            let outcome = await performAttachmentDelete(uid: uid, from: memoUID, using: client)
+            let outcome = await performAttachmentDelete(
+                uid: uid, from: memoUID, using: handle
+            )
             // Cleared HERE rather than by the caller that started it, for the reason
             // `SessionStore.renewDeviceToken` clears its own slot inside the task: that caller can
             // be resumed long after a later one has legitimately begun the next delete of this
@@ -746,11 +814,13 @@ public final class TimelineStore {
     private func performAttachmentDelete(
         uid: String,
         from memoUID: String,
-        using client: any APIProtocol
+        using handle: SessionHandle
     ) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         do {
             let response = try await client.deleteAttachmentApiAttachmentsUidDelete(
                 .init(path: .init(uid: uid))
@@ -767,11 +837,12 @@ public final class TimelineStore {
                 // over a picture that has indeed stopped existing, which is what was asked for.
                 guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
             }
+            guard sessionStillCurrent(handle) else { return false }
             forget(uid, from: memoUID)
             lastError = nil
             return true
         } catch {
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return false
         }
     }
@@ -852,9 +923,14 @@ public final class TimelineStore {
     @discardableResult
     public func refreshMemo(
         uid: String,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         // Read BEFORE the request goes out. What it is compared against on the way back is which
         // attachments the stream spoke about while the answer was in the air.
         let appliedWhenIssued = liveApplications
@@ -862,6 +938,7 @@ public final class TimelineStore {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
+                guard sessionStillCurrent(handle) else { return false }
                 let read = Memo(try ok.body.json, baseURL: baseURL)
                 apply(reconciled(read, issuedWith: appliedWhenIssued))
                 return true
@@ -914,13 +991,19 @@ public final class TimelineStore {
     /// should show the same copy the card behind it does.
     public func fetchMemo(
         uid: String,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Memo? {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
+                guard sessionStillCurrent(handle) else { return nil }
                 let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
                 apply(memo)
                 return memo
@@ -957,10 +1040,10 @@ public final class TimelineStore {
     public func jump(
         to uid: String,
         calendar: Calendar,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> MemoJumpOutcome {
-        guard let memo = await fetchMemo(uid: uid, using: client, baseURL: baseURL) else {
+        guard let memo = await fetchMemo(uid: uid, using: handle, baseURL: baseURL) else {
             return .unavailable
         }
         // Already on screen: `fetchMemo` applied the server's copy into it, and nothing needs
@@ -970,7 +1053,7 @@ public final class TimelineStore {
             return .unavailable
         }
         setQuery(MemoQuery(anchor: anchor))
-        await refresh(using: client, baseURL: baseURL)
+        await refresh(using: handle, baseURL: baseURL)
         // Anchored and still absent. Pushing now would open a screen whose edits go nowhere, so
         // the caller is told instead.
         guard memos.contains(where: { $0.uid == uid }) else { return .unavailable }
@@ -1029,12 +1112,14 @@ public final class TimelineStore {
     public func toggleTask(
         at index: Int,
         in uid: String,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
         let original = memos[position]
         let toggled = MemosCore.toggleTask(original.content, at: index)
@@ -1047,6 +1132,7 @@ public final class TimelineStore {
             )
             switch response {
             case .ok(let ok):
+                guard sessionStillCurrent(handle) else { return false }
                 apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
@@ -1079,7 +1165,7 @@ public final class TimelineStore {
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
                 memos[current] = admitted(original)
             }
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return false
         }
     }
@@ -1087,12 +1173,14 @@ public final class TimelineStore {
     private func patch(
         uid: String,
         _ body: Components.Schemas.MemoPatch,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        // Taken when the request is ISSUED, so a failure that lands after the session has
-        // moved on is reported to the one that ASKED (`SessionReporting`).
-        let issued = session?.handle?.generation
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(body))
@@ -1122,7 +1210,7 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            await report(error, issuedUnder: issued)
+            await report(error, issuedUnder: handle.generation)
             return false
         }
     }

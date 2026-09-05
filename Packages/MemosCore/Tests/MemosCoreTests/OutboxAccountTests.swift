@@ -1,4 +1,5 @@
 import Foundation
+import HTTPTypes
 import MemosCore
 import MemosOutbox
 import Testing
@@ -13,6 +14,18 @@ private let signInServer = "memos.example.invalid"
 @MainActor
 @Suite("What the outbox is allowed to upload as")
 struct OutboxAccountTests {
+    /// A whoami that answers with whichever account the presented token belongs to, so a switch
+    /// really changes the SUBJECT as well as the credential — which is the pair this suite is
+    /// about.
+    private static let whoamiPerToken: StubTransport.Handler = { request, _, _ in
+        let bearer = request.headerFields[.authorization] ?? ""
+        let subject = bearer.contains("pat-b") ? "brenda" : "fabian"
+        return Stub.json(
+            #"{"subject":"\#(subject)","display_name":null,"#
+                + #""email":null,"role":"user","auth_kind":"oidc"}"#
+        )
+    }
+
     private func session(
         credentials: any CredentialStore,
         handler: @escaping StubTransport.Handler = { _, _, _ in Stub.json(Stub.user) }
@@ -60,17 +73,22 @@ struct OutboxAccountTests {
     @Test("a sign-in whose credential would not store grants ITS token, never the stored one")
     func aStoredNowhereSignInGrantsItsOwnToken() async throws {
         let vault = FlakyCredentials()
-        let session = session(credentials: vault)
+        let session = session(credentials: vault, handler: Self.whoamiPerToken)
         await session.signIn(serverAddress: signInServer, token: "pat-a")
         #expect(vault.snapshot()[SessionStore.tokenAccount] == "pat-a")
+        #expect(session.state.user?.subject == "fabian")
         vault.refuseWrites()
 
         await session.signIn(serverAddress: signInServer, token: "pat-b")
 
-        #expect(session.state.user != nil, "B is established in memory; that is the premise")
+        #expect(session.state.user?.subject == "brenda", "B is established; that is the premise")
         #expect(vault.snapshot()[SessionStore.tokenAccount] == "pat-a", "and storage still has A")
         let grant = try #require(await provider(for: session).currentCredentials())
-        #expect(grant.token == "pat-b", "the grant is B's own credential, not the stored one")
+        #expect(grant.ownerSubject == "brenda")
+        #expect(
+            grant.token == "pat-b",
+            "brenda's subject beside fabian's token is a capture posted into the wrong account"
+        )
     }
 
     @Test("a session that was withdrawn grants nothing at all")
