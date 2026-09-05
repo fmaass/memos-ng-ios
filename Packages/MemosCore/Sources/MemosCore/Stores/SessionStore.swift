@@ -114,6 +114,24 @@ public final class SessionStore {
     /// Kept separate from `sessionGeneration` deliberately — that one fences this store's own
     /// in-flight replies, and merging the two would couple a media decision to a settings one.
     private let identity: MediaIdentity
+    /// The timeline snapshots on this device — read by the timeline, removed only from here.
+    ///
+    /// This store owns their removal for one reason: it is the only object that knows when the
+    /// answer to "whose device is this" changes, and a cached timeline that outlives its credential
+    /// is somebody's memos left behind on a phone nobody is signed in to. It is `public` because
+    /// the timeline reads through the SAME writer — one chain, or a removal and a write in flight
+    /// could pass each other.
+    ///
+    /// Nil unless the app composes one, so a test never deletes out of the running app's cache.
+    public let snapshots: TimelineSnapshotWriter?
+    /// The same number as `sessionGeneration`, in the one form the snapshot writer can read without
+    /// awaiting anything — see `SessionEpoch`. Handed in rather than made here, because the writer
+    /// needs it at the moment it is built, which is before this store exists.
+    ///
+    /// It is the minimal read-only session handle this phase needed. A fuller one — the client and
+    /// its generation as a single immutable value an operation carries from start to finish —
+    /// belongs with the provisional-session work.
+    public let sessionEpoch: SessionEpoch
     /// A licence that would not delete. It is kept because the thing it describes — a revoked
     /// identity that can still queue captures — outlives the call that failed to remove it, and
     /// the next `restore()` is where it is tried again.
@@ -128,7 +146,12 @@ public final class SessionStore {
     /// reliably cancelled by dropping the client that made it, so an answer about account A can
     /// arrive after someone has signed in as B, and anything that assigns it without checking
     /// would be telling B a fact about A.
-    private var sessionGeneration = 0
+    ///
+    /// Readable from outside because the timeline fences its own reads and writes against it: a
+    /// page issued as one person and answered as another must not reach a list or a file, and
+    /// there is one counter for that rather than a copy per store. `sessionEpoch` carries the same
+    /// number to the code that cannot await this store's isolation to read it.
+    public private(set) var sessionGeneration = 0
     /// The rotation in flight, if there is one, so a second `renewDeviceToken` joins it instead of
     /// starting a sibling that would destroy the token this one is still reasoning about.
     private var renewalInFlight: Task<DeviceTokenRenewal, Never>?
@@ -163,13 +186,17 @@ public final class SessionStore {
             try await Task.sleep(for: $0)
         },
         account: (any OutboxAccountPublishing)? = nil,
-        identity: MediaIdentity = .shared
+        identity: MediaIdentity = .shared,
+        snapshots: TimelineSnapshotWriter? = nil,
+        sessionEpoch: SessionEpoch = SessionEpoch()
     ) {
         self.credentials = credentials
         self.makeClient = makeClient
         self.sleeper = sleeper
         self.account = account
         self.identity = identity
+        self.snapshots = snapshots
+        self.sessionEpoch = sessionEpoch
     }
 
     /// The client every feature talks through, or `nil` while signed out.
@@ -404,9 +431,11 @@ public final class SessionStore {
         guard let stored,
             let configuration = ServerConfiguration(serverAddress: stored.address)
         else {
-            // No credential: whatever licence is lying about belongs to nobody. This is also the
-            // retry for a revocation that failed during sign-out.
+            // No credential: whatever licence is lying about belongs to nobody, and neither does
+            // any timeline left on the disk. This is also the retry for a revocation — or a
+            // removal — that failed during sign-out.
             clearAccountLicence()
+            await snapshots?.removeAll()
             return
         }
         let storedToken = stored.token
@@ -415,6 +444,8 @@ public final class SessionStore {
         // is. The subject cannot be checked here — that is precisely what the server is for.
         if let published = account?.current(), published.serverBaseURL != configuration.baseURL {
             clearAccountLicence()
+            // The same interrupted switch that left the licence behind left a timeline behind.
+            await snapshots?.removeAll()
         }
 
         state = .signingIn
@@ -535,7 +566,7 @@ public final class SessionStore {
         // where that is revoked, and never anywhere else.
         defaultVisibility = nil
         avatar = nil
-        sessionGeneration += 1
+        advanceSession()
         // Same lifecycle, one layer over: whatever the previous account's photos were, they are
         // not this one's, and a uid is only unique within one server.
         identity.rotate()
@@ -591,6 +622,9 @@ public final class SessionStore {
         token: String, configuration: ServerConfiguration
     ) async -> CredentialPersistence {
         guard clearAccountLicence() else { return .licenceNotRevoked }
+        // Beside the licence, and for the same reason: what is on the disk belongs to the account
+        // this credential is replacing. Signing in as the same person again costs one refresh.
+        await snapshots?.removeAll()
         do {
             // ONE call. Two awaits are two critical sections with a gap between them, and this
             // method's own callers run in that gap: a 401 handled or a sign-out tapped between
@@ -673,9 +707,21 @@ public final class SessionStore {
         // away, so keeping it would leave Settings naming a token that is gone.
         deviceToken = nil
         deviceTokenNotice = nil
-        sessionGeneration += 1
+        advanceSession()
         identity.rotate()
+        // Awaited on the same chain the timeline writes through, so a page still on its way to the
+        // disk cannot land behind this and leave a signed-out phone holding somebody's memos.
+        await snapshots?.removeAll()
         state = .signedOut
+    }
+
+    /// Moves the session on, in both of the places that have to agree about which one it is.
+    ///
+    /// One method rather than two statements: a bump that moved only the counter would leave the
+    /// snapshot writer admitting writes for a session this store has already ended.
+    private func advanceSession() {
+        sessionGeneration += 1
+        sessionEpoch.adopt(sessionGeneration)
     }
 
     /// Revokes the licence and REMEMBERS a failure to do so, so the next `restore` tries again.

@@ -181,13 +181,16 @@ public enum MediaChannel {
             case .event(let envelope):
                 guard let event = envelope.eventIfCurrent(for: identity) else { continue }
                 for list in lists {
-                    // Read on this actor, at the moment the answer is used — the list cannot move
-                    // between the decision and what it decides, because neither awaits.
+                    // Read on this actor, at the moment the answer is used. The apply below does
+                    // await — it waits for the picture of the list on disk to be written — so the
+                    // list CAN move under it; that is harmless because `apply` re-derives the
+                    // change from whatever the list holds when it runs, and does nothing when
+                    // there is no longer anything to change.
                     switch mediaEventOutcome(event, for: list.memos, at: now()) {
                     case .unchanged:
                         break
                     case .applied:
-                        list.apply(event)
+                        await list.apply(event)
                     case .refresh(let uid):
                         // The tile is about to be flipped onto a URL that has outlived its
                         // signature, so it is the MEMO that is re-read: the answer carries freshly

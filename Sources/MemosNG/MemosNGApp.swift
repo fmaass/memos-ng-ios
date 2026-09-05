@@ -48,7 +48,15 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
 
     // The account store is composed here, not defaulted inside the session: it writes into the
     // app group, which only a real app has, and the share extension reads what it publishes.
-    let session = SessionStore(account: OutboxAccountStore.live())
+    /// Built here rather than inside the session because both sides of the snapshot fence need the
+    /// SAME box: the writer reads it at the moment it writes, and the session moves it.
+    private static let sessionEpoch = SessionEpoch()
+
+    let session = SessionStore(
+        account: OutboxAccountStore.live(),
+        snapshots: TimelineSnapshotWriter.live(epoch: MemosNGAppDelegate.sessionEpoch),
+        sessionEpoch: MemosNGAppDelegate.sessionEpoch
+    )
     private(set) var outbox: Outbox?
     /// Built from the outbox's own preference store rather than a second one over the same suite:
     /// the drain acts on the object it was given, and a switch it never hears about is a switch

@@ -232,7 +232,7 @@ struct TimelinePaginationFenceTests {
         }
         // The reconciling read the channel makes when it starts, and one event off the stream.
         let reconciled = await store.refreshMemo(uid: "a", using: client, baseURL: Stub.baseURL)
-        store.apply(
+        await store.apply(
             MediaEvent(uid: "a1", status: .ready, progressPercent: 100, width: 1000, height: 1000)
         )
         release.set(true)

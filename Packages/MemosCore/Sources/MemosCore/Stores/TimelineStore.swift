@@ -76,6 +76,57 @@ public final class TimelineStore {
     /// a chosen day becomes on the wire is decided by a time zone a test can name.
     private let calendar: Calendar
     private let onUnauthorized: @MainActor @Sendable () async -> Void
+    /// Where the last-seen list is kept between launches, or nil for a store that keeps none —
+    /// which is every list that is not THE timeline: a search result set is an answer to a
+    /// question nobody asked again on the next launch.
+    private let snapshots: TimelineSnapshotWriter?
+    /// Whose timeline this is. Nil is the same "keep none" as above, and it is what a store built
+    /// before anybody is signed in has.
+    private let snapshotIdentity: TimelineSnapshotIdentity?
+    /// Which session the device is on RIGHT NOW, read from the one box that holds that fact rather
+    /// than mirrored here — a mirror is a second copy of the very thing this fence exists to be
+    /// sure of.
+    private let sessionEpoch: SessionEpoch
+    /// Whether this store's list is one a next launch should open on.
+    ///
+    /// False for every list that is not THE timeline. The search results are a `TimelineStore` too
+    /// (`MemoSearch`), and they are an answer to a question nobody will ask again tomorrow.
+    private let persists: Bool
+    /// How many times the published list has changed in this run.
+    ///
+    /// It is what the writer compares two pictures by, because the order two writes reach it in is
+    /// not something Swift promises. Moved at the ONE place the list changes, synchronously, before
+    /// anything is awaited.
+    private var listRevision = 0
+    /// The query the rows on screen were ADMITTED under — not the one that has since been asked
+    /// for.
+    ///
+    /// The two come apart on purpose: `setQuery` leaves the loaded rows where they are until a
+    /// refresh replaces them, so between a filter change and its answer the list is still the old
+    /// query's. Writing it down under the new query's name is how an anchored day would end up
+    /// being opened as "the timeline" on the next launch. Nil until a first page has replaced the
+    /// list at all.
+    private var admittedQuery: MemoQuery?
+    /// The memos carrying a change this app has made on screen and the server has not confirmed.
+    ///
+    /// Nothing is written down while one of these is outstanding: a tick that is about to be put
+    /// back is not a state a next launch should open on. The settle — the server's answer, or the
+    /// rollback — is itself a change to the list, so the write follows it.
+    private var optimistic: Set<String> = []
+    /// A change that was not written because something optimistic was outstanding at the time.
+    private var snapshotDirty = false
+    /// This store's claim on its identity, once the writer has issued one. Nil until it has: a
+    /// store that has not claimed the identity does not write for it.
+    private var producerToken: Int?
+    /// The claim being made, so two changes arriving together make ONE of them rather than a second
+    /// that retires the first.
+    private var producerBinding: Task<Int, Never>?
+    /// Whether the rows on screen came off the disk and no server has spoken yet.
+    private var showingSnapshot = false
+    /// Set when the signed-in identity stops being the one this store was built for. Everything
+    /// this store does with the disk ends there: what it restored is dropped, and nothing more is
+    /// written under an identity that has been left behind.
+    private var identityWithdrawn = false
 
     /// What this list is asking the server for. `.empty` is the plain timeline, and it is the
     /// default: a store nobody has filtered sends exactly what it always sent.
@@ -85,12 +136,124 @@ public final class TimelineStore {
         pageSize: Int = 20,
         query: MemoQuery = .empty,
         calendar: Calendar = .current,
+        snapshots: TimelineSnapshotWriter? = nil,
+        snapshotIdentity: TimelineSnapshotIdentity? = nil,
+        sessionEpoch: SessionEpoch = SessionEpoch(),
+        persists: Bool = false,
         onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.pageSize = pageSize
         self.query = query
         self.calendar = calendar
+        self.snapshots = snapshots
+        self.snapshotIdentity = snapshotIdentity
+        self.sessionEpoch = sessionEpoch
+        self.persists = persists
         self.onUnauthorized = onUnauthorized
+    }
+
+    /// Puts the memos this identity last saw on screen, before anything has been asked of the
+    /// server. Called once, where the store is made.
+    ///
+    /// It renders and nothing more. No cursor comes back with it — a cursor is a position inside a
+    /// list the server sent THIS run, and one read off a file would page into somebody else's idea
+    /// of the list — so `hasMore` keeps its optimistic default and the first `refresh` replaces the
+    /// rows whole. A list that is not empty is left alone: the network has already answered, and
+    /// the snapshot is the older word by definition.
+    ///
+    /// The identity is checked on both sides of the read. A file is only ever asked for under the
+    /// identity the session held when the read was ISSUED, and it is only ever rendered if that is
+    /// still the identity when the bytes come back.
+    public func restoreSnapshot() async {
+        guard memos.isEmpty, query.isEmpty, !identityWithdrawn else { return }
+        guard let snapshots, let snapshotIdentity else { return }
+        await claimProducer()
+        guard let snapshot = await snapshots.read(identity: snapshotIdentity) else { return }
+        guard memos.isEmpty, !identityWithdrawn else { return }
+        memos = snapshot.memos
+        showingSnapshot = true
+    }
+
+    /// Who the device is signed in as has changed.
+    ///
+    /// A snapshot on screen belongs to whoever wrote it, and that is no longer who is looking, so
+    /// it goes; a list the server sent is left alone, because the caller that changed the identity
+    /// owns what happens to the session, not to a page it already answered. Nothing more is written
+    /// either — this store's identity is the one it was built with, and that one has gone.
+    public func sessionIdentityChanged(to identity: TimelineSnapshotIdentity?) {
+        guard identity != snapshotIdentity else { return }
+        identityWithdrawn = true
+        guard showingSnapshot else { return }
+        memos = []
+        showingSnapshot = false
+    }
+
+    /// The one place the published list changes — and, with it, the picture of it on the disk.
+    ///
+    /// Every caller sits AFTER the fence that decides whether the change happens at all, so a page
+    /// from a lineage nobody is reading, or from a session that has ended, updates neither. The
+    /// write is AWAITED rather than launched: it takes its place in the writer's queue in the order
+    /// the changes were applied, and the session it was issued under travels with it so the writer
+    /// can refuse it at the moment of writing if that session has since gone.
+    ///
+    /// Only the plain timeline is kept. An anchored day, a tag filter or a search result is an
+    /// answer to a question nobody will ask again on the next launch, and opening the app on one
+    /// would be opening it on a list the reader never chose.
+    private func commit(_ next: [Memo], issuedUnder lineage: Lineage) async {
+        memos = next
+        // Whatever is on screen now came from the server, not from the disk.
+        showingSnapshot = false
+        // This number is how the writer tells which of two pictures THIS store took is the newer.
+        listRevision += 1
+        await persist(issuedUnder: lineage)
+    }
+
+    /// Claims this identity for this store, once, retiring whoever held it before.
+    ///
+    /// Joined rather than repeated: two changes arriving together would otherwise make two claims,
+    /// the second retiring the first, and the first store's write would be refused as a stranger's.
+    @discardableResult
+    private func claimProducer() async -> Int? {
+        guard persists, let snapshots, let snapshotIdentity else { return nil }
+        if let producerToken { return producerToken }
+        if let producerBinding { return await producerBinding.value }
+        let binding = Task { await snapshots.bind(to: snapshotIdentity) }
+        producerBinding = binding
+        let token = await binding.value
+        producerToken = token
+        return token
+    }
+
+    /// Writes the picture, when there is one worth writing.
+    private func persist(issuedUnder lineage: Lineage) async {
+        guard persists, !identityWithdrawn else { return }
+        // BOTH queries: the one the rows were admitted under, and the one being asked for now. A
+        // list of default rows with an anchor already requested is a list about to be replaced —
+        // writing it down would put a picture of the old list under the new list's name.
+        guard admittedQuery?.isEmpty == true, query.isEmpty else { return }
+        guard let snapshots, let snapshotIdentity else { return }
+        guard optimistic.isEmpty else {
+            snapshotDirty = true
+            return
+        }
+        guard let producer = await claimProducer() else { return }
+        snapshotDirty = false
+        await snapshots.write(
+            memos,
+            for: snapshotIdentity,
+            producer: producer,
+            revision: listRevision,
+            query: .empty,
+            session: lineage.session
+        )
+    }
+
+    /// An optimistic change has been answered — confirmed, or put back — so the list is once again
+    /// something a next launch may open on. Anything held back while it was outstanding goes now.
+    private func settle(_ uid: String, issuedUnder lineage: Lineage) async {
+        optimistic.remove(uid)
+        guard optimistic.isEmpty, snapshotDirty else { return }
+        await persist(issuedUnder: lineage)
     }
 
     /// Asks for a different list.
@@ -122,9 +285,15 @@ public final class TimelineStore {
     private struct Lineage: Equatable {
         var generation: Int
         var query: MemoQuery
+        /// Which SESSION asked. A page issued as one person and answered after the device became
+        /// somebody else's — or nobody's — continues nothing: it must not reach the list, and
+        /// therefore it cannot reach the disk either.
+        var session: Int
     }
 
-    private var lineage: Lineage { Lineage(generation: timelineGeneration, query: query) }
+    private var lineage: Lineage {
+        Lineage(generation: timelineGeneration, query: query, session: sessionEpoch.current)
+    }
 
     /// Which lineage the first page in flight belongs to, or nil when none is.
     ///
@@ -164,7 +333,6 @@ public final class TimelineStore {
                 MemosLog.api.info("GET /api/memos answered for a list that has moved on")
                 return
             }
-            memos = admitted(page.memos)
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
             // An anchored first page starts BELOW a ceiling, so everything written after that day
@@ -174,6 +342,12 @@ public final class TimelineStore {
             lastError = nil
             // This IS a different list — a new lineage, whose cursor no page in flight shares.
             timelineGeneration += 1
+            // The one place rows are REPLACED, and so the one place the query they were admitted
+            // under is settled.
+            admittedQuery = lineage.query
+            // Last, and awaited: everything this list says about itself is already true when the
+            // picture of it is taken.
+            await commit(admitted(page.memos), issuedUnder: lineage)
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
             // any more would put an error over a list that loaded perfectly well — and, on a 401,
@@ -205,10 +379,14 @@ public final class TimelineStore {
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
-        // The cursor and the lineage are re-read on every pass: after a drop, the page that
-        // comes next is the CURRENT list's next page, not the one this call set out to fetch.
+        // Read ONCE, for the whole operation. The cursor and the list lineage are re-read on every
+        // pass — after a drop, the page that comes next is the CURRENT list's next page, not the
+        // one this call set out to fetch — but the SESSION is not: an operation that started as one
+        // person must not continue as another, and re-reading here is exactly how it would.
+        let session = sessionEpoch.current
         while !isLoading, hasMore, let cursor = nextCursor {
-            let lineage = self.lineage
+            guard session == sessionEpoch.current else { return }
+            let lineage = Lineage(generation: timelineGeneration, query: query, session: session)
             do {
                 let page = try await Self.page(
                     client,
@@ -227,10 +405,11 @@ public final class TimelineStore {
                 // A cursor page can overlap the one before it when a memo moved; appending blindly
                 // would show the same memo twice and break SwiftUI's identity.
                 let known = Set(memos.map(\.uid))
-                memos += admitted(page.memos.filter { !known.contains($0.uid) })
+                let merged = memos + admitted(page.memos.filter { !known.contains($0.uid) })
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
+                await commit(merged, issuedUnder: lineage)
                 return
             } catch {
                 // Fenced exactly as the page above it is: a failure that answers a superseded
@@ -325,7 +504,7 @@ public final class TimelineStore {
                 let fresh = admitted(page.memos.filter { !known.contains($0.uid) })
                 lastError = nil
                 if !fresh.isEmpty {
-                    memos = Array(fresh.reversed()) + memos
+                    await commit(Array(fresh.reversed()) + memos, issuedUnder: lineage)
                     return previousTop
                 }
                 guard let next = page.nextCursor else { return nil }
@@ -388,8 +567,8 @@ public final class TimelineStore {
             switch response {
             case .created(let created):
                 let memo = admitted(Memo(try created.body.json, baseURL: baseURL))
-                memos = Self.placed(memo, in: memos, tie: .justCreated)
                 lastError = nil
+                await commit(Self.placed(memo, in: memos, tie: .justCreated), issuedUnder: lineage)
                 return true
             // Declared since the strict linking contract: the server refuses to create a memo
             // whose uploads it cannot link, rather than quietly dropping them. This path never
@@ -616,7 +795,7 @@ public final class TimelineStore {
             // the old order drops on arrival instead of merging around the moved memo (review
             // round: `placed` called here directly bypassed exactly that fence).
             let updated = Memo(json, baseURL: baseURL)
-            apply(updated)
+            await apply(updated)
             lastError = nil
             return true
         } catch {
@@ -635,12 +814,12 @@ public final class TimelineStore {
             )
             switch response {
             case .noContent:
-                memos.removeAll { $0.uid == uid }
                 // The memo is gone from the server as well, so any page still in flight — read
                 // while the memo was still there, and cursor pages overlap — would put it back on
                 // screen. It belongs to the list that still had this row; this one does not.
                 timelineGeneration += 1
                 lastError = nil
+                await commit(memos.filter { $0.uid != uid }, issuedUnder: lineage)
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -709,7 +888,7 @@ public final class TimelineStore {
                 // over a picture that has indeed stopped existing, which is what was asked for.
                 guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
             }
-            forget(uid, from: memoUID)
+            await forget(uid, from: memoUID)
             lastError = nil
             return true
         } catch {
@@ -722,10 +901,12 @@ public final class TimelineStore {
     ///
     /// In place, by uid: the memo's own ordering keys did not move, so it keeps its position and
     /// nothing is re-placed. The tombstone is what the rest of the store reads — see `admitted`.
-    private func forget(_ attachment: String, from memoUID: String) {
+    private func forget(_ attachment: String, from memoUID: String) async {
         removedAttachments.insert(attachment)
         guard let position = memos.firstIndex(where: { $0.uid == memoUID }) else { return }
-        memos[position].attachments.removeAll { $0.uid == attachment }
+        var next = memos
+        next[position].attachments.removeAll { $0.uid == attachment }
+        await commit(next, issuedUnder: lineage)
     }
 
     /// The delete in flight for each attachment uid, so a second call for one of them joins it
@@ -805,7 +986,7 @@ public final class TimelineStore {
             switch response {
             case .ok(let ok):
                 let read = Memo(try ok.body.json, baseURL: baseURL)
-                apply(reconciled(read, issuedWith: appliedWhenIssued))
+                await apply(reconciled(read, issuedWith: appliedWhenIssued))
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -864,7 +1045,7 @@ public final class TimelineStore {
             switch response {
             case .ok(let ok):
                 let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
-                apply(memo)
+                await apply(memo)
                 return memo
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -930,14 +1111,14 @@ public final class TimelineStore {
     /// Assigning the array anyway would re-render the whole timeline once per event for a value
     /// nothing on screen reads, which is the shape of the reconnect churn this channel is supposed
     /// not to have.
-    public func apply(_ event: MediaEvent) {
+    public func apply(_ event: MediaEvent) async {
         let next = applyMediaEvent(event, to: memos)
         guard next != memos else { return }
         // The one attachment this event named, and only because it really moved: a read already
         // in the air is now the older word on THIS file and still the newer word on every other
         // one — see `reconciled(_:issuedWith:)`.
         liveApplications[event.uid, default: 0] += 1
-        memos = next
+        await commit(next, issuedUnder: lineage)
     }
 
     /// How many live media events this list has APPLIED to each ATTACHMENT.
@@ -974,11 +1155,22 @@ public final class TimelineStore {
         using client: any APIProtocol,
         baseURL: URL
     ) async -> Bool {
+        // Refused, not joined, and the difference is the point: the second tap's INTENT depends on
+        // what the first one turns out to have done. A join would send one request and report its
+        // answer to both, which is a lie to whichever tap wanted the other state; a queue would send
+        // the second tick derived from a content the server may be about to reject. One outstanding
+        // toggle per memo, and the second tap is simply not taken (a store serializes its own
+        // mutations).
+        guard !optimistic.contains(uid) else { return false }
         guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
         let original = memos[position]
         let toggled = MemosCore.toggleTask(original.content, at: index)
         guard toggled != original.content else { return false }
 
+        // NOT through `commit`, and that is the point: a tick nobody has confirmed is not a state
+        // the next launch should open on. The memo is marked instead, which holds every OTHER
+        // change out of the file until this one is answered — see `persist` and `settle`.
+        optimistic.insert(uid)
         memos[position].content = toggled
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
@@ -986,7 +1178,9 @@ public final class TimelineStore {
             )
             switch response {
             case .ok(let ok):
-                apply(Memo(try ok.body.json, baseURL: baseURL))
+                optimistic.remove(uid)
+                await apply(Memo(try ok.body.json, baseURL: baseURL))
+                await settle(uid, issuedUnder: lineage)
                 lastError = nil
                 return true
             // The strict linking refusal is declared on the patch too. A ticked checkbox names no
@@ -1015,9 +1209,13 @@ public final class TimelineStore {
             // fails, and a raw restore would put the picture back on a memo the server has no
             // copy of it for. The tick still rolls back — that is what the snapshot is for — and
             // only what the server has confirmed gone is left out of it.
+            optimistic.remove(uid)
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
-                memos[current] = admitted(original)
+                var restored = memos
+                restored[current] = admitted(original)
+                await commit(restored, issuedUnder: lineage)
             }
+            await settle(uid, issuedUnder: lineage)
             await report(error)
             return false
         }
@@ -1035,7 +1233,7 @@ public final class TimelineStore {
             )
             switch response {
             case .ok(let ok):
-                apply(Memo(try ok.body.json, baseURL: baseURL))
+                await apply(Memo(try ok.body.json, baseURL: baseURL))
                 lastError = nil
                 return true
             // Either a named upload the server cannot link, or an edit key already bound to a
@@ -1078,29 +1276,33 @@ public final class TimelineStore {
     /// it would leave a row that the next refresh removes without explanation. It happens HERE, in
     /// the one place every server answer lands, so an archive made from a card, from the memo's own
     /// screen, or noticed by the reconciling read all reach the same conclusion.
-    public func apply(_ memo: Memo) {
+    public func apply(_ memo: Memo) async {
         let memo = admitted(memo)
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
         guard query.admitsArchiveState(of: memo) else {
-            memos.remove(at: position)
             // Same fence a delete raises, and for the same reason: a cursor page read while this
             // memo still belonged here overlaps the rows around it and would put it back.
             timelineGeneration += 1
             newerCursor = nil
+            var next = memos
+            next.remove(at: position)
+            await commit(next, issuedUnder: lineage)
             return
         }
         let previous = memos[position]
         guard previous.createdAt != memo.createdAt || previous.pinned != memo.pinned else {
-            memos[position] = memo
+            var next = memos
+            next[position] = memo
+            await commit(next, issuedUnder: lineage)
             return
         }
-        memos = Self.placed(memo, in: memos, tie: .alreadyExisted)
         // An ordering key moved, so the order every in-flight page was measured against is gone:
         // an upward block bounded below the memo's OLD place would land above rows it is older
         // than, and the next bound - read from the moved row - would skip the interval it jumped
         // over. Same fence as setQuery: the lineage moves, and stale answers drop on arrival.
         timelineGeneration += 1
         newerCursor = nil
+        await commit(Self.placed(memo, in: memos, tie: .alreadyExisted), issuedUnder: lineage)
     }
 
     /// The loaded list with one memo put where the server's own ordering puts it, replacing any

@@ -123,9 +123,13 @@ public final class MemoSearch {
         self.baseURL = baseURL
         self.pause = coalescing
         self.sleep = sleep
+        // Explicitly kept off the disk. A result set is an answer to a question nobody will ask
+        // again on the next launch, and the timeline snapshot is one file per identity — a search
+        // that wrote to it would overwrite the timeline with whatever was last searched for.
         self.results = TimelineStore(
             pageSize: pageSize,
             calendar: calendar,
+            persists: false,
             onUnauthorized: onUnauthorized
         )
     }

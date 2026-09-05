@@ -203,16 +203,26 @@ public struct TimelineView: View {
         .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
         .task {
             if timeline == nil {
-                timeline = TimelineStore(
+                let store = TimelineStore(
                     // Every day this screen can be anchored at is a day the heatmap named, and
                     // the heatmap's days are the server's UTC ones — see
                     // `HeatmapDateJump.anchorCalendar` for what reading them in the device's zone
                     // would hide.
                     calendar: HeatmapDateJump.anchorCalendar,
+                    snapshots: session.snapshots,
+                    snapshotIdentity: snapshotIdentity,
+                    sessionEpoch: session.sessionEpoch,
+                    // The one list in the app that is worth opening on tomorrow.
+                    persists: true,
                     onUnauthorized: { [session] in
                         await session.handle(.unauthorized)
                     }
                 )
+                // Before `load()`, and that order is the feature: the rows this phone last saw go
+                // on screen while the request that will replace them is still out — or never
+                // answers at all.
+                await store.restoreSnapshot()
+                timeline = store
             }
             await load()
             // What "Default" resolves to is the account's setting, not something the app can
@@ -221,6 +231,12 @@ public struct TimelineView: View {
             await session.loadSettings()
             // Adopt whatever the last run left in flight before anything new is scheduled.
             await outbox?.start()
+        }
+        // A snapshot on screen belongs to the identity that wrote it. If the session becomes
+        // somebody else's — or nobody's — while it is up, it goes; a list the server has since
+        // sent is left alone.
+        .onChange(of: session.state.user?.subject) {
+            timeline?.sessionIdentityChanged(to: snapshotIdentity)
         }
         // The live media channel, and its single owner.
         //
@@ -681,6 +697,18 @@ public struct TimelineView: View {
     /// put a second request in front of every pull of a list nobody had asked a heatmap question
     /// of (MEMNG-166); it belongs to the search sheet now and is read when that opens
     /// (MEMNG-126).
+    /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.
+    ///
+    /// Nil until there is both a server and a user, which is also the only state in which nothing
+    /// should be read off the disk: a snapshot with no signed-in identity to match against is
+    /// somebody's memos and no way to tell whose.
+    private var snapshotIdentity: TimelineSnapshotIdentity? {
+        guard let server = session.serverBaseURL, let subject = session.state.user?.subject else {
+            return nil
+        }
+        return TimelineSnapshotIdentity(server: server, subject: subject)
+    }
+
     private func load() async {
         guard let client = session.api, let baseURL = session.serverBaseURL else { return }
         await timeline?.refresh(using: client, baseURL: baseURL)
