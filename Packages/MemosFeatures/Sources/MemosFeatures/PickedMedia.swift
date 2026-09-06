@@ -81,8 +81,15 @@ nonisolated public struct PickedMedia: Transferable, Identifiable, Equatable {
         return mime
     }
 
+    /// What the upload takes over — carrying the COMPOSER's identity for this item.
+    ///
+    /// The identity is what makes a retried edit the same edit. A retry re-imports the picker's
+    /// export under a fresh temporary name, so the url and the modification date both move; an edit
+    /// key minted from those would change with them, and the server would answer a retry of a lost
+    /// save as a NEW edit rather than as the replay it is (`TimelineStore.editKey(for:)`).
     public var stagedSource: StagedSource {
-        StagedSource(url: url, filename: filename, mime: mime, lastModified: lastModified)
+        StagedSource(
+            url: url, filename: filename, mime: mime, lastModified: lastModified, identity: id)
     }
 }
 
@@ -101,11 +108,39 @@ nonisolated public enum ComposeAttachments {
         return imported == 1 ? "1 file attached" : "\(imported) files attached"
     }
 
-    /// A capture may be posted when it has words or files, and never while a pick is unresolved:
-    /// posting now would silently leave a photo behind.
-    public static func canPost(text: String, imported: Int, failed: Int, isBusy: Bool) -> Bool {
-        guard failed == 0, !isBusy else { return false }
+    /// Whether there is a memo here at all: words, or a file. It is deliberately not the guard for
+    /// anything else — see `postRefusal`, which refuses a post with something to read instead of
+    /// with a grey button.
+    public static func canPost(text: String, imported: Int, isBusy: Bool) -> Bool {
+        guard !isBusy else { return false }
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return hasText || imported > 0
+    }
+
+    /// Why this capture may not be posted YET, in one sentence naming the item that is holding it
+    /// up — or nil when it may.
+    ///
+    /// Two things hold a post up, and both are about a single item rather than about a count. A
+    /// file that could not be read must not be posted around: dropping it silently is the failure
+    /// somebody discovers weeks later, and naming it is what makes "remove it or try again" an
+    /// instruction about something identifiable. A file whose capture read has not come back yet
+    /// must not be posted EITHER, whatever the date control says — the memo's date and the order of
+    /// its pictures both depend on that answer, and a memo posted a second before it arrives is
+    /// dated and ordered by an incomplete set for ever.
+    ///
+    /// A refusal, never a silent drop, and never a disabled button.
+    public static func postRefusal(items: [ComposeAttachment]) -> String? {
+        if let failed = items.first(where: \.isFailed) {
+            return "\(failed.label) could not be read. Remove it, or try it again."
+        }
+        // A file still on its way is not attached yet. Posting now would send the memo without it
+        // — the same silent loss a failed item causes, arrived at by waiting a second less.
+        if let loading = items.first(where: \.isLoading) {
+            return "\(loading.label) is still loading. Give it a moment, or remove it."
+        }
+        if let pending = items.first(where: { $0.capture.isPending }) {
+            return "\(pending.label) is still being read. It decides the date, so give it a moment."
+        }
+        return nil
     }
 }

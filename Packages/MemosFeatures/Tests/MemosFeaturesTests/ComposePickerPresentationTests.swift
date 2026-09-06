@@ -197,7 +197,7 @@ struct ComposePickerPresentationTests {
     /// whatever that factor is, it is the same for all of them.
     @Test("the photos pill is on the sheet, and there is one of it")
     func onePhotosPillOnTheSheet() {
-        let labels = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in true })
+        let labels = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in .saved })
 
         // The positive control: if the probe cannot see the row's other pill, everything said
         // about this one would be said about a screen the probe never saw.

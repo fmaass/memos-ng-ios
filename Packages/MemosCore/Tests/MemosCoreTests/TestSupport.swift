@@ -110,6 +110,10 @@ enum Stub {
     /// from the moment the attachment does, long before the worker has produced anything to serve
     /// from them.
     ///
+    /// `position` is null the way a row written before the order was kept is: the field is
+    /// REQUIRED on `AttachmentRef` (nullable, but required), so a payload without it does not
+    /// decode at all — and what these tests are about is never the order the server saved.
+    ///
     /// `exp` and `sig` mint them the way the server does — `?exp=&scope=&sig=`, the shape
     /// `sign_asset_url` writes — for the tests that are about the SIGNATURE having a life of its
     /// own. Left off, the URLs carry no signature at all, which is what every other test wants:
@@ -125,7 +129,7 @@ enum Stub {
         return """
             {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
             "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
-            "hasLegacyPrint":false,"renditions":[],\
+            "hasLegacyPrint":false,"renditions":[],"position":null,\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
             "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
             "webUrl":"/api/attachments/\(uid)/web\(query)",\

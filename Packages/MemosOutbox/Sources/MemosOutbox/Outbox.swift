@@ -42,6 +42,13 @@ public final class Outbox {
     /// as a memo looks exactly like a lost one.
     public private(set) var lastCompletedAt: Date?
 
+    /// Why the last capture could not be written down, as a value rather than as a sentence.
+    ///
+    /// The sentence stays where it was — it is what the queue's own screen shows — but the compose
+    /// sheet has to do something different about each of these, and reading a category out of a
+    /// string is how a message becomes a contract nobody meant to sign.
+    public private(set) var lastEnqueueFailure: OutboxEnqueueFailure?
+
     private var enqueueError: String?
     private var queueError: String?
     private var persistenceError: String?
@@ -207,6 +214,7 @@ public final class Outbox {
             self.credentials.isCurrent(credentials)
         else {
             enqueueError = "Sign in before writing a memo."
+            lastEnqueueFailure = .notSignedIn
             return false
         }
         // The binding stamped on the job decides whose account this capture is ever sent into, and
@@ -223,12 +231,15 @@ public final class Outbox {
                 under: SendAuthority { authority.isCurrent(credentials) }
             )
             enqueueError = nil
+            lastEnqueueFailure = nil
         } catch is SendAuthorityWithdrawn {
             enqueueError = "Sign in before writing a memo."
+            lastEnqueueFailure = .notSignedIn
             return false
         } catch {
             enqueueError =
                 "This memo could not be saved on the device: \(error.localizedDescription)"
+            lastEnqueueFailure = .storage
             return false
         }
         await refresh()

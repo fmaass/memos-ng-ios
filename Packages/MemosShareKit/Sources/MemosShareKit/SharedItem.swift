@@ -16,19 +16,30 @@ public struct SharedFile: Sendable, Equatable, Identifiable {
     public var filename: String
     public var mime: String
     public var lastModified: Date?
+    /// The zone this file was IMPORTED in, which is where a wall-clock capture time with no offset
+    /// of its own is resolved.
+    ///
+    /// It is carried rather than read at Post because those are two different moments: the share
+    /// sheet takes the files as it opens and can then stand for as long as somebody leaves it
+    /// there, and a phone can be somewhere else by then. The date this memo takes must be the one
+    /// the file meant where it was taken over, not the one the device is set to when Post is
+    /// tapped.
+    public var captureZone: TimeZone
 
     public init(
         id: UUID = UUID(),
         url: URL,
         filename: String,
         mime: String,
-        lastModified: Date? = nil
+        lastModified: Date? = nil,
+        captureZone: TimeZone = .current
     ) {
         self.id = id
         self.url = url
         self.filename = filename
         self.mime = mime
         self.lastModified = lastModified
+        self.captureZone = captureZone
     }
 
     /// The provider boundary, as one function so the copy can be checksummed in a test.
@@ -36,10 +47,14 @@ public struct SharedFile: Sendable, Equatable, Identifiable {
     /// A provider's exported file is only valid for the length of its completion handler, so this
     /// is called from inside it — and the copy lands under a name derived from a fresh id: a
     /// filename that arrives from outside decides where a file lands only if you let it.
+    /// - Parameter zone: sampled HERE, at the import, and carried on the file — see `captureZone`.
+    ///   `.current` and not `.autoupdatingCurrent`: a zone that re-resolves would move a date that
+    ///   has already been decided.
     public static func imported(
         _ source: URL,
         into directory: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        zone: TimeZone = .current
     ) throws -> SharedFile {
         let id = UUID()
         let suffix = source.pathExtension
@@ -53,7 +68,8 @@ public struct SharedFile: Sendable, Equatable, Identifiable {
             url: destination,
             filename: source.lastPathComponent,
             mime: mimeType(forExtension: suffix),
-            lastModified: modified?.contentModificationDate
+            lastModified: modified?.contentModificationDate,
+            captureZone: zone
         )
     }
 
@@ -67,8 +83,10 @@ public struct SharedFile: Sendable, Equatable, Identifiable {
         return mime
     }
 
+    /// What the upload takes over, carrying this import's own token — see `StagedSource.identity`.
     public var stagedSource: StagedSource {
-        StagedSource(url: url, filename: filename, mime: mime, lastModified: lastModified)
+        StagedSource(
+            url: url, filename: filename, mime: mime, lastModified: lastModified, identity: id)
     }
 }
 

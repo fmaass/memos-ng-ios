@@ -299,12 +299,14 @@ public struct MemoDetailView: View {
     /// patched with them, whole or not at all (`TimelineStore.edit(attaching:)`). Deliberately not
     /// the outbox, which owns new captures — a queued edit needs an edit key to be retryable, and
     /// that is a separate piece of work.
-    private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> Bool {
+    private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async
+        -> ComposeOutcome
+    {
         guard case .edit(let uid, _, let createdAt) = mode,
             let handle = session?.activeHandle,
             let baseURL = session?.serverBaseURL
-        else { return false }
-        let saved = await timeline.edit(
+        else { return .failed(.authorization) }
+        let outcome = await timeline.edit(
             uid: uid,
             content: submission.content,
             createdAt: MemoDetailPresentation.editedDate(
@@ -314,8 +316,8 @@ public struct MemoDetailView: View {
             using: handle,
             baseURL: baseURL
         )
-        feedback.fire(saved ? .posted : .postFailed)
-        return saved
+        feedback.fire(outcome.isSaved ? .posted : .postFailed)
+        return outcome
     }
 
     @ViewBuilder

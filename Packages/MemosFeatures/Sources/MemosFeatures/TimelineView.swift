@@ -692,39 +692,46 @@ public struct TimelineView: View {
         _ mode: ComposeView.Mode,
         submission: ComposeSubmission,
         to timeline: TimelineStore
-    ) async -> Bool {
-        let posted: Bool
+    ) async -> ComposeOutcome {
+        let outcome: ComposeOutcome
         switch mode {
         case .create:
-            guard let outbox else { return false }
-            posted = await outbox.enqueue(
+            guard let outbox else { return .failed(.authorization) }
+            let saved = await outbox.enqueue(
                 content: submission.content,
                 visibility: submission.visibility?.rawValue,
                 // A backdated capture keeps the date it was given all the way through the queue:
-                // the job's capture stamp IS what the create call sends as `created_at`.
+                // the job's capture stamp IS what the create call sends as `created_at`. On Auto
+                // that date is the earliest instant the attached files carried, resolved before
+                // the sheet would let this be tapped.
                 capturedAt: submission.capturedAt(),
                 sources: submission.attachments.map(\.stagedSource)
             )
+            outcome =
+                saved
+                ? .saved
+                : .failed(
+                    outbox.lastEnqueueFailure == .notSignedIn ? .authorization : .storage)
         case .edit(let uid, _, let createdAt):
             guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
-                return false
+                return .failed(.authorization)
             }
-            posted = await timeline.edit(
+            outcome = await timeline.edit(
                 uid: uid,
                 content: submission.content,
                 createdAt: MemoDetailPresentation.editedDate(
                     chosen: submission.createdAt, original: createdAt
                 ),
-                // Files added to an EXISTING memo go up in the foreground, whole or not at all —
-                // the outbox above owns new captures, and a queued edit cannot be retried safely
-                // until an edit key exists to make the retry idempotent.
+                // Files added to an EXISTING memo go up in the FOREGROUND: the outbox above owns
+                // new captures, and an edit that failed is answered honestly on the sheet that is
+                // still open rather than queued (outbox-backed edits are MEMNG-124's line).
                 attaching: submission.attachments.map(\.stagedSource),
                 using: handle,
                 baseURL: baseURL
             )
         }
-        feedback.fire(posted ? .posted : .postFailed)
-        return posted
+        feedback.fire(outcome.isSaved ? .posted : .postFailed)
+        return outcome
     }
 
     /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.

@@ -56,7 +56,7 @@ struct LiveWriteTests {
                 content: "\(marker)\n- [x] probe task\nedited",
                 using: client.handle,
                 baseURL: configuration.baseURL
-            )
+            ).isSaved
         )
         #expect(
             await store.setPinned(

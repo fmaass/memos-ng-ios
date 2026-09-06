@@ -10,9 +10,9 @@ import Testing
 private final class MediaSubmissionRecorder {
     private(set) var last: ComposeSubmission?
 
-    func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> Bool {
+    func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> ComposeOutcome {
         last = submission
-        return true
+        return .saved
     }
 }
 
@@ -41,7 +41,7 @@ struct ComposeMediaEditTests {
 
     @Test("an edit sheet really offers the photo picker and the date")
     func theEditSheetOffersThePicker() {
-        let labels = ScreenProbe.labels(of: ComposeView(mode: mode()) { _ in true })
+        let labels = ScreenProbe.labels(of: ComposeView(mode: mode()) { _ in .saved })
 
         // The positive control: without it, a missing picker below would only prove the probe saw
         // nothing whatsoever.
@@ -58,8 +58,8 @@ struct ComposeMediaEditTests {
 
     @Test("an edit sheet still says nothing about who can see the memo")
     func theEditSheetOffersNoVisibility() {
-        let editing = ScreenProbe.labels(of: ComposeView(mode: mode()) { _ in true })
-        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in true })
+        let editing = ScreenProbe.labels(of: ComposeView(mode: mode()) { _ in .saved })
+        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in .saved })
 
         // Who can see a memo is its own deliberate action on the memo, not something that changes
         // as a side effect of fixing a typo.
@@ -90,7 +90,7 @@ struct ComposeMediaEditTests {
             save: recorder.save
         )
 
-        #expect(closed)
+        #expect(closed.isSaved)
         // Dropped here, the upload would never happen and the memo would save its new text with
         // the photograph silently missing — the one half-edit nobody can see has gone wrong.
         #expect(recorder.last?.attachments.map(\.filename) == ["a.jpg", "b.jpg"])

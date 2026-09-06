@@ -15,13 +15,45 @@ public struct StagedSource: Sendable, Equatable {
     public var filename: String
     public var mime: String
     public var lastModified: Date?
+    /// What names this file for as long as the layer above is holding it.
+    ///
+    /// Never nil: a source that is handed none MINTS one, because the alternative — naming a file
+    /// by where it is — is the one thing that cannot be an identity. A path can be reused: replace
+    /// the bytes at `…/photo.jpg` and it is a different file with the same name, and an edit key
+    /// built from that name would let the server replay the edit that carried the OLD bytes and
+    /// answer 200 while the replacement went nowhere. Every construction of this value is an
+    /// import, and every import is its own thing.
+    ///
+    /// A caller that wants two constructions to BE the same thing says so by passing the identity —
+    /// which is exactly what a retry does (`PickedMedia.stagedSource`), and the only way two of
+    /// these are ever equal for the edit key.
+    ///
+    /// The outbox does not read it: a queued capture is identified by its job and by `OutboxFile.id`,
+    /// which is minted where the bytes are copied and is what the manifest carries. This one lives
+    /// exactly as long as the fact it stands for — one compose session's edit key.
+    public var identity: UUID
 
-    public init(url: URL, filename: String, mime: String, lastModified: Date? = nil) {
+    public init(
+        url: URL,
+        filename: String,
+        mime: String,
+        lastModified: Date? = nil,
+        identity: UUID = UUID()
+    ) {
         self.url = url
         self.filename = filename
         self.mime = mime
         self.lastModified = lastModified
+        self.identity = identity
     }
+
+    /// How this file is named in an edit key: its token, and nothing else.
+    ///
+    /// No fallback to anything about the file, because every candidate is a lie somewhere. The
+    /// basename is shared by two directories; the full path is reused when the bytes at it are
+    /// replaced; the modification date moves when the picker exports again. Only a token minted at
+    /// the import says "this attachment", and only a token carried forward says "the same one".
+    public var editIdentity: String { identity.uuidString }
 }
 
 /// The queue on disk, as everything above it needs to see it.

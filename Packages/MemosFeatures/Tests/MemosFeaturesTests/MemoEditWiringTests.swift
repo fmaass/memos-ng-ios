@@ -145,7 +145,7 @@ struct MemoEditWiringTests {
             ComposeSubmission(content: "after", visibility: nil), save: recorder.save
         )
 
-        #expect(closed)
+        #expect(closed.isSaved)
         #expect(recorder.count == 1, "the sheet's Save did not reach the save at all")
         #expect(recorder.lastSubmission?.content == "after")
         #expect(recorder.lastMode == .edit(uid: "m5", content: "before", createdAt: created))
@@ -163,11 +163,11 @@ struct MemoEditWiringTests {
             ComposeSubmission(content: "after", visibility: nil), save: recorder.save
         )
 
-        #expect(!closed)
+        #expect(!closed.isSaved)
         #expect(recorder.count == 1)
         // The words someone just wrote are still on the screen, and the screen now says why.
         #expect(flow.editing != nil)
-        #expect(flow.lastError == MemoEditFlow.failureMessage)
+        #expect(flow.lastError == ComposeFailurePresentation.sentence(for: .rejection))
     }
 
     @Test("opening the sheet again clears the last failure")
@@ -196,7 +196,7 @@ struct MemoEditWiringTests {
         let closed = await flow.submit(
             ComposeSubmission(content: "after", visibility: nil), save: recorder.save
         )
-        #expect(!closed)
+        #expect(!closed.isSaved)
         #expect(recorder.count == 0, "a dismissed sheet must not still be able to save")
     }
 }
@@ -333,7 +333,9 @@ struct MemoDeleteWiringTests {
         #expect(flow.editing != nil, "a failed delete threw away the sheet anyway")
         #expect(!flow.memoDeleted, "a failed delete told the screen to pop")
         #expect(flow.lastError == MemoEditFlow.deleteFailureMessage)
-        #expect(flow.lastError != MemoEditFlow.failureMessage, "a delete said it was a save")
+        #expect(
+            flow.lastError != ComposeFailurePresentation.sentence(for: .rejection),
+            "a delete said it was a save")
     }
 
     /// The uid is the flow's own, not one the caller supplies, so a delete cannot be aimed at a
@@ -471,7 +473,7 @@ struct MemoDeleteWiringTests {
             of: ComposeView(
                 mode: mode,
                 delete: ComposeDelete(isAsking: false, send: { _ in })
-            ) { _ in true }
+            ) { _ in .saved }
         )
         #expect(
             withDelete.contains { $0.contains("Save") },
@@ -483,7 +485,7 @@ struct MemoDeleteWiringTests {
         )
 
         // A NEW memo has nothing to delete, and says nothing about deleting.
-        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in true })
+        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in .saved })
         // Cancel rather than Post as the control: Post is disabled on an empty capture, and a
         // control that may be missing for its own reasons controls nothing.
         #expect(
@@ -664,11 +666,13 @@ final class SubmissionRecorder {
     private(set) var count = 0
     private(set) var lastMode: ComposeView.Mode?
     private(set) var lastSubmission: ComposeSubmission?
-    private let result: Bool
+    private let result: ComposeOutcome
 
-    init(result: Bool) { self.result = result }
+    /// `result: false` is the ordinary failure this suite is about — the server answered no. The
+    /// categories are `ComposeFailureTests`' subject, not this one's.
+    init(result: Bool) { self.result = result ? .saved : .failed(.rejection) }
 
-    func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> Bool {
+    func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> ComposeOutcome {
         count += 1
         lastMode = mode
         lastSubmission = submission
