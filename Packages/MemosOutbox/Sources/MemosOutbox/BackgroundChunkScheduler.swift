@@ -63,12 +63,16 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
         _ request: URLRequest,
         fromFile file: URL,
         identity: OutboxTaskIdentity,
-        under authority: SendAuthority
+        under authority: SendAuthority,
+        issuedUnder epoch: Int
     ) {
         // A chunk handed to the background session is the one send that cannot be taken back: it
         // outlives this process. The engine checked before the hop that got here; this asks again
         // on THIS executor, because the hop itself is a suspension the switch fits into.
         guard authority.holds() else { return }
+        // Recorded BEFORE the task starts: its answer can arrive in the very next callback, and a
+        // refusal is only classifiable against the credential that earned it.
+        delegate.record(epoch: epoch, for: identity)
         let task = session.uploadTask(with: request, fromFile: file)
         task.taskDescription = identity.taskDescription
         task.resume()
@@ -104,8 +108,15 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// sent a second time. So nothing is dropped: it waits here, and adoption replays it IN ORDER,
     /// which matters because two answers for one file are a cursor moving forwards.
     private var waiting: [ChunkResult] = []
+    /// Which credential generation each in-flight chunk went out under, keyed the way the task is.
+    /// Empty for anything this process did not schedule — a task adopted across a relaunch.
+    private var epochs: [String: Int] = [:]
     /// What is still being written to disk. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
+
+    func record(epoch: Int, for identity: OutboxTaskIdentity) {
+        lock.withLock { epochs[identity.taskDescription] = epoch }
+    }
 
     /// AWAITS the replay. Adoption is what calls this, and a drain may only start after adoption
     /// has returned (`Outbox.start`), so the replay and the drain are serialised by that alone.
@@ -147,12 +158,14 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         guard let identity = OutboxTaskIdentity(taskDescription: task.taskDescription) else {
             return
         }
+        let epoch = lock.withLock { epochs.removeValue(forKey: identity.taskDescription) }
         deliver(
             ChunkResult(
                 identity: identity,
                 statusCode: (task.response as? HTTPURLResponse)?.statusCode,
                 body: body,
-                errorDescription: error?.localizedDescription
+                errorDescription: error?.localizedDescription,
+                epoch: epoch
             )
         )
     }

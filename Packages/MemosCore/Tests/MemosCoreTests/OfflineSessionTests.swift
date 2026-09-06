@@ -1140,6 +1140,56 @@ struct InvalidationFenceTests {
         #expect(session.serverBaseURL != nil, "the wipe's tail cleared the wrong session")
     }
 
+    /// H2. Validation captured its credential epoch BEFORE awaiting whoami, and judged the answer
+    /// by that. The middleware presents what the device holds at the instant it sends, so a renewal
+    /// landing in between means the request carried the SUCCESSOR — and its 401 is a refusal of the
+    /// credential this device is holding. Judged by the pre-await snapshot it looked like a refusal
+    /// of the predecessor, was discarded as stale, and the rejected session was kept.
+    ///
+    /// The classification now belongs where the credential is attached: `BearerAuthMiddleware`
+    /// records the epoch it presented and turns a refusal of a REPLACED one into
+    /// `CredentialSuperseded`, which never reaches that branch. An `APIError.unauthorized` that
+    /// does is therefore already a refusal of the credential in hand.
+    @Test("a 401 earned by the renewed token signs out, rather than being filed as a stale one")
+    func aRefusalOfTheRenewedTokenSignsOut() async throws {
+        let vault = InMemoryCredentials()
+        try vault.set("memos_pat_a", for: SessionStore.tokenAccount)
+        try vault.set(storedHost, for: SessionStore.serverAccount)
+        let seen = LockedValue<[String?]>([])
+        let refusing = LockedValue<Bool>(false)
+        let session = SessionStore(
+            credentials: vault,
+            makeClient: { _, credential in
+                // The renewal, queued on the main actor at the instant the client is built. It runs
+                // at the next suspension, which is the hop into `whoami` — after validation has
+                // read its epoch and before the middleware reads the credential. That window is
+                // the whole of what this test is about, and the premise below asserts it happened.
+                if refusing.get() {
+                    Task { @MainActor in credential.replace(with: "memos_pat_next") }
+                }
+                return Stub.client(token: credential) { request, _, _ in
+                    seen.set(seen.get() + [request.headerFields[.authorization]])
+                    guard refusing.get() else { return Stub.json(Stub.user) }
+                    return Stub.empty(.unauthorized)
+                }
+            }
+        )
+        await session.restore()
+        #expect(session.state.user != nil, "control: the launch signed in")
+
+        refusing.set(true)
+        await session.restore()
+
+        #expect(
+            seen.get().last == "Bearer memos_pat_next",
+            "the premise: the request that earned the 401 carried the successor"
+        )
+        #expect(
+            session.state == SessionState.signedOut,
+            "a refusal of the token this device is holding was filed as a stale one"
+        )
+    }
+
     /// F4. The `state.user == nil` escape these fences used to carry was a stand-in for "nothing
     /// took the session over", and it is not one: a NEWER sign-in that FAILED leaves the user nil
     /// too, and its own failure is the sentence on the screen. A sign-out resuming afterwards then

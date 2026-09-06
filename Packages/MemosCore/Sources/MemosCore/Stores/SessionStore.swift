@@ -838,15 +838,15 @@ public final class SessionStore {
             enterVerified()
         } catch let error as APIError where error == .unauthorized {
             guard generation == sessionGeneration else { return }
-            guard credential.isCurrent(presented.epoch) else {
-                // A refusal of a token this device has already replaced says nothing about the one
-                // it is holding. The middleware normally turns this into `CredentialSuperseded`
-                // before it ever gets here; the decision is repeated at the site that acts on it,
-                // because a client built without that fence would otherwise end a live session.
-                MemosLog.session.info("a 401 for a replaced credential is not a sign-out")
-                discard(error, admitted: admitted, attempt: attempt, host: host)
-                return
-            }
+            // NOT re-judged here. This used to compare `presented.epoch`, read before the await,
+            // and that is a different credential from the one the request carried whenever a
+            // renewal landed in between: the middleware presents what the device holds NOW, so a
+            // 401 earned by the successor was being filed as a refusal of the predecessor and the
+            // rejected session was kept. The classification belongs where the credential is
+            // attached — `BearerAuthMiddleware` records the epoch it presented and turns a refusal
+            // of a replaced one into `CredentialSuperseded`, which lands in the generic catch below
+            // as neither outcome. An `APIError.unauthorized` reaching HERE is therefore already a
+            // refusal of the credential this device is holding.
             let wiped = await wipeCredential()
             // The wipe is an await of its own, and its tail refuses when something overtook it.
             // The sentence it leaves behind is one more write and follows the same rule — judged

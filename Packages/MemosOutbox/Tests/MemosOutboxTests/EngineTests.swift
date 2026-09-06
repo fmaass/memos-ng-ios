@@ -1129,3 +1129,155 @@ final class CredentialsBox: @unchecked Sendable {
         set { lock.withLock { stored = newValue } }
     }
 }
+
+/// H1, the G3 residue, driven through the REAL facade — which is where the ordering lives. Going
+/// at `delegate.attach` directly, as the round-5 test did, cannot see it: `adopt()` used to set a
+/// flag BEFORE awaiting the attachment, so a second caller arriving inside that await saw the flag,
+/// skipped adoption and drained. The two are not sibling drains, so the engine's own `isDraining`
+/// cannot exclude them from each other, and the interleaving loses a cursor.
+@MainActor
+@Suite("Adoption is a barrier every drain passes")
+struct AdoptionBarrierTests {
+    @Test("no drain starts while adoption is still replaying, and nothing is sent twice")
+    func adoptionIsABarrier() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let preferences = Fixture.preferences(name: "memosng.outbox.tests.barrier")
+        defer { Fixture.forgetting("memosng.outbox.tests.barrier") }
+        // A chunk is already with the background session at offset 0 — the state a launch finds.
+        await harness.engine.drain()
+        let inFlight = try #require(harness.scheduler.uploads.first).identity
+        #expect(inFlight.offset == 0, "control: the chunk at offset 0 went out")
+
+        let gate = TestGate()
+        let answered = ChunkResult(
+            identity: inFlight,
+            statusCode: 200,
+            body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+        )
+        let outbox = Outbox(
+            repository: harness.repository,
+            credentials: harness.credentials,
+            http: harness.http,
+            scheduler: harness.scheduler,
+            completion: harness.completion,
+            network: harness.network,
+            preferences: preferences.store,
+            clock: { harness.clock.now },
+            // Adoption held open, and then replaying the answer that was waiting — which is
+            // exactly what a launch does, and exactly what a drain must not run beside.
+            attachScheduler: { handler in
+                await gate.pass()
+                await handler.handle(answered)
+            }
+        )
+
+        let launch = Task { await outbox.start() }
+        await gate.waitUntilParked()
+
+        // Every other way into a drain. None may reach the engine while adoption is held.
+        let second = Task { await outbox.start() }
+        let third = Task { await outbox.drain() }
+        for _ in 0..<200 { await Task.yield() }
+        #expect(
+            harness.scheduler.uploads.count == 1,
+            "a drain ran beside the replay: it retains an offset the replay is about to move"
+        )
+
+        await gate.open()
+        await launch.value
+        await second.value
+        await third.value
+
+        // Offset 0 exactly once — a drain that ran beside the replay would have sent it again,
+        // because the cursor it was holding had not moved yet — and the cursor is where the
+        // replay put it.
+        let offsets = harness.scheduler.uploads.map(\.identity.offset)
+        #expect(
+            offsets.filter { $0 == 0 }.count == 1,
+            "the bytes the replay was about to confirm were uploaded a second time"
+        )
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 400,
+            "the replay's cursor was overwritten by a drain that started beside it"
+        )
+    }
+}
+
+/// H3. A 401 is only a refusal of the credential that EARNED it. Three sites persisted
+/// `.held(.serverRefused)` on one whatever the grant had become, which strands a capture behind a
+/// "sign in again" the person has already done.
+@Suite("A refusal of a replaced grant is not a hold")
+struct SupersededRefusalTests {
+    /// H3a — the upload start.
+    @Test("a 401 to an upload start whose grant was replaced backs off instead of holding")
+    func upstartRefusalUnderAReplacedGrant() async throws {
+        let switched = CredentialsBox()
+        let http = ScriptedHTTP { request in
+            guard request.httpMethod == "POST", request.url?.path.hasSuffix("/uploads") == true
+            else { return ScriptedHTTP.json([:]) }
+            // The renewal lands while this request is on the wire.
+            switched.value?.supersede()
+            return OutboxHTTPResponse(statusCode: 401, body: Data())
+        }
+        let harness = try await Harness.make(bytes: 1000, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+
+        let job = try #require(await harness.reload())
+        #expect(job.state != JobState.held, "a refusal of a replaced grant held the job")
+        #expect(job.holdReason == nil)
+    }
+
+    /// H3b — the memo create.
+    @Test("a 401 to a memo create whose grant was replaced is retried, not held")
+    func createRefusalUnderAReplacedGrant() async throws {
+        let switched = CredentialsBox()
+        let http = ScriptedHTTP { request in
+            guard request.httpMethod == "POST", request.url?.path.hasSuffix("/memos") == true
+            else { return ScriptedHTTP.json([:]) }
+            switched.value?.supersede()
+            return OutboxHTTPResponse(statusCode: 401, body: Data())
+        }
+        // No files: the drain goes straight to the create.
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+
+        let job = try #require(await harness.reload())
+        #expect(
+            job.state != JobState.held,
+            "the create's stale 401 held a capture under a valid session"
+        )
+        #expect(job.holdReason == nil)
+    }
+
+    /// H3c — a chunk answer, which comes back in a LATER pass and so must carry the epoch it was
+    /// sent under: by the time anything classifies it, nothing else knows which credential earned
+    /// it.
+    @Test("a 401 chunk answer carrying a replaced epoch backs off instead of holding")
+    func chunkRefusalUnderAReplacedGrant() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let sent = try #require(harness.scheduler.uploads.first)
+        let epoch = try #require(harness.scheduler.epoch(of: sent.identity))
+
+        // The renewal happens between the chunk going out and its answer coming back.
+        harness.credentials.supersede()
+        await harness.engine.handle(
+            ChunkResult(identity: sent.identity, statusCode: 401, epoch: epoch)
+        )
+
+        let job = try #require(await harness.reload())
+        #expect(
+            job.state != JobState.held,
+            "a chunk refused under a credential this device has replaced held the capture"
+        )
+        #expect(job.holdReason == nil)
+    }
+}

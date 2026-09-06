@@ -79,6 +79,13 @@ public struct MemoCompletionEndpoint: MemoCompleting {
         } catch {
             return .retry(error.localizedDescription)
         }
+        // A 401 earned by a grant that has SINCE been replaced is not a refusal of the one this
+        // device is holding, and holding the job on it strands a capture behind a "sign in again"
+        // the person has already done. Retried, so the next pass sends under the current grant —
+        // and if THAT is refused, its epoch is the current one and the job holds.
+        if response.statusCode == 401, !authority.holds() {
+            return .retry("The credential this memo was sent under was replaced.")
+        }
         return outcome(for: response)
     }
 

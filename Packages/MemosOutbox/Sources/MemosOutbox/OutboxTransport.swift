@@ -67,17 +67,26 @@ public struct ChunkResult: Sendable, Equatable {
     public var statusCode: Int?
     public var body: Data
     public var errorDescription: String?
+    /// The credential generation this chunk was SENT under, when it is known.
+    ///
+    /// A chunk's answer comes back in a later pass, sometimes in a process launched for it alone,
+    /// so by the time anything classifies it the only thing that knows which credential earned it
+    /// is the answer itself. `nil` for a task adopted across a relaunch, where nothing recorded it
+    /// — read as "unknown", which is treated as current.
+    public var epoch: Int?
 
     public init(
         identity: OutboxTaskIdentity,
         statusCode: Int?,
         body: Data = Data(),
-        errorDescription: String? = nil
+        errorDescription: String? = nil,
+        epoch: Int? = nil
     ) {
         self.identity = identity
         self.statusCode = statusCode
         self.body = body
         self.errorDescription = errorDescription
+        self.epoch = epoch
     }
 }
 
@@ -94,11 +103,14 @@ public protocol OutboxChunkHandling: Sendable {
 public protocol OutboxChunkScheduling: Sendable {
     /// The tasks the session is carrying right now, whatever launched this process.
     func inFlight() async -> [OutboxTaskIdentity]
+    /// - Parameter epoch: the credential generation this chunk goes out under, kept so the
+    ///   answer can be classified against the credential that earned it.
     func upload(
         _ request: URLRequest,
         fromFile file: URL,
         identity: OutboxTaskIdentity,
-        under authority: SendAuthority
+        under authority: SendAuthority,
+        issuedUnder epoch: Int
     ) async
     func cancel(_ identities: [OutboxTaskIdentity]) async
 }

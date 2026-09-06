@@ -279,7 +279,16 @@ public actor OutboxEngine: OutboxChunkHandling {
             return nil
         }
         guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
-            await save(refusal(job, statusCode: response.statusCode, what: "upload"))
+            await save(
+                refusal(
+                    job,
+                    statusCode: response.statusCode,
+                    what: "upload",
+                    // Asked NOW, of the grant this request went out under: a renewal that landed
+                    // while it was on the wire makes its 401 an answer about a token that is gone.
+                    credentialSuperseded: !mayStillSend(credentials)
+                )
+            )
             return nil
         }
         let next = job.startingUpload(fileID: fileID, session: session)
@@ -318,7 +327,11 @@ public actor OutboxEngine: OutboxChunkHandling {
         // rather than being checked here, because `upload` is another actor and the hop to it is
         // one more instant for the switch to land in.
         await scheduler.upload(
-            request, fromFile: chunk, identity: identity, under: authority(under: credentials)
+            request,
+            fromFile: chunk,
+            identity: identity,
+            under: authority(under: credentials),
+            issuedUnder: credentials.epoch
         )
         // The chunk is already with the background session, and this write only records that. Its
         // failure is reported, not acted on: the answer is applied against the manifest as it
@@ -438,7 +451,16 @@ public actor OutboxEngine: OutboxChunkHandling {
         case .some(404):
             next = job.clearingLostUpload(fileID: fileID)
         case .some(let code) where (400..<500).contains(code) && code != 408 && code != 429:
-            next = refusal(job, statusCode: code, what: "chunk")
+            // The chunk carries the epoch it was SENT under (`ChunkResult.epoch`), because its
+            // answer arrives in a later pass — possibly in a process launched for it alone — and
+            // by then the only thing that knows which credential earned it is the answer itself.
+            // A nil epoch is a task from before this record existed, or one adopted across a
+            // relaunch: unknown, so it is treated as current and holds, exactly as it did before.
+            let replaced =
+                result.epoch.flatMap { sent in credentials.map { $0.epoch != sent } } ?? false
+            next = refusal(
+                job, statusCode: code, what: "chunk", credentialSuperseded: replaced
+            )
         case .some(let code):
             next = job.backingOff(at: clock(), error: "The upload failed (\(code)).")
         case .none:
@@ -482,8 +504,23 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     // MARK: - helpers
 
-    private func refusal(_ job: UploadJob, statusCode: Int, what: String) -> UploadJob {
+    /// - Parameter credentialSuperseded: whether the grant this request was SENT under has since
+    ///   been replaced. A 401 earned by a credential the device no longer holds says nothing about
+    ///   the one it does, and holding the job on it strands a capture behind a "sign in again" that
+    ///   the person has already done. It backs off instead, and the next pass sends under the
+    ///   current grant — ONCE: if that attempt is refused too, its epoch IS the current one and the
+    ///   job holds.
+    private func refusal(
+        _ job: UploadJob,
+        statusCode: Int,
+        what: String,
+        credentialSuperseded: Bool = false
+    ) -> UploadJob {
         switch statusCode {
+        case 401 where credentialSuperseded:
+            return job.backingOff(
+                at: clock(), error: "The credential that \(what) was sent under was replaced."
+            )
         case 401:
             return job.held(.serverRefused, error: "Sign in again to send this memo.")
         case 413:

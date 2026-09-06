@@ -96,6 +96,12 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
 
     private var hook: (@Sendable () -> Void)?
     private var verdicts: [Bool] = []
+    /// The credential generation each chunk went out under, as the production scheduler records it.
+    private var issued: [String: Int] = [:]
+
+    func epoch(of identity: OutboxTaskIdentity) -> Int? {
+        lock.withLock { issued[identity.taskDescription] }
+    }
 
     /// What the authority answered, in order, each time this executor was reached.
     var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
@@ -118,9 +124,11 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         _ request: URLRequest,
         fromFile file: URL,
         identity: OutboxTaskIdentity,
-        under authority: SendAuthority
+        under authority: SendAuthority,
+        issuedUnder epoch: Int
     ) async {
         beforeUpload?()
+        lock.withLock { issued[identity.taskDescription] = epoch }
         // The double does NOT enforce the policy it is used to test — a stand-in that implements
         // the guard proves only that the stand-in has one. It records the verdict the PRODUCTION
         // `SendAuthority` gives at the instant this executor runs, and the test reads that.
