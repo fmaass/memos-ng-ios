@@ -137,7 +137,7 @@ struct PickedThumbnail: View {
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Self.accessibilityLabel(for: attachment))
-        .task(id: attachment.id) {
+        .task(id: Self.thumbnailKey(for: attachment)) {
             guard let media = attachment.media else { return }
             let budget = PickedThumbnailSource.maxPixelSize(
                 forPointSize: size, scale: displayScale
@@ -183,6 +183,14 @@ struct PickedThumbnail: View {
                 .background(.black.opacity(0.35), in: .capsule)
         }
     }
+
+    /// What the tile's own load is keyed on: the FILE, not the item.
+    ///
+    /// The item's identity deliberately survives a retry — it is the same tile — so keying on it
+    /// would leave a recovered item showing the placeholder it had while it was failing. The copy's
+    /// url is what actually changes when the picker exports again, and nil (a tile with no file)
+    /// starts nothing at all.
+    static func thumbnailKey(for attachment: ComposeAttachment) -> URL? { attachment.media?.url }
 
     /// What a screen reader hears, which never leaves a state to a picture.
     static func accessibilityLabel(for attachment: ComposeAttachment) -> String {

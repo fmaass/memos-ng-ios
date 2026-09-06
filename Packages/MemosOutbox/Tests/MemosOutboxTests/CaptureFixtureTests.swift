@@ -1,7 +1,8 @@
 import CryptoKit
 import Foundation
-import MemosOutbox
 import Testing
+
+@testable import MemosOutbox
 
 /// The nine binary fixtures: that they ARE the files the artefact describes, and what this
 /// platform's frameworks read out of them.
@@ -14,19 +15,6 @@ import Testing
 @Suite("The vendored capture fixtures")
 struct CaptureFixtureTests {
     static let binaries = AutoMemoDateArtefact.binaries
-
-    /// The one file whose answer this platform does NOT agree with the artefact about, and why.
-    ///
-    /// `png-exif-after-idat.png` carries the same `eXIf` chunk as `png-exif.png`, legally placed
-    /// after the image data. Pillow (the server's reader) walks every chunk and finds it; Apple's
-    /// ImageIO stops at what its header parse collected and reports no EXIF dictionary at all
-    /// (measured on macOS 26.6 / Swift 6.3.3, 2026-09-06, and again by this suite on every run).
-    /// The rules are implemented as written — the primary image's EXIF dictionary, three tags — and
-    /// nothing here goes looking through PNG chunks to make one fixture pass, because a reader bent
-    /// to satisfy a fixture is a reader that no longer says what the platform does. The divergence
-    /// is asserted explicitly below instead, so the day ImageIO starts reading it, this suite says
-    /// so rather than silently agreeing.
-    static let divergingOnThisPlatform: Set<String> = ["png-exif-after-idat.png"]
 
     @Test(
         "every fixture the artefact names is vendored, whole",
@@ -50,10 +38,7 @@ struct CaptureFixtureTests {
 
     @Test(
         "the reader answers what the artefact expects",
-        arguments: CaptureFixtureTests.binaries.filter {
-            !CaptureFixtureTests.divergingOnThisPlatform.contains($0.name)
-        }
-    )
+        arguments: CaptureFixtureTests.binaries)
     func reading(_ named: AutoMemoDateArtefact.NamedBinary) async throws {
         // A fixed "now" so the header's future check is not a race with the clock.
         let now = try #require(AutoMemoDateArtefact.instant("2026-09-06T00:00:00Z"))
@@ -65,21 +50,65 @@ struct CaptureFixtureTests {
         #expect(reading.source?.rawValue == named.binary.expect.captureSource, "\(named.name)")
     }
 
-    @Test("ImageIO does not see an eXIf chunk placed after the image data")
-    func exifAfterImageDataIsInvisibleHere() async throws {
+    /// The case that made the reader grow a PNG chunk walk.
+    ///
+    /// `png-exif-after-idat.png` carries the same `eXIf` chunk as its twin, legally placed after
+    /// the image data. ImageIO reports no EXIF dictionary at all for that file (measured on macOS
+    /// 26.6 / Swift 6.3.3, 2026-09-06) while the server's reader walks every chunk and finds it —
+    /// so the client that could not see the tag grew a second look rather than the artefact losing
+    /// the case. Both PNGs answer with the instant the contract names.
+    @Test("an eXIf chunk is found wherever the format allows it to be")
+    func exifIsFoundBeforeAndAfterTheImageData() async throws {
+        let expected = try #require(AutoMemoDateArtefact.instant("2026-01-01T07:15:00Z"))
+        for name in ["png-exif.png", "png-exif-after-idat.png"] {
+            let named = try #require(Self.binaries.first { $0.name == name })
+            let reading = await CaptureReader.read(fileAt: named.url, mime: named.binary.mime)
+            #expect(reading.instant == expected, "\(name)")
+            #expect(reading.source == .exif, "\(name)")
+        }
+        // WHICH reader finds which is the divergence the walk exists for, asserted rather than
+        // assumed: ImageIO answers for the chunk before the image data and not for the one after.
+        let after = try #require(Self.binaries.first { $0.name == "png-exif-after-idat.png" })
+        #expect(CaptureReader.imageIOTags(at: after.url) == nil)
+        let before = try #require(Self.binaries.first { $0.name == "png-exif.png" })
+        #expect(CaptureReader.imageIOTags(at: before.url)?.dateTime == "2026:01:01 13:00:00")
+        // And on a PNG with no EXIF at all the walk finds nothing and invents nothing.
+        let none = try #require(Self.binaries.first { $0.name == "png-none.png" })
+        #expect(PNGExif.dateTags(inFileAt: none.url) == nil)
+        #expect(await CaptureReader.read(fileAt: none.url, mime: none.binary.mime) == .empty)
+    }
+
+    @Test("the chunk walk reads the date tags and nothing else")
+    func theChunkWalkReadsOnlyItsTags() throws {
         let named = try #require(Self.binaries.first { $0.name == "png-exif-after-idat.png" })
-        let reading = await CaptureReader.read(fileAt: named.url, mime: named.binary.mime)
-        #expect(
-            reading == .empty,
-            """
-            ImageIO now reads an eXIf chunk after IDAT. That is the artefact's expectation \
-            (\(named.binary.expect.captureInstant ?? "nil")) and this exception should be retired.
-            """)
-        // Its twin, the identical chunk placed BEFORE the image data, is the control: it proves
-        // the file's EXIF is readable at all and that only the placement is at issue.
-        let twin = try #require(Self.binaries.first { $0.name == "png-exif.png" })
-        let control = await CaptureReader.read(fileAt: twin.url, mime: twin.binary.mime)
-        #expect(control.instant != nil)
+        let tags = try #require(PNGExif.dateTags(inFileAt: named.url))
+        #expect(tags.dateTime == "2026:01:01 13:00:00")
+        #expect(tags.offset == "+05:45")
+        // A file that is not a PNG is not walked at all, whatever it contains.
+        let jpeg = try #require(Self.binaries.first { $0.name == "jpeg-offset.jpg" })
+        #expect(PNGExif.dateTags(inFileAt: jpeg.url) == nil)
+    }
+
+    /// The bound, proven with a read that does not come back.
+    ///
+    /// The composer refuses to post until every item has settled, so an unbounded read would hang
+    /// the Post button behind one file. A task group cannot be the mechanism — it waits for its
+    /// children at scope exit, and ImageIO does not answer cancellation — so what is asserted here
+    /// is the CALLER returning, not the work stopping.
+    @Test("a read that never comes back settles as nothing when the deadline passes")
+    func theDeadlineBoundsTheRead() async throws {
+        let gate = NeverReturns()
+        let started = Date()
+        let reading = await CaptureReader.withDeadline(.milliseconds(50)) {
+            await gate.wait()
+            return CaptureReading(instant: Date(), civil: nil, source: .exif)
+        }
+        let elapsed = Date().timeIntervalSince(started)
+
+        #expect(reading == .empty, "a read that never answered was allowed to answer")
+        #expect(elapsed < 5, "the deadline did not bound the caller (\(elapsed)s)")
+        // Let the abandoned work finish, so the test process is not left with a task in it.
+        await gate.release()
     }
 
     @Test("the HEIC's date comes from its PRIMARY image, not from item 0")
@@ -97,5 +126,24 @@ struct CaptureFixtureTests {
 
     static func hex(_ digest: SHA256Digest) -> String {
         digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// A read that answers only when the test lets it — which, for the deadline case, is after the
+/// deadline has already spoken.
+actor NeverReturns {
+    private var released = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = waiting
+        waiting = []
+        for waiter in waiters { waiter.resume() }
     }
 }

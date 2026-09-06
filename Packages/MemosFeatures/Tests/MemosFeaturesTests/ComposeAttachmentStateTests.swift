@@ -251,6 +251,91 @@ struct ComposeAttachmentStateTests {
         #expect(ComposeAttachments.postRefusal(items: imports.items) == nil)
     }
 
+    // MARK: - the tiles arrive at once
+
+    /// E1's first sentence: each picked item renders at once and carries its own state. A list that
+    /// appeared only when the slowest file had finished is the modal spinner in another costume.
+    @Test("every picked item is on screen before any of them has loaded")
+    func theTilesAppearAtOnce() async {
+        let gate = AnswerGate(.file(Self.media("first.heic")))
+        let imports = Self.imports()
+        let stamp = imports.selected()
+        let run = Task {
+            await imports.load(["one", "two", "three"], stamp: stamp) { _ in await gate.answer() }
+        }
+        await gate.waitUntilAsked()
+
+        #expect(imports.items.count == 3, "the tiles waited for the files")
+        #expect(imports.items.filter(\.isLoading).count == 3)
+        #expect(imports.isImporting)
+        // And a post is refused while they are on their way, naming one of them.
+        let refusal = ComposeAttachments.postRefusal(items: imports.items)
+        #expect(refusal?.contains("still loading") == true, "refusal was: \(refusal ?? "nil")")
+
+        await gate.release()
+        _ = await run.value
+        await settleTasks()
+        #expect(imports.attachments.count == 3)
+        #expect(ComposeAttachments.postRefusal(items: imports.items) == nil)
+    }
+
+    /// R3's rule, stated: a second retry of one item is REFUSED while the first is on the wire.
+    /// Two overlapping imports would race to write one tile, and the older answer landing last
+    /// would put a failure back over a success.
+    @Test("a second retry of the same item while one is in flight is refused")
+    func overlappingRetriesAreRefused() async {
+        let imports = Self.imports()
+        let gate = AnswerGate(.file(Self.media("arrived.heic")))
+        let calls = Counted()
+        // The first call is the pick, which fails; every call after it is a RETRY, and the retries
+        // are the ones the gate holds.
+        let loader: @MainActor (String) async -> ComposePickerAnswer = { _ in
+            calls.increment()
+            if calls.count == 1 { return .failed(.transport) }
+            return await gate.answer()
+        }
+        await imports.load(["one"], stamp: imports.selected(), using: loader)
+        let id = imports.items[0].id
+
+        let first = Task { await imports.retry(id: id) }
+        await gate.waitUntilAsked()
+        #expect(calls.count == 2)
+        // The second tap, while the first is still out there.
+        await imports.retry(id: id)
+        #expect(calls.count == 2, "the overlapping retry started a second import of one tile")
+
+        await gate.release()
+        await first.value
+        #expect(imports.items[0].media?.filename == "arrived.heic")
+        #expect(imports.items[0].id == id, "the retry replaced the tile instead of filling it")
+        // Once it is over, the item can be asked for again.
+        await imports.retry(id: id)
+        #expect(calls.count == 3)
+    }
+
+    /// R8: the tile's own load is keyed on the FILE, because the identity deliberately survives a
+    /// retry — keyed on that, a recovered item would keep the placeholder it had while it failed.
+    @Test("a recovered item's tile reloads, because the key is the file and not the identity")
+    func theThumbnailKeyFollowsTheFile() async {
+        let imports = Self.imports()
+        let calls = Counted()
+        let loader: @MainActor (String) async -> ComposePickerAnswer = { _ in
+            calls.increment()
+            return calls.count == 1 ? .failed(.transport) : .file(Self.media("arrived.heic"))
+        }
+        await imports.load(["one"], stamp: imports.selected(), using: loader)
+        let id = imports.items[0].id
+        let whileFailed = PickedThumbnail.thumbnailKey(for: imports.items[0])
+
+        await imports.retry(id: id)
+
+        let afterRetry = PickedThumbnail.thumbnailKey(for: imports.items[0])
+        #expect(imports.items[0].id == id, "the identity did not survive the retry")
+        #expect(whileFailed == nil, "a tile with no file had something to load")
+        #expect(afterRetry != nil, "the recovered tile has nothing to load")
+        #expect(afterRetry != whileFailed)
+    }
+
     @Test("what a failed save says depends on whether it was sent")
     func theSentencesDifferByCategory() {
         let never = ComposeFailurePresentation.sentence(for: .transport(sent: false))
@@ -275,6 +360,47 @@ func settleTasks() async {
         await Task.yield()
         try? await Task.sleep(for: .milliseconds(1))
     }
+}
+
+/// A picker answer that says when it has been ASKED for and answers only when the test lets it.
+actor AnswerGate {
+    private let answerValue: ComposePickerAnswer
+    private var asked = false
+    private var askWaiters: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(_ answer: ComposePickerAnswer) { self.answerValue = answer }
+
+    func waitUntilAsked() async {
+        if asked { return }
+        await withCheckedContinuation { askWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func answer() async -> ComposePickerAnswer {
+        asked = true
+        let waiters = askWaiters
+        askWaiters = []
+        for waiter in waiters { waiter.resume() }
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return answerValue
+    }
+}
+
+/// How many times something was asked for.
+@MainActor
+final class Counted {
+    private(set) var count = 0
+    func increment() { count += 1 }
 }
 
 /// A picker answer the test can change between attempts.

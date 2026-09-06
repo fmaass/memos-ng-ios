@@ -229,6 +229,29 @@ struct ComposeAutoDateTests {
         #expect(imports.attachments.map(\.filename) == ["b.heic", "c.heic"])
     }
 
+    /// F1b's tie-break is PICK order, and pick order is one order for the whole list. A photograph
+    /// taken before two were picked comes first — grouping the camera's items after the library's
+    /// would put it last among the undated ones, which is not the order anybody made.
+    @Test("undated items keep one pick order across the camera and the library")
+    func undatedItemsShareOnePickOrder() async {
+        let imports = Self.imports([:])
+        imports.captured(Self.media("IMG_0001.heic"))
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+
+        #expect(
+            imports.attachments.map(\.filename) == ["IMG_0001.heic", "a.heic", "b.heic"],
+            "the capture was grouped after the pick instead of keeping its place")
+        // And a capture taken AFTER a pick still comes after it.
+        imports.captured(Self.media("IMG_0002.heic"))
+        await settleTasks()
+        #expect(
+            imports.attachments.map(\.filename)
+                == ["IMG_0001.heic", "a.heic", "b.heic", "IMG_0002.heic"])
+    }
+
     @Test("a camera capture sorts by its own instant, like anything else")
     func aCaptureSortsByItsInstant() async {
         let imports = Self.imports([

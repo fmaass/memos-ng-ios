@@ -26,10 +26,13 @@ public enum CaptureReader {
     /// extraction deadline is five seconds; a read that has not finished by then is not coming.
     public static let deadline: Duration = .seconds(5)
 
-    public static func read(fileAt url: URL, mime: String, now: Date = Date()) async
-        -> CaptureReading
-    {
-        await withDeadline {
+    public static func read(
+        fileAt url: URL,
+        mime: String,
+        now: Date = Date(),
+        deadline: Duration = CaptureReader.deadline
+    ) async -> CaptureReading {
+        await withDeadline(deadline) {
             if mime.hasPrefix("video/") {
                 return await videoReading(at: url, now: now)
             }
@@ -44,18 +47,35 @@ public enum CaptureReader {
     /// memo by a thumbnail or an auxiliary picture — and the vendored `heic-offset.heic` fixture is
     /// exactly that shape, so the mistake fails a test rather than shipping.
     static func imageReading(at url: URL) -> CaptureReading {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return .empty }
+        if let tags = imageIOTags(at: url) {
+            let reading = CaptureTags.imageReading(
+                dateTimeOriginal: tags.dateTime, offset: tags.offset)
+            if reading.source != nil { return reading }
+        }
+        // ImageIO reports no EXIF at all for a PNG whose `eXIf` chunk sits after the image data,
+        // which is a placement the format allows and the server's reader finds. The chunk walk is
+        // the second look, and it reads nothing but that chunk (`PNGExif`).
+        if let tags = PNGExif.dateTags(inFileAt: url) {
+            return CaptureTags.imageReading(dateTimeOriginal: tags.dateTime, offset: tags.offset)
+        }
+        return .empty
+    }
+
+    /// The two date tags as ImageIO reports them for the PRIMARY image, or nil when it reports no
+    /// EXIF dictionary at all.
+    static func imageIOTags(at url: URL) -> (dateTime: String?, offset: String?)? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let index = CGImageSourceGetPrimaryImageIndex(source)
         guard
             let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil)
                 as? [CFString: Any],
             let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        else { return .empty }
-        let dateTime = exif[kCGImagePropertyExifDateTimeOriginal] as? String
-        let offset =
+        else { return nil }
+        return (
+            exif[kCGImagePropertyExifDateTimeOriginal] as? String,
             exif[kCGImagePropertyExifOffsetTimeOriginal] as? String
-            ?? exif[kCGImagePropertyExifOffsetTime] as? String
-        return CaptureTags.imageReading(dateTimeOriginal: dateTime, offset: offset)
+                ?? exif[kCGImagePropertyExifOffsetTime] as? String
+        )
     }
 
     /// A movie's creation date: the QuickTime key first, the movie header second.
@@ -99,24 +119,64 @@ public enum CaptureReader {
 
     /// The read, or nothing at all if it takes longer than a read of a file's header ever should.
     ///
-    /// A bound rather than a hope: the composer will not let a memo be posted until every item has
-    /// SETTLED, so a read that hangs would hang the Post button with it. Settling as "no date" is
-    /// the answer that keeps the sheet usable, and it is the same answer the SPA reaches when its
-    /// own poll runs out.
+    /// A bound rather than a hope, and it bounds the CALLER rather than merely asking the work to
+    /// stop. The composer will not let a memo be posted until every item has settled, so a read
+    /// that hangs would hang the Post button with it — and a task group cannot be the mechanism,
+    /// because a group waits for its children at scope exit and ImageIO does not answer
+    /// cancellation. So the work runs detached, the answer arrives through a one-shot claim, and
+    /// whichever of the read and the timer speaks first is the answer this returns; a work task
+    /// still running afterwards is cancelled and abandoned rather than waited for.
+    ///
+    /// Settling as "no date" is what keeps the sheet usable, and it is the same answer the SPA
+    /// reaches when its own poll runs out.
     static func withDeadline(
         _ duration: Duration = CaptureReader.deadline,
         _ work: @escaping @Sendable () async -> CaptureReading
     ) async -> CaptureReading {
-        await withTaskGroup(of: CaptureReading?.self, returning: CaptureReading.self) { group in
-            group.addTask { await work() }
-            group.addTask {
-                try? await Task.sleep(for: duration)
-                return Task.isCancelled ? nil : CaptureReading.empty
+        let answer = FirstAnswer()
+        let worker = Task.detached(priority: .utility) {
+            let reading = await work()
+            await answer.deliver(reading)
+        }
+        let timer = Task {
+            try? await Task.sleep(for: duration)
+            await answer.deliver(.empty)
+        }
+        let reading = await answer.value
+        worker.cancel()
+        timer.cancel()
+        return reading
+    }
+}
+
+/// The one answer a bounded read produces, whoever gets there first.
+///
+/// A one-shot claim, made inside the actor: the read and the timer both try to deliver, exactly one
+/// delivery wins, and the loser's answer is dropped rather than resuming a continuation twice —
+/// which is a crash, not a race to be lived with.
+private actor FirstAnswer {
+    private var answered: CaptureReading?
+    private var waiting: CheckedContinuation<CaptureReading, Never>?
+
+    var value: CaptureReading {
+        get async {
+            if let answered { return answered }
+            return await withCheckedContinuation { continuation in
+                if let answered {
+                    continuation.resume(returning: answered)
+                } else {
+                    waiting = continuation
+                }
             }
-            var answer: CaptureReading?
-            if let first = await group.next() { answer = first }
-            group.cancelAll()
-            return answer ?? .empty
+        }
+    }
+
+    func deliver(_ reading: CaptureReading) {
+        guard answered == nil else { return }
+        answered = reading
+        if let waiting {
+            self.waiting = nil
+            waiting.resume(returning: reading)
         }
     }
 }

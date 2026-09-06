@@ -15,29 +15,30 @@ import Observation
 /// `.onChange` have no defined order between them — so a pick made second could be stamped first
 /// and then lose to the very pick it was meant to replace.
 ///
-/// It is the same shape as `MediaImageStore`'s generation, for the same reason: the caller reads the
-/// fence before it goes away to do slow work, and an answer is refused on arrival once the fence has
-/// moved.
+/// Items appear AT ONCE, as placeholders, and each one fills in as its own file arrives. A list
+/// that appeared only when the slowest file had finished is the modal spinner in another costume:
+/// four photographs that are ready cannot be looked at because a fifth is coming down from iCloud.
 ///
-/// The capture reads add a SECOND fence, and it is a different one. A read is issued for one ITEM
-/// and is judged against that item's identity when it comes back: a result for an item that has
-/// been removed, replaced or retried since must not be written anywhere, because the item it
-/// describes is not on the screen any more. Both fences are checked after every await below, and
-/// the awaits are enumerated in the comments that guard them.
+/// Three fences, and they answer three different questions. The SELECTION stamp: does this answer
+/// still describe what is on the screen? The item's IDENTITY: is the item this answer was issued
+/// for still here? The item's READ GENERATION: is this still the read that item is waiting for — a
+/// retry keeps the identity on purpose, so identity alone would let an older read answer last.
+/// Every await below is followed by the checks that guard it, and each is named in a comment.
 @MainActor
 @Observable
 final class ComposeImports {
-    /// Everything attached, in PICK order — the order things entered the list, which never changes
-    /// once they have. The order the composer SHOWS and SENDS is `ordered` below; keeping the two
-    /// apart is what lets ties, and items that never get an instant, fall back on the order a
-    /// person actually put them in.
+    /// Everything attached, in PICK order — one order across the library and the camera, which is
+    /// what `sequence` carries. The order the composer SHOWS and SENDS is `ordered` below; keeping
+    /// the two apart is what lets ties, and items that never get an instant, fall back on the order
+    /// a person actually put them in.
     private(set) var items: [ComposeAttachment] = []
     /// Whether a selection is still loading.
     private(set) var isImporting = false
 
-    /// The zone a civil capture time is resolved in — the device's, read at pick. Injected so a
-    /// test can name the zone its expectations are written in rather than the one the machine
-    /// running it happens to be set to.
+    /// The zone a civil capture time is resolved in — the device's, snapshotted when this composer
+    /// opened and stamped onto every item it takes, so a zone that changes underneath cannot move
+    /// a date that has already been shown. Injected so a test can name the zone its expectations
+    /// are written in rather than the one the machine running it happens to be set to.
     let zone: TimeZone
     /// The file reader. Injected for the same reason: the fences are about ORDER, and a test that
     /// had to produce a real HEIC to exercise one would be testing ImageIO instead.
@@ -45,23 +46,28 @@ final class ComposeImports {
 
     /// The newest selection's stamp. Anything older is stale on arrival.
     private var current = 0
-    /// Which read each item is on. It is bumped every time a read is ISSUED for that item, and an
-    /// answer is applied only if the item is still holding the number its read was issued under.
-    ///
-    /// The identity alone is not quite enough, and the missing case is the retry: a retried item
-    /// keeps its identity on purpose — it is the same tile — so two reads for one identity can be
-    /// in flight, and the older one must not be allowed to answer last. An entry is dropped when
-    /// the item leaves, which is what makes a read for a removed or replaced item land nowhere.
-    private var readGeneration: [UUID: Int] = [:]
+    /// Pick order, across everything: the library and the camera share it (see
+    /// `ComposeAttachment.sequence`).
+    private var sequence = 0
     /// How to ask for one item again, by the identity it was picked under.
     ///
     /// Held here rather than on the attachment because a retry handle is a closure and an
     /// attachment is a value a test compares — and because the handle must die with the pick that
     /// made it: a retry that outlived its selection would put back an item the next pick replaced.
     private var retries: [UUID: @MainActor () async -> ComposePickerAnswer] = [:]
+    /// Which items have a retry on the wire. A second retry of the same item is REFUSED rather than
+    /// joined: there is one file and one tile, the answer in flight is about exactly this item, and
+    /// two overlapping imports would race to write it — the older one landing last would put a
+    /// failure back over a success.
+    private var retryInFlight: Set<UUID> = []
+    /// Which read each item is on. Bumped every time a read is ISSUED for that item; an answer is
+    /// applied only if the item is still holding the number its read was issued under.
+    private var readGeneration: [UUID: Int] = [:]
+    /// Which items came from this app's camera. A pick replaces the picked files and keeps these.
+    private var cameraIDs: Set<UUID> = []
 
     init(
-        zone: TimeZone = .autoupdatingCurrent,
+        zone: TimeZone = .current,
         readCapture: @escaping @MainActor (PickedMedia) async -> CaptureReading = {
             await CaptureReader.read(fileAt: $0.url, mime: $0.mime)
         }
@@ -77,11 +83,11 @@ final class ComposeImports {
     /// manifest is built from it, so what a person sees is what the server is told.
     var ordered: [ComposeAttachment] { AutoMemoDate.captureOrder(items, in: zone) }
 
-    /// The files, in that same order. Only the ones that actually arrived: an item that failed is
-    /// still on the screen, but there is no file to send.
+    /// The files, in that same order. Only the ones that actually arrived: an item that failed or
+    /// is still loading is on the screen, but there is no file to send.
     var attachments: [PickedMedia] { ordered.compactMap(\.media) }
 
-    /// How many files of the current selection could not be read.
+    /// How many items could not be read.
     var failed: Int { items.filter(\.isFailed).count }
 
     /// Whether any item's capture read has not come back yet.
@@ -101,9 +107,11 @@ final class ComposeImports {
         return current
     }
 
-    /// Loads one selection's files and writes them — unless a newer selection has landed since this
-    /// one was stamped, in which case the whole outcome is dropped, `isImporting` included: that
-    /// pick no longer describes what is on the screen, and the newer one is still owed its spinner.
+    /// Loads one selection's files. The tiles appear immediately, in pick order, each one loading;
+    /// every file then lands in its own place as it arrives.
+    ///
+    /// Nothing is written once a newer selection has landed: that pick no longer describes what is
+    /// on the screen, and the newer one is still owed its spinner.
     ///
     /// Every item is kept, whether or not its file arrived. A failure is a placeholder tile with a
     /// reason and a retry, never a silently missing photograph — that is the failure somebody
@@ -116,33 +124,44 @@ final class ComposeImports {
         stamp: Int,
         using loader: @escaping @MainActor (Item) async -> ComposePickerAnswer
     ) async -> Bool {
-        var imported: [ComposeAttachment] = []
+        guard stamp == current else { return false }
+        var placeholders: [ComposeAttachment] = []
         var handles: [UUID: @MainActor () async -> ComposePickerAnswer] = [:]
         for item in items {
-            // AWAIT 1. Nothing is written from inside this loop, so a stale answer cannot reach the
-            // list here; the ownership check for all of them is the stamp test below, immediately
-            // before the one write.
-            let answer = await loader(item)
-            let attachment = Self.attachment(from: answer)
-            imported.append(attachment)
-            handles[attachment.id] = { await loader(item) }
+            sequence += 1
+            let id = UUID()
+            placeholders.append(
+                ComposeAttachment(
+                    id: id, media: nil, load: .loading, capture: .pending,
+                    label: Self.arrivingLabel,
+                    sequence: sequence, captureZone: zone))
+            handles[id] = { await loader(item) }
         }
-        guard stamp == current else { return false }
-        // A pick replaces what was picked; the captures made in this app's own camera stay, which
-        // is what `keptCaptures` holds on to (see `captured`).
-        // `keptCaptures` is read off the list as it still stands, before the assignment replaces
-        // it — the camera's photographs survive a pick, and only they do.
-        self.items = imported + keptCaptures
+        // The placeholders are on screen before a single byte is read. `keptCaptures` is read off
+        // the list as it still stands — the camera's photographs survive a pick, and only they do —
+        // and the two are merged in ONE pick order rather than concatenated by source.
+        self.items = (placeholders + keptCaptures).sorted { $0.sequence < $1.sequence }
         // The camera's items carry no retry handle: a photograph taken here cannot be taken again
         // by asking a picker for it, so what a failed capture offers is the camera itself.
         retries = handles
         // Everything the replaced pick was reading is fenced out here: its items are gone from the
         // list above, and their generations go with them.
         readGeneration = readGeneration.filter { cameraIDs.contains($0.key) }
-        isImporting = false
-        for attachment in imported where attachment.media != nil {
-            beginCaptureRead(for: attachment.id)
+        isImporting = !placeholders.isEmpty
+
+        for placeholder in placeholders {
+            guard let handle = handles[placeholder.id] else { continue }
+            // AWAIT 1, once per item.
+            let answer = await handle()
+            // The selection must still be the one on screen, and this item must still be in it.
+            guard stamp == current,
+                let index = self.items.firstIndex(where: { $0.id == placeholder.id })
+            else { return false }
+            self.items[index] = Self.settle(self.items[index], with: answer)
+            if self.items[index].media != nil { beginCaptureRead(for: placeholder.id) }
         }
+        guard stamp == current else { return false }
+        isImporting = false
         return true
     }
 
@@ -153,12 +172,15 @@ final class ComposeImports {
     /// and a photo taken here and dropped because somebody afterwards chose two from the library is
     /// a photo nobody can take again.
     func captured(_ media: PickedMedia) {
+        sequence += 1
         let attachment = ComposeAttachment(
-            id: media.id, media: media, load: .ready, capture: .pending, label: media.filename)
+            id: media.id, media: media, load: .ready, capture: .pending, label: media.filename,
+            sequence: sequence, captureZone: zone)
         items.append(attachment)
         cameraIDs.insert(attachment.id)
-        // Fenced by its identity alone, deliberately: this photograph SURVIVES the next pick, so a
-        // read of it must not be thrown away because a selection landed while it was running.
+        // Fenced by its identity and its read generation alone, deliberately: this photograph
+        // SURVIVES the next pick, so its read must not be thrown away because a selection landed
+        // while it was running.
         beginCaptureRead(for: attachment.id)
     }
 
@@ -181,49 +203,43 @@ final class ComposeImports {
     func removeFailed() {
         let removed = items.filter(\.isFailed).map(\.id)
         items.removeAll(where: \.isFailed)
-        for id in removed {
-            retries[id] = nil
-            readGeneration[id] = nil
-            cameraIDs.remove(id)
-        }
+        for id in removed { forget(id) }
     }
 
     /// One item only.
     func remove(id: UUID) {
         items.removeAll { $0.id == id }
-        retries[id] = nil
-        readGeneration[id] = nil
-        cameraIDs.remove(id)
+        forget(id)
     }
 
     /// Asks for one failed item again, under the identity it was picked with.
     ///
-    /// The identity is the point: the answer is applied to THAT item or to nothing at all. A retry
-    /// whose item has been removed, or whose whole selection has been replaced, lands nowhere.
+    /// The identity is the point twice over. The answer is applied to THAT item or to nothing at
+    /// all — a retry whose item has been removed, or whose whole selection has been replaced, lands
+    /// nowhere. And the item keeps it, so an edit that is retried is the same edit to the server:
+    /// the file is re-imported under a new temporary name, but what identifies it does not change
+    /// (`PickedMedia.stagedSource`).
+    ///
+    /// A second retry while one is on the wire is REFUSED rather than joined. There is one file and
+    /// one tile; two overlapping imports would race to write it, and the older answer landing last
+    /// would put a failure back over a success.
     func retry(id: UUID) async {
-        guard let handle = retries[id], let index = items.firstIndex(where: { $0.id == id }) else {
-            return
-        }
+        guard !retryInFlight.contains(id), let handle = retries[id],
+            let index = items.firstIndex(where: { $0.id == id })
+        else { return }
+        retryInFlight.insert(id)
+        defer { retryInFlight.remove(id) }
         let stamp = current
         items[index].load = .loading
+        items[index].capture = .pending
         items[index].uploadFailed = nil
         // AWAIT 2. The list can change completely while this runs.
         let answer = await handle()
         guard stamp == current, let landing = items.firstIndex(where: { $0.id == id }) else {
             return
         }
-        let arrived = Self.attachment(from: answer)
-        // The identity survives the retry: it is the same tile. Which is exactly why the read that
-        // follows carries a generation as well — the previous attempt's read, if one is still out
-        // there, is for this same identity and must not be allowed to answer last.
-        items[landing] = ComposeAttachment(
-            id: id,
-            media: arrived.media,
-            load: arrived.load,
-            capture: arrived.media == nil ? .settled(.empty) : .pending,
-            label: arrived.label
-        )
-        if arrived.media != nil { beginCaptureRead(for: id) }
+        items[landing] = Self.settle(items[landing], with: answer)
+        if items[landing].media != nil { beginCaptureRead(for: id) }
     }
 
     /// Marks the files that were being added to an existing memo as not having gone up.
@@ -269,27 +285,43 @@ final class ComposeImports {
         }
     }
 
-    // MARK: - the camera's own items
+    // MARK: - bookkeeping
 
-    /// Which items came from this app's camera. A pick replaces the picked files and keeps these.
-    private var cameraIDs: Set<UUID> = []
+    /// What a tile says before its file has arrived.
+    static let arrivingLabel = "A file"
+
+    private func forget(_ id: UUID) {
+        retries[id] = nil
+        readGeneration[id] = nil
+        cameraIDs.remove(id)
+    }
 
     private var keptCaptures: [ComposeAttachment] {
         items.filter { cameraIDs.contains($0.id) }
     }
 
-    private static func attachment(from answer: ComposePickerAnswer) -> ComposeAttachment {
+    /// What one item becomes when its picker answer arrives. Its identity, its place in pick order
+    /// and the zone it was picked in all survive — only the file and the state change.
+    private static func settle(_ attachment: ComposeAttachment, with answer: ComposePickerAnswer)
+        -> ComposeAttachment
+    {
         switch answer {
-        case .file(let media):
+        case .file(var media):
+            // The COMPOSER's identity wins over the import's own: a retry re-imports the picker's
+            // export under a new name, and the same photograph has to stay the same attachment —
+            // to the tile, and to the edit key the server replays a lost answer under.
+            media.id = attachment.id
             return ComposeAttachment(
-                id: media.id, media: media, load: .ready, capture: .pending,
-                label: media.filename)
+                id: attachment.id, media: media, load: .ready, capture: .pending,
+                label: media.filename, sequence: attachment.sequence,
+                captureZone: attachment.captureZone)
         case .failed(let category):
             // An item with no file has no capture read to wait for: its decision is settled at
             // nothing, so it never holds up a Post that its own failure is already refusing.
             return ComposeAttachment(
-                id: UUID(), media: nil, load: .failed(category), capture: .settled(.empty),
-                label: "A file")
+                id: attachment.id, media: nil, load: .failed(category), capture: .settled(.empty),
+                label: attachment.label, sequence: attachment.sequence,
+                captureZone: attachment.captureZone)
         }
     }
 }

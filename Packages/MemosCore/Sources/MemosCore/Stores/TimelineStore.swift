@@ -863,7 +863,8 @@ public final class TimelineStore {
         // its own at the moment it sends.
         let key = editKey(
             for: MemoEditAttempt(
-                uid: uid, content: content, createdAt: createdAt, files: files
+                uid: uid, content: content, createdAt: createdAt,
+                files: files.map(\.editIdentity)
             )
         )
         var uploadUIDs: [String]?
@@ -911,7 +912,14 @@ public final class TimelineStore {
         var uid: String
         var content: String
         var createdAt: Date?
-        var files: [StagedSource]
+        /// The files as their IDENTITIES rather than as their bytes on disk.
+        ///
+        /// A retry after a failed upload re-imports the picker's export, which lands under a new
+        /// temporary name with a new modification date. Keyed on those, the same photograph
+        /// attached to the same memo would mint a NEW key, and the server would apply a retry of a
+        /// lost save a second time instead of replaying it — which is the one thing the key exists
+        /// to prevent (`StagedSource.editIdentity`).
+        var files: [String]
     }
 
     /// The edit a key was minted for, that key, and how many invocations are USING it right now.

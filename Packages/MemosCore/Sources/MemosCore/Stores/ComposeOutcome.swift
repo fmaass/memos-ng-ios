@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import OpenAPIRuntime
 
 /// Why a compose did not go through.
 ///
@@ -50,14 +51,67 @@ extension ComposeFailure {
         if StoreFailure.isSuperseded(error) { return .authorization }
         if StoreFailure.transportFailure(error) != nil { return .transport(sent: sent) }
         if StoreFailure.isCancellation(error) { return .transport(sent: sent) }
-        if let api = error as? APIError {
-            return api == .unauthorized ? .authorization : .rejection
+        // Down the chain, not at the top of it: the generated client wraps what it is given, and an
+        // `unauthorized` inside an envelope that is read as a plain refusal ends up telling somebody
+        // the server said no to their words when it in fact refused their session.
+        if let api = apiError(in: error) {
+            switch api {
+            case .unauthorized: return .authorization
+            // An answer the client could not read is not an answer that the memo was refused. The
+            // request went out and the server may well have applied it — see `.transport(sent:)`,
+            // and the sentence that goes with it.
+            case .decoding: return .transport(sent: sent)
+            default: return .rejection
+            }
         }
-        let bridged = error as NSError
-        if bridged.domain == NSCocoaErrorDomain, storageCodes.contains(bridged.code) {
-            return .storage
-        }
+        // The same fact arriving as the raw decoding failure, which is what a 2xx body the client
+        // cannot read throws before anything wraps it.
+        if isDecodingFailure(error) { return .transport(sent: sent) }
+        if let storage = storageFailure(in: error) { return storage }
         return .rejection
+    }
+
+    /// The `APIError` anywhere in an error's chain, or nil.
+    private static func apiError(in error: any Error) -> APIError? {
+        var current: (any Error)? = error
+        for _ in 0..<16 {
+            guard let error = current else { return nil }
+            if let api = error as? APIError { return api }
+            if let client = error as? ClientError {
+                current = client.underlyingError
+                continue
+            }
+            current = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return nil
+    }
+
+    /// Whether a `DecodingError` is anywhere in the chain.
+    private static func isDecodingFailure(_ error: any Error) -> Bool {
+        var current: (any Error)? = error
+        for _ in 0..<16 {
+            guard let error = current else { return false }
+            if error is DecodingError { return true }
+            if let client = error as? ClientError {
+                current = client.underlyingError
+                continue
+            }
+            current = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    /// A file that could not be read, written or made room for, anywhere in the chain.
+    private static func storageFailure(in error: any Error) -> ComposeFailure? {
+        var current: NSError? = error as NSError
+        for _ in 0..<16 {
+            guard let error = current else { return nil }
+            if error.domain == NSCocoaErrorDomain, storageCodes.contains(error.code) {
+                return .storage
+            }
+            current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return nil
     }
 
     /// The Cocoa codes a file that could not be read, written or made room for comes back as.

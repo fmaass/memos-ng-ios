@@ -10,6 +10,7 @@ import Testing
 private let listMemosOperation = "list_memos_api_memos_get"
 private let patchMemoOperation = "patch_memo_api_memos__uid__patch"
 private let startUploadOperation = "start_upload_api_uploads_post"
+private let appendChunkOperation = "append_chunk_api_uploads__upload_uid__patch"
 
 /// A file on disk with known contents, cleaned up by the test that made it.
 private func stagedFile(named name: String = "picked.jpg") throws -> StagedSource {
@@ -166,6 +167,94 @@ struct ComposeFailureTests {
         #expect(outcome.failure == nil)
     }
 
+    /// A 2xx the client cannot read is not a refusal. The request went out and the server may well
+    /// have applied it, so the one thing this may not say is that nothing was changed.
+    @Test("a success the client cannot decode could not be confirmed, and is not a rejection")
+    func anUndecodableSuccessIsUnconfirmed() async throws {
+        let store = TimelineStore()
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            // 200, with a body that is not a memo. What the transport did is not in doubt; what
+            // the server did with it is.
+            case patchMemoOperation: return Stub.json(#"{"not":"a memo"}"#)
+            default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let outcome = await store.edit(
+            uid: "a", content: "edited", using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .failed(.transport(sent: true)))
+        #expect(outcome != .failed(.rejection), "an unreadable success was reported as a refusal")
+    }
+
+    /// The retry of a media edit is the same edit, even though the file has been imported again.
+    ///
+    /// A retry re-exports the picker's file under a new temporary name, so the url and the
+    /// modification date both move. Keyed on those, the same photograph on the same memo would mint
+    /// a NEW edit key and the server would apply a retry of a lost save a second time instead of
+    /// replaying it — which is the one thing the key exists to prevent.
+    @Test("a file imported again under the same identity keeps the edit key")
+    func theEditKeySurvivesAReImport() async throws {
+        let first = try stagedFile(named: "holiday.jpg")
+        let second = try stagedFile(named: "holiday.jpg")
+        defer {
+            try? FileManager.default.removeItem(at: first.url)
+            try? FileManager.default.removeItem(at: second.url)
+        }
+        // The SAME attachment, imported twice: two paths, one identity.
+        let identity = UUID()
+        let attempt = StagedSource(
+            url: first.url, filename: first.filename, mime: first.mime, identity: identity)
+        let retried = StagedSource(
+            url: second.url, filename: second.filename, mime: second.mime, identity: identity)
+        #expect(attempt.url != retried.url, "control: the retry really did re-import the file")
+
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let answer = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(
+                    #"{"upload_uid":"u1","chunk_size":64,"bytes_received":0}"#, status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(
+                    """
+                    {"upload_uid":"u1","chunk_size":64,"bytes_received":\(data.count)}
+                    """)
+            case patchMemoOperation:
+                let sent = try await Stub.body(body)
+                keys.set(keys.get() + [(sent["edit_key"] as? String) ?? ""])
+                guard answer.get() else { throw URLError(.networkConnectionLost) }
+                return Stub.json(Stub.memo(uid: "a", content: "edited"))
+            default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let lost = await store.edit(
+            uid: "a", content: "edited", attaching: [attempt],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+        answer.set(true)
+        let repeated = await store.edit(
+            uid: "a", content: "edited", attaching: [retried],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(lost == .failed(.transport(sent: true)))
+        #expect(repeated == .saved)
+        let sentKeys = keys.get()
+        try #require(sentKeys.count == 2, "the patch was not reached twice: \(sentKeys)")
+        #expect(
+            sentKeys[0] == sentKeys[1],
+            "the re-imported file minted a new key, so the retry would apply the edit twice")
+    }
+
     @Test("the classification of an error is about the error, not about the message")
     func classification() {
         #expect(
@@ -175,6 +264,11 @@ struct ComposeFailureTests {
             ComposeFailure.classify(URLError(.notConnectedToInternet), sent: true)
                 == .transport(sent: true))
         #expect(ComposeFailure.classify(APIError.unauthorized, sent: true) == .authorization)
+        // Wrapped, which is how the generated client hands one back.
+        let wrapped = NSError(
+            domain: "GeneratedClient", code: 1,
+            userInfo: [NSUnderlyingErrorKey: APIError.unauthorized as NSError])
+        #expect(ComposeFailure.classify(wrapped, sent: true) == .authorization)
         #expect(ComposeFailure.classify(APIError.server(status: 500), sent: true) == .rejection)
         #expect(
             ComposeFailure.classify(

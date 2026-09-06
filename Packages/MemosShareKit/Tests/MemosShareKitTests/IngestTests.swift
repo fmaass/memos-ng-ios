@@ -4,6 +4,16 @@ import MemosOutbox
 import MemosShareKit
 import Testing
 
+/// A count shared by two closures that the commit calls from different places — the licence read
+/// and the capture read — so the test can say "signed out by the time the file had been read".
+final class ShareReadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int { lock.withLock { value } }
+    func increment() { lock.withLock { value += 1 } }
+}
+
 @Suite("A share on its way into the outbox")
 struct IngestTests {
     /// Every test gets its own app-group stand-in, removed afterwards.
@@ -29,7 +39,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "on the beach",
                 visibility: nil,
-                binding: Fixture.binding(),
+                binding: { Fixture.binding() },
                 expecting: Fixture.binding(),
                 capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
                 into: repository
@@ -63,7 +73,7 @@ struct IngestTests {
                 items: [.text("An Article"), .link(URL(string: "https://example.invalid/a")!)],
                 note: "",
                 visibility: nil,
-                binding: Fixture.binding(),
+                binding: { Fixture.binding() },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -86,7 +96,7 @@ struct IngestTests {
                 items: [.text("just me")],
                 note: "",
                 visibility: .private,
-                binding: Fixture.binding(),
+                binding: { Fixture.binding() },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -108,7 +118,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "a memo nobody may own",
                 visibility: nil,
-                binding: nil,
+                binding: { nil },
                 expecting: nil,
                 into: repository
             )
@@ -125,7 +135,7 @@ struct IngestTests {
                 items: [.text("   ")],
                 note: "  ",
                 visibility: nil,
-                binding: Fixture.binding(),
+                binding: { Fixture.binding() },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -147,7 +157,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "shared before signing out",
                 visibility: nil,
-                binding: nil,
+                binding: { nil },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -170,7 +180,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "composed for one account",
                 visibility: nil,
-                binding: somebodyElse,
+                binding: { somebodyElse },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -199,7 +209,7 @@ struct IngestTests {
                     items: [.file(real), .file(vanished)],
                     note: "half a share",
                     visibility: nil,
-                    binding: Fixture.binding(),
+                    binding: { Fixture.binding() },
                     expecting: Fixture.binding(),
                     into: repository
                 )
@@ -241,7 +251,7 @@ struct IngestTests {
                 items: files,
                 note: "the walk",
                 visibility: nil,
-                binding: Fixture.binding(),
+                binding: { Fixture.binding() },
                 expecting: Fixture.binding(),
                 // The moment of sharing, which the photographs are supposed to beat.
                 capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
@@ -262,6 +272,40 @@ struct IngestTests {
         }
     }
 
+    /// A sign-out that happens WHILE the files are being read has to stop the write.
+    ///
+    /// It is the reason the licence is handed over as a read rather than as a value: the capture
+    /// reads are an await, a share sheet can stand for hours, and a capture stamped with an account
+    /// that has since gone is one the engine holds forever — which looks exactly like a memo that
+    /// was lost.
+    @Test("an account that changes during the capture reads stops the share")
+    func anAccountChangeDuringTheReadsIsRefused() async throws {
+        try await withOutbox { repository, root in
+            let staged = try Fixture.file(in: root, named: "IMG_0011.heic", bytes: 16)
+            let file = try SharedFile.imported(staged, into: root)
+            let reads = ShareReadCounter()
+
+            let outcome = try await ShareIngest.commit(
+                items: [.file(file)],
+                note: "on the beach",
+                visibility: nil,
+                // Signed in when the sheet posted; signed out by the time the read came back.
+                binding: { reads.count == 0 ? Fixture.binding() : nil },
+                expecting: Fixture.binding(),
+                read: { _ in
+                    reads.increment()
+                    return .empty
+                },
+                into: repository
+            )
+
+            #expect(outcome == .notSignedIn)
+            #expect(
+                try await repository.loadJobs().isEmpty,
+                "a capture was written for an account that had gone during the reads")
+        }
+    }
+
     /// The control: with nothing that carries a date, the moment of sharing is still what the memo
     /// gets — the rule adds a date, it never takes one away.
     @Test("a share of files that say nothing keeps the moment of sharing")
@@ -274,7 +318,7 @@ struct IngestTests {
                 items: [.file(try SharedFile.imported(staged, into: root))],
                 note: "",
                 visibility: nil,
-                binding: Fixture.binding(),
+                binding: { Fixture.binding() },
                 expecting: Fixture.binding(),
                 capturedAt: shared,
                 read: { _ in .empty },

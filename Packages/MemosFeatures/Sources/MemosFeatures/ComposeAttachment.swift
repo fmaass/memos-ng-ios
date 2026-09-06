@@ -105,6 +105,15 @@ nonisolated public struct ComposeAttachment: Identifiable, Equatable, CaptureCar
     /// What to call it in a sentence. The picker's own filename when there is one, and something
     /// honest before then.
     public var label: String
+    /// Where this item comes in PICK order, across everything attached.
+    ///
+    /// One number for the library and the camera together, because they are one list to the person
+    /// holding the phone: a photograph taken before two were picked comes first, and the undated
+    /// items — which sort in pick order — would otherwise be grouped by where they came from.
+    public var sequence: Int
+    /// The zone this item's civil capture time is resolved in, snapshotted when it was picked. See
+    /// `CaptureCarrying.captureZone`.
+    public var captureZone: TimeZone?
     /// Set when this file was added to an EXISTING memo and the upload did not go through. It is
     /// separate from `load`, which is about the picker: this one is about the server.
     public var uploadFailed: ComposeLoadFailure?
@@ -115,6 +124,8 @@ nonisolated public struct ComposeAttachment: Identifiable, Equatable, CaptureCar
         load: Load = .loading,
         capture: CaptureDecision = .pending,
         label: String = "A file",
+        sequence: Int = 0,
+        captureZone: TimeZone? = nil,
         uploadFailed: ComposeLoadFailure? = nil
     ) {
         self.id = id
@@ -122,6 +133,8 @@ nonisolated public struct ComposeAttachment: Identifiable, Equatable, CaptureCar
         self.load = load
         self.capture = capture
         self.label = label
+        self.sequence = sequence
+        self.captureZone = captureZone
         self.uploadFailed = uploadFailed
     }
 

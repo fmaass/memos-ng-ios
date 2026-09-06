@@ -138,11 +138,25 @@ public enum AutoMemoDate {
         )
     }
 
-    /// The same answer for anything that carries a capture decision.
+    /// The same answer for anything that carries a capture decision, each item resolved in the zone
+    /// it was picked in (`CaptureCarrying.captureZone`) rather than in the zone of the moment.
     public static func autoMemoDate<Item: CaptureCarrying>(_ items: [Item], in zone: TimeZone)
         -> AutoMemoDateResult
     {
-        autoMemoDate(items.map(\.capture), in: zone)
+        var eligible: [Settled] = []
+        for item in items {
+            let one = settled(item.capture, in: item.captureZone ?? zone)
+            if one.instant != nil { eligible.append(one) }
+        }
+        guard var winner = eligible.first else { return .undated }
+        for candidate in eligible.dropFirst() where candidate.instant! < winner.instant! {
+            winner = candidate
+        }
+        return AutoMemoDateResult(
+            instant: winner.instant,
+            approximate: winner.approximate,
+            span: spanDays(eligible.compactMap(\.instant), in: zone)
+        )
     }
 
     /// The items in CAPTURE ORDER: everything with a settled eligible instant first, ascending by
@@ -157,7 +171,7 @@ public enum AutoMemoDate {
         var dated: [(item: Item, at: Date, pick: Int)] = []
         var undated: [Item] = []
         for (pick, item) in items.enumerated() {
-            if let instant = settled(item.capture, in: zone).instant {
+            if let instant = settled(item.capture, in: item.captureZone ?? zone).instant {
                 dated.append((item, instant, pick))
             } else {
                 undated.append(item)
@@ -220,6 +234,10 @@ struct CivilTime: Equatable {
         guard month >= 1, month <= 12, day >= 1, day <= 31, hour <= 23, minute <= 59, second <= 60
         else { return nil }
         self.init(year: year, month: month, day: day, hour: hour, minute: minute, second: second)
+        // A day that does not exist is not a date. `Calendar` NORMALISES rather than refusing —
+        // 31 February comes back as 3 March — so a reading that was never a moment would otherwise
+        // resolve to a real instant on a day nobody photographed anything.
+        guard isRealDate else { return nil }
     }
 
     init(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) {
@@ -265,6 +283,28 @@ struct CivilTime: Equatable {
     /// The same, with the time of day dropped — the calendar DAY as a comparable number.
     var pseudoUTCDay: Date {
         CivilTime(year: year, month: month, day: day, hour: 0, minute: 0, second: 0).pseudoUTC
+    }
+
+    /// Whether these components name a day the calendar actually has.
+    ///
+    /// Asked by ROUND TRIP rather than by counting days in a month: the components are turned into
+    /// an instant in UTC and read back, and anything the calendar had to move to make it work comes
+    /// back different.
+    var isRealDate: Bool {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        components.second = second
+        guard let date = calendar.date(from: components) else { return false }
+        let back = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second], from: date)
+        return back.year == year && back.month == month && back.day == day && back.hour == hour
+            && back.minute == minute && back.second == second
     }
 
     /// `YYYY-MM-DDTHH:MM:SS`, the shape the artefact writes a civil time in.

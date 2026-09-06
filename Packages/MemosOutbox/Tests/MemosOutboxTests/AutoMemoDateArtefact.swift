@@ -189,7 +189,17 @@ struct AutoMemoDateArtefact: Sendable {
 }
 
 /// A vector's item, as something the ordering function can be handed.
+///
+/// `captureZone` is nil for everything the artefact describes — a vector names ONE zone for the
+/// whole case — and is set only by the tests that are about an item carrying its own.
 struct ArtefactItem: CaptureCarrying, Sendable {
     var id: String
     var capture: CaptureDecision
+    var captureZone: TimeZone?
+
+    init(id: String, capture: CaptureDecision, captureZone: TimeZone? = nil) {
+        self.id = id
+        self.capture = capture
+        self.captureZone = captureZone
+    }
 }

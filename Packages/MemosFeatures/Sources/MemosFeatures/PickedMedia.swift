@@ -81,8 +81,15 @@ nonisolated public struct PickedMedia: Transferable, Identifiable, Equatable {
         return mime
     }
 
+    /// What the upload takes over — carrying the COMPOSER's identity for this item.
+    ///
+    /// The identity is what makes a retried edit the same edit. A retry re-imports the picker's
+    /// export under a fresh temporary name, so the url and the modification date both move; an edit
+    /// key minted from those would change with them, and the server would answer a retry of a lost
+    /// save as a NEW edit rather than as the replay it is (`TimelineStore.editKey(for:)`).
     public var stagedSource: StagedSource {
-        StagedSource(url: url, filename: filename, mime: mime, lastModified: lastModified)
+        StagedSource(
+            url: url, filename: filename, mime: mime, lastModified: lastModified, identity: id)
     }
 }
 
@@ -125,6 +132,11 @@ nonisolated public enum ComposeAttachments {
     public static func postRefusal(items: [ComposeAttachment]) -> String? {
         if let failed = items.first(where: \.isFailed) {
             return "\(failed.label) could not be read. Remove it, or try it again."
+        }
+        // A file still on its way is not attached yet. Posting now would send the memo without it
+        // — the same silent loss a failed item causes, arrived at by waiting a second less.
+        if let loading = items.first(where: \.isLoading) {
+            return "\(loading.label) is still loading. Give it a moment, or remove it."
         }
         if let pending = items.first(where: { $0.capture.isPending }) {
             return "\(pending.label) is still being read. It decides the date, so give it a moment."

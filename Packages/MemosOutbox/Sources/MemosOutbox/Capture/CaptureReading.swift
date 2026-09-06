@@ -62,4 +62,16 @@ public enum CaptureDecision: Sendable, Equatable {
 /// orders to drift.
 public protocol CaptureCarrying {
     var capture: CaptureDecision { get }
+    /// The zone this item's civil reading is resolved in, snapshotted when the item was picked.
+    ///
+    /// It travels WITH the item because a civil time has no zone of its own and the device's can
+    /// change: a phone that crosses a border, or a person who corrects the setting, would otherwise
+    /// re-resolve readings that have already been shown — moving the memo's date and reordering the
+    /// pictures after the fact. Nil means "whatever zone the caller supplies", which is what a
+    /// vector out of the artefact has.
+    var captureZone: TimeZone? { get }
+}
+
+extension CaptureCarrying {
+    public var captureZone: TimeZone? { nil }
 }

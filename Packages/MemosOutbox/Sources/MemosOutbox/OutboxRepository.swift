@@ -15,12 +15,32 @@ public struct StagedSource: Sendable, Equatable {
     public var filename: String
     public var mime: String
     public var lastModified: Date?
+    /// What the layer above calls this file, when it has a name for it that outlives the copy.
+    ///
+    /// The outbox does not read it: a queued capture is identified by its job and its file. It is
+    /// here because the ONE thing that must survive a file being imported again — the identity of
+    /// the attachment, for the edit key that makes a retry a replay — has to travel with the
+    /// source, and a parallel array beside it is a thing that comes apart.
+    public var identity: UUID?
 
-    public init(url: URL, filename: String, mime: String, lastModified: Date? = nil) {
+    public init(
+        url: URL,
+        filename: String,
+        mime: String,
+        lastModified: Date? = nil,
+        identity: UUID? = nil
+    ) {
         self.url = url
         self.filename = filename
         self.mime = mime
         self.lastModified = lastModified
+        self.identity = identity
+    }
+
+    /// How this file is named in an edit key: its identity when it has one, and otherwise what the
+    /// file is. Never the temporary path alone, which changes every time the picker exports again.
+    public var editIdentity: String {
+        identity?.uuidString ?? "\(filename)|\(mime)|\(url.lastPathComponent)"
     }
 }
 

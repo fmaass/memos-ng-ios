@@ -26,6 +26,10 @@ actor GatedExport {
         await withCheckedContinuation { startWaiters.append($0) }
     }
 
+    /// Whether the picker was asked for this file at all — which a pick that is already stale must
+    /// not be.
+    var startedLoading: Bool { hasStarted }
+
     func release() {
         isReleased = true
         let waiting = releaseWaiters
@@ -61,6 +65,10 @@ struct ComposeImportTests {
     /// pick's load is the one that starts first, so a stamp taken when a load STARTS numbers the
     /// older pick as the newer one — and then the older pick, arriving whenever it arrives, is
     /// let through onto the screen.
+    ///
+    /// The stamp is checked before the picker is asked for anything now, so a pick that has already
+    /// been replaced does not export a single file: `startedLoading` on the older export is what
+    /// says so.
     @Test("the pick made last wins even when its load is the one that started first")
     func theNewestPickWinsWhateverOrderTheLoadsStartIn() async {
         let imports = ComposeImports()
@@ -79,10 +87,11 @@ struct ComposeImportTests {
         let olderRun = Task {
             await imports.load(["older"], stamp: olderStamp) { _ in await older.load() }
         }
-        await older.waitUntilStarted()
 
-        await older.release()
         #expect(await olderRun.value == false, "the replaced pick wrote the attachment list")
+        #expect(
+            await older.startedLoading == false,
+            "a pick that had already been replaced still exported its files")
         await newer.release()
         #expect(await newerRun.value == true, "the pick that was made last was refused")
 
@@ -207,9 +216,12 @@ struct ComposeImportTests {
             _ in .file(Self.media("second.heic"))
         }
 
+        // The capture keeps its PLACE as well as its life: pick order is one order across the
+        // library and the camera, so a photograph taken before this pick stays in front of it
+        // (`ComposeAttachment.sequence`).
         #expect(
-            imports.attachments.map(\.filename) == ["second.heic", "IMG_20260828-141530.heic"],
-            "the next pick took the capture with it"
+            imports.attachments.map(\.filename) == ["IMG_20260828-141530.heic", "second.heic"],
+            "the next pick took the capture with it, or moved it"
         )
         // "Remove them" still means all of it: a capture is attached to this memo like anything
         // else, and clearing the attachments clears the attachments.

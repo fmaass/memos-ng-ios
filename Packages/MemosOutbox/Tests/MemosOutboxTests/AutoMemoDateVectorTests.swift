@@ -107,6 +107,71 @@ struct AutoMemoDateVectorTests {
         #expect(reading.source?.rawValue == vector.expect.source, "case \(vector.id)")
     }
 
+    /// Beyond the artefact, and deliberately: the artefact names ONE zone per case because the
+    /// server and the SPA each resolve in one. A phone does not — it can be picked up in another
+    /// country between two picks — so the zone travels with the ITEM here, and this is the case
+    /// that says so.
+    @Test("each item is resolved in the zone it was picked in, not in the zone of the moment")
+    func eachItemKeepsItsOwnZone() {
+        let berlin = AutoMemoDateArtefact.zone("Europe/Berlin")
+        let kathmandu = AutoMemoDateArtefact.zone("Asia/Kathmandu")
+        // The same wall-clock reading, picked in two places. In Kathmandu (+05:45) it is the
+        // earlier instant by more than four hours.
+        let items = [
+            ArtefactItem(
+                id: "berlin", capture: .settled(CaptureReading(civil: "2026-01-01T13:00:00")),
+                captureZone: berlin),
+            ArtefactItem(
+                id: "kathmandu", capture: .settled(CaptureReading(civil: "2026-01-01T13:00:00")),
+                captureZone: kathmandu),
+        ]
+
+        let answer = AutoMemoDate.autoMemoDate(items, in: berlin)
+        #expect(answer.instant == AutoMemoDateArtefact.instant("2026-01-01T07:15:00Z"))
+        #expect(answer.approximate)
+        #expect(AutoMemoDate.captureOrder(items, in: berlin).map(\.id) == ["kathmandu", "berlin"])
+        // The control: read in ONE zone, the two are the same instant and stay in pick order.
+        let flattened = items.map { ArtefactItem(id: $0.id, capture: $0.capture) }
+        #expect(
+            AutoMemoDate.autoMemoDate(flattened, in: berlin).instant
+                == AutoMemoDateArtefact.instant("2026-01-01T12:00:00Z"))
+    }
+
+    /// A day that does not exist is not a date. `Calendar` NORMALISES rather than refusing, so
+    /// without an explicit round trip this resolves to 3 March and dates a memo by a moment nobody
+    /// photographed anything at.
+    @Test(
+        "a civil time on a day the calendar does not have is rejected",
+        arguments: [
+            "2026-02-31T13:00:00", "2026-02-30T13:00:00", "2026-04-31T13:00:00",
+            "2026-13-01T13:00:00", "2026-00-10T13:00:00",
+        ]
+    )
+    func impossibleDatesAreRejected(_ civil: String) {
+        let zone = AutoMemoDateArtefact.zone("Europe/Berlin")
+        #expect(AutoMemoDate.resolveCivil(civil, in: zone) == nil, "case \(civil)")
+    }
+
+    @Test("the days that do exist still resolve (the control)")
+    func realDatesStillResolve() {
+        let zone = AutoMemoDateArtefact.zone("Europe/Berlin")
+        #expect(AutoMemoDate.resolveCivil("2026-02-28T13:00:00", in: zone) != nil)
+        // 2028 is a leap year: 29 February is a real day and must not be refused with the rest.
+        #expect(AutoMemoDate.resolveCivil("2028-02-29T13:00:00", in: zone) != nil)
+        #expect(AutoMemoDate.resolveCivil("2026-12-31T23:59:59", in: zone) != nil)
+    }
+
+    @Test("an EXIF date on a day that does not exist reads as nothing")
+    func impossibleExifDatesAreRejected() {
+        #expect(
+            CaptureTags.imageReading(dateTimeOriginal: "2026:02:31 13:00:00", offset: nil)
+                == .empty)
+        // The control, one day earlier.
+        #expect(
+            CaptureTags.imageReading(dateTimeOriginal: "2026:02:28 13:00:00", offset: nil).civil
+                == "2026-02-28T13:00:00")
+    }
+
     @Test("an item whose read has not settled contributes nothing to either answer")
     func pendingContributesNothing() throws {
         let zone = AutoMemoDateArtefact.zone("Europe/Berlin")

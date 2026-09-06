@@ -24,10 +24,13 @@ public enum ShareOutcome: Sendable, Equatable {
 /// the same chunks and lose its host mid-transfer. So this writes to the queue the app drains, and
 /// the app's next launch or background refresh moves the bytes.
 public enum ShareIngest {
-    /// - Parameter binding: the licence as it reads NOW, at the moment of use — not as it read
-    ///   when the sheet opened. Nil means nobody is signed in, and then NOTHING is written rather
-    ///   than a capture being stamped with a guess: a job bound to the wrong account is one the
-    ///   engine holds forever, which looks exactly like a memo that was lost.
+    /// - Parameter binding: how to READ the licence, not a licence somebody read earlier. It is a
+    ///   closure because this method awaits — the capture reads below — and a share sheet can stand
+    ///   for as long as somebody leaves it there: a value sampled before those awaits is a value
+    ///   that can be out of date by the time anything is written. Nil means nobody is signed in, and
+    ///   then NOTHING is written rather than a capture being stamped with a guess: a job bound to
+    ///   the wrong account is one the engine holds forever, which looks exactly like a memo that
+    ///   was lost.
     /// - Parameter expecting: the licence the sheet was opened with. A share sheet can sit on
     ///   screen for as long as someone leaves it there, and a sign-out or an account switch in the
     ///   app underneath it must not be posted through.
@@ -42,7 +45,7 @@ public enum ShareIngest {
         items: [SharedItem],
         note: String,
         visibility: ShareVisibility?,
-        binding: AccountBinding?,
+        binding: @Sendable () -> AccountBinding?,
         expecting: AccountBinding?,
         capturedAt: Date = Date(),
         zone: TimeZone = .autoupdatingCurrent,
@@ -51,21 +54,33 @@ public enum ShareIngest {
         },
         into repository: OutboxRepository
     ) async throws -> ShareOutcome {
-        guard let binding else { return .notSignedIn }
-        if let expecting, expecting != binding { return .accountChanged }
+        // Everything that can be answered without leaving is answered first, so a share with
+        // nothing in it, or one whose account has already gone, costs no reads at all.
+        guard let opening = binding() else { return .notSignedIn }
+        if let expecting, expecting != opening { return .accountChanged }
         let content = ShareComposition.content(note: note, items: items)
         let files = items.compactMap(\.file)
         guard !content.isEmpty || !files.isEmpty else { return .nothingToPost }
-        // One read per file, before anything is written down. There is no fence to keep here the
-        // way the composer keeps one: a share sheet holds ONE set of files that cannot be replaced
-        // while it stands, so every answer belongs to the item it was asked about. What the answers
-        // decide is the same as in the app — the memo's date, and the order the pictures go in.
+
+        // One read per file. It is the ONLY await this makes before the write, and it is taken
+        // BEFORE the licence is settled rather than after: a share sheet can stand for as long as
+        // somebody leaves it there, and a sign-out or an account switch during these reads must not
+        // be posted through. What the answers decide is the same as in the app — the memo's date,
+        // and the order the pictures go in. (There is no per-item fence to keep: a share sheet holds
+        // ONE set of files that cannot be replaced while it stands, so every answer belongs to the
+        // item it was asked about.)
         var carried: [CapturedShare] = []
         for file in files {
             carried.append(CapturedShare(file: file, capture: .settled(await read(file))))
         }
         let ordered = AutoMemoDate.captureOrder(carried, in: zone)
         let auto = AutoMemoDate.autoMemoDate(carried, in: zone)
+
+        // The licence RE-READ, as the last thing before the write and after every await above. It
+        // is read from the file rather than remembered, because the app is a different process and
+        // the file is the only shared truth: a sign-out during the reads has to stop this write.
+        guard let binding = binding() else { return .notSignedIn }
+        if let expecting, expecting != binding { return .accountChanged }
         let job = try await repository.enqueue(
             content: content,
             visibility: visibility?.rawValue,
