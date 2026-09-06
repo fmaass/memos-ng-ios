@@ -91,12 +91,12 @@ public enum MediaChannel {
     @MainActor
     public static func reconcile(
         _ store: TimelineStore,
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL
     ) async {
         for uid in uidsToReconcile(in: store.memos) {
             guard !Task.isCancelled else { return }
-            await store.refreshMemo(uid: uid, using: client, baseURL: baseURL)
+            await store.refreshMemo(uid: uid, using: handle, baseURL: baseURL)
         }
     }
 
@@ -155,7 +155,7 @@ public enum MediaChannel {
         _ stream: AsyncStream<MediaEventStreamItem>,
         into store: TimelineStore,
         alongside alsoOnScreen: @MainActor () -> [TimelineStore] = { [] },
-        using client: any APIProtocol,
+        using handle: SessionHandle,
         baseURL: URL,
         identity: MediaIdentity = .shared,
         now: @Sendable () -> Date = { Date() }
@@ -171,7 +171,7 @@ public enum MediaChannel {
                     // this connection took its snapshot and pages further rows in as somebody
                     // scrolls. A list with nothing waiting costs nothing.
                     for list in lists {
-                        await reconcile(list, using: client, baseURL: baseURL)
+                        await reconcile(list, using: handle, baseURL: baseURL)
                     }
                 case .stopped:
                     return
@@ -197,7 +197,7 @@ public enum MediaChannel {
                         // minted URLs, and the same in-place `apply` the reconcile uses puts it
                         // into the card already on screen. Decided per list, because the same
                         // memo can have been read into two of them at different times.
-                        await list.refreshMemo(uid: uid, using: client, baseURL: baseURL)
+                        await list.refreshMemo(uid: uid, using: handle, baseURL: baseURL)
                     }
                 }
             }

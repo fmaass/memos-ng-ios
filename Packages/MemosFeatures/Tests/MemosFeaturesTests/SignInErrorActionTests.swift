@@ -36,3 +36,33 @@ struct SignInErrorActionTests {
         #expect(signInErrorAction(for: nil) == .nothing)
     }
 }
+
+/// The same rule for the launch screen, which parks on its own failure type.
+///
+/// It is the same single exception — the Local Network permission — and it matters more here than
+/// on the sign-in screen: the server is a host on the home LAN, so a denial is what a first launch
+/// after an install runs into, and "Try again" cannot fix it.
+@Suite("The launch screen's failure affordance")
+struct SessionRestoreErrorActionTests {
+    @Test("the local-network denial is the one launch failure Settings can fix")
+    func denialOffersSettings() {
+        #expect(restoreErrorAction(for: .localNetworkDenied) == .openSettings)
+    }
+
+    @Test(
+        "no other launch failure sends anyone to Settings",
+        arguments: [
+            SessionRestoreFailure.offline(host: "memos.example.invalid"),
+            .unreachable(host: "memos.example.invalid", detail: "NSURLErrorDomain -1001"),
+            .server(.server(status: 500)),
+        ]
+    )
+    func everythingElseOffersNothing(_ failure: SessionRestoreFailure) {
+        #expect(restoreErrorAction(for: failure) == .nothing)
+    }
+
+    @Test("a launch that has not parked offers nothing")
+    func noFailureOffersNothing() {
+        #expect(restoreErrorAction(for: nil) == .nothing)
+    }
+}

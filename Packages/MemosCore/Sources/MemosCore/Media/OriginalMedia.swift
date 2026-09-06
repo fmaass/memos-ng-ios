@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 import UniformTypeIdentifiers
 
 /// What streams a response to a FILE rather than into memory.
@@ -12,12 +13,21 @@ import UniformTypeIdentifiers
 public protocol MediaDownloadTransport: Sendable {
     /// The URL loading system's own temporary copy, which it deletes as soon as this call returns
     /// — so a caller that wants the file has to move it before then.
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse)
+    /// - Parameter authority: asked INSIDE this transport, immediately before the request goes
+    ///   out. The caller fences the answer on both ways back, but the send itself happens on
+    ///   another executor and an original is the longest-lived request this app makes — the one
+    ///   most likely to leave under an account the device no longer holds (`SendAuthority`).
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
 }
 
 extension MediaSession: MediaDownloadTransport {
-    public func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
-        try await session.download(for: request)
+    public func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
+        // On the executor that sends, with nothing between the answer and the request.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        return try await session.download(for: authority.presenting(request))
     }
 }
 
@@ -246,14 +256,19 @@ public enum OriginalMedia {
         server: URL,
         transport: any MediaDownloadTransport,
         into directory: URL = .temporaryDirectory,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        under authority: SendAuthority = .unfenced
     ) async throws -> URL {
         // BEFORE the request is built, so a URL the credential may not be offered to produces no
         // request at all rather than one that is thrown away afterwards.
         guard sameOrigin(url, as: server) else { throw OriginalMediaError.foreignHost }
         let (temporary, response): (URL, URLResponse)
         do {
-            (temporary, response) = try await transport.download(request(url: url, token: token))
+            (temporary, response) = try await transport.download(
+                request(url: url, token: token), under: authority
+            )
+        } catch is SendAuthorityWithdrawn {
+            throw OriginalMediaError.superseded
         } catch {
             throw OriginalMediaError.refused(.transport(description: error.localizedDescription))
         }

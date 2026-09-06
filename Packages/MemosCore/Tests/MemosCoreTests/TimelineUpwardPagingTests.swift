@@ -71,9 +71,9 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasNewer, "an anchored list believed there was nothing above it")
-        let restore = await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        let restore = await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         // Reversed on the way in: the list stays newest-first from top to bottom, which is the
         // order every other thing that reads `memos` — the day grouping above all — depends on.
@@ -128,10 +128,10 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasNewer, "the server offered another page above and it was thrown away")
-        let restore = await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        let restore = await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["n3", "n2", "n1", "a", "b"])
         #expect(restore == "n2", "the reader was put back on a row that is no longer the top one")
@@ -176,8 +176,8 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(
             store.memos.map(\.uid) == ["a2", "a", "b"],
@@ -214,8 +214,8 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        let restore = await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let restore = await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(
             store.memos.map(\.uid) == ["n1", "a", "b"],
@@ -249,9 +249,9 @@ struct TimelineUpwardPagingTests {
             )
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadNewer(using: client.handle, baseURL: Stub.baseURL) }
         let deadline = Date().addingTimeInterval(5)
         while !entered.get(), Date() < deadline {
             await Task.yield()
@@ -259,7 +259,7 @@ struct TimelineUpwardPagingTests {
         #expect(entered.get(), "the page above was never asked for")
         // The pin is a MOVE: the list is pinned-first, and the block in flight was measured
         // against the unpinned order (review round: the pin path bypassed the fence).
-        await store.setPinned(true, uid: "b", using: client, baseURL: Stub.baseURL)
+        await store.setPinned(true, uid: "b", using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         let restore = await inFlight.value
 
@@ -288,9 +288,9 @@ struct TimelineUpwardPagingTests {
             )
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadNewer(using: client.handle, baseURL: Stub.baseURL) }
         let deadline = Date().addingTimeInterval(5)
         while !entered.get(), Date() < deadline {
             await Task.yield()
@@ -330,19 +330,19 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(!store.hasNewer, "the newest memo there is had something claimed above it")
-        let restore = await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        let restore = await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
         #expect(restore == nil)
         #expect(calls.count == 1, "a request went out for a page that cannot exist")
 
         // Positive control: the same store, anchored, DOES read upwards — so the refusal above is
         // the absence of a ceiling and not an upward path that never works.
         store.setQuery(Self.anchored)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasNewer)
-        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
         #expect(calls.count == 3)
     }
 
@@ -350,7 +350,7 @@ struct TimelineUpwardPagingTests {
     func settingAQueryClearsTheUpwardPromise() async {
         let client = Stub.client { _, _, _ in Stub.json(Self.anchoredPage) }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasNewer)
 
         store.setQuery(.empty)
@@ -376,8 +376,8 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["n1", "a", "b"])
     }
@@ -392,8 +392,8 @@ struct TimelineUpwardPagingTests {
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        let restore = await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let restore = await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["a", "b"])
         // Nil, not "a": the caller scrolls to whatever comes back, and scrolling the reader to a
@@ -420,9 +420,9 @@ struct TimelineUpwardPagingTests {
             )
         }
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadNewer(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadNewer(using: client.handle, baseURL: Stub.baseURL) }
         // Bounded: a page above that is never asked for at all has to FAIL this test, not hang
         // it — an unbounded spin turns one broken expectation into a suite that never ends.
         let deadline = Date().addingTimeInterval(5)
@@ -462,8 +462,8 @@ struct TimelineUpwardPagingTests {
             calendar: Self.utc
         )
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
 
         let upward = try #require(paths.get().last.map { Self.sent($0) })
         #expect(upward["q"] == ["travel"], "the page above dropped the term")
@@ -490,14 +490,14 @@ struct TimelineUpwardPagingTests {
         let store = TimelineStore(pageSize: 2, query: Self.anchored, calendar: Self.utc)
         #expect(!store.shouldLoadNewer(before: 0), "an unread list reached for a page above")
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.shouldLoadNewer(before: 0))
         #expect(store.shouldLoadNewer(before: 2))
         #expect(!store.shouldLoadNewer(before: 3), "a row three deep counted as the top")
 
         // Once the server says there is nothing above, the trigger stops asking.
-        await store.loadNewer(using: client, baseURL: Stub.baseURL)
+        await store.loadNewer(using: client.handle, baseURL: Stub.baseURL)
         #expect(!store.shouldLoadNewer(before: 0))
     }
 

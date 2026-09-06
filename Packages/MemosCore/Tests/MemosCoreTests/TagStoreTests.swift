@@ -23,7 +23,7 @@ struct TagStoreTests {
         }
         let store = TagStore()
 
-        await store.load(using: client)
+        await store.load(using: client.handle)
 
         #expect(store.tags == [MemoTag(name: "travel", count: 3), MemoTag(name: "food", count: 1)])
         #expect(store.lastError == nil)
@@ -40,7 +40,8 @@ struct TagStoreTests {
         let store = TagStore()
         #expect(!store.hasLoaded, "a store nobody has read says it has been answered")
 
-        await store.load(using: Stub.client { _, _, _ in Stub.json("[]") })
+        let client = Stub.client { _, _, _ in Stub.json("[]") }
+        await store.load(using: client.handle)
 
         #expect(store.hasLoaded, "an answered store does not say it has been answered")
         #expect(store.tags.isEmpty)
@@ -58,10 +59,10 @@ struct TagStoreTests {
                 : Stub.empty(.internalServerError)
         }
         let store = TagStore()
-        await store.load(using: client)
+        await store.load(using: client.handle)
         #expect(store.tags.count == 2)
 
-        await store.load(using: client)
+        await store.load(using: client.handle)
 
         #expect(store.tags.count == 2, "a failed load emptied the tags")
         #expect(store.lastError != nil, "the failure was swallowed")
@@ -84,11 +85,11 @@ struct TagStoreTests {
         }
         let store = TagStore()
 
-        let stale = Task { await store.load(using: client) }
+        let stale = Task { await store.load(using: client.handle) }
         // Both directions are the event itself, never a clock: this returns when the first request
         // has actually reached the gate.
         await gate.entered()
-        await store.load(using: client)
+        await store.load(using: client.handle)
         #expect(store.tags == [MemoTag(name: "food", count: 9)], "the later load did not land")
 
         await gate.release()

@@ -250,8 +250,8 @@ public struct MemoDetailView: View {
     /// that was asked about — is `AttachmentDeleteFlow.advance`'s decision, and the store is what
     /// makes two of them one request on the wire.
     private func deletePicture(_ attachmentUID: String) async -> Bool {
-        guard let client = session?.api else { return false }
-        let deleted = await timeline.deleteAttachment(uid: attachmentUID, from: uid, using: client)
+        guard let handle = session?.activeHandle else { return false }
+        let deleted = await timeline.deleteAttachment(uid: attachmentUID, from: uid, using: handle)
         feedback.fire(deleted ? .deleted : .postFailed)
         return deleted
     }
@@ -271,11 +271,12 @@ public struct MemoDetailView: View {
     /// archived ones is open is still right there, and popping then would take somebody off a
     /// screen that is still true.
     private func archive(_ action: MemoDetailPresentation.MemoArchiveAction) async {
-        guard let client = session?.api, let baseURL = session?.serverBaseURL else { return }
+        guard let handle = session?.activeHandle, let baseURL = session?.serverBaseURL
+        else { return }
         isArchiving = true
         defer { isArchiving = false }
         let changed = await timeline.setArchived(
-            action.archived, uid: uid, using: client, baseURL: baseURL
+            action.archived, uid: uid, using: handle, baseURL: baseURL
         )
         feedback.fire(changed ? .posted : .postFailed)
         guard changed, !timeline.memos.contains(where: { $0.uid == uid }) else { return }
@@ -286,8 +287,8 @@ public struct MemoDetailView: View {
     /// the sheet is open on — is `MemoEditFlow.advanceDelete`'s decision, so that rule lives
     /// somewhere a test can drive rather than inside a view body.
     private func performDelete(_ uid: String) async -> Bool {
-        guard let client = session?.api else { return false }
-        let deleted = await timeline.delete(uid: uid, using: client)
+        guard let handle = session?.activeHandle else { return false }
+        let deleted = await timeline.delete(uid: uid, using: handle)
         feedback.fire(deleted ? .deleted : .postFailed)
         return deleted
     }
@@ -300,7 +301,7 @@ public struct MemoDetailView: View {
     /// that is a separate piece of work.
     private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async -> Bool {
         guard case .edit(let uid, _, let createdAt) = mode,
-            let client = session?.api,
+            let handle = session?.activeHandle,
             let baseURL = session?.serverBaseURL
         else { return false }
         let saved = await timeline.edit(
@@ -310,7 +311,7 @@ public struct MemoDetailView: View {
                 chosen: submission.createdAt, original: createdAt
             ),
             attaching: submission.attachments.map(\.stagedSource),
-            using: client,
+            using: handle,
             baseURL: baseURL
         )
         feedback.fire(saved ? .posted : .postFailed)
@@ -392,8 +393,9 @@ public struct MemoDetailView: View {
     }
 
     private func toggle(_ index: Int, to checked: Bool) async {
-        guard let client = session?.api, let baseURL = session?.serverBaseURL else { return }
-        guard await timeline.toggleTask(at: index, in: uid, using: client, baseURL: baseURL)
+        guard let handle = session?.activeHandle, let baseURL = session?.serverBaseURL
+        else { return }
+        guard await timeline.toggleTask(at: index, in: uid, using: handle, baseURL: baseURL)
         else { return }
         feedback.fire(checked ? .taskChecked : .taskUnchecked)
     }

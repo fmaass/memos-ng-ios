@@ -56,8 +56,13 @@ public final class Outbox {
     private let credentials: any OutboxCredentialsProviding
     private let engine: OutboxEngine
     private let changes: OutboxChangeBox
-    private var attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)?
-    private var isStarted = false
+    private let attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)?
+    /// The adoption in flight, or the one that finished. It replaces an `isStarted` flag, which
+    /// was set BEFORE the attachment was awaited: a second caller arriving inside that await saw
+    /// the flag, skipped adoption and drained beside the replay. The two are not siblings, so the
+    /// engine's own `isDraining` cannot exclude them from each other, and the interleaving loses a
+    /// cursor. Held for the life of the process, because adoption happens once.
+    private var adoption: Task<Void, Never>?
 
     public init(
         repository: OutboxRepository,
@@ -67,8 +72,13 @@ public final class Outbox {
         completion: any MemoCompleting,
         network: any NetworkPathProviding,
         preferences: UploadPreferences,
-        clock: @escaping @Sendable () -> Date = Date.init
+        clock: @escaping @Sendable () -> Date = Date.init,
+        // Passed in rather than assigned afterwards, so `adopt()` cannot be reached before the
+        // thing it is supposed to await exists — and so the facade is drivable without a real
+        // background `URLSession`, which is what the ordering below has to be tested through.
+        attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)? = nil
     ) {
+        self.attachScheduler = attachScheduler
         let changes = OutboxChangeBox()
         self.changes = changes
         self.repository = repository
@@ -114,20 +124,44 @@ public final class Outbox {
             scheduler: scheduler,
             completion: MemoCompletionEndpoint(http: http),
             network: NetworkPathMonitor(),
-            preferences: UploadPreferences.live(appGroup: appGroup)
+            preferences: UploadPreferences.live(appGroup: appGroup),
+            attachScheduler: { handler in await scheduler.attach(handler) }
         )
-        outbox.attachScheduler = { handler in await scheduler.attach(handler) }
         return outbox
+    }
+
+    /// Take over what the last run left behind — WITHOUT sending anything.
+    ///
+    /// Attaching the background session's handler and reading the queue back are not network work
+    /// and need no authority: a chunk the system finished while the app was dead has already been
+    /// sent, and its answer carries the server's own byte count. Discarded, that count is lost and
+    /// the bytes are sent again. So a wake that has no credential to drain with still comes
+    /// through here — only `start` below asks for authority.
+    public func adopt() async {
+        await adopted()
+        await refresh()
+    }
+
+    /// The barrier. The first caller runs the attachment; everyone else JOINS it and waits for the
+    /// same task, so no drain can begin while a replay is still landing.
+    private func adopted() async {
+        if let adoption { return await adoption.value }
+        let work = Task { @MainActor [self] in _ = await attachScheduler?(engine) }
+        adoption = work
+        await work.value
     }
 
     /// Adopt whatever survived the last run, then try to drain. Safe to call on every launch and
     /// every foreground — the engine refuses to drain twice at once.
     public func start() async {
-        if !isStarted {
-            isStarted = true
-            await attachScheduler?(engine)
-        }
-        await refresh()
+        await adopt()
+        await engine.drain()
+    }
+
+    /// Every OTHER way into a drain goes through here, so adoption is a barrier rather than a
+    /// courtesy the first caller happens to observe.
+    private func drainAfterAdoption() async {
+        await adopted()
         await engine.drain()
     }
 
@@ -157,7 +191,7 @@ public final class Outbox {
     }
 
     public func drain() async {
-        await engine.drain()
+        await drainAfterAdoption()
     }
 
     /// Writes a capture to disk and only then tries the network. The return value says whether it
@@ -169,26 +203,36 @@ public final class Outbox {
         capturedAt: Date = Date(),
         sources: [StagedSource]
     ) async -> Bool {
-        guard let credentials = await credentials.currentCredentials() else {
+        guard let credentials = await credentials.currentCredentials(),
+            self.credentials.isCurrent(credentials)
+        else {
             enqueueError = "Sign in before writing a memo."
             return false
         }
+        // The binding stamped on the job decides whose account this capture is ever sent into, and
+        // the repository copies every file before it commits one. So the authority travels INTO
+        // that actor and is asked again immediately before the commit, rather than only here.
+        let authority = self.credentials
         do {
             _ = try await repository.enqueue(
                 content: content,
                 visibility: visibility,
                 capturedAt: capturedAt,
                 binding: credentials.binding,
-                sources: sources
+                sources: sources,
+                under: SendAuthority { authority.isCurrent(credentials) }
             )
             enqueueError = nil
+        } catch is SendAuthorityWithdrawn {
+            enqueueError = "Sign in before writing a memo."
+            return false
         } catch {
             enqueueError =
                 "This memo could not be saved on the device: \(error.localizedDescription)"
             return false
         }
         await refresh()
-        Task { await engine.drain() }
+        Task { await self.drainAfterAdoption() }
         return true
     }
 
@@ -196,7 +240,7 @@ public final class Outbox {
     public func retry(_ jobID: UUID) async {
         await engine.release(jobID: jobID)
         await refresh()
-        await engine.drain()
+        await drainAfterAdoption()
     }
 
     /// Throws a capture away on purpose — the "Remove" offered by a row whose manifest could not be

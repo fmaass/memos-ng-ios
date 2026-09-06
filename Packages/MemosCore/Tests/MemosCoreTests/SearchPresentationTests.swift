@@ -16,7 +16,9 @@ import Testing
 struct SearchPresentationTests {
     private static func search() -> MemoSearch {
         MemoSearch(
-            client: Stub.client { _, _, _ in Stub.json(Stub.memoList(["a"], nextCursor: nil)) },
+            handle: Stub.client { _, _, _ in
+                Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }.handle,
             baseURL: Stub.baseURL
         )
     }
@@ -102,12 +104,12 @@ extension SearchPresentationTests {
         let entered = Latch()
         let release = Latch()
         let search = MemoSearch(
-            client: Stub.client { _, _, _ in
+            handle: Stub.client { _, _, _ in
                 entered.signal()
                 await release.wait()
                 if Task.isCancelled { throw URLError(.cancelled) }
                 return Stub.json(Stub.memoList(["late"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL
         )
 
@@ -135,12 +137,12 @@ extension SearchPresentationTests {
         let entered = Latch()
         let release = Latch()
         let search = MemoSearch(
-            client: Stub.client { _, _, _ in
+            handle: Stub.client { _, _, _ in
                 entered.signal()
                 await release.wait()
                 if Task.isCancelled { throw URLError(.cancelled) }
                 return Stub.json(Stub.memoList(["late"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL
         )
 

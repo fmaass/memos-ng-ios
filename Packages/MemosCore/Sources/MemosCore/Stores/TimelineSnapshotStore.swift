@@ -111,6 +111,7 @@ public struct TimelineSnapshotStore: Sendable {
 
     private let root: URL
     private let writeData: @Sendable (Data, URL) throws -> Void
+    private let removeItem: @Sendable (URL) throws -> Void
 
     /// - Parameters:
     ///   - root: the directory the files live in. Injected rather than reached for, so a test
@@ -118,12 +119,18 @@ public struct TimelineSnapshotStore: Sendable {
     ///   - writeData: the bytes-to-disk step. Injected for one reason: the failure this store has
     ///     to survive — a write that throws, on a full or unwritable disk — is one a test cannot
     ///     produce by asking the file system nicely.
+    ///   - removeItem: the take-it-away step, injected for the neighbouring reason. WHEN a removal
+    ///     happens is a fact about this cache that nothing else can observe — the file is simply
+    ///     gone afterwards, whatever order it went in — and the order is the guarantee: the wipe
+    ///     runs after the session that wrote the file has already ended.
     public init(
         root: URL,
-        writeData: @escaping @Sendable (Data, URL) throws -> Void = Self.atomically
+        writeData: @escaping @Sendable (Data, URL) throws -> Void = Self.atomically,
+        removeItem: @escaping @Sendable (URL) throws -> Void = Self.removingItem
     ) {
         self.root = root
         self.writeData = writeData
+        self.removeItem = removeItem
     }
 
     /// The store in the app's own container, or nil when there is no bundle identifier to scope it
@@ -212,14 +219,14 @@ public struct TimelineSnapshotStore: Sendable {
     }
 
     public func remove(identity: TimelineSnapshotIdentity) {
-        try? FileManager.default.removeItem(at: root.appending(path: identity.fileName))
+        try? removeItem(root.appending(path: identity.fileName))
     }
 
     /// Everything, whoever wrote it. This is what a credential going away means: a cache that
     /// outlives the token it was read with is somebody's memos left on a device nobody is signed
     /// in to.
     public func removeAll() {
-        try? FileManager.default.removeItem(at: root)
+        try? removeItem(root)
     }
 
     /// The bytes on disk, replaced whole.
@@ -228,6 +235,12 @@ public struct TimelineSnapshotStore: Sendable {
     /// answer than a truncated one.
     public static let atomically: @Sendable (Data, URL) throws -> Void = { data, url in
         try data.write(to: url, options: .atomic)
+    }
+
+    /// The removal, as the file system does it. A path that is not there is not a failure — five
+    /// absences already read as one here.
+    public static let removingItem: @Sendable (URL) throws -> Void = { url in
+        try FileManager.default.removeItem(at: url)
     }
 }
 
@@ -247,7 +260,12 @@ public struct TimelineSnapshotStore: Sendable {
 /// and it leaves somebody's memos on a device nobody is signed in to.
 public actor TimelineSnapshotWriter {
     private let store: TimelineSnapshotStore
-    private let epoch: SessionEpoch
+    /// The authority this writer refuses by, readable from anywhere without an await.
+    ///
+    /// Public so the ONE store that writes through it can stamp its pictures with the same box
+    /// that will judge them. Handing that number in from somewhere else is how a picture ends up
+    /// stamped with a counter nobody is comparing it against.
+    public nonisolated let epoch: SessionEpoch
     /// The newest revision written by the CURRENT producer of each identity. Empty at launch, and
     /// emptied again whenever an identity changes hands, which is why a new producer's first
     /// picture always lands however far the last one had counted.
@@ -258,11 +276,6 @@ public actor TimelineSnapshotWriter {
     public init(store: TimelineSnapshotStore, epoch: SessionEpoch) {
         self.store = store
         self.epoch = epoch
-    }
-
-    /// The writer over the app's own container, or nil when there is nowhere to keep a snapshot.
-    public static func live(epoch: SessionEpoch) -> TimelineSnapshotWriter? {
-        TimelineSnapshotStore.live().map { TimelineSnapshotWriter(store: $0, epoch: epoch) }
     }
 
     public func read(identity: TimelineSnapshotIdentity) -> TimelineSnapshot? {

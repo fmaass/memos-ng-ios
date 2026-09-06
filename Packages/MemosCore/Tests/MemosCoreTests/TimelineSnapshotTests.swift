@@ -1,7 +1,13 @@
 import Foundation
 import MemosAPI
 @testable import MemosCore
+import MemosOutbox
 import Testing
+
+// The transport is handed the contract's own operationId, not the generated Swift method name.
+private let listMemosOperation = "list_memos_api_memos_get"
+private let tokenRenewOperation = "native_renew_api_auth_native_renew_post"
+private let tokenReadOperation = "native_token_api_auth_native_token_get"
 
 /// The timeline that is on screen before the network answers.
 ///
@@ -23,8 +29,10 @@ struct TimelineSnapshotTests {
     }
 
     private let identity = TimelineSnapshotIdentity(server: Stub.baseURL, subject: "fabian")
-    /// The session both sides of the fence read. One per test — Swift Testing builds a fresh suite
-    /// value for each case — so a case that moves it moves nothing for anybody else.
+    /// The authority a writer built WITHOUT a session is fenced by. One per test — Swift Testing
+    /// builds a fresh suite value for each case — so a case that moves it moves nothing for
+    /// anybody else. Where a case has a real `SessionStore`, the session's own epoch is the one
+    /// that counts and this is not used.
     private let epoch = SessionEpoch()
 
     private func writer(
@@ -47,16 +55,46 @@ struct TimelineSnapshotTests {
         FileManager.default.fileExists(atPath: root.appending(path: identity.fileName).path)
     }
 
-    /// A session over an empty keychain, sharing `writer` with the timeline. Its transport answers
-    /// whoami and is asked nothing else.
-    private func sessionStore(writer: TimelineSnapshotWriter) -> SessionStore {
+    /// A session over an empty keychain, OWNING the writer the timeline writes through. Its
+    /// transport answers whoami and is asked nothing else.
+    ///
+    /// It builds the writer exactly as the app does — from a directory — so the epoch the writer
+    /// refuses by is this session's own and no case can hand it another.
+    private func sessionStore(
+        root: URL,
+        writeData: (@Sendable (Data, URL) throws -> Void)? = nil,
+        removeItem: (@Sendable (URL) throws -> Void)? = nil
+    ) -> SessionStore {
         SessionStore(
             credentials: InMemoryCredentials(),
             makeClient: { _, token in
                 Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
             },
-            snapshots: writer,
-            sessionEpoch: epoch
+            snapshots: TimelineSnapshotStore(
+                root: root,
+                writeData: writeData ?? TimelineSnapshotStore.atomically,
+                removeItem: removeItem ?? TimelineSnapshotStore.removingItem
+            )
+        )
+    }
+
+    /// A session whose transport a case scripts by operation, over the writer it owns.
+    ///
+    /// The cases below that use it are about what the SESSION does to a list and a file — a
+    /// sign-out, a renewal — so nothing here is a stand-in: the real store signs in, the real
+    /// timeline reads through the real writer, and the fences are the ones the app runs.
+    private func signedInSession(
+        root: URL,
+        removeItem: (@Sendable (URL) throws -> Void)? = nil,
+        handler: @escaping StubTransport.Handler
+    ) -> SessionStore {
+        SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            snapshots: TimelineSnapshotStore(
+                root: root,
+                removeItem: removeItem ?? TimelineSnapshotStore.removingItem
+            )
         )
     }
 
@@ -76,7 +114,6 @@ struct TimelineSnapshotTests {
             query: query,
             snapshots: writer,
             snapshotIdentity: identity ?? self.identity,
-            sessionEpoch: epoch,
             persists: persists
         )
     }
@@ -115,7 +152,7 @@ struct TimelineSnapshotTests {
             )
         }
 
-        await written.refresh(using: client, baseURL: Stub.baseURL)
+        await written.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(written.memos.count == 2, "control: the list this case is a picture of")
 
         // A second store over the same directory IS the next launch: nothing is carried over in
@@ -138,7 +175,7 @@ struct TimelineSnapshotTests {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         await store(writer: writer(root: root))
-            .refresh(using: page(["a", "b"]), baseURL: Stub.baseURL)
+            .refresh(using: page(["a", "b"]).handle, baseURL: Stub.baseURL)
 
         let otherSubject = store(
             writer: writer(root: root),
@@ -193,7 +230,8 @@ struct TimelineSnapshotTests {
     func aRenderedSnapshotIsDiscardedWhenTheIdentityChanges() async {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        await store(writer: writer(root: root)).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await store(writer: writer(root: root))
+            .refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         let timeline = store(writer: writer(root: root))
         await timeline.restoreSnapshot()
         #expect(timeline.memos.map(\.uid) == ["a"], "control: the snapshot did render")
@@ -204,7 +242,7 @@ struct TimelineSnapshotTests {
         #expect(timeline.memos.isEmpty)
 
         // And nothing more is written under an identity this store has been told it no longer has.
-        await timeline.refresh(using: page(["b"]), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["b"]).handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.map(\.uid) == ["a"])
     }
 
@@ -216,7 +254,7 @@ struct TimelineSnapshotTests {
         // Nothing restored: these rows came off the wire, which is exactly the case a switch
         // between two signed-in identities on one server produces — the screen holding this store
         // is never torn down, so nothing else empties it.
-        await timeline.refresh(using: page(["a", "b"]), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["a", "b"]).handle, baseURL: Stub.baseURL)
         #expect(timeline.memos.map(\.uid) == ["a", "b"], "control: the server's rows are up")
 
         timeline.sessionIdentityChanged(
@@ -234,28 +272,30 @@ struct TimelineSnapshotTests {
     func theSameIdentityLeavesTheSnapshotAlone() async {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        await store(writer: writer(root: root)).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await store(writer: writer(root: root))
+            .refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         let timeline = store(writer: writer(root: root))
         await timeline.restoreSnapshot()
 
         timeline.sessionIdentityChanged(to: identity)
 
         #expect(timeline.memos.map(\.uid) == ["a"])
-        await timeline.refresh(using: page(["b"]), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["b"]).handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.map(\.uid) == ["b"], "control: this store still writes")
     }
 
     // MARK: - the credential going away
 
     @Test("signing out removes the snapshot and the next launch is empty")
-    func signOutRemovesTheSnapshot() async {
+    func signOutRemovesTheSnapshot() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let writer = writer(root: root)
-        await store(writer: writer).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        let session = sessionStore(root: root)
+        let writer = try #require(session.snapshots)
+        await store(writer: writer).refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(exists(root), "control: a snapshot was written")
 
-        await sessionStore(writer: writer).signOutWithoutRevoking()
+        await session.signOutWithoutRevoking()
 
         #expect(!exists(root))
         let relaunched = store(writer: writer)
@@ -264,40 +304,78 @@ struct TimelineSnapshotTests {
     }
 
     @Test("a 401 takes the snapshot with the credential")
-    func unauthorizedRemovesTheSnapshot() async {
+    func unauthorizedRemovesTheSnapshot() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let writer = writer(root: root)
-        await store(writer: writer).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        let session = sessionStore(root: root)
+        let writer = try #require(session.snapshots)
+        await store(writer: writer).refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(exists(root), "control: a snapshot was written")
 
-        await sessionStore(writer: writer).handle(.unauthorized)
+        await session.handle(.unauthorized)
 
         #expect(!exists(root))
     }
 
     @Test("a launch that finds no credential leaves no snapshot behind either")
-    func restoreWithoutACredentialWipes() async {
+    func restoreWithoutACredentialWipes() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let writer = writer(root: root)
-        await store(writer: writer).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        let session = sessionStore(root: root)
+        let writer = try #require(session.snapshots)
+        await store(writer: writer).refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(exists(root), "control: a snapshot was written")
 
-        await sessionStore(writer: writer).restore()
+        await session.restore()
 
         #expect(!exists(root))
     }
 
-    @Test("signing in leaves the outgoing account's timeline nowhere on the device")
-    func signInRemovesTheOutgoingSnapshot() async {
+    /// The OTHER branch of `restore()` that reaches the wipe, and it reaches it on its own rather
+    /// than through the identity-scoped list: the credential here is good and the session is about
+    /// to be admitted on it, so the last-known identity must NOT be forgotten — only the timeline
+    /// the interrupted switch left behind goes.
+    @Test("a launch that finds a licence for another server takes that timeline with it")
+    func restoreWithAMismatchedLicenceWipes() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let writer = writer(root: root)
-        await store(writer: writer).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        let credentials = InMemoryCredentials()
+        try credentials.set("memos_pat_good", for: SessionStore.tokenAccount)
+        try credentials.set(Stub.baseURL.absoluteString, for: SessionStore.serverAccount)
+        let account = SpyAccountStore()
+        account.publish(
+            AccountBinding(
+                serverBaseURL: URL(string: "https://other.example.invalid")!,
+                ownerSubject: "somebody-else"
+            )
+        )
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            account: account,
+            snapshots: TimelineSnapshotStore(root: root)
+        )
+        let timeline = store(writer: try #require(session.snapshots))
+        await timeline.refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(exists(root), "control: a snapshot was written")
 
-        let session = sessionStore(writer: writer)
+        await session.restore()
+
+        #expect(session.state.user != nil, "control: the stored credential was admitted")
+        #expect(!exists(root), "an interrupted switch left one account's timeline on the device")
+    }
+
+    @Test("signing in leaves the outgoing account's timeline nowhere on the device")
+    func signInRemovesTheOutgoingSnapshot() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = sessionStore(root: root)
+        let writer = try #require(session.snapshots)
+        await store(writer: writer).refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
+        #expect(exists(root), "control: a snapshot was written")
+
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
 
         #expect(session.state.user?.subject == "fabian", "control: the sign-in did happen")
@@ -305,27 +383,33 @@ struct TimelineSnapshotTests {
     }
 
     @Test("a snapshot still on its way to the disk cannot land behind a sign-out")
-    func aWriteCannotOvertakeTheWipe() async {
+    func aWriteCannotOvertakeTheWipe() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let entered = LockedValue<Bool>(false)
-        let shared = writer(root: root) { data, url in
-            entered.set(true)
-            // Slow, not held: the point is that a removal issued while this is in the air still
-            // runs after it — not that anything can be blocked open for ever.
-            Thread.sleep(forTimeInterval: 0.05)
-            try data.write(to: url, options: .atomic)
-        }
+        let session = sessionStore(
+            root: root,
+            writeData: { data, url in
+                entered.set(true)
+                // Slow, not held: the point is that a removal issued while this is in the air
+                // still runs after it — not that anything can be blocked open for ever.
+                Thread.sleep(forTimeInterval: 0.05)
+                try data.write(to: url, options: .atomic)
+            }
+        )
+        let shared = try #require(session.snapshots)
         let timeline = store(writer: shared)
-        await timeline.refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(exists(root), "control: the directory was not empty before the sign-out")
 
         entered.set(false)
-        let inFlight = Task { await timeline.refresh(using: page(["b"]), baseURL: Stub.baseURL) }
+        let inFlight = Task {
+            await timeline.refresh(using: page(["b"]).handle, baseURL: Stub.baseURL)
+        }
         while !entered.get() {
             await Task.yield()
         }
-        await sessionStore(writer: shared).signOutWithoutRevoking()
+        await session.signOutWithoutRevoking()
         await inFlight.value
 
         #expect(!exists(root), "a write in the air landed behind the sign-out")
@@ -359,17 +443,16 @@ struct TimelineSnapshotTests {
             pageSize: 1,
             snapshots: writer(root: root),
             snapshotIdentity: identity,
-            sessionEpoch: epoch,
             persists: true
         )
 
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
-        let inFlight = Task { await timeline.loadMore(using: client, baseURL: Stub.baseURL) }
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let inFlight = Task { await timeline.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
         // The list the held page was a continuation of is gone before it lands.
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         await inFlight.value
 
@@ -391,14 +474,14 @@ struct TimelineSnapshotTests {
         let tagged = store(writer: shared, query: MemoQuery(tags: ["holiday"]))
         let searched = store(writer: shared, query: MemoQuery(term: "beach"))
 
-        await anchored.refresh(using: page(["anchored"]), baseURL: Stub.baseURL)
-        await tagged.refresh(using: page(["tagged"]), baseURL: Stub.baseURL)
-        await searched.refresh(using: page(["searched"]), baseURL: Stub.baseURL)
+        await anchored.refresh(using: page(["anchored"]).handle, baseURL: Stub.baseURL)
+        await tagged.refresh(using: page(["tagged"]).handle, baseURL: Stub.baseURL)
+        await searched.refresh(using: page(["searched"]).handle, baseURL: Stub.baseURL)
 
         #expect(anchored.memos.map(\.uid) == ["anchored"], "control: the filtered lists did load")
         #expect(!exists(root), "a list nobody will ask for again was written down")
 
-        await store(writer: shared).refresh(using: page(["plain"]), baseURL: Stub.baseURL)
+        await store(writer: shared).refresh(using: page(["plain"]).handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.map(\.uid) == ["plain"], "control: the plain timeline is kept")
     }
 
@@ -427,14 +510,14 @@ struct TimelineSnapshotTests {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         await store(writer: writer(root: root))
-            .refresh(using: page(["a", "b"]), baseURL: Stub.baseURL)
+            .refresh(using: page(["a", "b"]).handle, baseURL: Stub.baseURL)
 
         let relaunched = store(writer: writer(root: root))
         await relaunched.restoreSnapshot()
         #expect(relaunched.memos.map(\.uid) == ["a", "b"])
 
         let offline = Stub.client { _, _, _ in throw Offline() }
-        await relaunched.refresh(using: offline, baseURL: Stub.baseURL)
+        await relaunched.refresh(using: offline.handle, baseURL: Stub.baseURL)
 
         #expect(
             relaunched.memos.map(\.uid) == ["a", "b"],
@@ -449,7 +532,8 @@ struct TimelineSnapshotTests {
     func corruptBytesReadAsAbsent() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        await store(writer: writer(root: root)).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await store(writer: writer(root: root))
+            .refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         let control = store(writer: writer(root: root))
         await control.restoreSnapshot()
         #expect(control.memos.map(\.uid) == ["a"], "control: this file rendered before it was cut")
@@ -488,7 +572,8 @@ struct TimelineSnapshotTests {
     func aPurgedDirectoryIsAColdStart() async {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        await store(writer: writer(root: root)).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await store(writer: writer(root: root))
+            .refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         try? FileManager.default.removeItem(at: root)
 
         let relaunched = store(writer: writer(root: root))
@@ -521,8 +606,8 @@ struct TimelineSnapshotTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let timeline = store(writer: writer(root: root))
 
-        await timeline.refresh(using: page(["a", "b"]), baseURL: Stub.baseURL)
-        await timeline.refresh(using: page(["c"]), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["a", "b"]).handle, baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["c"]).handle, baseURL: Stub.baseURL)
 
         #expect(onDisk(root)?.memos.map(\.uid) == ["c"])
     }
@@ -532,10 +617,11 @@ struct TimelineSnapshotTests {
         struct DiskFull: Error {}
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        await store(writer: writer(root: root)).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await store(writer: writer(root: root))
+            .refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
 
         let refusing = store(writer: writer(root: root) { _, _ in throw DiskFull() })
-        await refusing.refresh(using: page(["b"]), baseURL: Stub.baseURL)
+        await refusing.refresh(using: page(["b"]).handle, baseURL: Stub.baseURL)
 
         #expect(refusing.memos.map(\.uid) == ["b"], "the failed write took the screen with it")
         #expect(onDisk(root)?.memos.map(\.uid) == ["a"], "the previous snapshot was destroyed")
@@ -547,11 +633,10 @@ struct TimelineSnapshotTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let anonymous = TimelineStore(
             snapshots: writer(root: root),
-            sessionEpoch: epoch,
             persists: true
         )
 
-        await anonymous.refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await anonymous.refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         await anonymous.restoreSnapshot()
 
         #expect(anonymous.memos.map(\.uid) == ["a"], "control: the list itself loaded")
@@ -564,26 +649,31 @@ struct TimelineSnapshotTests {
     // MARK: - the session fence
 
     @Test("a page issued in one session and answered in the next reaches neither list nor disk")
-    func aPageFromAnEndedSessionIsDropped() async {
+    func aPageFromAnEndedSessionIsDropped() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let entered = LockedValue<Bool>(false)
         let release = LockedValue<Bool>(false)
-        let client = Stub.client { _, _, _ in
+        let session = signedInSession(root: root) { _, _, operation in
+            guard operation == listMemosOperation else { return Stub.json(Stub.user) }
             entered.set(true)
             while !release.get() {
                 try await Task.sleep(for: .milliseconds(1))
             }
             return Stub.json(Stub.memoList(["late"], nextCursor: nil))
         }
-        let timeline = store(writer: writer(root: root))
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let timeline = store(writer: try #require(session.snapshots))
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
 
-        let inFlight = Task { await timeline.refresh(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await timeline.refresh(using: handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
-        // The device becomes somebody else's — or nobody's — while the page is in the air.
-        epoch.adopt(1)
+        // The device becomes nobody's while the page is in the air. The INCARNATION moves, which
+        // is what a list is judged by.
+        await session.signOutWithoutRevoking()
         release.set(true)
         await inFlight.value
 
@@ -606,7 +696,7 @@ struct TimelineSnapshotTests {
         }
         let timeline = store(writer: writer(root: root))
 
-        let inFlight = Task { await timeline.refresh(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await timeline.refresh(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
@@ -636,7 +726,7 @@ struct TimelineSnapshotTests {
 
         // The device becomes somebody else's between the page being issued and its picture being
         // written.
-        epoch.adopt(1)
+        epoch.bump()
         await shared.write(
             [memoValue("theirs")],
             for: identity,
@@ -666,7 +756,7 @@ struct TimelineSnapshotTests {
         #expect(exists(root), "control: the directory was not empty before the wipe")
 
         // What a sign-out is, in the order a sign-out does it.
-        epoch.adopt(1)
+        epoch.bump()
         await shared.removeAll()
         await shared.write(
             [memoValue("b")],
@@ -710,6 +800,101 @@ struct TimelineSnapshotTests {
         #expect(onDisk(root)?.revision == 6)
     }
 
+    // MARK: - a renewal is not the end of a session
+
+    /// The fence that decides whether a page may land is the INCARNATION, never the authority
+    /// epoch. They come apart on exactly one event, and this is it: a renewal replaces the token
+    /// without ending the session. Judged by the authority epoch, every page in flight when a
+    /// renewal landed would be dropped — and nothing retries a dropped page, so the list would
+    /// simply stay as it was until something else asked.
+    @Test("a renewal while a page is in flight leaves the list it was asked for standing")
+    func aRenewalDoesNotVoidAPageInFlight() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let session = signedInSession(root: root) { _, _, operation in
+            switch operation {
+            case listMemosOperation:
+                entered.set(true)
+                while !release.get() {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+                return Stub.json(Stub.memoList(["late"], nextCursor: nil))
+            case tokenRenewOperation:
+                return Stub.json(Stub.exchange(token: "memos_pat_next"))
+            case tokenReadOperation:
+                return Stub.json(Stub.nativeToken(name: "Fabian's iPhone"))
+            default:
+                return Stub.json(Stub.user)
+            }
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_first")
+        let timeline = store(writer: try #require(session.snapshots))
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        let incarnation = session.sessionIncarnation.current
+        let authority = session.epoch.current
+
+        let inFlight = Task { await timeline.refresh(using: handle, baseURL: Stub.baseURL) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        // The credential is replaced while the page is on the wire.
+        let outcome = await session.renewDeviceToken()
+        release.set(true)
+        await inFlight.value
+
+        #expect(outcome == .renewed, "control: the renewal happened")
+        #expect(
+            session.epoch.current != authority,
+            "control: a renewal moves the AUTHORITY epoch — without that this case proves nothing"
+        )
+        #expect(
+            session.sessionIncarnation.current == incarnation,
+            "control: a renewal is not the end of an incarnation"
+        )
+        #expect(
+            timeline.memos.map(\.uid) == ["late"],
+            "a renewal voided a page in flight, and nothing retries one"
+        )
+    }
+
+    /// The order the wipe happens in, made observable at the one moment it can be: the removal
+    /// itself. `endIncarnation` runs first and moves the authority epoch, so a picture already on
+    /// its way to the writer is stamped with a number that is no longer current and is refused
+    /// there. Wiped first and ended after, that same picture would be accepted — and would land
+    /// behind the removal, leaving one account's memos on a device nobody is signed in to.
+    @Test("the snapshot is wiped under an incarnation that has already ended")
+    func theWipeRunsAfterTheIncarnationEnded() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authorityBox = LockedValue<SessionEpoch?>(nil)
+        let atWipe = LockedValue<Int?>(nil)
+        let session = sessionStore(
+            root: root,
+            removeItem: { url in
+                atWipe.set(authorityBox.get()?.current)
+                try FileManager.default.removeItem(at: url)
+            }
+        )
+        authorityBox.set(session.epoch)
+        let timeline = store(writer: try #require(session.snapshots))
+        await timeline.refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
+        #expect(exists(root), "control: a snapshot was written")
+        let before = session.epoch.current
+
+        await session.signOutWithoutRevoking()
+
+        #expect(!exists(root), "the snapshot outlived the credential")
+        let observed = try #require(atWipe.get(), "control: the removal really ran")
+        #expect(
+            observed > before,
+            "the wipe ran under the epoch it was wiping: a picture still on its way to the disk "
+                + "would have been accepted and landed behind it"
+        )
+    }
+
     // MARK: - the snapshot follows the list
 
     @Test("what is loaded is what is kept, and a delete is kept too")
@@ -724,10 +909,10 @@ struct TimelineSnapshotTests {
                 : Stub.json(Stub.memoList(uids, nextCursor: nil))
         }
 
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.count == 100, "the loaded list is not what was kept")
 
-        let deleted = await timeline.delete(uid: "memo-7", using: client)
+        let deleted = await timeline.delete(uid: "memo-7", using: client.handle)
 
         #expect(deleted, "control: the server confirmed the delete")
         let relaunched = store(writer: writer(root: root))
@@ -751,20 +936,20 @@ struct TimelineSnapshotTests {
                 ? Stub.empty(.noContent)
                 : Stub.json(Stub.memoList(["anchored"], nextCursor: nil))
         }
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(timeline.memos.map(\.uid) == ["anchored"], "control: the anchored list loaded")
         #expect(!exists(root), "control: an anchored list is not written down")
 
         // The anchor is cleared — but the rows are the anchored day's until a refresh replaces
         // them, and a confirmed change to them is still a change to THAT list.
         timeline.setQuery(.empty)
-        let deleted = await timeline.delete(uid: "anchored", using: client)
+        let deleted = await timeline.delete(uid: "anchored", using: client.handle)
 
         #expect(deleted, "control: the server confirmed the delete")
         #expect(!exists(root), "rows admitted under an anchor were written as the timeline")
 
         // And a load that really does replace them with the plain timeline is written.
-        await timeline.refresh(using: page(["plain"]), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(["plain"]).handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.map(\.uid) == ["plain"], "control: the plain list is kept")
     }
 
@@ -775,7 +960,7 @@ struct TimelineSnapshotTests {
         let shared = writer(root: root)
         let results = store(writer: shared, persists: false)
 
-        await results.refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await results.refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
 
         #expect(results.memos.map(\.uid) == ["a"], "control: the list itself loaded")
         #expect(
@@ -811,14 +996,14 @@ struct TimelineSnapshotTests {
             return Stub.empty(.internalServerError)
         }
         let timeline = store(writer: writer(root: root))
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(
             onDisk(root)?.memos.map(\.content) == ["- [ ] task", "b"],
             "control: the loaded list was written down"
         )
 
         let ticking = Task {
-            await timeline.toggleTask(at: 0, in: "a", using: client, baseURL: Stub.baseURL)
+            await timeline.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
         }
         while !entered.get() {
             await Task.yield()
@@ -862,16 +1047,16 @@ struct TimelineSnapshotTests {
             return Stub.empty(.conflict)
         }
         let timeline = store(writer: writer(root: root))
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         let first = Task {
-            await timeline.toggleTask(at: 0, in: "a", using: client, baseURL: Stub.baseURL)
+            await timeline.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
         }
         while !entered.get() {
             await Task.yield()
         }
         let second = await timeline.toggleTask(
-            at: 0, in: "a", using: client, baseURL: Stub.baseURL
+            at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL
         )
         release.set(true)
         let firstAnswer = await first.value
@@ -894,12 +1079,12 @@ struct TimelineSnapshotTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let shared = writer(root: root)
 
-        await store(writer: shared).refresh(using: page(["a"]), baseURL: Stub.baseURL)
+        await store(writer: shared).refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.map(\.uid) == ["a"], "control: the first store wrote")
 
         // The screen is torn down and made again — a second store, the same identity, numbering
         // its own changes from scratch.
-        await store(writer: shared).refresh(using: page(["b"]), baseURL: Stub.baseURL)
+        await store(writer: shared).refresh(using: page(["b"]).handle, baseURL: Stub.baseURL)
 
         #expect(onDisk(root)?.memos.map(\.uid) == ["b"], "the rebuilt screen cannot write")
     }
@@ -979,13 +1164,13 @@ struct TimelineSnapshotTests {
                 ? Stub.empty(.noContent)
                 : Stub.json(Stub.memoList(["plain", "other"], nextCursor: nil))
         }
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(onDisk(root)?.memos.count == 2, "control: the plain list was written")
 
         // A day has been chosen; its page has not come back. The rows are still the plain
         // timeline's, and the next thing this store does is replace them.
         timeline.setQuery(MemoQuery(anchor: .day(year: 2026, month: 8, day: 23)))
-        let deleted = await timeline.delete(uid: "other", using: client)
+        let deleted = await timeline.delete(uid: "other", using: client.handle)
 
         #expect(deleted, "control: the server confirmed the delete")
         #expect(onDisk(root)?.memos.count == 2, "a list under a requested anchor was written")

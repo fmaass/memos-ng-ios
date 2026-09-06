@@ -123,9 +123,9 @@ struct SearchResultsLiveTests {
             }
         }
         let timeline = TimelineStore()
-        await timeline.refresh(using: client, baseURL: Stub.baseURL)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
         let search = MemoSearch(
-            client: client,
+            handle: client.handle,
             baseURL: Stub.baseURL,
             coalescing: .milliseconds(1)
         )
@@ -155,7 +155,7 @@ struct SearchResultsLiveTests {
             channel(items),
             into: fixture.timeline,
             alongside: { fixture.presentation.liveResults },
-            using: fixture.client,
+            using: fixture.client.handle,
             baseURL: Stub.baseURL,
             identity: MediaIdentity()
         )
@@ -216,7 +216,7 @@ struct SearchResultsLiveTests {
             }
         }
         let search = MemoSearch(
-            client: client,
+            handle: client.handle,
             baseURL: Stub.baseURL,
             coalescing: .milliseconds(1)
         )
@@ -424,7 +424,7 @@ struct SearchResultsLiveTests {
             }
         }
         let search = MemoSearch(
-            client: client,
+            handle: client.handle,
             baseURL: Stub.baseURL,
             coalescing: .milliseconds(1)
         )
@@ -444,7 +444,7 @@ struct SearchResultsLiveTests {
             channel([.event(envelope(Self.foundReady))]),
             into: TimelineStore(),
             alongside: { presentation.liveResults },
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL,
             identity: MediaIdentity()
         )

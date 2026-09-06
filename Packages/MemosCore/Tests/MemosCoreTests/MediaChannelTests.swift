@@ -61,7 +61,7 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         return Loaded(store: store, client: client, gets: gets)
     }
 
@@ -74,7 +74,7 @@ struct MediaChannelTests {
         await MediaChannel.consume(
             channel(items),
             into: fixture.store,
-            using: fixture.client,
+            using: fixture.client.handle,
             baseURL: Stub.baseURL,
             identity: identity
         )
@@ -376,14 +376,14 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.first?.attachments.first?.readiness == .waiting)
 
         // No `.open` in the stream: every read this test counts is the event's own.
         await MediaChannel.consume(
             channel([.event(envelope(Self.readyEvent))]),
             into: store,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL,
             identity: MediaIdentity(),
             now: { now }
@@ -416,12 +416,12 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         await MediaChannel.consume(
             channel([.event(envelope(Self.readyEvent))]),
             into: store,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL,
             identity: MediaIdentity(),
             now: { now }
@@ -583,7 +583,7 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let fixture = Loaded(store: store, client: client, gets: gets)
 
         await consume(
@@ -633,10 +633,10 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(MediaChannel.uidsToReconcile(in: store.memos) == [Self.uid])
 
-        await MediaChannel.reconcile(store, using: client, baseURL: Stub.baseURL)
+        await MediaChannel.reconcile(store, using: client.handle, baseURL: Stub.baseURL)
 
         // ONE request: the settled memo is not re-read, and the waiting one is read exactly once —
         // this is a single pass, not the loop it replaced.
@@ -646,7 +646,7 @@ struct MediaChannelTests {
 
         // And starting the channel again now costs nothing at all: nothing is waiting.
         #expect(MediaChannel.uidsToReconcile(in: store.memos).isEmpty)
-        await MediaChannel.reconcile(store, using: client, baseURL: Stub.baseURL)
+        await MediaChannel.reconcile(store, using: client.handle, baseURL: Stub.baseURL)
         #expect(gets.count == 1, "a second start re-read a timeline with nothing waiting")
     }
 

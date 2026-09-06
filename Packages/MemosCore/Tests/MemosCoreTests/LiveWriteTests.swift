@@ -27,21 +27,26 @@ struct LiveWriteTests {
         let store = TimelineStore()
         let marker = "live-write-probe do-not-keep"
 
-        await store.refresh(using: client, baseURL: configuration.baseURL)
+        await store.refresh(using: client.handle, baseURL: configuration.baseURL)
         #expect(store.lastError == nil)
 
         #expect(
             await store.create(
                 content: "\(marker)\n- [ ] probe task",
                 visibility: .private,
-                using: client,
+                using: client.handle,
                 baseURL: configuration.baseURL
             )
         )
         let uid = try #require(store.memos.first { $0.content.contains(marker) }?.uid)
 
         #expect(
-            await store.toggleTask(at: 0, in: uid, using: client, baseURL: configuration.baseURL)
+            await store.toggleTask(
+                at: 0,
+                in: uid,
+                using: client.handle,
+                baseURL: configuration.baseURL
+            )
         )
         #expect(store.memos.first { $0.uid == uid }?.content.contains("- [x] probe task") == true)
 
@@ -49,23 +54,33 @@ struct LiveWriteTests {
             await store.edit(
                 uid: uid,
                 content: "\(marker)\n- [x] probe task\nedited",
-                using: client,
+                using: client.handle,
                 baseURL: configuration.baseURL
             )
         )
         #expect(
-            await store.setPinned(true, uid: uid, using: client, baseURL: configuration.baseURL)
+            await store.setPinned(
+                true,
+                uid: uid,
+                using: client.handle,
+                baseURL: configuration.baseURL
+            )
         )
         #expect(store.memos.first?.uid == uid, "the pinned probe leads the list")
         #expect(
-            await store.setPinned(false, uid: uid, using: client, baseURL: configuration.baseURL)
+            await store.setPinned(
+                false,
+                uid: uid,
+                using: client.handle,
+                baseURL: configuration.baseURL
+            )
         )
         #expect(
             await store.setVisibility(
-                .private, uid: uid, using: client, baseURL: configuration.baseURL
+                .private, uid: uid, using: client.handle, baseURL: configuration.baseURL
             )
         )
-        #expect(await store.delete(uid: uid, using: client))
+        #expect(await store.delete(uid: uid, using: client.handle))
         #expect(!store.memos.contains { $0.uid == uid })
     }
 }

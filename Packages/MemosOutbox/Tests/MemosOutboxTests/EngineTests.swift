@@ -124,6 +124,96 @@ struct EngineTests {
         #expect(saved.state == .uploading)
     }
 
+    /// A drain pass outlives the account switch that happens during it: the credential was
+    /// acquired under A and every request after the switch would be sent as A into B's session.
+    /// The pass is ABANDONED rather than the job held — nothing is wrong with the capture, and the
+    /// next pass acquires under whoever is signed in then.
+    @Test("a pass whose session ended sends nothing and leaves the capture queued")
+    func aSupersededPassSendsNothing() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        harness.credentials.supersedeAfterNextAcquisition()
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests.isEmpty, "not even the health probe is a request to send")
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .waiting, "the capture waits for a pass that belongs to it")
+    }
+
+    /// The switch lands BETWEEN the probe and the first send — the window a check taken once at
+    /// the start of the pass cannot see, because the probe is itself an await.
+    @Test("a switch between the probe and the first send stops the pass there")
+    func aSwitchAfterTheProbeStopsThePass() async throws {
+        let switched = CredentialsBox()
+        let http = ScriptedHTTP { request in
+            // The switch lands INSIDE the probe, so the pass resumes into a session that is over.
+            if request.httpMethod == "GET" {
+                switched.value?.supersede()
+                return OutboxHTTPResponse(statusCode: 200)
+            }
+            return ScriptedHTTP.session(uid: "u1", chunkSize: 400, received: 0)
+        }
+        let harness = try await Harness.make(bytes: 1000, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+
+        #expect(harness.http.requests(method: "GET").count == 1, "the probe went out")
+        #expect(harness.http.requests(method: "POST").isEmpty, "and nothing after it did")
+        #expect(harness.scheduler.uploads.isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .waiting)
+    }
+
+    /// R-B4. The authority is withdrawn AFTER the engine's own check and before the executor that
+    /// actually sends — the window an actor hop opens. The scheduler is the one send that cannot
+    /// be taken back, so the check has to be inside it.
+    @Test("a withdrawal between the engine's check and the scheduler sends no chunk")
+    func aWithdrawalInsideTheHopSendsNoChunk() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        // The scheduler asks the authority as it is at the moment IT runs, so withdrawing after
+        // the engine has decided to send is exactly the interleaving under test.
+        harness.scheduler.beforeUpload = { harness.credentials.supersede() }
+
+        await harness.engine.drain()
+
+        #expect(
+            harness.scheduler.authorityVerdicts == [false],
+            "the authority the engine handed the executor still said yes after the withdrawal"
+        )
+        #expect(harness.scheduler.uploads.isEmpty, "so no chunk was handed over")
+        let saved = try #require(await harness.reload())
+        #expect(saved.state != .held, "and the capture is not held for it either")
+    }
+
+    /// And between two chunk sends: the first chunk is already with the background session, its
+    /// answer comes back, and the pass that would send the SECOND one no longer has the authority
+    /// the first was sent with.
+    @Test("a switch between two chunks stops before the second one")
+    func aSwitchBetweenChunksStopsTheNextSend() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        #expect(harness.scheduler.uploads.count == 1, "the premise: one chunk is on its way")
+
+        // The switch lands after this pass re-acquires and before it sends the next chunk — the
+        // window a check taken at acquisition time cannot see.
+        harness.credentials.supersedeAfterNextAcquisition()
+        await harness.engine.handle(
+            ChunkResult(
+                identity: harness.scheduler.uploads[0].identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        #expect(harness.scheduler.uploads.count == 1, "the second chunk was never scheduled")
+    }
+
     @Test("an unreachable server costs one small request and never a chunk")
     func healthProbeGuardsTheDrain() async throws {
         let harness = try await Harness.make(bytes: 1000, http: .standard(health: 503))
@@ -393,6 +483,107 @@ struct EngineTests {
         let released = try #require(await harness.reload())
         #expect(released.state == .waiting)
         #expect(released.holdReason == nil)
+    }
+
+    /// N2, reopened. The background session exists from the moment the app does and can deliver a
+    /// finished chunk's answer in the same turn — before adoption has run, because adoption is a
+    /// task the launch schedules. The delegate used to drop anything that arrived with no handler
+    /// attached, and that answer carries the server's own `bytes_received`: dropped, those bytes
+    /// are uploaded a second time.
+    ///
+    /// Driven through the delegate itself, because that is where the drop was. The previous version
+    /// of this test called `engine.handle` directly, which is downstream of the delegate — it never
+    /// touched the attachment ordering at all and stayed green with the fix taken out.
+    @Test("a chunk result delivered before adoption is replayed, in order, not dropped")
+    func aResultDeliveredBeforeAdoptionIsReplayed() async throws {
+        let delegate = OutboxSessionDelegate()
+        let handler = RecordingChunkHandler()
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0)
+
+        // Both arrive while nothing is attached — the window a launch opens.
+        delegate.deliver(ChunkResult(identity: identity, statusCode: 200, body: Data("1".utf8)))
+        delegate.deliver(ChunkResult(identity: identity, statusCode: 200, body: Data("2".utf8)))
+        #expect(await handler.received.isEmpty, "the premise: nothing was attached yet")
+
+        await delegate.attach(handler)
+
+        let bodies = await handler.received.map { String(decoding: $0.body, as: UTF8.self) }
+        #expect(
+            bodies == ["1", "2"],
+            """
+            an answer delivered before adoption was dropped, or replayed out of order — two \
+            answers for one file are a cursor moving forwards
+            """
+        )
+    }
+}
+
+/// Collects what the delegate hands on, in arrival order.
+actor RecordingChunkHandler: OutboxChunkHandling {
+    private(set) var received: [ChunkResult] = []
+
+    func handle(_ result: ChunkResult) async { received.append(result) }
+}
+
+@Suite("Adoption before draining")
+struct AdoptionOrderingTests {
+    /// G3. The replay used to run in a Task nobody waited on, and a drain can start beside it. The
+    /// two are not siblings, so `isDraining` does not exclude them from each other, and the
+    /// interleaving is a lost cursor: the drain retains a job at offset 0 and awaits its probe, the
+    /// replay banks the server's confirmed offset and advances, and the drain then resumes with the
+    /// job it was holding — sending those bytes a second time and saving the older offset over the
+    /// newer one.
+    ///
+    /// Serialised by adoption AWAITING the replay: `attach` does not return until every held answer
+    /// has reached the engine, and `Outbox.start` does not drain until adoption has returned. That
+    /// is what the first assertion below is: the cursor has already moved by the time `attach` is
+    /// done, with no yielding of any kind in between.
+    ///
+    /// The handler is the REAL engine, not a recorder — the previous version of this test used one
+    /// that only appended, so it could not have noticed a cursor at all.
+    @Test("adoption does not return until a held answer has reached the cursor")
+    func adoptionAwaitsTheReplayBeforeAnyDrain() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let first = try #require(harness.scheduler.uploads.first)
+        #expect(first.identity.offset == 0, "control: the drain sent the chunk at offset 0")
+
+        // The system answers that chunk while nothing is attached — a launch, before adoption ran.
+        let delegate = OutboxSessionDelegate()
+        delegate.deliver(
+            ChunkResult(
+                identity: first.identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 0,
+            "the premise: nothing has banked it yet"
+        )
+
+        await delegate.attach(harness.engine)
+
+        // Read with nothing awaited in between. Adoption returning while the replay is still in
+        // flight is the whole of the bug: a drain starting HERE would be the one that races it.
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 400,
+            "adoption returned before the answer it was replaying had reached the cursor"
+        )
+
+        await harness.engine.drain()
+
+        // Exactly once for the bytes the replay confirmed. A second send of offset 0 is what the
+        // race produced: a drain resuming with the job it was holding, over a cursor that had
+        // already moved. (Offset 400 may legitimately be sent again — nothing has confirmed it.)
+        let offsets = harness.scheduler.uploads.map(\.identity.offset)
+        #expect(
+            offsets.filter { $0 == 0 }.count == 1,
+            "the bytes the replay had already confirmed were uploaded a second time"
+        )
+        #expect(offsets.first == 0, "control: the first send is the one the replay answered")
+        #expect(try #require(await harness.reload()).files[0].bytesConfirmed >= 400)
     }
 }
 
@@ -883,5 +1074,210 @@ struct NetworkPolicyDrainTests {
         let saved = try #require(await harness.reload())
         #expect(saved.state == .uploading)
         #expect(saved.waitReason == nil)
+    }
+}
+
+/// R-N2. A wake with no authority still has to ADOPT: the system woke this process because a
+/// chunk finished, and its answer carries the server's own byte count. A wake that gated adoption
+/// on authority attached no handler, discarded that answer and re-sent bytes the server holds.
+@MainActor
+@Suite("Adoption is not a send")
+struct OutboxAdoptionTests {
+
+    @Test("a wake with no credential still takes over the queue and sends nothing")
+    func adoptionNeedsNoAuthority() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        let source = try Fixture.file(in: root, named: "one.heic", bytes: 400)
+        _ = try await repository.enqueue(
+            content: "on the beach",
+            visibility: nil,
+            capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+        )
+        let http = ScriptedHTTP.standard(chunkSize: 400)
+        let preferences = Fixture.preferences(name: "memosng.outbox.tests.adoption")
+        defer { Fixture.forgetting("memosng.outbox.tests.adoption") }
+        let outbox = Outbox(
+            repository: repository,
+            // Nobody is signed in — the cold background wake this is about.
+            credentials: StaticCredentials(credentials: nil),
+            http: http,
+            scheduler: ScriptedScheduler(),
+            completion: ScriptedCompletion([.retry("not now")], repeating: .retry("not now")),
+            network: StubNetworkPath(),
+            preferences: preferences.store
+        )
+
+        await outbox.adopt()
+
+        #expect(outbox.jobs.count == 1, "the queue is taken over whether or not it may be drained")
+        #expect(http.requests.isEmpty, "and adoption itself sent nothing")
+    }
+}
+
+/// Hands the scripted server the credentials it has to supersede, which do not exist yet when the
+/// server is built.
+final class CredentialsBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: SwitchableCredentials?
+
+    var value: SwitchableCredentials? {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
+/// H1, the G3 residue, driven through the REAL facade — which is where the ordering lives. Going
+/// at `delegate.attach` directly, as the round-5 test did, cannot see it: `adopt()` used to set a
+/// flag BEFORE awaiting the attachment, so a second caller arriving inside that await saw the flag,
+/// skipped adoption and drained. The two are not sibling drains, so the engine's own `isDraining`
+/// cannot exclude them from each other, and the interleaving loses a cursor.
+@MainActor
+@Suite("Adoption is a barrier every drain passes")
+struct AdoptionBarrierTests {
+    @Test("no drain starts while adoption is still replaying, and nothing is sent twice")
+    func adoptionIsABarrier() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let preferences = Fixture.preferences(name: "memosng.outbox.tests.barrier")
+        defer { Fixture.forgetting("memosng.outbox.tests.barrier") }
+        // A chunk is already with the background session at offset 0 — the state a launch finds.
+        await harness.engine.drain()
+        let inFlight = try #require(harness.scheduler.uploads.first).identity
+        #expect(inFlight.offset == 0, "control: the chunk at offset 0 went out")
+
+        let gate = TestGate()
+        let answered = ChunkResult(
+            identity: inFlight,
+            statusCode: 200,
+            body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+        )
+        let outbox = Outbox(
+            repository: harness.repository,
+            credentials: harness.credentials,
+            http: harness.http,
+            scheduler: harness.scheduler,
+            completion: harness.completion,
+            network: harness.network,
+            preferences: preferences.store,
+            clock: { harness.clock.now },
+            // Adoption held open, and then replaying the answer that was waiting — which is
+            // exactly what a launch does, and exactly what a drain must not run beside.
+            attachScheduler: { handler in
+                await gate.pass()
+                await handler.handle(answered)
+            }
+        )
+
+        let launch = Task { await outbox.start() }
+        await gate.waitUntilParked()
+
+        // Every other way into a drain. None may reach the engine while adoption is held.
+        let second = Task { await outbox.start() }
+        let third = Task { await outbox.drain() }
+        for _ in 0..<200 { await Task.yield() }
+        #expect(
+            harness.scheduler.uploads.count == 1,
+            "a drain ran beside the replay: it retains an offset the replay is about to move"
+        )
+
+        await gate.open()
+        await launch.value
+        await second.value
+        await third.value
+
+        // Offset 0 exactly once — a drain that ran beside the replay would have sent it again,
+        // because the cursor it was holding had not moved yet — and the cursor is where the
+        // replay put it.
+        let offsets = harness.scheduler.uploads.map(\.identity.offset)
+        #expect(
+            offsets.filter { $0 == 0 }.count == 1,
+            "the bytes the replay was about to confirm were uploaded a second time"
+        )
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 400,
+            "the replay's cursor was overwritten by a drain that started beside it"
+        )
+    }
+}
+
+/// H3. A 401 is only a refusal of the credential that EARNED it. Three sites persisted
+/// `.held(.serverRefused)` on one whatever the grant had become, which strands a capture behind a
+/// "sign in again" the person has already done.
+@Suite("A refusal of a replaced grant is not a hold")
+struct SupersededRefusalTests {
+    /// H3a — the upload start.
+    @Test("a 401 to an upload start whose grant was replaced backs off instead of holding")
+    func upstartRefusalUnderAReplacedGrant() async throws {
+        let switched = CredentialsBox()
+        let http = ScriptedHTTP { request in
+            guard request.httpMethod == "POST", request.url?.path.hasSuffix("/uploads") == true
+            else { return ScriptedHTTP.json([:]) }
+            // The renewal lands while this request is on the wire.
+            switched.value?.supersede()
+            return OutboxHTTPResponse(statusCode: 401, body: Data())
+        }
+        let harness = try await Harness.make(bytes: 1000, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+
+        let job = try #require(await harness.reload())
+        #expect(job.state != JobState.held, "a refusal of a replaced grant held the job")
+        #expect(job.holdReason == nil)
+    }
+
+    /// H3b — the memo create.
+    @Test("a 401 to a memo create whose grant was replaced is retried, not held")
+    func createRefusalUnderAReplacedGrant() async throws {
+        let switched = CredentialsBox()
+        let http = ScriptedHTTP { request in
+            guard request.httpMethod == "POST", request.url?.path.hasSuffix("/memos") == true
+            else { return ScriptedHTTP.json([:]) }
+            switched.value?.supersede()
+            return OutboxHTTPResponse(statusCode: 401, body: Data())
+        }
+        // No files: the drain goes straight to the create.
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+
+        let job = try #require(await harness.reload())
+        #expect(
+            job.state != JobState.held,
+            "the create's stale 401 held a capture under a valid session"
+        )
+        #expect(job.holdReason == nil)
+    }
+
+    /// H3c — a chunk answer, which comes back in a LATER pass and so must carry the epoch it was
+    /// sent under: by the time anything classifies it, nothing else knows which credential earned
+    /// it.
+    @Test("a 401 chunk answer carrying a replaced epoch backs off instead of holding")
+    func chunkRefusalUnderAReplacedGrant() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let sent = try #require(harness.scheduler.uploads.first)
+        let epoch = try #require(harness.scheduler.epoch(of: sent.identity))
+
+        // The renewal happens between the chunk going out and its answer coming back.
+        harness.credentials.supersede()
+        await harness.engine.handle(
+            ChunkResult(identity: sent.identity, statusCode: 401, epoch: epoch)
+        )
+
+        let job = try #require(await harness.reload())
+        #expect(
+            job.state != JobState.held,
+            "a chunk refused under a credential this device has replaced held the capture"
+        )
+        #expect(job.holdReason == nil)
     }
 }
