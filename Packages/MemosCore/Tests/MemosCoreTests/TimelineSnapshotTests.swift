@@ -1322,9 +1322,11 @@ struct TimelineSnapshotTests {
                 return Stub.json(Stub.page([Stub.memo(uid: "a", content: "- [ ] task")]))
             }
             patches.increment()
-            // The FIRST answer comes straight back; every later one is held, so a claim made
-            // while the first was landing is still outstanding when the third tap is tried.
-            if patches.count > 1 {
+            // The FIRST answer comes straight back and the SECOND is held, so the claim made
+            // while the first was landing is still outstanding when the third tap is tried. A
+            // third request is answered at once: a build that wrongly takes one must fail this
+            // case, not hang it.
+            if patches.count == 2 {
                 while !releasePatch.get() {
                     try await Task.sleep(for: .milliseconds(1))
                 }
@@ -1387,9 +1389,17 @@ struct TimelineSnapshotTests {
                 return Stub.json(Stub.page([Stub.memo(uid: "a", content: "- [ ] task")]))
             }
             patches.increment()
+            // Only the two the case is about are held. A third is answered at once, so a build
+            // that wrongly takes one fails this case rather than hanging it.
             let mine = patches.count
-            while mine == 1 ? !releaseFirst.get() : !releaseSecond.get() {
-                try await Task.sleep(for: .milliseconds(1))
+            if mine == 1 {
+                while !releaseFirst.get() {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+            } else if mine == 2 {
+                while !releaseSecond.get() {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
             }
             return Stub.json(Stub.memo(uid: "a", content: "- [x] task"))
         }
