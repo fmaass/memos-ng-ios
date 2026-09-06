@@ -57,9 +57,12 @@ public struct URLSessionSSETransport: SSEConnecting {
     public func connect(_ request: URLRequest, under authority: SendAuthority) async throws
         -> SSEConnection
     {
-        // On the executor that opens the stream, with nothing between the answer and the connect.
+        // On the executor that opens the stream, with nothing between the answer and the connect
+        // — and the credential goes on HERE, for the reason `SendAuthority.presenting` gives: this
+        // loop reconnects for as long as the screen is up, and a renewal can land in the hop
+        // between the request being built and this line.
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
-        let (bytes, response) = try await session.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: authority.presenting(request))
         // A non-HTTP response has no status to read. Zero is not 200, so it takes the retry path
         // rather than being mistaken for an open stream.
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0

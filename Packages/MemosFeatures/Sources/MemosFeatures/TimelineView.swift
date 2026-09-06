@@ -633,13 +633,14 @@ public struct TimelineView: View {
         else { return }
         // The channel reconnects for as long as this screen is up, so what it presents has to
         // keep proving it belongs to a session this device holds — asked by the transport, at
-        // each connect (`SendAuthority`).
-        let incarnation = session.sessionIncarnation
-        let granted = incarnation.current
+        // each connect. The session's OWN authority, not one assembled here: it carries the
+        // credential and its epoch as well as the verdict, which is what lets the transport
+        // present the token the device is holding NOW and the client tell a refusal of that from a
+        // refusal of one it has already replaced (`SendAuthority`).
         await MediaChannel.consume(
             MediaEventClient.device(
                 grant: { [session] in session.credentialGrant() },
-                authority: SendAuthority { incarnation.isCurrent(granted) }
+                authority: session.sendAuthority()
             ).stream(),
             into: timeline,
             alongside: { [searchPresentation] in searchPresentation.liveResults },

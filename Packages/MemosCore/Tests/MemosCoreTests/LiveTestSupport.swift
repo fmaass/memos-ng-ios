@@ -100,9 +100,20 @@ actor ScriptedSSETransport: SSEConnecting {
     private var script: [ScriptedConnection]
     private(set) var requests: [URLRequest] = []
     private let terminations = TerminationCounter()
+    /// Run on the FIRST connect only, either side of the credential going on — the two instants a
+    /// renewal can land in and be told apart: before the send, and after it but before its answer
+    /// is judged.
+    private let beforeConnect: @Sendable () -> Void
+    private let afterPresenting: @Sendable () -> Void
 
-    init(_ script: [ScriptedConnection] = []) {
+    init(
+        _ script: [ScriptedConnection] = [],
+        beforeConnect: @escaping @Sendable () -> Void = {},
+        afterPresenting: @escaping @Sendable () -> Void = {}
+    ) {
         self.script = script
+        self.beforeConnect = beforeConnect
+        self.afterPresenting = afterPresenting
     }
 
     var connectCount: Int { requests.count }
@@ -129,7 +140,12 @@ actor ScriptedSSETransport: SSEConnecting {
         // The double records the PRODUCTION authority's verdict; it does not implement the policy.
         verdicts.append(authority.holds())
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
-        requests.append(request)
+        let first = requests.isEmpty
+        if first { beforeConnect() }
+        // Presented HERE, through the production helper, because that is where the real transport
+        // puts the credential on — so what is recorded is what would have gone on the wire.
+        requests.append(authority.presenting(request))
+        if first { afterPresenting() }
         // Past the end of the script this server behaves like the real one with nothing in
         // flight: it opens and closes immediately (`app/routers/assets.py:763-764`). A test that
         // over-runs its script is then bounded by the sleeper's budget instead of hanging.

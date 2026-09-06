@@ -881,7 +881,9 @@ private actor RotatingSSETransport: SSEConnecting {
         // The double records the PRODUCTION authority's verdict; it does not implement the policy.
         verdicts.append(authority.holds())
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
-        authorizations.append(request.value(forHTTPHeaderField: "Authorization"))
+        authorizations.append(
+            authority.presenting(request).value(forHTTPHeaderField: "Authorization")
+        )
         if authorizations.count == 1 { rotate() }
         return SSEConnection(
             statusCode: 200,

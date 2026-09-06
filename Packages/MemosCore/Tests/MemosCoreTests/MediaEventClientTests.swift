@@ -340,6 +340,72 @@ struct MediaEventClientTests {
         #expect(await sleeper.waits.isEmpty, "absent is terminal — there is nothing to retry for")
     }
 
+    /// G2, the send. The channel builds its request from the grant it can see, and then hops to
+    /// the transport — a renewal fits in that hop, and this loop reconnects for as long as the
+    /// screen is up, so it is the lane that meets the most of them. The credential goes on at the
+    /// send, from the authority, so what leaves is what the device is holding.
+    @Test("a connect whose credential moved before the hop carries the successor")
+    @MainActor
+    func aConnectPresentsTheCredentialItLeavesWith() async {
+        let granted = grant(token: "memos_pat_first")
+        let rotating = RotatingGrant("memos_pat_first")
+        let authority = rotating.authority
+        let transport = ScriptedSSETransport(
+            [ScriptedConnection()],
+            beforeConnect: { rotating.rotate(to: "memos_pat_next") }
+        )
+        let client = MediaEventClient.device(
+            grant: { granted },
+            identity: MediaIdentity(),
+            transport: transport,
+            sleeper: RecordingSleeper(budget: 1),
+            authority: authority
+        )
+
+        _ = await client.collect()
+
+        #expect(
+            await transport.header("Authorization", of: 0) == "Bearer memos_pat_next",
+            "the connect carried the token the renewal had already replaced"
+        )
+    }
+
+    /// G2, the answer. A 401 to a request that presented a credential this device has SINCE
+    /// replaced says nothing about the one it is holding — and this channel's 401 is terminal, so
+    /// obeying it takes live updates away for the rest of the session. It re-grants and connects
+    /// again instead, exactly once: a second refusal in a row is not a rotation to chase.
+    @Test("a 401 about a credential already replaced does not end the channel")
+    @MainActor
+    func aStale401DoesNotEndTheChannel() async {
+        let granted = grant(token: "memos_pat_first")
+        let rotating = RotatingGrant("memos_pat_first")
+        let authority = rotating.authority
+        let transport = ScriptedSSETransport(
+            [ScriptedConnection(statusCode: 401), ScriptedConnection()],
+            // AFTER the credential went on and BEFORE the answer is judged: the instant that makes
+            // the refusal one about a token this device no longer holds.
+            afterPresenting: { rotating.rotate(to: "memos_pat_next") }
+        )
+        let client = MediaEventClient.device(
+            grant: { granted },
+            identity: MediaIdentity(),
+            transport: transport,
+            sleeper: RecordingSleeper(budget: 3),
+            authority: authority
+        )
+
+        let items = await client.collect()
+
+        #expect(
+            items.states.last != .stopped(.unauthorized),
+            "a refusal of a replaced credential ended a session that is perfectly valid"
+        )
+        // At least twice: the re-grant is immediate, and past its script this server opens and
+        // closes at once, so the loop goes on reconnecting until the sleeper's budget stops it.
+        #expect(await transport.connectCount >= 2, "and it did not connect again to find out")
+        #expect(await transport.header("Authorization", of: 1) == "Bearer memos_pat_next")
+    }
+
     /// F1. The channel used to read the vault itself, and the vault is not the session. Sign in
     /// as B on a device where the write fails and A's token is still stored — the state
     /// `.storedNowhere` leaves — and a vault-reading channel presents A's credential under B's
@@ -401,6 +467,24 @@ struct MediaEventClientTests {
         #expect(await sleeper.waits == [1, 2, 4], "it backs off and keeps trying")
         #expect(await transport.connectCount == 0, "and presents no credential it does not have")
     }
+}
+
+/// A credential that rotates the way a renewal does: the token moves, its epoch moves with it,
+/// and the session never ends — which is exactly why the incarnation cannot tell them apart.
+final class RotatingGrant: @unchecked Sendable {
+    private let lock = NSLock()
+    private var grant: PresentedGrant
+
+    init(_ token: String) { grant = PresentedGrant(token: token, epoch: 0) }
+
+    func rotate(to token: String) {
+        lock.withLock { grant = PresentedGrant(token: token, epoch: grant.epoch + 1) }
+    }
+
+    var current: PresentedGrant { lock.withLock { grant } }
+
+    /// Built ONCE and shared, because what a send presented is recorded in the authority itself.
+    lazy var authority: SendAuthority = SendAuthority({ true }, credential: { [self] in current })
 }
 
 @Suite("SSEBackoff")

@@ -293,6 +293,45 @@ struct SessionNoiseTests {
         )
     }
 
+    /// G1. The other half of the same rule, and the direction that costs more. The send is made
+    /// with the RENEWED token — that much F2 fixed — so a 401 answered to it is a refusal of the
+    /// credential this device is holding, and it ends the session. Judged by the epoch read BEFORE
+    /// the send it looks like a refusal of a token already replaced, and the session is kept: the
+    /// device carries on believing it is signed in with a credential the server has rejected.
+    @Test("a 401 answered to the renewed token ends the session, and is not read as a stale one")
+    func aRefusalOfTheRenewedTokenEndsTheSession() async {
+        let session = await signedIn(
+            handler: { _, _, operation in
+                switch operation {
+                case whoamiOperation: return Stub.json(Stub.user)
+                case "native_renew_api_auth_native_renew_post":
+                    return Stub.json(Stub.exchange(token: "memos_pat_next"))
+                default: return Stub.json(Stub.nativeToken(name: "Fabian's iPhone"))
+                }
+            }
+        )
+        let transport = HeldDownloadTransport(status: 401)
+
+        let download = Task { try await session.download(original(), transport: transport) }
+        for _ in 0..<200 where !transport.entered.get() { await Task.yield() }
+        #expect(transport.entered.get(), "the download never reached the send point")
+
+        #expect(await session.renewDeviceToken() == .renewed, "the premise: the token rotated")
+        transport.release.set(true)
+        await #expect(throws: OriginalMediaError.refused(.unauthorized)) {
+            try await download.value
+        }
+
+        #expect(
+            transport.presented.get() == "Bearer memos_pat_next",
+            "the premise: the request that earned the 401 carried the successor"
+        )
+        #expect(
+            session.state == .signedOut,
+            "a refusal of the token this device is holding was read as one about a replaced token"
+        )
+    }
+
     /// The OTHER guard on the same lane, kept as its own test rather than folded into the one
     /// above: with nobody signed in there is no credential to offer, so the store refuses before it
     /// builds a request at all. Named for what it is, and asserted on the specific error, so it
@@ -425,6 +464,9 @@ struct SessionNoiseTests {
 final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
+    private let status: Int
+
+    init(status: Int = 200) { self.status = status }
     let entered = LockedValue<Bool>(false)
     let release = LockedValue<Bool>(false)
     /// What the request carried at the moment it was sent — the whole point of holding it here.
@@ -441,7 +483,7 @@ final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
         // The production transport puts the credential on HERE, from the authority, and so does
         // this: a double that presented what the caller wrote down before suspending could not
         // tell a fenced lane from an unfenced one.
-        let sending = OriginalMedia.presenting(authority, on: request)
+        let sending = authority.presenting(request)
         presented.set(sending.value(forHTTPHeaderField: "Authorization"))
         lock.withLock { count += 1 }
         let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
@@ -449,7 +491,7 @@ final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
         return (
             file,
             HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+                url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil
             )!
         )
     }

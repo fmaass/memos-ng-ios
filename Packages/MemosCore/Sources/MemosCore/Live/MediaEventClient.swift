@@ -219,6 +219,11 @@ public final class MediaEventClient: Sendable {
         var attempt = 0
         var lastEventID: String?
         var serverRetryHint: TimeInterval?
+        /// The bound on re-granting. ONE immediate reconnect per refusal of a replaced credential,
+        /// and it is spent until a connection opens or the server closes one cleanly. A second in
+        /// a row is not a rotation the device is chasing — it is a credential the server keeps
+        /// refusing, and that IS the end of the channel.
+        var regrants = 0
 
         while !Task.isCancelled {
             guard await generation() == fence else {
@@ -250,13 +255,28 @@ public final class MediaEventClient: Sendable {
             case .cancelled:
                 stop(.cancelled, into: continuation)
                 return
+            case .superseded:
+                guard regrants == 0 else {
+                    MemosLog.media.info("a second refusal in a row is not a rotation to chase")
+                    stop(.unauthorized, into: continuation)
+                    return
+                }
+                regrants += 1
+                // The credential moved, not the session: reconnect at once, and do not spend a
+                // step of the backoff on somebody else's rotation.
+                attempt = max(attempt - 1, 0)
+                delay = 0
             case .ended:
                 // The server closes when nothing is in flight. That is not a failure and must not
                 // escalate the backoff — the next connection is a fresh first attempt.
                 attempt = 0
+                regrants = 0
                 delay = idleReconnectDelay
             case .failed(let opened):
-                if opened { attempt = 0 }
+                if opened {
+                    attempt = 0
+                    regrants = 0
+                }
                 delay = backoff.delay(forAttempt: max(attempt, 1), serverHint: serverRetryHint)
             }
 
@@ -325,6 +345,18 @@ public final class MediaEventClient: Sendable {
             case 200:
                 break
             case 401, 403:
+                // Judged against what the connect actually PRESENTED. This loop outlives any one
+                // credential: a renewal lands between the request being built and the transport
+                // sending it, the transport correctly presents the successor, and if the answer is
+                // about the token this device has since replaced then it says nothing about the one
+                // it is holding. Ending the channel on it takes live updates away from a session
+                // that is perfectly valid.
+                if connection.statusCode == 401, let sent = authority.presented(),
+                    authority.currentEpoch() != sent.epoch
+                {
+                    MemosLog.media.info("a 401 for a replaced credential does not end the channel")
+                    return result(.superseded)
+                }
                 MemosLog.media.info("GET /api/events refused the credential")
                 return result(.unauthorized)
             default:
@@ -390,6 +422,9 @@ public final class MediaEventClient: Sendable {
     private enum ConnectionOutcome: Sendable, Equatable {
         case ended
         case failed(opened: Bool)
+        /// A refusal of a credential this device has already replaced. Not an answer about the one
+        /// it is holding, so the channel re-grants and connects again — see the bound in `run`.
+        case superseded
         case unauthorized
         case signedOut
         case identityChanged

@@ -49,8 +49,8 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
 
     /// Wired after construction because the handler is the engine, and the engine needs the
     /// scheduler: one of the two references has to be attached rather than passed in.
-    public func attach(_ handler: any OutboxChunkHandling) {
-        delegate.attach(handler)
+    public func attach(_ handler: any OutboxChunkHandling) async {
+        await delegate.attach(handler)
     }
 
     public func inFlight() async -> [OutboxTaskIdentity] {
@@ -107,21 +107,26 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// What is still being written to disk. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
 
-    public func attach(_ handler: any OutboxChunkHandling) {
+    /// AWAITS the replay. Adoption is what calls this, and a drain may only start after adoption
+    /// has returned (`Outbox.start`), so the replay and the drain are serialised by that alone.
+    ///
+    /// It used to hand the replay to an unawaited `Task`, which is not serialisation: a drain
+    /// starting beside it retains a job at its own offset, awaits a probe, and resumes after the
+    /// replay has banked a LATER offset — then re-sends those bytes and saves the older cursor over
+    /// the newer one. `isDraining` cannot see that, because the replay is not a sibling drain.
+    ///
+    /// Each of these was counted into `pending` when it arrived, so the system's completion handler
+    /// has been waiting on them since — and still is, until this loop has finished.
+    public func attach(_ handler: any OutboxChunkHandling) async {
         let replay: [ChunkResult] = lock.withLock {
             self.handler = handler
             let held = waiting
             waiting = []
             return held
         }
-        guard !replay.isEmpty else { return }
-        // Each of these was counted into `pending` when it arrived, so the system's completion
-        // handler has been waiting on them since — and still is, until this loop has finished.
-        Task {
-            for result in replay {
-                await handler.handle(result)
-                pending.leave()
-            }
+        for result in replay {
+            await handler.handle(result)
+            pending.leave()
         }
     }
 

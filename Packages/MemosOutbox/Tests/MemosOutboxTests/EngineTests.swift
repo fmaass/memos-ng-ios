@@ -505,8 +505,7 @@ struct EngineTests {
         delegate.deliver(ChunkResult(identity: identity, statusCode: 200, body: Data("2".utf8)))
         #expect(await handler.received.isEmpty, "the premise: nothing was attached yet")
 
-        delegate.attach(handler)
-        for _ in 0..<200 where await handler.received.count < 2 { await Task.yield() }
+        await delegate.attach(handler)
 
         let bodies = await handler.received.map { String(decoding: $0.body, as: UTF8.self) }
         #expect(
@@ -524,6 +523,68 @@ actor RecordingChunkHandler: OutboxChunkHandling {
     private(set) var received: [ChunkResult] = []
 
     func handle(_ result: ChunkResult) async { received.append(result) }
+}
+
+@Suite("Adoption before draining")
+struct AdoptionOrderingTests {
+    /// G3. The replay used to run in a Task nobody waited on, and a drain can start beside it. The
+    /// two are not siblings, so `isDraining` does not exclude them from each other, and the
+    /// interleaving is a lost cursor: the drain retains a job at offset 0 and awaits its probe, the
+    /// replay banks the server's confirmed offset and advances, and the drain then resumes with the
+    /// job it was holding — sending those bytes a second time and saving the older offset over the
+    /// newer one.
+    ///
+    /// Serialised by adoption AWAITING the replay: `attach` does not return until every held answer
+    /// has reached the engine, and `Outbox.start` does not drain until adoption has returned. That
+    /// is what the first assertion below is: the cursor has already moved by the time `attach` is
+    /// done, with no yielding of any kind in between.
+    ///
+    /// The handler is the REAL engine, not a recorder — the previous version of this test used one
+    /// that only appended, so it could not have noticed a cursor at all.
+    @Test("adoption does not return until a held answer has reached the cursor")
+    func adoptionAwaitsTheReplayBeforeAnyDrain() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let first = try #require(harness.scheduler.uploads.first)
+        #expect(first.identity.offset == 0, "control: the drain sent the chunk at offset 0")
+
+        // The system answers that chunk while nothing is attached — a launch, before adoption ran.
+        let delegate = OutboxSessionDelegate()
+        delegate.deliver(
+            ChunkResult(
+                identity: first.identity,
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 0,
+            "the premise: nothing has banked it yet"
+        )
+
+        await delegate.attach(harness.engine)
+
+        // Read with nothing awaited in between. Adoption returning while the replay is still in
+        // flight is the whole of the bug: a drain starting HERE would be the one that races it.
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 400,
+            "adoption returned before the answer it was replaying had reached the cursor"
+        )
+
+        await harness.engine.drain()
+
+        // Exactly once for the bytes the replay confirmed. A second send of offset 0 is what the
+        // race produced: a drain resuming with the job it was holding, over a cursor that had
+        // already moved. (Offset 400 may legitimately be sent again — nothing has confirmed it.)
+        let offsets = harness.scheduler.uploads.map(\.identity.offset)
+        #expect(
+            offsets.filter { $0 == 0 }.count == 1,
+            "the bytes the replay had already confirmed were uploaded a second time"
+        )
+        #expect(offsets.first == 0, "control: the first send is the one the replay answered")
+        #expect(try #require(await harness.reload()).files[0].bytesConfirmed >= 400)
+    }
 }
 
 @Suite("Not letting go too early")

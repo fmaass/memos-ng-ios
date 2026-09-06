@@ -280,7 +280,7 @@ public final class SessionStore {
     /// Read here, on the main actor, at the instant the operation starts; asked again by the
     /// executor doing the sending. The incarnation rather than `epoch`, because a renewal replaces
     /// the token a request presents without ending anything it is doing.
-    private func sendAuthority() -> SendAuthority {
+    public func sendAuthority() -> SendAuthority {
         let incarnation = sessionIncarnation
         let granted = incarnation.current
         // The credential goes with it, read through the SAME object the client presents from, so
@@ -291,7 +291,12 @@ public final class SessionStore {
         let presenting = credential
         return SendAuthority(
             { incarnation.isCurrent(granted) },
-            credential: { presenting?.presented().token }
+            credential: {
+                guard let snapshot = presenting?.presented() else { return nil }
+                // The epoch travels WITH the token. What a response is judged against has to be
+                // the generation that earned it, and a token on its own cannot answer that.
+                return PresentedGrant(token: snapshot.token, epoch: snapshot.epoch)
+            }
         )
     }
 
@@ -2041,6 +2046,9 @@ public final class SessionStore {
         let presented = credential.presented()
         guard !presented.token.isEmpty else { throw OriginalMediaError.notSignedIn }
         let generation = sessionGeneration
+        // Held rather than passed inline: after the send it is the only thing that knows which
+        // credential went out, and that is what the refusal below has to be judged against.
+        let authority = sendAuthority()
         do {
             let file = try await OriginalMedia.fetch(
                 url: wanted.url,
@@ -2053,7 +2061,7 @@ public final class SessionStore {
                 // Carried INTO the transport as well as fenced on both ways back here: an original
                 // is the longest-lived request this app makes, and the send itself happens on
                 // another executor where this actor's own check cannot reach.
-                under: sendAuthority()
+                under: authority
             )
             guard generation == sessionGeneration else {
                 MemosLog.session.info("an original arrived for a session that has ended")
@@ -2071,7 +2079,14 @@ public final class SessionStore {
                 MemosLog.session.info("a download failed for a session that has ended")
                 throw OriginalMediaError.superseded
             }
-            if error == .unauthorized, !credential.isCurrent(presented.epoch) {
+            // The epoch that was SENT, not the one read before the send. A renewal landing in
+            // between installs T1 and revokes T0; the transport correctly presents T1, and judging
+            // its refusal by T0's epoch would report a rejection of the credential this device is
+            // holding as an answer about one it had replaced — retaining a session the server has
+            // just ended. `presented()` is nil only if nothing ever asked the authority, which no
+            // production transport does; then the caller's own snapshot is the best it has.
+            let sentEpoch = authority.presented()?.epoch ?? presented.epoch
+            if error == .unauthorized, !credential.isCurrent(sentEpoch) {
                 MemosLog.session.info(
                     "a download was refused for a credential this device replaced; not a sign-out"
                 )

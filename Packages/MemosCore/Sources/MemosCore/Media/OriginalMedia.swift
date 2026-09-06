@@ -27,25 +27,7 @@ extension MediaSession: MediaDownloadTransport {
     {
         // On the executor that sends, with nothing between the answer and the request.
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
-        return try await session.download(for: OriginalMedia.presenting(authority, on: request))
-    }
-}
-
-extension OriginalMedia {
-    /// Puts the credential on in the same instant the authority was asked, and never before.
-    ///
-    /// The caller builds the request with the token it could see when it started; a renewal that
-    /// lands inside the awaits between there and here destroys that token without ending the
-    /// session, so what the caller wrote down is the one thing that must not go on the wire. The
-    /// authority reads the credential the session is presenting NOW.
-    ///
-    /// An authority with no credential behind it (`.unfenced`, and the outbox's, which carries its
-    /// own) leaves the request exactly as it arrived.
-    static func presenting(_ authority: SendAuthority, on request: URLRequest) -> URLRequest {
-        guard let token = authority.credential(), !token.isEmpty else { return request }
-        var presented = request
-        presented.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return presented
+        return try await session.download(for: authority.presenting(request))
     }
 }
 
