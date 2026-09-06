@@ -280,20 +280,29 @@ public final class TimelineStore {
             snapshotDirty = true
             return
         }
+        // CAPTURED, before the claim below suspends. The eligibility checked above is about the
+        // list as it stands NOW — plain rows, admitted under the plain query — and the claim is
+        // long enough for an anchored refresh to replace both. Writing `memos` on the way out
+        // would then file that day's rows under the plain timeline's name, and the next launch
+        // would open on a window the reader never chose. What is written is the picture the
+        // change that called this made, and the revision that picture had.
+        let picture = memos
+        let revision = listRevision
         guard let producer = await claimProducer() else { return }
         // Taken AGAIN, because the claim above suspends: a tick begun while it was out would
         // otherwise have its unconfirmed content written by this call, which is the one thing the
-        // check before the await exists to prevent.
-        guard optimistic.isEmpty else {
+        // check before the await exists to prevent. The withdrawal is re-asked for the same
+        // reason — an identity that has been left behind writes nothing more.
+        guard optimistic.isEmpty, !identityWithdrawn else {
             snapshotDirty = true
             return
         }
         snapshotDirty = false
         await snapshots.write(
-            memos,
+            picture,
             for: snapshotIdentity,
             producer: producer,
-            revision: listRevision,
+            revision: revision,
             query: .empty,
             // The AUTHORITY the operation was ISSUED under, not the one now: the writer's refusal
             // is about the credential this device was holding when the change was asked for, and
@@ -643,6 +652,9 @@ public final class TimelineStore {
                 lastError = nil
                 if !fresh.isEmpty {
                     await commit(Array(fresh.reversed()) + memos, under: authority)
+                    // The uid handed back is a row of THIS account's list, and the caller scrolls
+                    // to it. After the commit's own await, ask once more whose list it is.
+                    guard sessionStillCurrent(handle) else { return nil }
                     return previousTop
                 }
                 guard let next = page.nextCursor else { return nil }
@@ -1341,6 +1353,10 @@ public final class TimelineStore {
                 guard sessionStillCurrent(handle) else { return nil }
                 let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
                 await apply(memo, under: authority)
+                // AGAIN, after the apply: it awaits its way to the disk, and the memo below is
+                // one account's own — handing it to a caller that has become somebody else is an
+                // effect exactly as much as writing it would be.
+                guard sessionStillCurrent(handle) else { return nil }
                 return memo
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -1391,6 +1407,9 @@ public final class TimelineStore {
         }
         setQuery(MemoQuery(anchor: anchor))
         await refresh(using: handle, baseURL: baseURL)
+        // The refresh awaits its way to the disk as well as to the server, and what comes back
+        // from here is a MEMO — the screen it opens belongs to whoever owns the session now.
+        guard sessionStillCurrent(handle) else { return .unavailable }
         // Anchored and still absent. Pushing now would open a screen whose edits go nowhere, so
         // the caller is told instead.
         guard memos.contains(where: { $0.uid == uid }) else { return .unavailable }

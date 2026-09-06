@@ -85,6 +85,7 @@ struct TimelineSnapshotTests {
     /// timeline reads through the real writer, and the fences are the ones the app runs.
     private func signedInSession(
         root: URL,
+        writeData: (@Sendable (Data, URL) throws -> Void)? = nil,
         removeItem: (@Sendable (URL) throws -> Void)? = nil,
         handler: @escaping StubTransport.Handler
     ) -> SessionStore {
@@ -93,6 +94,7 @@ struct TimelineSnapshotTests {
             makeClient: { _, token in Stub.client(token: token, handler: handler) },
             snapshots: TimelineSnapshotStore(
                 root: root,
+                writeData: writeData ?? TimelineSnapshotStore.atomically,
                 removeItem: removeItem ?? TimelineSnapshotStore.removingItem
             )
         )
@@ -1539,6 +1541,192 @@ struct TimelineSnapshotTests {
         #expect(
             onDisk(root)?.memos.map(\.uid) == ["a", "b"],
             "a picture stamped with an authority the request never had was written"
+        )
+    }
+
+    // MARK: - what a continuation may hand back (review round 3)
+
+    /// A memo is one account's own. `fetchMemo` fences the ANSWER, but its apply awaits its way to
+    /// the disk, and what it returns afterwards goes to a screen — which may by then belong to
+    /// nobody.
+    @Test("a memo read as one person is not handed back once the session has ended")
+    func aFetchedMemoIsNotHandedBackAfterTheSessionEnds() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writes = Counter()
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let session = signedInSession(
+            root: root,
+            writeData: { data, url in
+                writes.increment()
+                // The load's own picture goes through; the one the fetch's apply takes is held
+                // open, and the session ends while it is.
+                if writes.count > 1 {
+                    entered.set(true)
+                    while !release.get() {
+                        Thread.sleep(forTimeInterval: 0.005)
+                    }
+                }
+                try data.write(to: url, options: .atomic)
+            }
+        ) { _, _, operation in
+            switch operation {
+            case listMemosOperation:
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "as loaded")]))
+            case let op where op.contains("get_memo"):
+                return Stub.json(Stub.memo(uid: "a", content: "as the server has it"))
+            default:
+                return Stub.json(Stub.user)
+            }
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let timeline = store(writer: try #require(session.snapshots))
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await timeline.refresh(using: handle, baseURL: Stub.baseURL)
+
+        let fetching = Task {
+            await timeline.fetchMemo(uid: "a", using: handle, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        // The withdrawal is synchronous — the client goes before the sign-out's first await — so
+        // the session is already over while the picture is still being written.
+        let signingOut = Task { await session.signOutWithoutRevoking() }
+        while session.activeHandle != nil {
+            await Task.yield()
+        }
+        release.set(true)
+        let fetched = await fetching.value
+        await signingOut.value
+
+        #expect(fetched == nil, "a memo was handed to a screen that had become nobody's")
+    }
+
+    /// The same value, one layer up: a jump ends in a memo the caller pushes a screen onto.
+    @Test("a jump does not end in a memo once the session has ended")
+    func aJumpDoesNotHandBackAMemoAfterTheSessionEnds() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writes = Counter()
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let session = signedInSession(
+            root: root,
+            writeData: { data, url in
+                writes.increment()
+                if writes.count > 1 {
+                    entered.set(true)
+                    while !release.get() {
+                        Thread.sleep(forTimeInterval: 0.005)
+                    }
+                }
+                try data.write(to: url, options: .atomic)
+            }
+        ) { _, _, operation in
+            switch operation {
+            case listMemosOperation:
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "as loaded")]))
+            case let op where op.contains("get_memo"):
+                return Stub.json(Stub.memo(uid: "a", content: "as the server has it"))
+            default:
+                return Stub.json(Stub.user)
+            }
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let timeline = store(writer: try #require(session.snapshots))
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await timeline.refresh(using: handle, baseURL: Stub.baseURL)
+
+        let jumping = Task {
+            await timeline.jump(
+                to: "a", calendar: .current, using: handle, baseURL: Stub.baseURL
+            )
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        let signingOut = Task { await session.signOutWithoutRevoking() }
+        while session.activeHandle != nil {
+            await Task.yield()
+        }
+        release.set(true)
+        let outcome = await jumping.value
+        await signingOut.value
+
+        #expect(
+            outcome == .unavailable,
+            "a jump opened a screen on a memo belonging to a session that had ended"
+        )
+    }
+
+    /// The eligibility a write is granted is about the list as it stands when it is asked for.
+    /// Claiming the identity suspends, and an anchored refresh landing inside that claim replaces
+    /// both the rows and the query they were admitted under — so the picture is CAPTURED with its
+    /// query rather than re-read on the way out.
+    @Test("an anchored refresh landing inside the producer claim does not become the timeline")
+    func anAnchoredListLandingInsideTheClaimIsNotWritten() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let shared = writer(root: root) { data, url in
+            entered.set(true)
+            while !release.get() {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            try data.write(to: url, options: .atomic)
+        }
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            // The anchored read is the one that carries a day; the plain one carries none.
+            return path.contains("created_before") || path.contains("anchor")
+                ? Stub.json(Stub.memoList(["anchored"], nextCursor: nil))
+                : Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+        }
+        // A store of ANOTHER identity, holding the writer open so the claim below is really out.
+        let occupier = store(
+            writer: shared,
+            identity: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "somebody-else")
+        )
+        let timeline = store(writer: shared)
+        let busy = Task {
+            await occupier.refresh(using: page(["occupier"]).handle, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+
+        // The plain list loads and its picture asks for a claim, which is stuck behind the write
+        // above.
+        let plain = Task { await timeline.refresh(using: client.handle, baseURL: Stub.baseURL) }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        // And the list becomes an anchored day while that claim is out.
+        timeline.setQuery(MemoQuery(anchor: .day(year: 2026, month: 8, day: 23)))
+        let anchored = Task {
+            await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        release.set(true)
+        await busy.value
+        await plain.value
+        await anchored.value
+
+        #expect(
+            timeline.memos.map(\.uid) == ["anchored"],
+            "control: the list on screen really did become the anchored day"
+        )
+        let kept = onDisk(root)?.memos.map(\.uid)
+        #expect(
+            kept == nil || kept == ["a", "b"],
+            "a day's rows were written down as the plain timeline"
         )
     }
 
