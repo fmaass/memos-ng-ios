@@ -82,4 +82,93 @@ struct CaptureDateTests {
         #expect(job.capturedAt >= before.addingTimeInterval(-1))
         #expect(job.capturedAt <= after)
     }
+
+    /// The Auto date is not a label on a screen: it is the number the create call sends. So it is
+    /// followed the same way a chosen date is — computed by the rule from what the files said, put
+    /// through `enqueue`, read back off the disk a relaunch would read, and finally found in the
+    /// bytes of the request.
+    @Test("the earliest capture instant is the date the create call sends")
+    func theAutoDateReachesTheCreateCall() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        let zone = TimeZone(identifier: "Europe/Berlin") ?? .gmt
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let later = try #require(formatter.date(from: "2026-01-01T15:00:00Z"))
+        // The earlier of the two carries no offset of its own: a civil reading, resolved here.
+        let readings: [CaptureDecision] = [
+            .settled(CaptureReading(instant: later, civil: nil, source: .exif)),
+            .settled(CaptureReading(instant: nil, civil: "2026-01-01T13:00:00", source: .exif)),
+        ]
+        let auto = AutoMemoDate.autoMemoDate(readings, in: zone)
+        #expect(auto.approximate, "the winner was the resolved one")
+
+        let queued = await outbox(repository).enqueue(
+            content: "the walk",
+            visibility: nil,
+            capturedAt: try #require(auto.instant),
+            sources: []
+        )
+        #expect(queued)
+
+        let reopened = try OutboxRepository(root: root.appending(path: "outbox"))
+        let job = try #require(try await reopened.loadJobs().first)
+        let request = try OutboxRequests.createMemo(
+            baseURL: Fixture.server, token: "pat-token", job: job
+        )
+        let body = try #require(request.httpBody)
+        let sent = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        // 13:00 in Berlin in January is 12:00Z — and whole seconds on the wire, as ever.
+        #expect(sent["created_at"] as? String == "2026-01-01T12:00:00Z")
+    }
+
+    /// The order the composer shows is the order the manifest keeps, and the manifest is what the
+    /// wire is built from. Nothing sorts anything again downstream: if the array handed to
+    /// `enqueue` is in capture order, the memo is.
+    @Test("the files reach the manifest in the order they were handed over")
+    func theCaptureOrderReachesTheManifest() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        let zone = TimeZone(identifier: "Europe/Berlin") ?? .gmt
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+
+        func staged(_ name: String) throws -> StagedSource {
+            let url = root.appending(path: name)
+            try Data(repeating: 0x41, count: 4).write(to: url)
+            return StagedSource(url: url, filename: name, mime: "image/jpeg")
+        }
+        struct Item: CaptureCarrying {
+            var source: StagedSource
+            var capture: CaptureDecision
+        }
+        func item(_ name: String, _ stamp: String?) throws -> Item {
+            let instant = stamp.flatMap { formatter.date(from: $0) }
+            return Item(
+                source: try staged(name),
+                capture: .settled(
+                    CaptureReading(
+                        instant: instant, civil: nil, source: instant == nil ? nil : .exif)))
+        }
+        // Picked b, a, c (undated), d — the artefact's own ordering case.
+        let picked = [
+            try item("b.jpg", "2026-01-01T15:00:00Z"),
+            try item("a.jpg", "2026-01-01T13:00:00Z"),
+            try item("c.jpg", nil),
+            try item("d.jpg", "2026-01-01T14:00:00Z"),
+        ]
+
+        let queued = await outbox(repository).enqueue(
+            content: "the walk",
+            visibility: nil,
+            sources: AutoMemoDate.captureOrder(picked, in: zone).map(\.source)
+        )
+        #expect(queued)
+
+        let reopened = try OutboxRepository(root: root.appending(path: "outbox"))
+        let job = try #require(try await reopened.loadJobs().first)
+        #expect(job.files.map(\.filename) == ["a.jpg", "d.jpg", "b.jpg", "c.jpg"])
+    }
 }
