@@ -294,6 +294,38 @@ struct ComposeAutoDateTests {
         #expect(imports.autoDate.instant == Self.instant("2026-01-01T07:15:00Z"))
     }
 
+    /// The same, between two PICKS rather than a pick and a capture: the picker is the way most
+    /// files arrive, and a second selection lands in whatever zone the phone is in by then.
+    @Test("two picks either side of a zone change each keep their own")
+    func twoPicksKeepTheirOwnZones() async throws {
+        let berlin = Self.zone
+        let kathmandu = TimeZone(identifier: "Asia/Kathmandu") ?? .gmt
+        let now = ZoneBox(berlin)
+        let imports = ComposeImports(
+            zone: berlin,
+            zoneAtPick: { now.value },
+            readCapture: { _ in CaptureReading(civil: "2026-01-01T13:00:00", source: .exif) })
+
+        await imports.load(["first"], stamp: imports.selected()) { _ in
+            .file(Self.media("first.heic"))
+        }
+        await settleTasks()
+        let firstItem = try #require(imports.items.first)
+        #expect(firstItem.captureZone == berlin)
+        #expect(imports.autoDate.instant == Self.instant("2026-01-01T12:00:00Z"))
+
+        // The phone moves. A pick REPLACES what was picked, so this is the whole list now.
+        now.value = kathmandu
+        await imports.load(["second"], stamp: imports.selected()) { _ in
+            .file(Self.media("second.heic"))
+        }
+        await settleTasks()
+
+        let secondItem = try #require(imports.items.first)
+        #expect(secondItem.captureZone == kathmandu, "the second pick took the composer's old zone")
+        #expect(imports.autoDate.instant == Self.instant("2026-01-01T07:15:00Z"))
+    }
+
     @Test("a camera capture sorts by its own instant, like anything else")
     func aCaptureSortsByItsInstant() async {
         let imports = Self.imports([

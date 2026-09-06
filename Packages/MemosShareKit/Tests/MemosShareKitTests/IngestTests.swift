@@ -341,6 +341,43 @@ struct IngestTests {
         }
     }
 
+    /// The share sheet takes its files as it opens and can then stand for hours, from which the
+    /// phone may well have travelled. A wall-clock capture time with no offset is resolved in the
+    /// zone the file was IMPORTED in — not in whatever the device is set to when Post is tapped.
+    @Test("a shared file keeps the zone it was imported in, not the one Post is tapped in")
+    func theImportZoneDecidesTheDate() async throws {
+        try await withOutbox { repository, root in
+            let berlin = TimeZone(identifier: "Europe/Berlin") ?? .gmt
+            let kathmandu = TimeZone(identifier: "Asia/Kathmandu") ?? .gmt
+            let staged = try Fixture.file(in: root, named: "IMG_0013.heic", bytes: 8)
+            // Imported in Kathmandu; posted, much later, from Berlin.
+            let file = try SharedFile.imported(staged, into: root, zone: kathmandu)
+            #expect(file.captureZone == kathmandu)
+
+            let outcome = try await ShareIngest.commit(
+                items: [.file(file)],
+                note: "",
+                visibility: nil,
+                binding: { Fixture.binding() },
+                expecting: Fixture.binding(),
+                capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+                zone: berlin,
+                read: { _ in CaptureReading(civil: "2026-01-01T13:00:00", source: .exif) },
+                into: repository
+            )
+
+            guard case .enqueued(let id) = outcome else {
+                Issue.record("expected the share to be queued, got \(outcome)")
+                return
+            }
+            let job = try #require(await repository.job(id))
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            // 13:00 in Kathmandu (+05:45) is 07:15Z. Resolved in Berlin it would have been 12:00Z.
+            #expect(job.capturedAt == formatter.date(from: "2026-01-01T07:15:00Z"))
+        }
+    }
+
     /// The control: with nothing that carries a date, the moment of sharing is still what the memo
     /// gets — the rule adds a date, it never takes one away.
     @Test("a share of files that say nothing keeps the moment of sharing")

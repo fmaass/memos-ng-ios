@@ -328,6 +328,70 @@ struct ComposeFailureTests {
             "the replacement was sent under the replaced file's key, so the server can replay it")
     }
 
+    /// The same danger from the other direction, and the one a path cannot answer: the file at
+    /// `…/photo.jpg` is REPLACED — same name, same place, different picture. Named by where it is,
+    /// the second save would go out under the first one's key and the server would replay the edit
+    /// that carried the old bytes: 200, and the replacement nowhere.
+    @Test("replacing the bytes at one path is a different edit")
+    func replacingTheBytesAtOnePathIsADifferentEdit() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "photo.jpg")
+
+        try Data(repeating: 0x41, count: 8).write(to: url)
+        let first = StagedSource(url: url, filename: "photo.jpg", mime: "image/jpeg")
+        // The person picks another picture, and it lands at the same place.
+        try Data(repeating: 0x42, count: 8).write(to: url)
+        let second = StagedSource(url: url, filename: "photo.jpg", mime: "image/jpeg")
+        #expect(first.url == second.url, "control: the two imports really are at one path")
+        #expect(
+            first.editIdentity != second.editIdentity,
+            "a re-import at the same path kept the old file's identity")
+
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let answer = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(
+                    #"{"upload_uid":"u1","chunk_size":64,"bytes_received":0}"#, status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(
+                    """
+                    {"upload_uid":"u1","chunk_size":64,"bytes_received":\(data.count)}
+                    """)
+            case patchMemoOperation:
+                let sent = try await Stub.body(body)
+                keys.set(keys.get() + [(sent["edit_key"] as? String) ?? ""])
+                guard answer.get() else { throw URLError(.networkConnectionLost) }
+                return Stub.json(Stub.memo(uid: "a", content: "edited"))
+            default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let uncertain = await store.edit(
+            uid: "a", content: "edited", attaching: [first],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+        answer.set(true)
+        let replaced = await store.edit(
+            uid: "a", content: "edited", attaching: [second],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(uncertain == .failed(.transport(sent: true)))
+        #expect(replaced == .saved)
+        let sentKeys = keys.get()
+        try #require(sentKeys.count == 2, "the patch was not reached twice: \(sentKeys)")
+        #expect(
+            sentKeys[0] != sentKeys[1],
+            "the replacement went out under the replaced file's key, so it can be replayed away")
+    }
+
     @Test("an upload refused for an ended session is an authorization failure, not a rejection")
     func aCarriedUnauthorizedIsAuthorization() {
         // The REAL wrapper the upload throws, not a synthetic one: `MediaUpload` reports an ended

@@ -38,9 +38,10 @@ public enum ShareIngest {
     ///   sharing. A file that DOES carry a capture date wins over it: the same Auto rule the
     ///   composer follows, because a photograph shared from Photos is exactly the case the rule was
     ///   written for.
-    /// - Parameter zone: the zone a wall-clock EXIF time with no offset is resolved in, sampled at
-    ///   THIS import (`.current`, never `.autoupdatingCurrent`, which would re-resolve a reading
-    ///   after the fact if the device's setting moved).
+    /// - Parameter zone: the DISPLAY zone — what "different calendar days" is counted in. Each
+    ///   file's own reading is resolved in the zone IT was imported in (`SharedFile.captureZone`),
+    ///   which is a different moment: the sheet takes the files as it opens and Post can come much
+    ///   later, from somewhere else.
     /// - Parameter read: how a file's own capture date is read. Injected so the ORDER and the DATE
     ///   can be tested without a real photograph, and so this stays one read per file.
     public static func commit(
@@ -108,8 +109,10 @@ public enum ShareIngest {
 }
 
 /// One shared file and what it said about when it was taken, so the shared set can be ordered by
-/// the same function the composer's tiles are.
+/// the same function the composer's tiles are — each in the zone it was IMPORTED in.
 struct CapturedShare: CaptureCarrying {
     var file: SharedFile
     var capture: CaptureDecision
+
+    var captureZone: TimeZone? { file.captureZone }
 }
