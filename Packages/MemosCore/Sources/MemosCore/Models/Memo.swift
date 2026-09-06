@@ -34,7 +34,7 @@ public enum AttachmentReadiness: String, Sendable, Equatable {
 }
 
 /// A media file hanging off a memo, with the derived tiers the server already produced.
-public struct MemoAttachment: Sendable, Equatable, Identifiable {
+public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     public var uid: String
     public var mime: String
     public var status: AttachmentStatus
@@ -123,7 +123,13 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable {
     }
 }
 
-public struct Memo: Sendable, Equatable, Identifiable {
+/// One memo, as every screen in the app reads it.
+///
+/// `Codable` because the timeline snapshot on disk is made of these (`TimelineSnapshotStore`).
+/// That carries an obligation: changing the SHAPE of this type — or of `MemoAttachment` under it —
+/// bumps `TimelineSnapshot.currentFormatVersion` in the same change, so a file written by the
+/// previous version reads as absent instead of decoding into a memo that is missing half of itself.
+public struct Memo: Sendable, Equatable, Identifiable, Codable {
     public var uid: String
     public var owner: String
     public var mine: Bool

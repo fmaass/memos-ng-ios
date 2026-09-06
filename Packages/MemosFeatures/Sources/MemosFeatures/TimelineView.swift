@@ -218,16 +218,32 @@ public struct TimelineView: View {
         }
         .task {
             if timeline == nil {
-                timeline = TimelineStore(
+                let store = TimelineStore(
                     // Every day this screen can be anchored at is a day the heatmap named, and
                     // the heatmap's days are the server's UTC ones — see
                     // `HeatmapDateJump.anchorCalendar` for what reading them in the device's zone
                     // would hide.
                     calendar: HeatmapDateJump.anchorCalendar,
+                    snapshots: session.snapshots,
+                    snapshotIdentity: snapshotIdentity,
+                    // The one list in the app that is worth opening on tomorrow.
+                    persists: true,
                     onUnauthorized: { [session] in
                         await session.handle(.unauthorized)
                     }
                 )
+                // Before anything is read off the disk: a store that persists reads the session's
+                // incarnation through this seam, and a picture stamped before it was named would
+                // carry a number belonging to nobody.
+                store.reports(to: session)
+                // Published BEFORE the read, not after it: the read is an await, and the
+                // withdrawal below reaches this store through `timeline`. Assigned afterwards,
+                // an account switch during the read would have nothing to tell.
+                timeline = store
+                // Before `load()`, and that order is the feature: the rows this phone last saw go
+                // on screen while the request that will replace them is still out — or never
+                // answers at all.
+                await store.restoreSnapshot()
             }
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this list (`SessionReporting`).
@@ -239,6 +255,12 @@ public struct TimelineView: View {
             await session.loadSettings()
             // Adopt whatever the last run left in flight before anything new is scheduled.
             await outbox?.start()
+        }
+        // A snapshot on screen belongs to the identity that wrote it. If the session becomes
+        // somebody else's — or nobody's — while it is up, it goes; a list the server has since
+        // sent is left alone.
+        .onChange(of: session.state.user?.subject) {
+            timeline?.sessionIdentityChanged(to: snapshotIdentity)
         }
         // The live media channel, and its single owner.
         //
@@ -703,6 +725,18 @@ public struct TimelineView: View {
         }
         feedback.fire(posted ? .posted : .postFailed)
         return posted
+    }
+
+    /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.
+    ///
+    /// Nil until there is both a server and a user, which is also the only state in which nothing
+    /// should be read off the disk: a snapshot with no signed-in identity to match against is
+    /// somebody's memos and no way to tell whose.
+    private var snapshotIdentity: TimelineSnapshotIdentity? {
+        guard let server = session.serverBaseURL, let subject = session.state.user?.subject else {
+            return nil
+        }
+        return TimelineSnapshotIdentity(server: server, subject: subject)
     }
 
     /// Everything this screen reads from the server, on the one signal that already means "read

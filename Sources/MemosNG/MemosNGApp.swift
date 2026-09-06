@@ -49,7 +49,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     // The account store is composed here, not defaulted inside the session: it writes into the
     // app group, which only a real app has, and the share extension reads what it publishes. The
     // last-known-user file is composed here for the same reason — it is a real container's file,
-    // and a test that got one by default would write into it.
+    // and a test that got one by default would write into it. So is the snapshot store: it is a
+    // directory inside the running app's container, and the session is handed the store rather
+    // than the writer over it, so the writer can only ever be fenced by this session's own epoch.
     //
     // `lazy` because `onVerified` reaches back into this object: the outbox restart is the one
     // thing the session cannot do for itself, and the moment worth restarting on — a credential
@@ -57,6 +59,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     private(set) lazy var session = SessionStore(
         account: OutboxAccountStore.live(),
         lastKnownUser: LastKnownUserFile.live(),
+        snapshots: TimelineSnapshotStore.live(),
         // Synchronous, because that is when the transition happens. What it starts is its own
         // task, and that task re-reads the authority before it drains — a confirmation is not a
         // promise that the session still exists by the time a drain gets a turn.

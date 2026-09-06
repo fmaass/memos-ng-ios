@@ -299,7 +299,7 @@ struct TimelineUpwardPagingTests {
         // The server re-dates a loaded memo to ABOVE the block in flight. The block was bounded
         // below the old order: merged anyway, it would sit above rows it is older than, and the
         // next bound - read from the moved row - would skip everything the move jumped over.
-        store.apply(
+        await store.apply(
             Memo(
                 uid: "b",
                 owner: "fabian",

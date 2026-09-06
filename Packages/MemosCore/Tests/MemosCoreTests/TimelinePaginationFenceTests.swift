@@ -236,7 +236,7 @@ struct TimelinePaginationFenceTests {
             using: client.handle,
             baseURL: Stub.baseURL
         )
-        store.apply(
+        await store.apply(
             MediaEvent(uid: "a1", status: .ready, progressPercent: 100, width: 1000, height: 1000)
         )
         release.set(true)

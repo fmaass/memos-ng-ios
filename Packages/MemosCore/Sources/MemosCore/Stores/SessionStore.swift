@@ -127,6 +127,19 @@ public final class SessionStore {
     /// Kept separate from `sessionGeneration` deliberately — that one fences this store's own
     /// in-flight replies, and merging the two would couple a media decision to a settings one.
     private let identity: MediaIdentity
+    /// The timeline snapshots on this device — read by the timeline, removed only from here.
+    ///
+    /// This store owns their removal for one reason: it is the only object that knows when the
+    /// answer to "whose device is this" changes, and a cached timeline that outlives its credential
+    /// is somebody's memos left behind on a phone nobody is signed in to. It is `public` because
+    /// the timeline writes through the SAME writer — one chain, or a removal and a write in flight
+    /// could pass each other.
+    ///
+    /// BUILT here, over `epoch`, rather than handed in: the writer's only fence is that counter,
+    /// and a writer constructed elsewhere could be given one this session never moves.
+    ///
+    /// Nil unless the app composes one, so a test never deletes out of the running app's cache.
+    public let snapshots: TimelineSnapshotWriter?
     /// A licence that would not delete. It is kept because the thing it describes — a revoked
     /// identity that can still queue captures — outlives the call that failed to remove it, and
     /// the next `restore()` is where it is tried again.
@@ -147,7 +160,10 @@ public final class SessionStore {
     /// It exists for the writers that commit from wherever their work finished. A hop to ask "is
     /// this session still the one I started under" is a suspension, and the suspension is exactly
     /// where the session can end.
-    public nonisolated let epoch = SessionEpoch()
+    ///
+    /// Assigned in `init` rather than here because the snapshot writer is built over this very
+    /// box: one object, held by the session that moves it and by the writer that refuses by it.
+    public nonisolated let epoch: SessionEpoch
     /// The INCARNATION, in a box of its own that a sender can read without hopping.
     ///
     /// Distinct from `epoch` above, and the difference matters to exactly one kind of caller. The
@@ -249,12 +265,20 @@ public final class SessionStore {
         account: (any OutboxAccountPublishing)? = nil,
         identity: MediaIdentity = .shared,
         lastKnownUser: (any LastKnownUserStoring)? = nil,
+        // The DIRECTORY, not a writer over it. The writer is built below, against this
+        // store's own epoch, so nothing can hand it a counter this session does not move.
+        snapshots: TimelineSnapshotStore? = nil,
         onVerified: (@MainActor @Sendable () -> Void)? = nil,
         // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
         // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
         // and a named default would have to be public to be referenced from one.
         diagnostics: (@Sendable (String) -> Void)? = nil
     ) {
+        // ONE box, named before it is stored, because the writer below is built over it and
+        // `self.epoch` cannot be read until every property is in place.
+        let epoch = SessionEpoch()
+        self.epoch = epoch
+        self.snapshots = snapshots.map { TimelineSnapshotWriter(store: $0, epoch: epoch) }
         self.credentials = credentials
         self.makeClient = makeClient
         self.sleeper = sleeper
@@ -726,13 +750,15 @@ public final class SessionStore {
         guard let stored,
             let configuration = ServerConfiguration(serverAddress: stored.address)
         else {
-            // No credential: whatever licence is lying about belongs to nobody. This is also the
-            // retry for a revocation that failed during sign-out.
+            // No credential: whatever licence is lying about belongs to nobody, and neither does
+            // any timeline left on the disk. This is also the retry for a revocation — or a
+            // removal — that failed during sign-out.
             clearAccountLicence()
             // And whatever identity is lying about has no token behind it. The keychain item is
             // `ThisDeviceOnly`, so a device restore lands here with a file and nothing to bind it
-            // to — the orphan this branch exists to reconcile.
-            invalidateIdentityScopedState()
+            // to — the orphan this branch exists to reconcile. And a timeline cached under a
+            // credential that is not there is the same orphan, one file over.
+            await invalidateIdentityScopedState()
             return
         }
         let storedToken = stored.token
@@ -741,6 +767,15 @@ public final class SessionStore {
         // the confirmation. The subject cannot be checked here — that is what the server is for.
         if let published = account?.current(), published.serverBaseURL != configuration.baseURL {
             clearAccountLicence()
+            // The same interrupted switch that left the licence behind left a timeline behind.
+            await snapshots?.removeAll()
+            // And that removal is an await: a sign-out or a sign-in landing inside it owns the
+            // session now, and admitting this stored credential below would install a session
+            // nobody asked for on top of theirs.
+            guard owns(issued) else {
+                MemosLog.session.info("a launch check was overtaken while it cleared a timeline")
+                return
+            }
         }
 
         lastError = nil
@@ -1217,9 +1252,17 @@ public final class SessionStore {
     /// Called from the three places an identity stops being this device's: a wipe, an account
     /// switch, and a launch that finds a licence with no credential behind it. It is deliberately
     /// the only such list — a second place to remember is how one of them ends up missing.
-    private func invalidateIdentityScopedState() {
+    ///
+    /// The snapshot wipe is AWAITED, and it is the last thing here: everything above it is
+    /// synchronous, so by the time the disk is touched the incarnation has already ended and the
+    /// authority epoch has already moved — a picture still on its way to the writer is stamped
+    /// with the epoch before it and is refused there rather than landing behind this removal.
+    /// That ordering is the whole of the guarantee, and it is what `endIncarnation` being called
+    /// FIRST at every one of these three sites buys.
+    private func invalidateIdentityScopedState() async {
         supersedeValidationInFlight()
         forgetLastKnownUser()
+        await snapshots?.removeAll()
     }
 
     /// Writes down who this device is signed in as, bound to the credential the server answered
@@ -1323,7 +1366,15 @@ public final class SessionStore {
         credential = nil
         endIncarnation()
         let installing = sessionGeneration
-        invalidateIdentityScopedState()
+        await invalidateIdentityScopedState()
+        // That call awaits the snapshot removal, and a sign-out or another installation can
+        // complete inside it. Writing the credential afterwards would store one for a session
+        // this device has already left — asked here, before the write, because after it the
+        // token is on the device whatever the caller then decides.
+        guard owns(installing) else {
+            MemosLog.session.info("a sign-in was overtaken before its credential was written")
+            return Persistence(outcome: .storedNowhere, installing: installing)
+        }
         do {
             // ONE call. Two awaits are two critical sections with a gap between them, and this
             // method's own callers run in that gap: a 401 handled or a sign-out tapped between
@@ -1447,17 +1498,24 @@ public final class SessionStore {
         client = nil
         credential = nil
         endIncarnation()
-        invalidateIdentityScopedState()
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         verification = .verified
         persistenceProven = false
         retryInFlight?.cancel()
         retryInFlight = nil
         // Everything above this line is synchronous and belongs to the incarnation this method
-        // just ended. Everything below it happens AFTER a keychain await, and a sign-in can
-        // complete inside that await — so the tail asks whether the session it is about to clear
-        // is still the one it set out to clear.
+        // just ended. Everything below it happens AFTER an await, and a sign-in can complete
+        // inside one — so the number the tail fences on is read while nothing has suspended yet.
         let issued = sessionGeneration
+        // The identity-scoped list, LAST of the synchronous withdrawal: its own tail awaits the
+        // snapshot removal, and nothing above may be left until after that.
+        await invalidateIdentityScopedState()
+        // A sign-in can complete inside that await, and the credential in the keychain is then
+        // ITS credential. Deleting it would sign out a session this method never knew about.
+        guard owns(issued) else {
+            MemosLog.session.info("a sign-out was overtaken before it deleted the credential")
+            return issued
+        }
         // Both halves, whatever either does: a wipe that stopped at the first failure would
         // leave the server address next to a token it could not delete. A failure is REMEMBERED
         // rather than dropped — a device that believes it is signed out while a credential is
