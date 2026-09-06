@@ -104,6 +104,76 @@ struct MediaChannelTests {
     /// The same attachment, mid-transcode.
     private nonisolated static var processingEvent: MediaEvent { SSEFixture.liveEvents[1] }
 
+    // MARK: - more than one list, and an account switch between them
+
+    /// The envelope is judged once per LIST, not once per event.
+    ///
+    /// Applying to the first list awaits — it waits for the picture of that list to reach the
+    /// disk — and an account switch inside that await makes this event somebody else's news. An
+    /// attachment uid means nothing across accounts, so a list that has not seen the event yet
+    /// must not see it at all.
+    @Test("an account switch while the first list applies stops the event before the second")
+    func anIdentityRotationBetweenListsStopsTheEvent() async {
+        let clock = MediaFetchGeneration(defaults: nil)
+        let identity = MediaIdentity(clock: clock)
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "media-channel-identity")
+            .appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Self.memo("pending")]))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let writes = Counter()
+        let writer = TimelineSnapshotWriter(
+            store: TimelineSnapshotStore(
+                root: root,
+                writeData: { data, url in
+                    writes.increment()
+                    // The load's own picture goes through untouched. The next one is the event's,
+                    // and the account switches while it is being written.
+                    if writes.count > 1 { clock.rotate() }
+                    try data.write(to: url, options: .atomic)
+                }
+            ),
+            epoch: SessionEpoch()
+        )
+        let first = TimelineStore(
+            snapshots: writer,
+            snapshotIdentity: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "fabian"),
+            persists: true
+        )
+        let second = TimelineStore()
+        await first.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await second.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(
+            second.memos.first?.attachments.first?.readiness == .waiting,
+            "control: the second list starts where the first one does"
+        )
+
+        await MediaChannel.consume(
+            channel([.event(envelope(Self.readyEvent))]),
+            into: first,
+            alongside: { [second] },
+            using: client.handle,
+            baseURL: Stub.baseURL,
+            identity: identity
+        )
+
+        #expect(
+            first.memos.first?.attachments.first?.readiness == .ready,
+            "control: the list the event reached first did apply it"
+        )
+        #expect(
+            second.memos.first?.attachments.first?.readiness == .waiting,
+            "an event applied to a list after the account it belonged to had changed"
+        )
+    }
+
     // MARK: - the whole point
 
     @Test("a waiting tile goes ready on its event, carrying the layout the worker wrote")

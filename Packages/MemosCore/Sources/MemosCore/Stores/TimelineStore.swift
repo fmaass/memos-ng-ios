@@ -117,12 +117,22 @@ public final class TimelineStore {
     /// being opened as "the timeline" on the next launch. Nil until a first page has replaced the
     /// list at all.
     private var admittedQuery: MemoQuery?
-    /// The memos carrying a change this app has made on screen and the server has not confirmed.
+    /// The memos carrying a change this app has made on screen and the server has not confirmed,
+    /// each under the CLAIM that made it.
     ///
     /// Nothing is written down while one of these is outstanding: a tick that is about to be put
     /// back is not a state a next launch should open on. The settle — the server's answer, or the
     /// rollback — is itself a change to the list, so the write follows it.
-    private var optimistic: Set<String> = []
+    ///
+    /// A claim rather than a bare uid because a release happens after awaits, and by then the
+    /// entry under that uid may belong to somebody else: an identity change empties this map, and
+    /// the next tap on the same memo makes a NEW claim. A release that removed whatever it found
+    /// would retire that one and let a third request overlap it, which is the very thing the map
+    /// exists to prevent. So a release names the claim it owns and a stale one does nothing.
+    private var optimistic: [String: Int] = [:]
+    /// The last claim handed out. Never reset — a number that comes round again is a claim that
+    /// can be released by the wrong owner.
+    private var optimisticClaim = 0
     /// A change that was not written because something optimistic was outstanding at the time.
     private var snapshotDirty = false
     /// This store's claim on its identity, once the writer has issued one. Nil until it has: a
@@ -178,9 +188,18 @@ public final class TimelineStore {
     public func restoreSnapshot() async {
         guard memos.isEmpty, query.isEmpty, !identityWithdrawn else { return }
         guard let snapshots, let snapshotIdentity else { return }
+        // Taken BEFORE the first suspension, and compared after the last one. The claim and the
+        // read are both awaits, and a session can end inside either: rendering afterwards would
+        // put one account's memos on a device that has become somebody else's — and the store's
+        // own `identityWithdrawn` cannot answer it, because that only moves if somebody tells
+        // this store, and the incarnation moves whether anybody does or not.
+        let issued = lineage
         await claimProducer()
         guard let snapshot = await snapshots.read(identity: snapshotIdentity) else { return }
-        guard memos.isEmpty, !identityWithdrawn else { return }
+        guard memos.isEmpty, !identityWithdrawn, issued == lineage else {
+            MemosLog.api.info("a snapshot read under a session that has moved on was not rendered")
+            return
+        }
         memos = snapshot.memos
         showingSnapshot = true
     }
@@ -224,13 +243,13 @@ public final class TimelineStore {
     /// Only the plain timeline is kept. An anchored day, a tag filter or a search result is an
     /// answer to a question nobody will ask again on the next launch, and opening the app on one
     /// would be opening it on a list the reader never chose.
-    private func commit(_ next: [Memo], issuedUnder lineage: Lineage) async {
+    private func commit(_ next: [Memo], under authority: Int) async {
         memos = next
         // Whatever is on screen now came from the server, not from the disk.
         showingSnapshot = false
         // This number is how the writer tells which of two pictures THIS store took is the newer.
         listRevision += 1
-        await persist(issuedUnder: lineage)
+        await persist(under: authority)
     }
 
     /// Claims this identity for this store, once, retiring whoever held it before.
@@ -250,7 +269,7 @@ public final class TimelineStore {
     }
 
     /// Writes the picture, when there is one worth writing.
-    private func persist(issuedUnder lineage: Lineage) async {
+    private func persist(under authority: Int) async {
         guard persists, !identityWithdrawn else { return }
         // BOTH queries: the one the rows were admitted under, and the one being asked for now. A
         // list of default rows with an anchor already requested is a list about to be replaced —
@@ -276,19 +295,32 @@ public final class TimelineStore {
             producer: producer,
             revision: listRevision,
             query: .empty,
-            // The AUTHORITY, not the incarnation: the writer's refusal is about the credential
-            // this device holds, and it is read again — synchronously, on the writer — at the
-            // moment the bytes are about to land.
-            session: lineage.authority
+            // The AUTHORITY the operation was ISSUED under, not the one now: the writer's refusal
+            // is about the credential this device was holding when the change was asked for, and
+            // it is read again — synchronously, on the writer — at the moment the bytes land.
+            session: authority
         )
     }
 
     /// An optimistic change has been answered — confirmed, or put back — so the list is once again
     /// something a next launch may open on. Anything held back while it was outstanding goes now.
-    private func settle(_ uid: String, issuedUnder lineage: Lineage) async {
-        optimistic.remove(uid)
+    ///
+    /// LAST, after the apply or the rollback it belongs to has been awaited to the end: a claim
+    /// released before that is a claim a second tap can take while the first one is still landing,
+    /// and the first one's settle would then retire the second's.
+    private func settle(_ uid: String, claim: Int, under authority: Int) async {
+        release(uid, claim: claim)
         guard optimistic.isEmpty, snapshotDirty else { return }
-        await persist(issuedUnder: lineage)
+        await persist(under: authority)
+    }
+
+    /// Gives up ONE claim on a memo — the caller's own, or nothing.
+    ///
+    /// A release that ran after an identity change would otherwise take the incoming identity's
+    /// claim with it (`sessionIdentityChanged` empties the map, and the next tap makes a new one).
+    private func release(_ uid: String, claim: Int) {
+        guard optimistic[uid] == claim else { return }
+        optimistic.removeValue(forKey: uid)
     }
 
     /// Asks for a different list.
@@ -324,22 +356,6 @@ public final class TimelineStore {
         /// and answered after the device became somebody else's — or nobody's — continues nothing:
         /// it must not reach the list, and therefore it cannot reach the disk either.
         var session: Int
-        /// The AUTHORITY epoch the operation was issued under, carried to the snapshot writer and
-        /// compared by nothing else here.
-        ///
-        /// Two numbers rather than one because they answer different questions. The authority
-        /// epoch also moves on a token RENEWAL, which replaces the credential without ending the
-        /// session: judging the LIST by it would void every page in flight whenever a renewal
-        /// landed, and a voided page is not retried. So it is deliberately outside `==` below —
-        /// equality asks one question, "is this still the list the answer was asked for", and the
-        /// credential the request went out on is not part of it.
-        var authority: Int
-
-        /// Hand-written for the reason above: `authority` is carried, never compared.
-        static func == (lhs: Lineage, rhs: Lineage) -> Bool {
-            lhs.generation == rhs.generation && lhs.query == rhs.query
-                && lhs.session == rhs.session
-        }
     }
 
     private var lineage: Lineage {
@@ -349,13 +365,24 @@ public final class TimelineStore {
             // The incarnation, from the session itself. A store with no session named to it has
             // nothing to be wrong about and reads zero — the same answer `sessionStillCurrent`
             // gives one.
-            session: session?.sessionIncarnation.current ?? 0,
-            // The authority, from the very box the writer refuses on. Asked of the writer rather
-            // than held here, so a store cannot stamp its pictures with a counter the writer is
-            // not judging them by.
-            authority: snapshots?.epoch.current ?? 0
+            session: session?.sessionIncarnation.current ?? 0
         )
     }
+
+    /// The authority epoch to stamp a picture of this list with, read at the moment an operation
+    /// is ISSUED and carried through it.
+    ///
+    /// It is NOT part of the lineage, and the difference is the point. The authority epoch also
+    /// moves on a token renewal, which replaces the credential without ending the session: judging
+    /// the LIST by it would drop every page in flight whenever a renewal landed, and nothing
+    /// retries a dropped page. The list is judged by the incarnation; only the WRITE is judged by
+    /// this, and only to be refused (`TimelineSnapshotWriter.write`).
+    ///
+    /// Read from the very box the writer refuses on, so a store cannot stamp its pictures with a
+    /// counter that is not the one judging them. Every operation takes it ONCE, before its
+    /// request goes out, and hands it to every apply point it reaches — re-reading it when the
+    /// answer comes back would stamp the picture with an authority the request never had.
+    private func issuedAuthority() -> Int { snapshots?.epoch.current ?? 0 }
 
     /// Which lineage the first page in flight belongs to, or nil when none is.
     ///
@@ -372,6 +399,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         let lineage = self.lineage
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
@@ -419,7 +449,7 @@ public final class TimelineStore {
             admittedQuery = lineage.query
             // Last, and awaited: everything this list says about itself is already true when the
             // picture of it is taken.
-            await commit(admitted(page.memos), issuedUnder: lineage)
+            await commit(admitted(page.memos), under: authority)
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
             // any more would put an error over a list that loaded perfectly well — and, on a 401,
@@ -453,6 +483,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -466,8 +499,7 @@ public final class TimelineStore {
             let lineage = Lineage(
                 generation: timelineGeneration,
                 query: query,
-                session: issued.session,
-                authority: issued.authority
+                session: issued.session
             )
             do {
                 let page = try await Self.page(
@@ -501,7 +533,7 @@ public final class TimelineStore {
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
-                await commit(merged, issuedUnder: lineage)
+                await commit(merged, under: authority)
                 return
             } catch {
                 // Fenced exactly as the page above it is: a failure that answers a superseded
@@ -556,6 +588,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         guard !isLoadingNewer, !isLoading, hasNewer else { return nil }
         isLoadingNewer = true
         defer { isLoadingNewer = false }
@@ -607,7 +642,7 @@ public final class TimelineStore {
                 let fresh = admitted(page.memos.filter { !known.contains($0.uid) })
                 lastError = nil
                 if !fresh.isEmpty {
-                    await commit(Array(fresh.reversed()) + memos, issuedUnder: lineage)
+                    await commit(Array(fresh.reversed()) + memos, under: authority)
                     return previousTop
                 }
                 guard let next = page.nextCursor else { return nil }
@@ -741,6 +776,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         do {
             let response = try await client.createMemoApiMemosPost(
                 .init(body: .json(.init(content: content, visibility: visibility?.generated)))
@@ -750,7 +788,9 @@ public final class TimelineStore {
                 guard sessionStillCurrent(handle) else { return false }
                 let memo = admitted(Memo(try created.body.json, baseURL: baseURL))
                 lastError = nil
-                await commit(Self.placed(memo, in: memos, tie: .justCreated), issuedUnder: lineage)
+                await commit(
+                    Self.placed(memo, in: memos, tie: .justCreated), under: authority
+                )
                 return true
             // Declared since the strict linking contract: the server refuses to create a memo
             // whose uploads it cannot link, rather than quietly dropping them. This path never
@@ -806,6 +846,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // No authority is taken here: this method issues no request that changes the LIST. The
+        // uploads write nothing down, and the patch below is issued inside `patch`, which takes
+        // its own at the moment it sends.
         let key = editKey(
             for: MemoEditAttempt(
                 uid: uid, content: content, createdAt: createdAt, files: files
@@ -970,6 +1013,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         do {
             // Each response is switched on rather than reached through the generated throwing
             // accessors: those throw an untyped "unexpected status" error, and a 401 that does not
@@ -996,8 +1042,10 @@ public final class TimelineStore {
             // round: `placed` called here directly bypassed exactly that fence).
             guard sessionStillCurrent(handle) else { return false }
             let updated = Memo(json, baseURL: baseURL)
-            await apply(updated)
+            // Before the apply, which awaits: a line cleared afterwards would be cleared for
+            // whatever session the answer came back into.
             lastError = nil
+            await apply(updated, under: authority)
             return true
         } catch {
             await report(error, issuedUnder: handle)
@@ -1014,6 +1062,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         do {
             let response = try await client.deleteMemoApiMemosUidDelete(
                 .init(path: .init(uid: uid))
@@ -1026,7 +1077,7 @@ public final class TimelineStore {
                 // screen. It belongs to the list that still had this row; this one does not.
                 timelineGeneration += 1
                 lastError = nil
-                await commit(memos.filter { $0.uid != uid }, issuedUnder: lineage)
+                await commit(memos.filter { $0.uid != uid }, under: authority)
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -1086,6 +1137,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         // Asked HERE, before the send, and not only of the answer below. This runs in a Task of
         // its own (`deleteAttachment` claims the slot and spawns), so the session can be withdrawn
         // between the handle being captured and this body starting — and a DELETE is not a read:
@@ -1108,8 +1162,9 @@ public final class TimelineStore {
                 guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
             }
             guard sessionStillCurrent(handle) else { return false }
-            await forget(uid, from: memoUID)
+            // Before the forget, which awaits its way to the disk: see `setPinned`.
             lastError = nil
+            await forget(uid, from: memoUID, under: authority)
             return true
         } catch {
             await report(error, issuedUnder: handle)
@@ -1121,12 +1176,12 @@ public final class TimelineStore {
     ///
     /// In place, by uid: the memo's own ordering keys did not move, so it keeps its position and
     /// nothing is re-placed. The tombstone is what the rest of the store reads — see `admitted`.
-    private func forget(_ attachment: String, from memoUID: String) async {
+    private func forget(_ attachment: String, from memoUID: String, under authority: Int) async {
         removedAttachments.insert(attachment)
         guard let position = memos.firstIndex(where: { $0.uid == memoUID }) else { return }
         var next = memos
         next[position].attachments.removeAll { $0.uid == attachment }
-        await commit(next, issuedUnder: lineage)
+        await commit(next, under: authority)
     }
 
     /// The delete in flight for each attachment uid, so a second call for one of them joins it
@@ -1203,6 +1258,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         // Read BEFORE the request goes out. What it is compared against on the way back is which
         // attachments the stream spoke about while the answer was in the air.
         let appliedWhenIssued = liveApplications
@@ -1212,7 +1270,7 @@ public final class TimelineStore {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return false }
                 let read = Memo(try ok.body.json, baseURL: baseURL)
-                await apply(reconciled(read, issuedWith: appliedWhenIssued))
+                await apply(reconciled(read, issuedWith: appliedWhenIssued), under: authority)
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -1273,13 +1331,16 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return nil }
                 let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
-                await apply(memo)
+                await apply(memo, under: authority)
                 return memo
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -1348,13 +1409,19 @@ public final class TimelineStore {
     /// nothing on screen reads, which is the shape of the reconnect churn this channel is supposed
     /// not to have.
     public func apply(_ event: MediaEvent) async {
+        // Entry IS the issue point for an event: nothing was asked of the server, the stream said
+        // something and this is the moment it is acted on.
+        await apply(event, under: issuedAuthority())
+    }
+
+    private func apply(_ event: MediaEvent, under authority: Int) async {
         let next = applyMediaEvent(event, to: memos)
         guard next != memos else { return }
         // The one attachment this event named, and only because it really moved: a read already
         // in the air is now the older word on THIS file and still the newer word on every other
         // one — see `reconciled(_:issuedWith:)`.
         liveApplications[event.uid, default: 0] += 1
-        await commit(next, issuedUnder: lineage)
+        await commit(next, under: authority)
     }
 
     /// How many live media events this list has APPLIED to each ATTACHMENT.
@@ -1396,13 +1463,20 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         // Refused, not joined, and the difference is the point: the second tap's INTENT depends on
         // what the first one turns out to have done. A join would send one request and report its
         // answer to both, which is a lie to whichever tap wanted the other state; a queue would send
         // the second tick derived from a content the server may be about to reject. One outstanding
         // toggle per memo, and the second tap is simply not taken (a store serializes its own
         // mutations).
-        guard !optimistic.contains(uid) else { return false }
+        //
+        // The claim is held until this invocation has finished LANDING — the apply and the picture
+        // of the list it commits are both awaits, and a tap taken inside them would be a second
+        // request on a memo whose first answer is still being written down.
+        guard optimistic[uid] == nil else { return false }
         guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
         let original = memos[position]
         let toggled = MemosCore.toggleTask(original.content, at: index)
@@ -1411,7 +1485,9 @@ public final class TimelineStore {
         // NOT through `commit`, and that is the point: a tick nobody has confirmed is not a state
         // the next launch should open on. The memo is marked instead, which holds every OTHER
         // change out of the file until this one is answered — see `persist` and `settle`.
-        optimistic.insert(uid)
+        optimisticClaim += 1
+        let claim = optimisticClaim
+        optimistic[uid] = claim
         memos[position].content = toggled
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
@@ -1419,15 +1495,19 @@ public final class TimelineStore {
             )
             switch response {
             case .ok(let ok):
-                // Released before the fence below, because it is this store's own bookkeeping
-                // rather than a fact about the list: the request the claim was held for is over
-                // whoever the device belongs to now, and a claim left behind would refuse every
-                // later tap on this memo and hold the file back for good.
-                optimistic.remove(uid)
-                guard sessionStillCurrent(handle) else { return false }
-                await apply(Memo(try ok.body.json, baseURL: baseURL))
-                await settle(uid, issuedUnder: lineage)
+                // The session may have ended while the patch was out. The claim goes either way —
+                // the request it was held for is over — but it goes AFTER the work it guards, and
+                // never over another owner's (`release`).
+                guard sessionStillCurrent(handle) else {
+                    release(uid, claim: claim)
+                    return false
+                }
+                // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
+                await apply(Memo(try ok.body.json, baseURL: baseURL), under: authority)
+                // LAST: the apply above is awaited, and a tap taken inside it would overlap this
+                // one. The settle releases the claim and then writes whatever it was holding back.
+                await settle(uid, claim: claim, under: authority)
                 return true
             // The strict linking refusal is declared on the patch too. A ticked checkbox names no
             // upload, so this is reported rather than recovered from — recovering would mean
@@ -1455,19 +1535,21 @@ public final class TimelineStore {
             // fails, and a raw restore would put the picture back on a memo the server has no
             // copy of it for. The tick still rolls back — that is what the snapshot is for — and
             // only what the server has confirmed gone is left out of it.
-            // Released first, for the reason the success path releases first: the claim
-            // describes a request, and this one is over.
-            optimistic.remove(uid)
             // The rollback is a WRITE, and a write for a session that has ended belongs to
             // nobody: the row it would put back is the previous account's, and the list it would
-            // put it into is the next one's.
-            guard sessionStillCurrent(handle) else { return false }
+            // put it into is the next one's. The claim is given up either way, and only ever the
+            // one this invocation made.
+            guard sessionStillCurrent(handle) else {
+                release(uid, claim: claim)
+                return false
+            }
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
                 var restored = memos
                 restored[current] = admitted(original)
-                await commit(restored, issuedUnder: lineage)
+                await commit(restored, under: authority)
             }
-            await settle(uid, issuedUnder: lineage)
+            // After the rollback has landed, for the reason the success path settles last.
+            await settle(uid, claim: claim, under: authority)
             await report(error, issuedUnder: handle)
             return false
         }
@@ -1484,6 +1566,9 @@ public final class TimelineStore {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(body))
@@ -1496,8 +1581,9 @@ public final class TimelineStore {
                 // otherwise land in the next one — clearing ITS error line and telling the sheet
                 // the save went through, for a session that no longer exists.
                 guard sessionStillCurrent(handle) else { return false }
-                await apply(Memo(try ok.body.json, baseURL: baseURL))
+                // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
+                await apply(Memo(try ok.body.json, baseURL: baseURL), under: authority)
                 return true
             // Either a named upload the server cannot link, or an edit key already bound to a
             // DIFFERENT memo. Neither is recoverable here: the uploads this call named are spent,
@@ -1540,6 +1626,10 @@ public final class TimelineStore {
     /// the one place every server answer lands, so an archive made from a card, from the memo's own
     /// screen, or noticed by the reconciling read all reach the same conclusion.
     public func apply(_ memo: Memo) async {
+        await apply(memo, under: issuedAuthority())
+    }
+
+    private func apply(_ memo: Memo, under authority: Int) async {
         let memo = admitted(memo)
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
         guard query.admitsArchiveState(of: memo) else {
@@ -1549,14 +1639,14 @@ public final class TimelineStore {
             newerCursor = nil
             var next = memos
             next.remove(at: position)
-            await commit(next, issuedUnder: lineage)
+            await commit(next, under: authority)
             return
         }
         let previous = memos[position]
         guard previous.createdAt != memo.createdAt || previous.pinned != memo.pinned else {
             var next = memos
             next[position] = memo
-            await commit(next, issuedUnder: lineage)
+            await commit(next, under: authority)
             return
         }
         // An ordering key moved, so the order every in-flight page was measured against is gone:
@@ -1565,7 +1655,7 @@ public final class TimelineStore {
         // over. Same fence as setQuery: the lineage moves, and stale answers drop on arrival.
         timelineGeneration += 1
         newerCursor = nil
-        await commit(Self.placed(memo, in: memos, tie: .alreadyExisted), issuedUnder: lineage)
+        await commit(Self.placed(memo, in: memos, tie: .alreadyExisted), under: authority)
     }
 
     /// The loaded list with one memo put where the server's own ordering puts it, replacing any

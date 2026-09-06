@@ -236,11 +236,14 @@ public struct TimelineView: View {
                 // incarnation through this seam, and a picture stamped before it was named would
                 // carry a number belonging to nobody.
                 store.reports(to: session)
+                // Published BEFORE the read, not after it: the read is an await, and the
+                // withdrawal below reaches this store through `timeline`. Assigned afterwards,
+                // an account switch during the read would have nothing to tell.
+                timeline = store
                 // Before `load()`, and that order is the feature: the rows this phone last saw go
                 // on screen while the request that will replace them is still out — or never
                 // answers at all.
                 await store.restoreSnapshot()
-                timeline = store
             }
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this list (`SessionReporting`).

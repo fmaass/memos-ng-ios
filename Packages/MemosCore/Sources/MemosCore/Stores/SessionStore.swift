@@ -769,6 +769,13 @@ public final class SessionStore {
             clearAccountLicence()
             // The same interrupted switch that left the licence behind left a timeline behind.
             await snapshots?.removeAll()
+            // And that removal is an await: a sign-out or a sign-in landing inside it owns the
+            // session now, and admitting this stored credential below would install a session
+            // nobody asked for on top of theirs.
+            guard owns(issued) else {
+                MemosLog.session.info("a launch check was overtaken while it cleared a timeline")
+                return
+            }
         }
 
         lastError = nil
@@ -1360,6 +1367,14 @@ public final class SessionStore {
         endIncarnation()
         let installing = sessionGeneration
         await invalidateIdentityScopedState()
+        // That call awaits the snapshot removal, and a sign-out or another installation can
+        // complete inside it. Writing the credential afterwards would store one for a session
+        // this device has already left — asked here, before the write, because after it the
+        // token is on the device whatever the caller then decides.
+        guard owns(installing) else {
+            MemosLog.session.info("a sign-in was overtaken before its credential was written")
+            return Persistence(outcome: .storedNowhere, installing: installing)
+        }
         do {
             // ONE call. Two awaits are two critical sections with a gap between them, and this
             // method's own callers run in that gap: a 401 handled or a sign-out tapped between
@@ -1495,6 +1510,12 @@ public final class SessionStore {
         // The identity-scoped list, LAST of the synchronous withdrawal: its own tail awaits the
         // snapshot removal, and nothing above may be left until after that.
         await invalidateIdentityScopedState()
+        // A sign-in can complete inside that await, and the credential in the keychain is then
+        // ITS credential. Deleting it would sign out a session this method never knew about.
+        guard owns(issued) else {
+            MemosLog.session.info("a sign-out was overtaken before it deleted the credential")
+            return issued
+        }
         // Both halves, whatever either does: a wipe that stopped at the first failure would
         // leave the server address next to a token it could not delete. A failure is REMEMBERED
         // rather than dropped — a device that believes it is signed out while a credential is

@@ -181,6 +181,12 @@ public enum MediaChannel {
             case .event(let envelope):
                 guard let event = envelope.eventIfCurrent(for: identity) else { continue }
                 for list in lists {
+                    // The identity, AGAIN, once per list. Applying to the first one awaits — it
+                    // waits for the picture of that list on disk to be written — and an account
+                    // switch inside that await makes this event somebody else's news: an
+                    // attachment uid means nothing across accounts, so the lists that have not
+                    // seen it yet must not see it at all.
+                    guard envelope.eventIfCurrent(for: identity) != nil else { break }
                     // Read on this actor, at the moment the answer is used. The apply below does
                     // await — it waits for the picture of the list on disk to be written — so the
                     // list CAN move under it; that is harmless because `apply` re-derives the

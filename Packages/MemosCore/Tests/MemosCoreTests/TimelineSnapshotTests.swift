@@ -1176,6 +1176,362 @@ struct TimelineSnapshotTests {
         #expect(onDisk(root)?.memos.count == 2, "a list under a requested anchor was written")
     }
 
+    // MARK: - what the new awaits opened (review round 2)
+
+    /// A sign-in that has been superseded while its own wipe was on the writer must not go on to
+    /// write its credential: the device belongs to whoever came after it.
+    @Test("a sign-in overtaken inside the snapshot wipe writes no credential")
+    func aSupersededSignInWritesNothing() async {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = LockedValue<Bool>(false)
+        let credentials = CountingCredentials()
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            snapshots: TimelineSnapshotStore(
+                root: root,
+                removeItem: { url in
+                    entered.set(true)
+                    // Long enough for the sign-out below to take the session away while this
+                    // sign-in is still inside its own wipe.
+                    Thread.sleep(forTimeInterval: 0.05)
+                    try? FileManager.default.removeItem(at: url)
+                }
+            )
+        )
+
+        let signingIn = Task {
+            await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_new")
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        await session.signOutWithoutRevoking()
+        await signingIn.value
+
+        #expect(
+            credentials.writeCount == 0,
+            "a sign-in that no longer owned the session stored its credential anyway"
+        )
+    }
+
+    /// The mirror: a sign-out that has been superseded while its wipe was on the writer must not
+    /// delete the credential the NEWER sign-in has just stored.
+    @Test("a sign-out overtaken inside the snapshot wipe deletes no credential")
+    func aSupersededSignOutDeletesNothing() async {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = LockedValue<Bool>(false)
+        let credentials = CountingCredentials()
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            snapshots: TimelineSnapshotStore(
+                root: root,
+                removeItem: { url in
+                    entered.set(true)
+                    Thread.sleep(forTimeInterval: 0.05)
+                    try? FileManager.default.removeItem(at: url)
+                }
+            )
+        )
+
+        let signingOut = Task { await session.signOutWithoutRevoking() }
+        while !entered.get() {
+            await Task.yield()
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_new")
+        await signingOut.value
+
+        #expect(
+            credentials.removeCount == 0,
+            "a sign-out that no longer owned the session deleted a newer credential"
+        )
+        #expect(
+            credentials.snapshot()[SessionStore.tokenAccount] == "memos_pat_new",
+            "control: the newer sign-in did store its credential"
+        )
+    }
+
+    /// The launch check clears the timeline an interrupted account switch left, and that removal
+    /// is an await. A session that ended inside it must not have this stored credential admitted
+    /// on top of whatever came next.
+    @Test("a launch check overtaken inside the snapshot wipe admits nothing")
+    func aSupersededRestoreAdmitsNothing() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = LockedValue<Bool>(false)
+        let credentials = CountingCredentials()
+        try credentials.set("memos_pat_good", for: SessionStore.tokenAccount)
+        try credentials.set(Stub.baseURL.absoluteString, for: SessionStore.serverAccount)
+        let account = SpyAccountStore()
+        account.publish(
+            AccountBinding(
+                serverBaseURL: URL(string: "https://other.example.invalid")!,
+                ownerSubject: "somebody-else"
+            )
+        )
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            account: account,
+            snapshots: TimelineSnapshotStore(
+                root: root,
+                removeItem: { url in
+                    entered.set(true)
+                    Thread.sleep(forTimeInterval: 0.05)
+                    try? FileManager.default.removeItem(at: url)
+                }
+            )
+        )
+
+        let restoring = Task { await session.restore() }
+        while !entered.get() {
+            await Task.yield()
+        }
+        await session.signOutWithoutRevoking()
+        await restoring.value
+
+        #expect(
+            session.state.user == nil,
+            "a launch check admitted a credential for a session that had already ended"
+        )
+    }
+
+    /// A tap taken while the first one's answer is still landing must not be RETIRED by that
+    /// answer: the claim under a memo belongs to whoever made it, and a settle that removed
+    /// whatever it found would let a third request overlap the second.
+    @Test("a settle does not retire a claim made while its own answer was landing")
+    func aSettleDoesNotRetireAClaimMadeWhileItLanded() async {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let patches = Counter()
+        let writes = Counter()
+        let applying = LockedValue<Bool>(false)
+        let releaseWrite = LockedValue<Bool>(false)
+        let releasePatch = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            guard operation.contains("patch_memo") else {
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "- [ ] task")]))
+            }
+            patches.increment()
+            // The FIRST answer comes straight back; every later one is held, so a claim made
+            // while the first was landing is still outstanding when the third tap is tried.
+            if patches.count > 1 {
+                while !releasePatch.get() {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+            }
+            return Stub.json(Stub.memo(uid: "a", content: "- [x] task"))
+        }
+        let shared = writer(root: root) { data, url in
+            writes.increment()
+            // The load's own picture goes straight through. The next one is the tap's, and
+            // holding it open is what gives a second tap somewhere to land.
+            if writes.count > 1 {
+                applying.set(true)
+                while !releaseWrite.get() {
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+            }
+            try data.write(to: url, options: .atomic)
+        }
+        let timeline = store(writer: shared)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        let first = Task {
+            await timeline.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while !applying.get() {
+            await Task.yield()
+        }
+        let second = Task {
+            await timeline.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while patches.count < 2 {
+            await Task.yield()
+        }
+        releaseWrite.set(true)
+        let ticked = await first.value
+        // The second tap is still on the wire. A third must find its claim, not a hole the first
+        // one's settle punched in it.
+        let third = await timeline.toggleTask(
+            at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL
+        )
+        releasePatch.set(true)
+        _ = await second.value
+
+        #expect(ticked, "control: the first tap went through")
+        #expect(!third, "a third tap was taken while the second was still outstanding")
+        #expect(patches.count == 2, "the first answer's settle admitted a third request")
+    }
+
+    /// A claim belongs to the tap that made it. An identity change empties the claims, the next
+    /// tap makes a new one, and the settle of the tap from BEFORE the change must not retire it.
+    @Test("a settle from before an identity change does not retire the claim made after it")
+    func aStaleSettleDoesNotRetireANewerClaim() async {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let patches = Counter()
+        let releaseFirst = LockedValue<Bool>(false)
+        let releaseSecond = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            guard operation.contains("patch_memo") else {
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "- [ ] task")]))
+            }
+            patches.increment()
+            let mine = patches.count
+            while mine == 1 ? !releaseFirst.get() : !releaseSecond.get() {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            return Stub.json(Stub.memo(uid: "a", content: "- [x] task"))
+        }
+        let timeline = store(writer: writer(root: root))
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        let outgoing = Task {
+            await timeline.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while patches.count < 1 {
+            await Task.yield()
+        }
+        // The device becomes somebody else's, which empties the claims this store was holding.
+        timeline.sessionIdentityChanged(
+            to: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "somebody-else")
+        )
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let incoming = Task {
+            await timeline.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while patches.count < 2 {
+            await Task.yield()
+        }
+        // Only now does the FIRST answer come back, so its settle runs with the incoming tap's
+        // claim sitting under the same uid.
+        releaseFirst.set(true)
+        _ = await outgoing.value
+
+        let third = await timeline.toggleTask(
+            at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL
+        )
+        releaseSecond.set(true)
+        _ = await incoming.value
+
+        #expect(!third, "a third tap was taken while the second was still outstanding")
+        #expect(patches.count == 2, "the settle of a retired tap admitted a third request")
+    }
+
+    /// A snapshot read spans two awaits, and a session can end inside either. What comes back is
+    /// judged against the incarnation that ASKED for it, not against whoever is signed in when the
+    /// bytes arrive — nobody has to tell this store anything for that to hold.
+    @Test("a snapshot read under a session that has since ended is not rendered")
+    func aSnapshotReadAcrossASessionEndIsNotRendered() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try write(to: root)
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        // The session moves the incarnation and keeps NO snapshots of its own, so the file this
+        // case is about survives the sign-out and the read really does have something to render.
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let shared = writer(root: root) { data, url in
+            entered.set(true)
+            while !release.get() {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            try data.write(to: url, options: .atomic)
+        }
+        let occupier = store(writer: shared, identity: identity)
+        let timeline = store(writer: shared)
+        timeline.reports(to: session)
+        // Occupies the writer, so the restore below is suspended on it rather than racing.
+        let busy = Task {
+            await occupier.refresh(using: page(["occupier"]).handle, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        let restoring = Task { await timeline.restoreSnapshot() }
+        // The restore is on this actor and has nothing to do but reach the writer and stop.
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+
+        await session.signOutWithoutRevoking()
+        release.set(true)
+        await busy.value
+        await restoring.value
+
+        #expect(
+            timeline.memos.isEmpty,
+            "a snapshot read as one person was rendered for a device that had become nobody's"
+        )
+    }
+
+    /// The picture is stamped with the authority the operation was ISSUED under. A renewal that
+    /// lands while the request is out replaces the credential, so the writer refuses the picture —
+    /// while the list itself, judged by the incarnation, takes the answer.
+    @Test("a picture issued before a renewal is refused, and the list still applies")
+    func aPictureKeepsTheAuthorityItWasIssuedUnder() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let session = signedInSession(root: root) { _, _, operation in
+            switch operation {
+            case tokenRenewOperation:
+                return Stub.json(Stub.exchange(token: "memos_pat_next"))
+            case tokenReadOperation:
+                return Stub.json(Stub.nativeToken(name: "Fabian's iPhone"))
+            case let op where op.contains("delete_memo"):
+                entered.set(true)
+                while !release.get() {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+                return Stub.empty(.noContent)
+            case listMemosOperation:
+                return Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
+            default:
+                return Stub.json(Stub.user)
+            }
+        }
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_first")
+        let timeline = store(writer: try #require(session.snapshots))
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await timeline.refresh(using: handle, baseURL: Stub.baseURL)
+        #expect(onDisk(root)?.memos.map(\.uid) == ["a", "b"], "control: the load was written down")
+
+        let deleting = Task { await timeline.delete(uid: "a", using: handle) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        _ = await session.renewDeviceToken()
+        release.set(true)
+        let deleted = await deleting.value
+
+        #expect(deleted, "control: the server confirmed the delete")
+        #expect(timeline.memos.map(\.uid) == ["b"], "the list did not take its own answer")
+        #expect(
+            onDisk(root)?.memos.map(\.uid) == ["a", "b"],
+            "a picture stamped with an authority the request never had was written"
+        )
+    }
+
     // MARK: - hand-built envelopes
 
     private func write(
@@ -1194,4 +1550,36 @@ struct TimelineSnapshotTests {
         )
         try JSONEncoder().encode(envelope).write(to: root.appending(path: identity.fileName))
     }
+}
+
+/// An in-memory keychain that COUNTS what was asked of it.
+///
+/// The final contents cannot answer these cases: a superseded write followed by somebody else's
+/// delete, and a superseded delete followed by somebody else's write, both end in a state that
+/// looks innocent. What was ASKED is the fact.
+private final class CountingCredentials: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+    private var writes = 0
+    private var removals = 0
+
+    func set(_ value: String, for account: String) throws {
+        lock.withLock {
+            storage[account] = value
+            writes += 1
+        }
+    }
+
+    func string(for account: String) throws -> String? { lock.withLock { storage[account] } }
+
+    func remove(_ account: String) throws {
+        lock.withLock {
+            storage.removeValue(forKey: account)
+            removals += 1
+        }
+    }
+
+    var writeCount: Int { lock.withLock { writes } }
+    var removeCount: Int { lock.withLock { removals } }
+    func snapshot() -> [String: String] { lock.withLock { storage } }
 }
