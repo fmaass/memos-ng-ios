@@ -254,12 +254,19 @@ struct ComposeAttachmentsTests {
 
     @Test("a file that could not be read blocks Post rather than being dropped quietly")
     func failedImportBlocksPost() {
-        #expect(ComposeAttachments.canPost(text: "hi", imported: 0, failed: 0, isBusy: false))
-        #expect(ComposeAttachments.canPost(text: "", imported: 1, failed: 0, isBusy: false))
-        #expect(!ComposeAttachments.canPost(text: "", imported: 0, failed: 0, isBusy: false))
-        #expect(!ComposeAttachments.canPost(text: "   ", imported: 0, failed: 0, isBusy: false))
-        // The one that matters: words plus a photo that did not arrive is NOT postable.
-        #expect(!ComposeAttachments.canPost(text: "hi", imported: 1, failed: 1, isBusy: false))
-        #expect(!ComposeAttachments.canPost(text: "hi", imported: 1, failed: 0, isBusy: true))
+        #expect(ComposeAttachments.canPost(text: "hi", imported: 0, isBusy: false))
+        #expect(ComposeAttachments.canPost(text: "", imported: 1, isBusy: false))
+        #expect(!ComposeAttachments.canPost(text: "", imported: 0, isBusy: false))
+        #expect(!ComposeAttachments.canPost(text: "   ", imported: 0, isBusy: false))
+        #expect(!ComposeAttachments.canPost(text: "hi", imported: 1, isBusy: true))
+
+        // The one that matters, and it is a REFUSAL now rather than a grey button: words plus a
+        // photograph that did not arrive is not postable, and what stops it is a sentence naming
+        // the file rather than a control that has gone quiet.
+        let failed = ComposeAttachment(
+            id: UUID(), media: nil, load: .failed(.transport), capture: .settled(.empty),
+            label: "holiday.jpg")
+        #expect(ComposeAttachments.postRefusal(items: [failed])?.contains("holiday.jpg") == true)
+        #expect(ComposeAttachments.postRefusal(items: []) == nil)
     }
 }

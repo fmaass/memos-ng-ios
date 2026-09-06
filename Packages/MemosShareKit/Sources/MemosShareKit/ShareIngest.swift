@@ -31,6 +31,13 @@ public enum ShareIngest {
     /// - Parameter expecting: the licence the sheet was opened with. A share sheet can sit on
     ///   screen for as long as someone leaves it there, and a sign-out or an account switch in the
     ///   app underneath it must not be posted through.
+    /// - Parameter capturedAt: what to date the memo when the files say nothing — the moment of
+    ///   sharing. A file that DOES carry a capture date wins over it: the same Auto rule the
+    ///   composer follows, because a photograph shared from Photos is exactly the case the rule was
+    ///   written for.
+    /// - Parameter zone: the zone a wall-clock EXIF time with no offset is resolved in.
+    /// - Parameter read: how a file's own capture date is read. Injected so the ORDER and the DATE
+    ///   can be tested without a real photograph, and so this stays one read per file.
     public static func commit(
         items: [SharedItem],
         note: String,
@@ -38,20 +45,41 @@ public enum ShareIngest {
         binding: AccountBinding?,
         expecting: AccountBinding?,
         capturedAt: Date = Date(),
+        zone: TimeZone = .autoupdatingCurrent,
+        read: (SharedFile) async -> CaptureReading = {
+            await CaptureReader.read(fileAt: $0.url, mime: $0.mime)
+        },
         into repository: OutboxRepository
     ) async throws -> ShareOutcome {
         guard let binding else { return .notSignedIn }
         if let expecting, expecting != binding { return .accountChanged }
         let content = ShareComposition.content(note: note, items: items)
-        let sources = items.compactMap(\.file).map(\.stagedSource)
-        guard !content.isEmpty || !sources.isEmpty else { return .nothingToPost }
+        let files = items.compactMap(\.file)
+        guard !content.isEmpty || !files.isEmpty else { return .nothingToPost }
+        // One read per file, before anything is written down. There is no fence to keep here the
+        // way the composer keeps one: a share sheet holds ONE set of files that cannot be replaced
+        // while it stands, so every answer belongs to the item it was asked about. What the answers
+        // decide is the same as in the app — the memo's date, and the order the pictures go in.
+        var carried: [CapturedShare] = []
+        for file in files {
+            carried.append(CapturedShare(file: file, capture: .settled(await read(file))))
+        }
+        let ordered = AutoMemoDate.captureOrder(carried, in: zone)
+        let auto = AutoMemoDate.autoMemoDate(carried, in: zone)
         let job = try await repository.enqueue(
             content: content,
             visibility: visibility?.rawValue,
-            capturedAt: capturedAt,
+            capturedAt: auto.instant ?? capturedAt,
             binding: binding,
-            sources: sources
+            sources: ordered.map(\.file.stagedSource)
         )
         return .enqueued(job.id)
     }
+}
+
+/// One shared file and what it said about when it was taken, so the shared set can be ordered by
+/// the same function the composer's tiles are.
+struct CapturedShare: CaptureCarrying {
+    var file: SharedFile
+    var capture: CaptureDecision
 }

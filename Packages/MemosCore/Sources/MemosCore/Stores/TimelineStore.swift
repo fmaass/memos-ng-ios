@@ -852,7 +852,7 @@ public final class TimelineStore {
         attaching files: [StagedSource] = [],
         using handle: SessionHandle,
         baseURL: URL
-    ) async -> Bool {
+    ) async -> ComposeOutcome {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -876,16 +876,18 @@ public final class TimelineStore {
                 // This invocation is over, and it failed: the key stays behind for the retry.
                 finishEdit(key: key, saved: false)
                 await report(error, issuedUnder: handle)
-                return false
+                // Nothing was patched, so nothing on the server changed — `sent: false` is what
+                // licenses the sheet to say so.
+                return .failed(ComposeFailure.classify(error, sent: false))
             }
         }
         // The upload above is the longest await this store makes, and the patch below is a SEND.
         // A session that ended inside the upload must not have a memo edited under its name.
         guard sessionStillCurrent(handle) else {
             finishEdit(key: key, saved: false)
-            return false
+            return .failed(.authorization)
         }
-        let saved = await patch(
+        let outcome = await patchOutcome(
             uid: uid,
             .init(
                 content: content, createdAt: createdAt, editKey: key, uploadUids: uploadUIDs
@@ -893,8 +895,8 @@ public final class TimelineStore {
             using: handle,
             baseURL: baseURL
         )
-        finishEdit(key: key, saved: saved)
-        return saved
+        finishEdit(key: key, saved: outcome.isSaved)
+        return outcome
     }
 
     /// What identifies ONE Save, so that a retry of it can be told apart from a new one.
@@ -1580,6 +1582,25 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
+        await patchOutcome(uid: uid, body, using: handle, baseURL: baseURL).isSaved
+    }
+
+    /// The same request, with the reason it failed kept rather than flattened to false.
+    ///
+    /// Only the compose sheet needs the reason — the other callers of `patch` act on a memo that is
+    /// already on screen and have the store's own error line for it — but the request may exist
+    /// only once, or the two would drift apart in exactly the way a lost answer is easiest to get
+    /// wrong.
+    ///
+    /// The patch is a SEND: by the time anything can be caught below, the request has gone out.
+    /// That is what `sent: true` records, and it is the difference between "nothing changed" and
+    /// "this could not be confirmed".
+    private func patchOutcome(
+        uid: String,
+        _ body: Components.Schemas.MemoPatch,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> ComposeOutcome {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1599,11 +1620,11 @@ public final class TimelineStore {
                 // method. An edit issued under one session and answered after a switch would
                 // otherwise land in the next one — clearing ITS error line and telling the sheet
                 // the save went through, for a session that no longer exists.
-                guard sessionStillCurrent(handle) else { return false }
+                guard sessionStillCurrent(handle) else { return .failed(.authorization) }
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 await apply(Memo(try ok.body.json, baseURL: baseURL), under: authority)
-                return true
+                return .saved
             // Either a named upload the server cannot link, or an edit key already bound to a
             // DIFFERENT memo. Neither is recoverable here: the uploads this call named are spent,
             // and a key is minted per (memo, edit) so a key on another memo is not a state this
@@ -1625,7 +1646,7 @@ public final class TimelineStore {
             }
         } catch {
             await report(error, issuedUnder: handle)
-            return false
+            return .failed(ComposeFailure.classify(error, sent: true))
         }
     }
 

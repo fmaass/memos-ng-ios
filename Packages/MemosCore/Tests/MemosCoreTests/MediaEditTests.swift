@@ -94,7 +94,7 @@ struct MediaEditTests {
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
             uid: "a", content: "edited", using: client.handle, baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(saved)
         #expect(sent.get()["content"] as? String == "edited")
@@ -142,7 +142,7 @@ struct MediaEditTests {
             attaching: [file],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(saved)
         #expect(started.get()["filename"] as? String == "picked.jpg")
@@ -182,7 +182,7 @@ struct MediaEditTests {
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
             uid: "a", content: "big", attaching: [file], using: client.handle, baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(saved)
         // Three chunks: 4, 4, 2 — each starting where the SERVER said it now holds up to, which is
@@ -219,7 +219,7 @@ struct MediaEditTests {
             attaching: [file],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(!saved)
         // THE rollback: no patch was ever sent, so the memo still says what it said. Half an edit
@@ -256,7 +256,7 @@ struct MediaEditTests {
             attaching: [file],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(!saved)
         #expect(store.memos[0].content == "hello")
@@ -324,7 +324,7 @@ struct MediaEditTests {
         await store.edit(uid: "a", content: "two", using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
             uid: "a", content: "two", using: client.handle, baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         let sent = keys.get()
         #expect(saved)
@@ -386,10 +386,11 @@ struct MediaEditTests {
         // Submitted while the first is still out: it mints its own key into the slot.
         let second = await store.edit(
             uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(!second, "control: the second save failed, so it is the one with a retry to make")
         release.set(true)
-        #expect(await first.value, "control: the first save landed, which is what tidies up")
+        #expect(
+            await first.value.isSaved, "control: the first save landed, which is what tidies up")
 
         // The retry of the SECOND save — the one whose response was lost.
         await store.edit(uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL)
@@ -455,9 +456,10 @@ struct MediaEditTests {
         }
 
         releaseFirst.set(true)
-        #expect(await first.value, "control: the first save landed, which is what tidies up")
+        #expect(
+            await first.value.isSaved, "control: the first save landed, which is what tidies up")
         releaseSecond.set(true)
-        #expect(await second.value == false, "control: the second save is the one with a retry")
+        #expect(!(await second.value).isSaved, "control: the second save is the one with a retry")
 
         // The retry of the save whose response was lost.
         await store.edit(uid: "a", content: "same", using: client.handle, baseURL: Stub.baseURL)
@@ -602,7 +604,7 @@ struct MediaEditTests {
             attaching: [file],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(!saved)
         // The session IS asked where it stands: the contract's answer is attempted, not skipped.
@@ -653,7 +655,7 @@ struct MediaEditTests {
             attaching: [file],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(saved, "an offset gap abandoned an edit the session had answered")
         #expect(heads.get() == 1, "the session was never asked where it stands")
@@ -696,7 +698,7 @@ struct MediaEditTests {
             attaching: [file],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(!saved)
         #expect(chunks.get() == 1, "the same chunk was resent into a gap that had not moved")
@@ -743,7 +745,7 @@ struct MediaEditTests {
         let first = await store.edit(
             uid: "a", content: "with a photo", attaching: [file], using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(!first)
         #expect(keys.get().isEmpty, "an edit whose upload failed still patched the memo")
 
@@ -752,7 +754,7 @@ struct MediaEditTests {
         let second = await store.edit(
             uid: "a", content: "with a photo", attaching: [file], using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(second)
         // Exactly one patch, and it carries the key the abandoned attempt would have used — so a
@@ -792,7 +794,7 @@ struct MediaEditTests {
             attaching: [missing],
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(!saved)
         #expect(requests.count == 0)

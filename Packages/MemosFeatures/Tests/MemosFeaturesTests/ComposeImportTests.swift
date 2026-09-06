@@ -33,7 +33,7 @@ actor GatedExport {
         for waiter in waiting { waiter.resume() }
     }
 
-    func load() async -> PickedMedia? {
+    func load() async -> ComposePickerAnswer {
         hasStarted = true
         let waiting = startWaiters
         startWaiters = []
@@ -41,7 +41,7 @@ actor GatedExport {
         if !isReleased {
             await withCheckedContinuation { releaseWaiters.append($0) }
         }
-        return media
+        return .file(media)
     }
 }
 
@@ -149,7 +149,7 @@ struct ComposeImportTests {
 
         let stamp = imports.selected()
         imports.clear()
-        let run = Task { await imports.load(["queued"], stamp: stamp) { _ in media } }
+        let run = Task { await imports.load(["queued"], stamp: stamp) { _ in .file(media) } }
 
         #expect(await run.value == false, "a pick removed before it loaded landed anyway")
         #expect(imports.attachments.isEmpty)
@@ -166,7 +166,7 @@ struct ComposeImportTests {
 
         let kept = Self.media("kept.heic")
         let landed = await imports.load(["ok", "broken"], stamp: stamp) { item in
-            item == "ok" ? kept : nil
+            item == "ok" ? .file(kept) : .failed(.transport)
         }
 
         #expect(landed)
@@ -183,8 +183,8 @@ struct ComposeImportTests {
         let first = Self.media("first.heic")
         let second = Self.media("second.heic")
 
-        await imports.load(["first"], stamp: imports.selected()) { _ in first }
-        await imports.load(["second"], stamp: imports.selected()) { _ in second }
+        await imports.load(["first"], stamp: imports.selected()) { _ in .file(first) }
+        await imports.load(["second"], stamp: imports.selected()) { _ in .file(second) }
 
         #expect(imports.attachments.map(\.filename) == ["second.heic"])
     }
@@ -197,11 +197,15 @@ struct ComposeImportTests {
         let imports = ComposeImports()
         let shot = Self.media("IMG_20260828-141530.heic")
 
-        await imports.load(["first"], stamp: imports.selected()) { _ in Self.media("first.heic") }
+        await imports.load(["first"], stamp: imports.selected()) { _ in
+            .file(Self.media("first.heic"))
+        }
         imports.captured(shot)
         #expect(imports.attachments.map(\.filename) == ["first.heic", "IMG_20260828-141530.heic"])
 
-        await imports.load(["second"], stamp: imports.selected()) { _ in Self.media("second.heic") }
+        await imports.load(["second"], stamp: imports.selected()) {
+            _ in .file(Self.media("second.heic"))
+        }
 
         #expect(
             imports.attachments.map(\.filename) == ["second.heic", "IMG_20260828-141530.heic"],

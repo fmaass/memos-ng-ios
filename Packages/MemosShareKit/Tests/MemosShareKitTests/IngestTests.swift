@@ -213,6 +213,81 @@ struct IngestTests {
             #expect(leftovers.isEmpty, "a manifest is written last, and its media with it")
         }
     }
+
+    /// A share is dated by its photographs, the same way a memo written in the app is.
+    ///
+    /// It is the same rule and the same functions — this is where the extension gets its Auto date
+    /// — so the two clients cannot come to disagree about which photograph a shared memo belongs
+    /// to. The read is injected here: what is being held is the RULE (earliest wins, undated last),
+    /// not ImageIO.
+    @Test("a shared set is dated by its earliest photograph and queued in capture order")
+    func theShareTakesTheEarliestCaptureDate() async throws {
+        try await withOutbox { repository, root in
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            let later = try #require(formatter.date(from: "2026-01-01T15:00:00Z"))
+            let earlier = try #require(formatter.date(from: "2026-01-01T13:00:00Z"))
+            let readings: [String: CaptureReading] = [
+                "late.heic": CaptureReading(instant: later, civil: nil, source: .exif),
+                "early.heic": CaptureReading(instant: earlier, civil: nil, source: .exif),
+            ]
+            var files: [SharedItem] = []
+            for name in ["late.heic", "undated.heic", "early.heic"] {
+                let staged = try Fixture.file(in: root, named: name, bytes: 8)
+                files.append(.file(try SharedFile.imported(staged, into: root)))
+            }
+
+            let outcome = try await ShareIngest.commit(
+                items: files,
+                note: "the walk",
+                visibility: nil,
+                binding: Fixture.binding(),
+                expecting: Fixture.binding(),
+                // The moment of sharing, which the photographs are supposed to beat.
+                capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+                zone: TimeZone(identifier: "Europe/Berlin") ?? .gmt,
+                read: { readings[$0.filename] ?? .empty },
+                into: repository
+            )
+
+            guard case .enqueued(let id) = outcome else {
+                Issue.record("expected the share to be queued, got \(outcome)")
+                return
+            }
+            let job = try #require(await repository.job(id))
+            #expect(job.capturedAt == earlier, "the share was dated by the clock, not the photos")
+            #expect(
+                job.files.map(\.filename) == ["early.heic", "late.heic", "undated.heic"],
+                "the queued files are not in capture order")
+        }
+    }
+
+    /// The control: with nothing that carries a date, the moment of sharing is still what the memo
+    /// gets — the rule adds a date, it never takes one away.
+    @Test("a share of files that say nothing keeps the moment of sharing")
+    func undatedFilesKeepTheSharingMoment() async throws {
+        try await withOutbox { repository, root in
+            let staged = try Fixture.file(in: root, named: "scan.pdf", bytes: 8)
+            let shared = Date(timeIntervalSince1970: 1_750_000_000)
+
+            let outcome = try await ShareIngest.commit(
+                items: [.file(try SharedFile.imported(staged, into: root))],
+                note: "",
+                visibility: nil,
+                binding: Fixture.binding(),
+                expecting: Fixture.binding(),
+                capturedAt: shared,
+                read: { _ in .empty },
+                into: repository
+            )
+
+            guard case .enqueued(let id) = outcome else {
+                Issue.record("expected the share to be queued, got \(outcome)")
+                return
+            }
+            #expect(try #require(await repository.job(id)).capturedAt == shared)
+        }
+    }
 }
 
 @Suite("A file taken over from a share provider")

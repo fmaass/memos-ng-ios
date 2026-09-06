@@ -391,7 +391,7 @@ struct SessionNoiseTests {
             attaching: [StagedSource(url: file, filename: "one.bin", mime: "image/jpeg")],
             using: handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
 
         #expect(!saved, "an edit for a session that ended did not save")
         #expect(

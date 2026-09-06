@@ -172,7 +172,7 @@ extension TimelineStoreTests {
 
         let edited = await store.edit(
             uid: "a", content: "edited", using: client.handle, baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(edited)
         #expect(store.memos.first?.content == "edited")
         // A PATCH is a partial update: an edit that never touched the date must not carry one, or
@@ -215,7 +215,7 @@ extension TimelineStoreTests {
             createdAt: chosen,
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(edited)
 
         // The date the editor chose is what went on the wire, to the second.
@@ -245,7 +245,7 @@ extension TimelineStoreTests {
             createdAt: chosen,
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(edited)
         #expect(store.memos.map(\.uid) == ["c", "a", "b"])
     }
@@ -274,7 +274,7 @@ extension TimelineStoreTests {
             createdAt: chosen,
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(edited)
         // The server settles a tie by `id DESC` and never sends the id (see `TimelineTie`), so an
         // existing memo does not overtake the rows already on that timestamp. A comparator that
@@ -324,7 +324,7 @@ extension TimelineStoreTests {
             createdAt: chosen,
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(edited)
         // Older than the memo below it and still above it: pinned-first outranks the date, which
         // is how the server orders the page this list is a copy of.

@@ -1,4 +1,5 @@
 import MemosCore
+import MemosOutbox
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -86,7 +87,7 @@ public struct ComposeView: View {
     }
 
     let mode: Mode
-    let submit: (ComposeSubmission) async -> Bool
+    let submit: (ComposeSubmission) async -> ComposeOutcome
     /// The destructive action, on an edit that has one. `nil` everywhere else — a new memo has
     /// nothing to delete, and neither has a memo that is not mine (see `ComposeDelete`).
     let delete: ComposeDelete?
@@ -107,6 +108,9 @@ public struct ComposeView: View {
     /// overwrite the newer — see `ComposeImports`.
     @State private var imports = ComposeImports()
     @State private var isSaving = false
+    /// The one sentence the sheet has to say: why a Post was refused, or why a Save did not go
+    /// through. Never a raw error, and never two at once.
+    @State private var problem: String?
     @State private var detent: PresentationDetent = .medium
     /// What the sheet has up — its keyboard and its photo picker — as one value, so the order
     /// between them is a thing a test can hold. See `ComposeStage`.
@@ -116,7 +120,7 @@ public struct ComposeView: View {
     public init(
         mode: Mode,
         delete: ComposeDelete? = nil,
-        submit: @escaping (ComposeSubmission) async -> Bool
+        submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) {
         self.mode = mode
         self.delete = delete
@@ -138,16 +142,25 @@ public struct ComposeView: View {
         return false
     }
 
-    /// A memo with photos and no words is a memo. Only an empty capture — or one whose files did
-    /// not all arrive — is refused.
+    /// A memo with photos and no words is a memo. Only an empty capture is nothing to post.
+    ///
+    /// It is deliberately NOT the guard for the unresolved items. A disabled button explains
+    /// nothing: somebody who has attached a photograph that will not download, and finds Post grey,
+    /// is left to guess which of the five things they did was wrong. So the button stays live and
+    /// the refusal is a SENTENCE naming the item (`ComposeAttachments.postRefusal`), and the items
+    /// that did arrive are never lost in the process.
     private var canSave: Bool {
         ComposeAttachments.canPost(
             text: content,
             imported: imports.attachments.count,
-            failed: imports.failed,
             isBusy: isSaving || imports.isImporting
         )
     }
+
+    /// The date this memo will carry: the one that was chosen, or — while the control is on Auto —
+    /// the earliest capture instant among what is attached. Nil is "whenever this is", which the
+    /// outbox stamps with the moment of writing.
+    private var resolvedDate: Date? { ComposeDate.resolved(chosen: date, auto: auto) }
 
     public var body: some View {
         NavigationStack {
@@ -163,21 +176,9 @@ public struct ComposeView: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isEdit ? "Save" : "Post") {
-                        Task {
-                            isSaving = true
-                            defer { isSaving = false }
-                            let submission = ComposeSubmission(
-                                content: content,
-                                visibility: visibility,
-                                attachments: imports.attachments,
-                                createdAt: date
-                            )
-                            if await submit(submission) { dismiss() }
-                        }
-                    }
-                    .disabled(!canSave)
-                    .fontWeight(.semibold)
+                    Button(isEdit ? "Save" : "Post") { post() }
+                        .disabled(!canSave)
+                        .fontWeight(.semibold)
                 }
             }
             .task {
@@ -289,11 +290,26 @@ public struct ComposeView: View {
             // Stamped HERE, synchronously, as the selection lands — not inside the task, where
             // the number would order the loads' start times instead. See `ComposeImports`.
             let stamp = imports.selected()
+            problem = nil
             Task {
-                await imports.load(items, stamp: stamp) {
-                    try? await $0.loadTransferable(type: PickedMedia.self)
+                await imports.load(items, stamp: stamp) { item in
+                    do {
+                        guard let media = try await item.loadTransferable(type: PickedMedia.self)
+                        else {
+                            // The picker answered, with nothing. That is not a network fact, so it
+                            // is not allowed to say "needs connection".
+                            return .failed(.unknown)
+                        }
+                        return .file(media)
+                    } catch {
+                        return .failed(ComposeLoadFailure.category(for: error))
+                    }
                 }
             }
+        }
+        .onChange(of: imports.items.count) { _, _ in
+            // The sentence was about the list as it was.
+            problem = nil
         }
         .onChange(of: imports.attachments.isEmpty) { _, isEmpty in
             // Photos are the reason to want the room; the sheet takes it rather than making
@@ -307,8 +323,10 @@ public struct ComposeView: View {
     /// new memo or added to one that already exists.
     @ViewBuilder
     private var attachedRow: some View {
-        if !imports.attachments.isEmpty {
-            PickedThumbnailRow(attachments: imports.attachments)
+        if !imports.items.isEmpty {
+            PickedThumbnailRow(attachments: imports.ordered) { id in
+                Task { await imports.retry(id: id) }
+            }
         }
         if imports.failed > 0,
             let summary = ComposeAttachments.summary(
@@ -319,9 +337,17 @@ public struct ComposeView: View {
                 Text(summary)
                     .font(.footnote)
                     .foregroundStyle(.orange)
-                Button("Remove them") { clearPicked() }
+                // Only the failed ones. The successful imports and the camera captures are not
+                // what anybody is asking to be rid of.
+                Button("Remove them") { imports.removeFailed() }
                     .font(.footnote)
             }
+        }
+        if let problem {
+            Text(problem)
+                .font(.footnote)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -346,8 +372,9 @@ public struct ComposeView: View {
                 isImporting: imports.isImporting,
                 spelling: spelling
             )
-            // Not clearable: a memo being edited already has a date, and there is nothing to put
-            // it back to — "now" would be a date this sheet invented.
+            // Not clearable and never Auto: a memo being edited already has a date, and the
+            // files already on it carry no capture instant this client has ever read. Edit Auto is
+            // its own ticket.
             MemoDateRow(date: $date, clearable: false, spelling: spelling)
         }
     }
@@ -421,12 +448,59 @@ public struct ComposeView: View {
         ComposeMetaPills(
             verbosity: verbosity,
             stage: $stage,
-            attachmentCount: imports.attachments.count,
+            attachmentCount: imports.items.count,
             isImporting: imports.isImporting,
             date: $date,
+            auto: auto,
             visibility: $visibility,
             accountDefault: session?.defaultVisibility
         )
+    }
+
+    /// What the Auto side of the date control has to say, or nil on an edit, which has no Auto.
+    private var auto: AutoMemoDateResult? {
+        ComposeDate.auto(isEdit: isEdit, from: imports.autoDate)
+    }
+
+    /// Post, or say why not.
+    ///
+    /// The refusal is checked HERE rather than in the button's `disabled`, and it is checked again
+    /// on every tap: an item can settle, fail or be removed between two taps, and the answer to
+    /// "may this go now" is only ever about the list as it stands. `isSaving` is claimed
+    /// synchronously, before any await, so two taps in one frame are one submission — a disabled
+    /// button is not the guard for that either.
+    private func post() {
+        guard !isSaving else { return }
+        if let refusal = ComposeAttachments.postRefusal(items: imports.items) {
+            problem = refusal
+            return
+        }
+        problem = nil
+        isSaving = true
+        imports.clearUploadFailures()
+        Task {
+            defer { isSaving = false }
+            let submission = ComposeSubmission(
+                content: content,
+                visibility: visibility,
+                attachments: imports.attachments,
+                createdAt: resolvedDate
+            )
+            let outcome = await submit(submission)
+            switch outcome {
+            case .saved:
+                dismiss()
+            case .failed(let failure):
+                // The sheet stays open with everything still in it — the words, the date mode, the
+                // files and their identities. That is the whole of what "preserved" means here: it
+                // is THIS compose session, not survival across a dismissal or a force-quit, which
+                // would need the outbox and is MEMNG-124's line.
+                problem = ComposeFailurePresentation.sentence(for: failure)
+                if let category = ComposeFailurePresentation.tileCategory(for: failure) {
+                    imports.markUploadFailed(category)
+                }
+            }
+        }
     }
 
     /// What the picker's presentation binds to. Only dismissal comes back through it — the picker
@@ -439,14 +513,6 @@ public struct ComposeView: View {
     /// The camera's presentation, on the same discipline as the picker's.
     private var capturingCamera: Binding<Bool> {
         Binding(get: { stage.capturing }, set: { if !$0 { stage.cameraClosed() } })
-    }
-
-    /// Emptying the picker fences whatever it is still loading first: the selection this clears
-    /// sets off its own import (of nothing), and a pick already on its way must not land between
-    /// the two.
-    private func clearPicked() {
-        imports.clear()
-        picked = []
     }
 }
 
@@ -605,6 +671,11 @@ enum VisibilityChoice {
 /// accepts would be the odd one out rather than the careful one.
 struct MemoDateRow: View {
     @Binding var date: Date?
+    /// What Auto has worked out from the attached files, or nil where there is no Auto — an edit.
+    /// It is passed in rather than computed here because the answer belongs to the attachments,
+    /// and a control that went looking for them would be a control no test could pose a question
+    /// to.
+    var auto: AutoMemoDateResult?
     /// Whether "no date of its own" is still available. It is the default for a new capture; a
     /// memo being edited already has a date, and there is nothing to clear it back to.
     var clearable: Bool = true
@@ -621,17 +692,19 @@ struct MemoDateRow: View {
             seed = date ?? Date()
             isPicking = true
         } label: {
-            MemoDatePill(date: date, spelling: spelling)
+            MemoDatePill(date: date, auto: auto, spelling: spelling)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Memo date")
-        .accessibilityValue(MemoDateChoice.title(for: date))
+        .accessibilityValue(MemoDateChoice.spokenValue(for: date, auto: auto))
         .popover(isPresented: $isPicking) {
-            MemoDatePicker(date: $date, seed: seed, clearable: clearable) { isPicking = false }
-                // A popover rather than the sheet iOS would otherwise substitute on a phone: the
-                // compose sheet is already a sheet, and a second one over it hides the memo being
-                // dated behind the picker that dates it.
-                .presentationCompactAdaptation(.popover)
+            MemoDatePicker(date: $date, seed: seed, clearable: clearable, isAuto: auto != nil) {
+                isPicking = false
+            }
+            // A popover rather than the sheet iOS would otherwise substitute on a phone: the
+            // compose sheet is already a sheet, and a second one over it hides the memo being
+            // dated behind the picker that dates it.
+            .presentationCompactAdaptation(.popover)
         }
     }
 }
@@ -650,6 +723,10 @@ struct MemoDatePicker: View {
     /// at the picker does not date the memo.
     let seed: Date
     var clearable: Bool = true
+    /// Whether clearing the date puts the control back on AUTO (a new memo) rather than on the
+    /// time of writing. It changes only what the button SAYS: what it does — putting the chosen
+    /// date back to nothing — is one act, and nil has meant "this sheet chose no date" all along.
+    var isAuto: Bool = false
     var onDone: () -> Void = {}
 
     /// The picker edits this rather than `date` directly, so that "no date chosen" survives merely
@@ -691,11 +768,15 @@ struct MemoDatePicker: View {
                     date = nil
                     onDone()
                 } label: {
-                    Label("Now", systemImage: "clock")
-                        .font(.subheadline)
+                    Label(
+                        isAuto ? "Auto" : "Now",
+                        systemImage: isAuto ? "wand.and.sparkles" : "clock"
+                    )
+                    .font(.subheadline)
                 }
                 .disabled(date == nil)
-                .accessibilityLabel("Use the time of writing")
+                .accessibilityLabel(
+                    isAuto ? "Use the date of the photographs" : "Use the time of writing")
             }
         }
         .frame(width: Self.width)
@@ -707,10 +788,15 @@ struct MemoDatePicker: View {
 /// (`DynamicTypeFittingTests`), the same way the visibility pill is.
 struct MemoDatePill: View {
     let date: Date?
+    /// The Auto answer, on a sheet that has one. A pill with no chosen date and no Auto is the old
+    /// "Now" pill, which is what an edit's date row still is.
+    var auto: AutoMemoDateResult?
     var spelling: ComposeMetaRow.Spelling = .short
 
     var title: String? {
-        spelling == .glyph ? nil : MemoDateChoice.pillTitle(for: date)
+        guard spelling != .glyph else { return nil }
+        if date == nil, let auto { return MemoDateChoice.autoTitle(auto) }
+        return MemoDateChoice.pillTitle(for: date)
     }
 
     var body: some View {
@@ -735,6 +821,45 @@ nonisolated enum MemoDateChoice {
             ? .dateTime.day().month(.abbreviated)
             : .dateTime.day().month(.abbreviated).year().hour().minute()
         return date.formatted(style.locale(locale))
+    }
+
+    /// What the pill says while the control is on AUTO: the date the photographs decided, marked
+    /// approximate when the winning one carried no offset of its own, with the span when they were
+    /// not all taken on one day.
+    ///
+    /// "Auto · now" is the honest answer for a memo with nothing dated attached: Auto is on, and
+    /// what it resolves to is the moment of writing. It does not show a date this sheet invented.
+    ///
+    /// The "≈" is the ONLY surface of approximation anywhere — an exact instant and a resolved
+    /// civil one compete on equal terms, and the tilde is what says the winner was the second kind.
+    static func autoTitle(
+        _ auto: AutoMemoDateResult,
+        locale: Locale = .autoupdatingCurrent
+    ) -> String {
+        var text = "Auto · "
+        if let instant = auto.instant {
+            if auto.approximate { text += "≈ " }
+            text += title(for: instant, compact: true, locale: locale)
+        } else {
+            text += "now"
+        }
+        if auto.span > 0 { text += " · spans \(auto.span) days" }
+        return text
+    }
+
+    /// What a screen reader hears on the date control, which never abbreviates and never leaves the
+    /// mode unsaid.
+    static func spokenValue(
+        for date: Date?,
+        auto: AutoMemoDateResult?,
+        locale: Locale = .autoupdatingCurrent
+    ) -> String {
+        guard date == nil, let auto else { return title(for: date, locale: locale) }
+        guard let instant = auto.instant else { return "Automatic: the time of writing" }
+        let stamp = title(for: instant, locale: locale)
+        let approximately = auto.approximate ? "approximately " : ""
+        let span = auto.span > 0 ? ", spanning \(auto.span) days" : ""
+        return "Automatic: \(approximately)\(stamp)\(span)"
     }
 
     /// What the PILL carries beside its calendar, or nil while the capture is simply "now".
@@ -841,6 +966,7 @@ struct ComposeMetaPills: View {
     let attachmentCount: Int
     var isImporting: Bool = false
     @Binding var date: Date?
+    var auto: AutoMemoDateResult?
     @Binding var visibility: MemoVisibility?
     var accountDefault: MemoVisibility?
 
@@ -852,7 +978,7 @@ struct ComposeMetaPills: View {
                 isImporting: isImporting,
                 spelling: verbosity.count
             )
-            MemoDateRow(date: $date, spelling: verbosity.date)
+            MemoDateRow(date: $date, auto: auto, spelling: verbosity.date)
             VisibilityMenu(
                 selection: $visibility,
                 accountDefault: accountDefault,

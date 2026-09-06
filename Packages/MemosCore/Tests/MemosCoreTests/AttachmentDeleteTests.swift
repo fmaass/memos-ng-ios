@@ -298,7 +298,7 @@ struct AttachmentDeleteTests {
         }
         let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
         release.set(true)
-        let saved = await edit.value
+        let saved = await edit.value.isSaved
 
         #expect(removed)
         #expect(saved)

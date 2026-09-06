@@ -213,7 +213,7 @@ struct TimelineRefreshTests {
             content: "edited on the detail screen",
             using: client.handle,
             baseURL: Stub.baseURL
-        )
+        ).isSaved
         #expect(edited)
         #expect(
             store.memos.first { $0.uid == far }?.content == "edited on the detail screen",
