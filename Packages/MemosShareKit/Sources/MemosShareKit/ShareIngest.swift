@@ -38,17 +38,19 @@ public enum ShareIngest {
     ///   sharing. A file that DOES carry a capture date wins over it: the same Auto rule the
     ///   composer follows, because a photograph shared from Photos is exactly the case the rule was
     ///   written for.
-    /// - Parameter zone: the zone a wall-clock EXIF time with no offset is resolved in.
+    /// - Parameter zone: the zone a wall-clock EXIF time with no offset is resolved in, sampled at
+    ///   THIS import (`.current`, never `.autoupdatingCurrent`, which would re-resolve a reading
+    ///   after the fact if the device's setting moved).
     /// - Parameter read: how a file's own capture date is read. Injected so the ORDER and the DATE
     ///   can be tested without a real photograph, and so this stays one read per file.
     public static func commit(
         items: [SharedItem],
         note: String,
         visibility: ShareVisibility?,
-        binding: @Sendable () -> AccountBinding?,
+        binding: @escaping @Sendable () -> AccountBinding?,
         expecting: AccountBinding?,
         capturedAt: Date = Date(),
-        zone: TimeZone = .autoupdatingCurrent,
+        zone: TimeZone = .current,
         read: (SharedFile) async -> CaptureReading = {
             await CaptureReader.read(fileAt: $0.url, mime: $0.mime)
         },
@@ -79,16 +81,29 @@ public enum ShareIngest {
         // The licence RE-READ, as the last thing before the write and after every await above. It
         // is read from the file rather than remembered, because the app is a different process and
         // the file is the only shared truth: a sign-out during the reads has to stop this write.
-        guard let binding = binding() else { return .notSignedIn }
-        if let expecting, expecting != binding { return .accountChanged }
-        let job = try await repository.enqueue(
-            content: content,
-            visibility: visibility?.rawValue,
-            capturedAt: auto.instant ?? capturedAt,
-            binding: binding,
-            sources: ordered.map(\.file.stagedSource)
-        )
-        return .enqueued(job.id)
+        guard let licence = binding() else { return .notSignedIn }
+        // Against what was standing when this commit BEGAN, whether or not the sheet supplied an
+        // expectation of its own. `expecting` is what the sheet was opened with — a longer window,
+        // and one a caller may not have — and neither of them covers an account that changes inside
+        // this call.
+        if licence != opening { return .accountChanged }
+        if let expecting, expecting != licence { return .accountChanged }
+        do {
+            // The copy is the slow part, and the licence is asked for AGAIN inside the repository,
+            // immediately before the manifest is committed: an account that changes while the bytes
+            // are being copied must not leave a capture stamped with the one that has gone.
+            let job = try await repository.enqueue(
+                content: content,
+                visibility: visibility?.rawValue,
+                capturedAt: auto.instant ?? capturedAt,
+                binding: licence,
+                sources: ordered.map(\.file.stagedSource),
+                under: SendAuthority { binding() == opening }
+            )
+            return .enqueued(job.id)
+        } catch is SendAuthorityWithdrawn {
+            return .accountChanged
+        }
     }
 }
 

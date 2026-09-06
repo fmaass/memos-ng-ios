@@ -336,6 +336,44 @@ struct ComposeAttachmentStateTests {
         #expect(afterRetry != whileFailed)
     }
 
+    /// The one thing somebody can do about an upload that failed is to try it again — so the marks
+    /// the last attempt left must be cleared BEFORE the next attempt is judged, or the tiles it
+    /// marked refuse the very save they are asking for.
+    @Test("a save can be tried again after it failed on transport")
+    func aFailedSaveCanBeTriedAgain() async {
+        let imports = Self.imports()
+        await imports.load(["one"], stamp: imports.selected()) { _ in .file(Self.media("a.heic")) }
+        await settleTasks()
+        imports.markUploadFailed(.transport)
+
+        // Judged with the previous attempt's marks still on, this is refused and the person is
+        // stuck with a memo they cannot save and cannot fix.
+        #expect(ComposeAttachments.postRefusal(items: imports.items) != nil)
+        // The attempt itself clears them first, so it goes.
+        #expect(imports.beginPostAttempt() == nil, "a failed save could never be tried again")
+        #expect(imports.items[0].failure == nil)
+    }
+
+    /// A photograph taken in this app cannot be asked for again — there is no picker to ask — but
+    /// its file is already here, so "Try again" has to mean something: clear the mark the upload
+    /// left and read it again.
+    @Test("a camera capture whose upload failed can be retried like anything else")
+    func aCameraCaptureCanBeRetried() async {
+        let imports = Self.imports()
+        imports.captured(Self.media("IMG_0001.heic"))
+        await settleTasks()
+        imports.markUploadFailed(.transport)
+        #expect(imports.items[0].failure == .transport)
+
+        await imports.retry(id: imports.items[0].id)
+        await settleTasks()
+
+        #expect(imports.items[0].failure == nil, "the camera tile's retry did nothing at all")
+        #expect(imports.items[0].isFailed == false)
+        #expect(imports.items[0].media?.filename == "IMG_0001.heic")
+        #expect(ComposeAttachments.postRefusal(items: imports.items) == nil)
+    }
+
     @Test("what a failed save says depends on whether it was sent")
     func theSentencesDifferByCategory() {
         let never = ComposeFailurePresentation.sentence(for: .transport(sent: false))

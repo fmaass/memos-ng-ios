@@ -67,8 +67,10 @@ public struct SharedFile: Sendable, Equatable, Identifiable {
         return mime
     }
 
+    /// What the upload takes over, carrying this import's own token — see `StagedSource.identity`.
     public var stagedSource: StagedSource {
-        StagedSource(url: url, filename: filename, mime: mime, lastModified: lastModified)
+        StagedSource(
+            url: url, filename: filename, mime: mime, lastModified: lastModified, identity: id)
     }
 }
 

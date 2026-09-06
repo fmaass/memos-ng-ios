@@ -255,6 +255,92 @@ struct ComposeFailureTests {
             "the re-imported file minted a new key, so the retry would apply the edit twice")
     }
 
+    /// The other half of the edit key, and the dangerous one: two DIFFERENT files must never share
+    /// an identity. Two photographs called the same thing in two directories — which is what
+    /// "replace the picture with the other one" produces — keyed the same would let the second save
+    /// be answered as a replay of the first, and the memo would keep the file nobody wanted with
+    /// nothing said about it.
+    @Test("two different files with the same name are two different edits")
+    func sameNameDifferentFileIsADifferentEdit() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let one = root.appending(path: "one")
+        let two = root.appending(path: "two")
+        for directory in [one, two] {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        func staged(in directory: URL, bytes: UInt8) throws -> StagedSource {
+            let url = directory.appending(path: "photo.jpg")
+            try Data(repeating: bytes, count: 8).write(to: url)
+            // No identity: this is a source nothing imported — the case the fallback is for.
+            return StagedSource(url: url, filename: "photo.jpg", mime: "image/jpeg")
+        }
+        let first = try staged(in: one, bytes: 0x41)
+        let second = try staged(in: two, bytes: 0x42)
+        #expect(first.filename == second.filename, "control: the two files are named the same")
+        #expect(
+            first.editIdentity != second.editIdentity,
+            "two different files share an edit identity, so one can replay the other")
+
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let answer = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(
+                    #"{"upload_uid":"u1","chunk_size":64,"bytes_received":0}"#, status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(
+                    """
+                    {"upload_uid":"u1","chunk_size":64,"bytes_received":\(data.count)}
+                    """)
+            case patchMemoOperation:
+                let sent = try await Stub.body(body)
+                keys.set(keys.get() + [(sent["edit_key"] as? String) ?? ""])
+                guard answer.get() else { throw URLError(.networkConnectionLost) }
+                return Stub.json(Stub.memo(uid: "a", content: "edited"))
+            default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        // The first save is uncertain: it went out and its answer was lost.
+        let uncertain = await store.edit(
+            uid: "a", content: "edited", attaching: [first],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+        answer.set(true)
+        // Then the picture is REPLACED with the other one and saved again.
+        let replaced = await store.edit(
+            uid: "a", content: "edited", attaching: [second],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(uncertain == .failed(.transport(sent: true)))
+        #expect(replaced == .saved)
+        let sentKeys = keys.get()
+        try #require(sentKeys.count == 2, "the patch was not reached twice: \(sentKeys)")
+        #expect(
+            sentKeys[0] != sentKeys[1],
+            "the replacement was sent under the replaced file's key, so the server can replay it")
+    }
+
+    @Test("an upload refused for an ended session is an authorization failure, not a rejection")
+    func aCarriedUnauthorizedIsAuthorization() {
+        // The REAL wrapper the upload throws, not a synthetic one: `MediaUpload` reports an ended
+        // session as a refusal carrying the API error, and read as an opaque error it looks exactly
+        // like the server refusing somebody's words.
+        let refused = MediaUploadError.refused(.unauthorized)
+        #expect(ComposeFailure.classify(refused, sent: false) == .authorization)
+        // And one that really IS a refusal stays a rejection.
+        #expect(
+            ComposeFailure.classify(MediaUploadError.refused(.server(status: 500)), sent: false)
+                == .rejection)
+    }
+
     @Test("the classification of an error is about the error, not about the message")
     func classification() {
         #expect(

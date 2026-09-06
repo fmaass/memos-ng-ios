@@ -35,10 +35,18 @@ final class ComposeImports {
     /// Whether a selection is still loading.
     private(set) var isImporting = false
 
-    /// The zone a civil capture time is resolved in — the device's, snapshotted when this composer
-    /// opened and stamped onto every item it takes, so a zone that changes underneath cannot move
-    /// a date that has already been shown. Injected so a test can name the zone its expectations
-    /// are written in rather than the one the machine running it happens to be set to.
+    /// Where the zone comes from, asked ONCE PER PICK rather than once per composer.
+    ///
+    /// A civil capture time has no zone of its own, so the client supplies one — and which one is a
+    /// fact about the moment of picking: a phone can be picked up in another country, or its
+    /// setting corrected, between two picks in the same sheet. Each item is stamped with the answer
+    /// as it read WHEN IT WAS PICKED (`ComposeAttachment.captureZone`), so nothing already on
+    /// screen re-resolves. Injected so a test can name the zone its expectations are written in,
+    /// and change it between two picks.
+    private let zoneAtPick: @MainActor () -> TimeZone
+
+    /// The zone the DISPLAY works in — the span hint's calendar days. Sampled once, here, because
+    /// it is about what the person is looking at now rather than about any one item.
     let zone: TimeZone
     /// The file reader. Injected for the same reason: the fences are about ORDER, and a test that
     /// had to produce a real HEIC to exercise one would be testing ImageIO instead.
@@ -67,12 +75,18 @@ final class ComposeImports {
     private var cameraIDs: Set<UUID> = []
 
     init(
-        zone: TimeZone = .current,
+        zone: TimeZone? = nil,
+        zoneAtPick: (@MainActor () -> TimeZone)? = nil,
         readCapture: @escaping @MainActor (PickedMedia) async -> CaptureReading = {
             await CaptureReader.read(fileAt: $0.url, mime: $0.mime)
         }
     ) {
-        self.zone = zone
+        // `.current` rather than `.autoupdatingCurrent`, and read rather than remembered: an
+        // autoupdating zone re-resolves every civil reading the moment the device's setting moves,
+        // which would re-date and reorder what is already on the screen.
+        let atPick = zoneAtPick ?? { zone ?? .current }
+        self.zoneAtPick = atPick
+        self.zone = zone ?? atPick()
         self.readCapture = readCapture
     }
 
@@ -127,6 +141,8 @@ final class ComposeImports {
         guard stamp == current else { return false }
         var placeholders: [ComposeAttachment] = []
         var handles: [UUID: @MainActor () async -> ComposePickerAnswer] = [:]
+        // Sampled HERE, as the pick lands, and stamped onto every item of it.
+        let picked = zoneAtPick()
         for item in items {
             sequence += 1
             let id = UUID()
@@ -134,7 +150,7 @@ final class ComposeImports {
                 ComposeAttachment(
                     id: id, media: nil, load: .loading, capture: .pending,
                     label: Self.arrivingLabel,
-                    sequence: sequence, captureZone: zone))
+                    sequence: sequence, captureZone: picked))
             handles[id] = { await loader(item) }
         }
         // The placeholders are on screen before a single byte is read. `keptCaptures` is read off
@@ -175,7 +191,7 @@ final class ComposeImports {
         sequence += 1
         let attachment = ComposeAttachment(
             id: media.id, media: media, load: .ready, capture: .pending, label: media.filename,
-            sequence: sequence, captureZone: zone)
+            sequence: sequence, captureZone: zoneAtPick())
         items.append(attachment)
         cameraIDs.insert(attachment.id)
         // Fenced by its identity and its read generation alone, deliberately: this photograph
@@ -224,9 +240,19 @@ final class ComposeImports {
     /// one tile; two overlapping imports would race to write it, and the older answer landing last
     /// would put a failure back over a success.
     func retry(id: UUID) async {
-        guard !retryInFlight.contains(id), let handle = retries[id],
+        guard !retryInFlight.contains(id),
             let index = items.firstIndex(where: { $0.id == id })
         else { return }
+        guard let handle = retries[id] else {
+            // Nothing to ask again, and something to do anyway: this item's FILE is already here —
+            // a photograph taken with the camera, or an import whose upload was what failed. The
+            // retry is then about the mark and the read, not about fetching the file, and a tile
+            // that offers "Try again" and does nothing is worse than one that does not offer it.
+            guard items[index].media != nil else { return }
+            items[index].uploadFailed = nil
+            beginCaptureRead(for: id)
+            return
+        }
         retryInFlight.insert(id)
         defer { retryInFlight.remove(id) }
         let stamp = current
@@ -256,6 +282,18 @@ final class ComposeImports {
     /// connection" while it is being uploaded again is a tile lying about the present.
     func clearUploadFailures() {
         for index in items.indices { items[index].uploadFailed = nil }
+    }
+
+    /// A fresh attempt at posting: why it may not go, or nil.
+    ///
+    /// The previous attempt's upload marks are cleared BEFORE the list is judged, and the order is
+    /// the whole point. A save that failed on transport marks its tiles; judged with those marks
+    /// still on, the very next tap is refused as "could not be read" — so the one thing somebody
+    /// can do about an upload that failed, which is to try it again, would be the one thing the
+    /// sheet would not let them do.
+    func beginPostAttempt() -> String? {
+        clearUploadFailures()
+        return ComposeAttachments.postRefusal(items: items)
     }
 
     // MARK: - capture reads

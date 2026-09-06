@@ -306,6 +306,41 @@ struct IngestTests {
         }
     }
 
+    /// The copy is the slow part, and it happens after every check a caller could make. So the
+    /// licence goes INTO the repository as an authority it asks again immediately before it commits
+    /// the manifest: an account that changes while the bytes are being copied must leave nothing
+    /// behind.
+    @Test("an account that changes while the files are being copied leaves nothing queued")
+    func anAccountChangeDuringTheCopyIsRefused() async throws {
+        try await withOutbox { repository, root in
+            let staged = try Fixture.file(in: root, named: "IMG_0012.heic", bytes: 32)
+            let file = try SharedFile.imported(staged, into: root)
+            let licence = ShareReadCounter()
+
+            let outcome = try await ShareIngest.commit(
+                items: [.file(file)],
+                note: "on the beach",
+                visibility: nil,
+                // The first two reads are the opening check and the re-read after the capture
+                // reads; every read after them is the authority the repository asks while it is
+                // copying, and by then the account has gone.
+                binding: {
+                    licence.increment()
+                    return licence.count <= 2 ? Fixture.binding() : nil
+                },
+                expecting: Fixture.binding(),
+                read: { _ in .empty },
+                into: repository
+            )
+            #expect(licence.count > 2, "the repository never asked for the licence while copying")
+
+            #expect(outcome == .accountChanged)
+            #expect(
+                try await repository.loadJobs().isEmpty,
+                "a capture was committed for an account that had gone during the copy")
+        }
+    }
+
     /// The control: with nothing that carries a date, the moment of sharing is still what the memo
     /// gets — the rule adds a date, it never takes one away.
     @Test("a share of files that say nothing keeps the moment of sharing")

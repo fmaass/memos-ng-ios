@@ -142,7 +142,17 @@ public enum CaptureReader {
             try? await Task.sleep(for: duration)
             await answer.deliver(.empty)
         }
-        let reading = await answer.value
+        // The caller's cancellation has to reach BOTH: the unstructured children, which are not in
+        // its task tree, and the continuation this is parked on, which nothing else would ever
+        // resume. Delivering "nothing" is what wakes it, and the one-shot claim inside
+        // `FirstAnswer` is what makes a cancellation racing an answer still exactly one delivery.
+        let reading = await withTaskCancellationHandler {
+            await answer.value
+        } onCancel: {
+            worker.cancel()
+            timer.cancel()
+            Task { await answer.deliver(.empty) }
+        }
         worker.cancel()
         timer.cancel()
         return reading

@@ -471,13 +471,14 @@ public struct ComposeView: View {
     /// button is not the guard for that either.
     private func post() {
         guard !isSaving else { return }
-        if let refusal = ComposeAttachments.postRefusal(items: imports.items) {
+        // The marks the LAST attempt left are cleared before this attempt is judged — otherwise a
+        // save that failed on transport can never be tried again (`ComposeImports.beginPostAttempt`).
+        if let refusal = imports.beginPostAttempt() {
             problem = refusal
             return
         }
         problem = nil
         isSaving = true
-        imports.clearUploadFailures()
         Task {
             defer { isSaving = false }
             let submission = ComposeSubmission(

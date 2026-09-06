@@ -72,11 +72,17 @@ extension ComposeFailure {
     }
 
     /// The `APIError` anywhere in an error's chain, or nil.
+    ///
+    /// `APIErrorCarrying` is checked as well as the type itself: the failures this app actually
+    /// meets are wrappers — `MediaUploadError.refused(.unauthorized)` is what an upload against an
+    /// ended session throws — and a wrapper read as an opaque error is a session failure reported
+    /// as the server refusing somebody's words.
     private static func apiError(in error: any Error) -> APIError? {
         var current: (any Error)? = error
         for _ in 0..<16 {
             guard let error = current else { return nil }
             if let api = error as? APIError { return api }
+            if let carried = (error as? any APIErrorCarrying)?.apiError { return carried }
             if let client = error as? ClientError {
                 current = client.underlyingError
                 continue

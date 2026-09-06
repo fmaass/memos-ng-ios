@@ -111,6 +111,36 @@ struct CaptureFixtureTests {
         await gate.release()
     }
 
+    /// A cancelled read has to come back, and quickly. The caller's cancellation reaches neither
+    /// the detached work nor the continuation this is parked on by itself — nothing else would ever
+    /// resume it — so a composer that goes away while a big video is being read would otherwise
+    /// wait out the whole deadline for an answer nobody wants.
+    @Test("a cancelled read returns at once, with nothing, and cancels the work")
+    func cancellingTheReadReturnsAtOnce() async throws {
+        let gate = NeverReturns()
+        let sawCancellation = CancellationWitness()
+        let started = Date()
+        let task = Task {
+            await CaptureReader.withDeadline(.seconds(30)) {
+                await gate.wait()
+                await sawCancellation.record(Task.isCancelled)
+                return CaptureReading(instant: Date(), civil: nil, source: .exif)
+            }
+        }
+        // Give the work a turn to start, then take it away.
+        try await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+        let reading = await task.value
+        let elapsed = Date().timeIntervalSince(started)
+
+        #expect(reading == .empty, "a cancelled read answered with a date anyway")
+        #expect(elapsed < 5, "the cancellation waited for the deadline (\(elapsed)s)")
+        // And the work itself was cancelled rather than left running to the end of the process.
+        await gate.release()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await sawCancellation.value == true, "the detached read was not cancelled")
+    }
+
     @Test("the HEIC's date comes from its PRIMARY image, not from item 0")
     func heicPrimaryImage() async throws {
         let named = try #require(Self.binaries.first { $0.name == "heic-offset.heic" })
@@ -127,6 +157,12 @@ struct CaptureFixtureTests {
     static func hex(_ digest: SHA256Digest) -> String {
         digest.map { String(format: "%02x", $0) }.joined()
     }
+}
+
+/// Whether the abandoned work saw the cancellation it was sent.
+actor CancellationWitness {
+    private(set) var value: Bool?
+    func record(_ cancelled: Bool) { value = cancelled }
 }
 
 /// A read that answers only when the test lets it — which, for the deadline case, is after the

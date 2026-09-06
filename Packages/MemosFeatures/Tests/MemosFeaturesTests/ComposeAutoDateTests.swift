@@ -9,6 +9,13 @@ import Testing
 /// The arithmetic itself is held to the vendored artefact in `MemosOutboxTests`; what is held here
 /// is the composer's part: that the control shows what was decided, that a chosen date wins, that
 /// an edit is never on Auto, and that adding, removing and late-arriving reads all move the answer.
+/// A zone a test can move between two picks.
+@MainActor
+final class ZoneBox {
+    var value: TimeZone
+    init(_ value: TimeZone) { self.value = value }
+}
+
 @MainActor
 @Suite("The Auto memo date in the composer")
 struct ComposeAutoDateTests {
@@ -28,7 +35,7 @@ struct ComposeAutoDateTests {
     /// An imports object whose files answer by name — the seam that lets a test say "this one was
     /// taken at one o'clock" without producing a photograph that was.
     static func imports(_ readings: [String: CaptureReading]) -> ComposeImports {
-        ComposeImports(zone: zone) { readings[$0.filename] ?? .empty }
+        ComposeImports(zone: zone, readCapture: { readings[$0.filename] ?? .empty })
     }
 
     static func exact(_ text: String) -> CaptureReading {
@@ -188,11 +195,13 @@ struct ComposeAutoDateTests {
     @Test("an item that settles late moves to its place and can re-date the memo")
     func aLateCompletionReordersAndRedates() async {
         let gate = ReadGate(Self.exact("2026-01-01T12:00:00Z"))
-        let imports = ComposeImports(zone: Self.zone) { media in
-            media.filename == "late.heic"
-                ? await gate.read(media)
-                : Self.exact("2026-01-01T14:00:00Z")
-        }
+        let imports = ComposeImports(
+            zone: Self.zone,
+            readCapture: { media in
+                media.filename == "late.heic"
+                    ? await gate.read(media)
+                    : Self.exact("2026-01-01T14:00:00Z")
+            })
 
         await imports.load(["late", "early"], stamp: imports.selected()) { item in
             .file(Self.media("\(item).heic"))
@@ -250,6 +259,39 @@ struct ComposeAutoDateTests {
         #expect(
             imports.attachments.map(\.filename)
                 == ["IMG_0001.heic", "a.heic", "b.heic", "IMG_0002.heic"])
+    }
+
+    /// The zone is a fact about the MOMENT OF PICKING, not about the composer: a phone can be
+    /// picked up in another country, or its setting corrected, between two picks in one sheet. Each
+    /// item keeps the zone it was picked in, so nothing already on screen re-resolves.
+    @Test("each pick is stamped with the zone as it read at that moment")
+    func theZoneIsSampledAtEachPick() async throws {
+        let berlin = Self.zone
+        let kathmandu = TimeZone(identifier: "Asia/Kathmandu") ?? .gmt
+        let now = ZoneBox(berlin)
+        // The same wall-clock reading for every file: what differs is only where it was picked.
+        let imports = ComposeImports(
+            zone: berlin,
+            zoneAtPick: { now.value },
+            readCapture: { _ in CaptureReading(civil: "2026-01-01T13:00:00", source: .exif) })
+
+        await imports.load(["here"], stamp: imports.selected()) { _ in
+            .file(Self.media("here.heic"))
+        }
+        await settleTasks()
+
+        // The phone moves, and a second item is attached.
+        now.value = kathmandu
+        imports.captured(Self.media("there.heic"))
+        await settleTasks()
+
+        let picked = try #require(imports.items.first { $0.label == "here.heic" })
+        let captured = try #require(imports.items.first { $0.label == "there.heic" })
+        #expect(picked.captureZone == berlin, "the first item's zone moved with the device")
+        #expect(captured.captureZone == kathmandu, "the second item did not take the new zone")
+        // One reading, two zones, two instants — and Kathmandu (+05:45) is the earlier of them, so
+        // that is the date the memo takes.
+        #expect(imports.autoDate.instant == Self.instant("2026-01-01T07:15:00Z"))
     }
 
     @Test("a camera capture sorts by its own instant, like anything else")

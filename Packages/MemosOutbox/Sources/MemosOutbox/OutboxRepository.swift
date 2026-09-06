@@ -37,10 +37,19 @@ public struct StagedSource: Sendable, Equatable {
         self.identity = identity
     }
 
-    /// How this file is named in an edit key: its identity when it has one, and otherwise what the
-    /// file is. Never the temporary path alone, which changes every time the picker exports again.
+    /// How this file is named in an edit key.
+    ///
+    /// The identity when it has one — a per-import token, minted where the file is copied out of
+    /// the picker or the provider (`PickedMedia.imported`, `SharedFile.imported`), so a file
+    /// imported AGAIN for a retry keeps the name the first attempt used.
+    ///
+    /// Without one, the FULL PATH, never the basename: two files can be called the same thing in
+    /// two directories, and an identity they shared would let a replacement be answered as a replay
+    /// of the edit it replaced — the memo keeping the old file and nobody being told. A source with
+    /// no token is one nothing imported (a test's, or a caller that built it by hand), and for those
+    /// the path is exactly what tells them apart.
     public var editIdentity: String {
-        identity?.uuidString ?? "\(filename)|\(mime)|\(url.lastPathComponent)"
+        identity?.uuidString ?? "\(url.path)|\(filename)|\(mime)"
     }
 }
 
