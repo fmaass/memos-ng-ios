@@ -592,7 +592,7 @@ struct TimelineSnapshotTests {
         let uids = (0..<300).map { "memo-\($0)" }
         let timeline = store(writer: writer(root: root))
 
-        await timeline.refresh(using: page(uids), baseURL: Stub.baseURL)
+        await timeline.refresh(using: page(uids).handle, baseURL: Stub.baseURL)
 
         #expect(timeline.memos.count == 300, "control: the loaded list itself is not capped")
         #expect(onDisk(root)?.memos.count == TimelineSnapshotStore.capacity)
@@ -887,11 +887,11 @@ struct TimelineSnapshotTests {
         await session.signOutWithoutRevoking()
 
         #expect(!exists(root), "the snapshot outlived the credential")
-        let observed = try #require(atWipe.get(), "control: the removal really ran")
+        // Control: the removal really ran — a nil here is a case that proved nothing.
+        let observed = try #require(atWipe.get())
         #expect(
             observed > before,
-            "the wipe ran under the epoch it was wiping: a picture still on its way to the disk "
-                + "would have been accepted and landed behind it"
+            "the wipe ran under an epoch that had not moved: a picture on its way would land"
         )
     }
 
