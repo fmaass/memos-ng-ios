@@ -1,7 +1,7 @@
 # Provenance of the memos-ng artefacts vendored into this package.
 # Written by scripts/sync-openapi.sh — do not edit by hand.
 repo=memos-ng
-commit=55c9a6fb3539ba7a152c8b69e73b4bdb547706d7
-subject=Let a device token read and rename itself (#114)
-committed=2026-08-28T06:06:04+02:00
-files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md
+commit=dacfdd0b4f36255e078cb9a024564c9c8f758736
+subject=Date a new memo by its earliest photo, and show the pictures in capture order (#132)
+committed=2026-09-06T01:54:46+02:00
+files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md Sources/MemosAPI/Fixtures/auto-memo-date.json Sources/MemosAPI/Fixtures/auto-memo-date/heic-offset.heic Sources/MemosAPI/Fixtures/auto-memo-date/jpeg-no-offset.jpg Sources/MemosAPI/Fixtures/auto-memo-date/jpeg-offset.jpg Sources/MemosAPI/Fixtures/auto-memo-date/mov-creationdate.mov Sources/MemosAPI/Fixtures/auto-memo-date/mp4-header-only.mp4 Sources/MemosAPI/Fixtures/auto-memo-date/mp4-zero-header.mp4 Sources/MemosAPI/Fixtures/auto-memo-date/png-exif-after-idat.png Sources/MemosAPI/Fixtures/auto-memo-date/png-exif.png Sources/MemosAPI/Fixtures/auto-memo-date/png-none.png

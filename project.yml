@@ -331,6 +331,15 @@ targets:
       # asserted against — from ONE memos-ng commit, same as the parity fixture.
       - path: Packages/MemosAPI/Sources/MemosAPI/openapi.json
         buildPhase: resources
+      # The Auto memo date and the capture order are ONE rule set for every client, and this is
+      # where the rule set lives: the artefact vendored from the same memos-ng commit as the
+      # document above, with the binaries it names beside it. The vectors and the files are read
+      # out of this bundle at run time, so the reader and the vector suites are held to the same
+      # artefact the server and the SPA are held to — not to cases copied into Swift.
+      - path: Packages/MemosAPI/Sources/MemosAPI/Fixtures/auto-memo-date.json
+        buildPhase: resources
+      - path: Packages/MemosAPI/Sources/MemosAPI/Fixtures/auto-memo-date
+        buildPhase: resources
     dependencies:
       - package: MemosOutbox
       - target: MemosNG
@@ -338,6 +347,13 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng.outboxtests
+        # The capture fixtures are VENDORED BYTES, and this bundle checks each one's sha256
+        # against the artefact that describes it. Xcode re-encodes PNG resources on the way in —
+        # measured on this project 2026-09-06: png-none.png went from 77 bytes to 85 — which
+        # rewrites the very files the digests are about, and can move the eXIf chunk whose
+        # PLACEMENT one of them exists to test. So the copy is left alone here.
+        COMPRESS_PNG_FILES: NO
+        STRIP_PNG_TEXT: NO
 
   MemosShareKitTests:
     type: bundle.unit-test
