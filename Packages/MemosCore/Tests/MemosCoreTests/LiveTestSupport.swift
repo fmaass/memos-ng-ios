@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 @testable import MemosCore
 
 /// The bytes the running server actually writes.
@@ -99,9 +100,20 @@ actor ScriptedSSETransport: SSEConnecting {
     private var script: [ScriptedConnection]
     private(set) var requests: [URLRequest] = []
     private let terminations = TerminationCounter()
+    /// Run on the FIRST connect only, either side of the credential going on — the two instants a
+    /// renewal can land in and be told apart: before the send, and after it but before its answer
+    /// is judged.
+    private let beforeConnect: @Sendable () -> Void
+    private let afterPresenting: @Sendable () -> Void
 
-    init(_ script: [ScriptedConnection] = []) {
+    init(
+        _ script: [ScriptedConnection] = [],
+        beforeConnect: @escaping @Sendable () -> Void = {},
+        afterPresenting: @escaping @Sendable () -> Void = {}
+    ) {
         self.script = script
+        self.beforeConnect = beforeConnect
+        self.afterPresenting = afterPresenting
     }
 
     var connectCount: Int { requests.count }
@@ -114,13 +126,26 @@ actor ScriptedSSETransport: SSEConnecting {
         return requests[index].value(forHTTPHeaderField: name)
     }
 
+    /// What the production authority answered at each connect.
+    var verdicts: [Bool] = []
+
     func url(of index: Int) -> String? {
         guard index < requests.count else { return nil }
         return requests[index].url?.absoluteString
     }
 
-    func connect(_ request: URLRequest) async throws -> SSEConnection {
-        requests.append(request)
+    func connect(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> SSEConnection
+    {
+        // The double records the PRODUCTION authority's verdict; it does not implement the policy.
+        verdicts.append(authority.holds())
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        let first = requests.isEmpty
+        if first { beforeConnect() }
+        // Presented HERE, through the production helper, because that is where the real transport
+        // puts the credential on — so what is recorded is what would have gone on the wire.
+        requests.append(authority.presenting(request))
+        if first { afterPresenting() }
         // Past the end of the script this server behaves like the real one with nothing in
         // flight: it opens and closes immediately (`app/routers/assets.py:763-764`). A test that
         // over-runs its script is then bounded by the sleeper's budget instead of hanging.
@@ -190,7 +215,8 @@ enum LiveStub {
             token: LiveStub.token
         ),
         backoff: SSEBackoff = SSEBackoff(),
-        idleReconnectDelay: TimeInterval = 15
+        idleReconnectDelay: TimeInterval = 15,
+        authority: SendAuthority = .unfenced
     ) -> MediaEventClient {
         MediaEventClient(
             credentials: { credentials },
@@ -198,7 +224,8 @@ enum LiveStub {
             backoff: backoff,
             idleReconnectDelay: idleReconnectDelay,
             transport: transport,
-            sleeper: sleeper
+            sleeper: sleeper,
+            authority: authority
         )
     }
 }

@@ -53,6 +53,42 @@ public enum StoreFailure {
         return false
     }
 
+    /// Whether the middleware refused this on behalf of a credential the device has since
+    /// replaced.
+    ///
+    /// It arrives wrapped in the generated client's envelope, exactly as a cancellation does, so
+    /// it is looked for down the chain rather than at the top of it. A caller that treats it as a
+    /// failure of the credential in hand ends a session that has just renewed.
+    public static func isSuperseded(_ error: any Error) -> Bool {
+        var current: (any Error)? = error
+        for _ in 0..<maximumDepth {
+            guard let error = current else { return false }
+            if error is CredentialSuperseded { return true }
+            if let client = error as? ClientError {
+                current = client.underlyingError
+                continue
+            }
+            current = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    /// The classification of a failure that never reached the server, or nil for one that did.
+    ///
+    /// This is the fork the whole "one surface for can't-reach-the-server" rule turns on. A
+    /// transport-class failure goes to the session sink and never into a store's `lastError`; an
+    /// answer the server gave — a 403, a 500 — is about the thing somebody just did and is
+    /// reported where it always was. A cancellation is neither: it is this app's own supersede
+    /// coming back at it.
+    public static func transportFailure(_ error: any Error) -> NativeLoginTransportFailure? {
+        guard !isCancellation(error), !isSuperseded(error) else { return nil }
+        guard !(error is APIError), (error as? any APIErrorCarrying)?.apiError == nil else {
+            return nil
+        }
+        guard NativeLoginTransportFailure.isTransportFailure(error) else { return nil }
+        return NativeLoginTransportFailure.classify(error)
+    }
+
     /// The failure a store should report, or nil for one it must swallow.
     ///
     /// Only cancellation is swallowed. Everything else — a 500, a decode, a phone with no network

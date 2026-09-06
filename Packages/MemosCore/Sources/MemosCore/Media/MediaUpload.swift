@@ -57,14 +57,20 @@ public enum MediaUpload {
     /// finalizes pending uploads as part of the memo write that names them
     /// (`app/routers/memos.py`, "finalize-on-post"), so a client that called `/finalize` itself
     /// would produce an attachment belonging to no memo — an orphan in the library.
+    /// - Parameter authority: asked immediately before EVERY request this makes — the start, each
+    ///   chunk, and the offset HEAD a gap recovers through. A chunked upload is the longest-lived
+    ///   thing this app sends and the one most likely to still be going when a session ends, and
+    ///   it runs off the main actor, so the check travels with it rather than being made once by
+    ///   the caller (`SendAuthority`).
     public static func upload(
         _ source: StagedSource,
         using client: any APIProtocol,
         fileManager: FileManager = .default,
-        offsetDeadline deadline: Duration = offsetDeadline
+        offsetDeadline deadline: Duration = offsetDeadline,
+        under authority: SendAuthority = .unfenced
     ) async throws -> String {
         let size = try byteSize(of: source.url, fileManager: fileManager)
-        let started = try await start(source, size: size, using: client)
+        let started = try await start(source, size: size, using: client, under: authority)
         guard size > 0 else { return started.uploadUid }
 
         let handle: FileHandle
@@ -84,7 +90,9 @@ public enum MediaUpload {
             // the declared size can no longer be reached and the server will never call it
             // complete.
             guard !piece.isEmpty else { throw MediaUploadError.stalled }
-            switch try await append(piece, to: started.uploadUid, at: offset, using: client) {
+            switch try await append(
+                piece, to: started.uploadUid, at: offset, using: client, under: authority
+            ) {
             case .accepted(let answer):
                 // The SERVER's count is the position, never this loop's arithmetic: it is what a
                 // resume would read, and the one number that cannot disagree with what it holds.
@@ -117,7 +125,7 @@ public enum MediaUpload {
                 resyncs += 1
                 guard
                     let synced = try? await self.offset(
-                        of: started.uploadUid, using: client, within: deadline
+                        of: started.uploadUid, using: client, within: deadline, under: authority
                     )
                 else { throw MediaUploadError.refused(.server(status: 409)) }
                 // Two ways this stops instead of spinning: a server that reports the very offset
@@ -163,11 +171,16 @@ public enum MediaUpload {
     public static func uploadAll(
         _ sources: [StagedSource],
         using client: any APIProtocol,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        under authority: SendAuthority = .unfenced
     ) async throws -> [String] {
         var uids: [String] = []
         for source in sources {
-            uids.append(try await upload(source, using: client, fileManager: fileManager))
+            uids.append(
+                try await upload(
+                    source, using: client, fileManager: fileManager, under: authority
+                )
+            )
         }
         return uids
     }
@@ -193,8 +206,11 @@ public enum MediaUpload {
     static func start(
         _ source: StagedSource,
         size: Int64,
-        using client: any APIProtocol
+        using client: any APIProtocol,
+        under authority: SendAuthority = .unfenced
     ) async throws -> Components.Schemas.UploadOut {
+        // Immediately before the send, on the executor doing it.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let response = try await client.startUploadApiUploadsPost(
             .init(
                 body: .json(
@@ -244,10 +260,11 @@ public enum MediaUpload {
     static func offset(
         of uploadUID: String,
         using client: any APIProtocol,
-        within deadline: Duration = offsetDeadline
+        within deadline: Duration = offsetDeadline,
+        under authority: SendAuthority = .unfenced
     ) async throws -> Int64 {
         try await withThrowingTaskGroup(of: Int64.self) { group in
-            group.addTask { try await read(offsetOf: uploadUID, using: client) }
+            group.addTask { try await read(offsetOf: uploadUID, using: client, under: authority) }
             group.addTask {
                 try await Task.sleep(for: deadline)
                 throw MediaUploadError.stalled
@@ -260,8 +277,11 @@ public enum MediaUpload {
 
     private static func read(
         offsetOf uploadUID: String,
-        using client: any APIProtocol
+        using client: any APIProtocol,
+        under authority: SendAuthority = .unfenced
     ) async throws -> Int64 {
+        // Immediately before the send, on the executor doing it.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let response = try await client.uploadOffsetApiUploadsUploadUidHead(
             .init(path: .init(uploadUid: uploadUID))
         )
@@ -286,8 +306,11 @@ public enum MediaUpload {
         _ piece: Data,
         to uploadUID: String,
         at offset: Int64,
-        using client: any APIProtocol
+        using client: any APIProtocol,
+        under authority: SendAuthority = .unfenced
     ) async throws -> ChunkOutcome {
+        // Immediately before the send, on the executor doing it — every chunk, not only the first.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let response = try await client.appendChunkApiUploadsUploadUidPatch(
             .init(
                 path: .init(uploadUid: uploadUID),

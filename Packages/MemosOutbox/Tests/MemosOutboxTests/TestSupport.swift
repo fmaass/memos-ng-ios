@@ -18,7 +18,12 @@ final class ScriptedHTTP: OutboxHTTPPerforming, @unchecked Sendable {
         self.handler = handler
     }
 
-    func perform(_ request: URLRequest) async throws -> OutboxHTTPResponse {
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        // The double answers the same question the real performer does, so a test can put the
+        // withdrawal between two sends and see the second one refused.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         lock.withLock { seen.append(request) }
         return try handler(request)
     }
@@ -89,6 +94,18 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         self.pretendInFlight = inFlight
     }
 
+    private var hook: (@Sendable () -> Void)?
+    private var verdicts: [Bool] = []
+    /// The credential generation each chunk went out under, as the production scheduler records it.
+    private var issued: [String: Int] = [:]
+
+    func epoch(of identity: OutboxTaskIdentity) -> Int? {
+        lock.withLock { issued[identity.taskDescription] }
+    }
+
+    /// What the authority answered, in order, each time this executor was reached.
+    var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
+
     func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { pretendInFlight } }
 
     /// Set after the harness knows the job and file ids a relaunch would have left behind.
@@ -96,7 +113,28 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         lock.withLock { pretendInFlight = identities }
     }
 
-    func upload(_ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity) async {
+    /// Run the instant BEFORE the authority is asked — how a test puts an account switch inside
+    /// the hop between the engine's decision to send and this executor performing it.
+    var beforeUpload: (@Sendable () -> Void)? {
+        get { lock.withLock { hook } }
+        set { lock.withLock { hook = newValue } }
+    }
+
+    func upload(
+        _ request: URLRequest,
+        fromFile file: URL,
+        identity: OutboxTaskIdentity,
+        under authority: SendAuthority,
+        issuedUnder epoch: Int
+    ) async {
+        beforeUpload?()
+        lock.withLock { issued[identity.taskDescription] = epoch }
+        // The double does NOT enforce the policy it is used to test — a stand-in that implements
+        // the guard proves only that the stand-in has one. It records the verdict the PRODUCTION
+        // `SendAuthority` gives at the instant this executor runs, and the test reads that.
+        let permitted = authority.holds()
+        lock.withLock { verdicts.append(permitted) }
+        guard permitted else { return }
         lock.withLock {
             scheduled.append(
                 Scheduled(
@@ -176,8 +214,13 @@ final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
         self.lastOutcome = last ?? outcomes.last ?? .created(uid: "m1")
     }
 
-    func create(job: UploadJob, credentials: OutboxCredentials) async -> MemoCompletionOutcome {
-        lock.withLock {
+    func create(
+        job: UploadJob,
+        credentials: OutboxCredentials,
+        under authority: SendAuthority
+    ) async -> MemoCompletionOutcome {
+        guard authority.holds() else { return .retry("no authority") }
+        return lock.withLock {
             attempts.append(job.idempotencyKey)
             guard !outcomes.isEmpty else { return lastOutcome }
             return outcomes.removeFirst()
@@ -331,6 +374,8 @@ final class MutableClock: @unchecked Sendable {
 final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendable {
     private let lock = NSLock()
     private var current: OutboxCredentials?
+    private var epoch = 0
+    private var supersedeOnAcquire = false
 
     init(_ current: OutboxCredentials?) { self.current = current }
 
@@ -338,13 +383,39 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
         lock.withLock { current = credentials }
     }
 
-    func currentCredentials() async -> OutboxCredentials? { lock.withLock { current } }
+    /// Somebody signs in as somebody else RIGHT NOW — driven from inside the scripted server, so
+    /// a test can put the switch between two sends rather than only before the first.
+    func supersede() { lock.withLock { epoch += 1 } }
+
+    /// Somebody signs in as somebody else the instant AFTER a pass acquires its credential — the
+    /// window the acquisition itself cannot close, and the one every request in that pass is then
+    /// inside of.
+    func supersedeAfterNextAcquisition() { lock.withLock { supersedeOnAcquire = true } }
+
+    func currentCredentials() async -> OutboxCredentials? {
+        lock.withLock {
+            guard var acquired = current else { return nil }
+            acquired.epoch = epoch
+            if supersedeOnAcquire {
+                epoch += 1
+                supersedeOnAcquire = false
+            }
+            return acquired
+        }
+    }
+
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        lock.withLock { epoch == credentials.epoch }
+    }
 }
 
 struct StaticCredentials: OutboxCredentialsProviding {
     var credentials: OutboxCredentials?
 
     func currentCredentials() async -> OutboxCredentials? { credentials }
+
+    /// Nothing moves under this one, so what it granted always still stands.
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
 }
 
 enum Fixture {

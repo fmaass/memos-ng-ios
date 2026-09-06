@@ -53,6 +53,19 @@ public enum NativeLoginTransportFailure: Sendable, Equatable {
         return denied ? .localNetworkDenied : .offline
     }
 
+    /// Whether the request never got an answer at all — as opposed to getting one the app did not
+    /// like.
+    ///
+    /// The distinction is what the banner is keyed on. A store that cannot reach the server has
+    /// nothing to say that the session is not already saying in one line, while a server that
+    /// ANSWERED and refused is about the thing somebody just tapped and belongs on it. It is
+    /// decided from the URL loading system's own domain rather than by elimination, because
+    /// "everything that is not an `APIError`" also catches a body this app could not decode, and a
+    /// decoding defect is not a phone that is offline.
+    public static func isTransportFailure(_ error: any Error) -> Bool {
+        chain(from: error).contains { $0.domain == NSURLErrorDomain }
+    }
+
     /// The only text about a failed exchange that may be written down: what it was classified as,
     /// and the domain and code it was classified from.
     public static func diagnostic(for error: any Error) -> String {

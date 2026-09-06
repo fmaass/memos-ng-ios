@@ -13,7 +13,7 @@ struct TimelineStoreTests {
             Stub.json(Stub.memoList(["a", "b"], nextCursor: "cursor-1"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["a", "b"])
         #expect(store.hasMore)
@@ -25,7 +25,7 @@ struct TimelineStoreTests {
         let store = TimelineStore()
         let client = Stub.client { _, _, _ in Stub.json(Stub.memoList(["a"], nextCursor: nil)) }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(!store.hasMore)
         #expect(!store.shouldLoadMore(after: 0))
@@ -43,8 +43,8 @@ struct TimelineStoreTests {
                 : Stub.json(Stub.memoList(["a", "b"], nextCursor: "cursor-1"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["a", "b", "c"])
         #expect(paths.get().count == 2)
@@ -62,8 +62,8 @@ struct TimelineStoreTests {
                 : Stub.json(Stub.memoList(["a", "b"], nextCursor: "cursor-1"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["a", "b", "c"])
     }
@@ -77,8 +77,8 @@ struct TimelineStoreTests {
             return Stub.json(Stub.memoList(["a"], nextCursor: nil))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(calls.count == 1)
     }
@@ -89,7 +89,7 @@ struct TimelineStoreTests {
         let store = TimelineStore(onUnauthorized: { signedOut.increment() })
         let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(signedOut.count == 1)
         #expect(store.memos.isEmpty)
@@ -102,7 +102,7 @@ struct TimelineStoreTests {
         let store = TimelineStore(onUnauthorized: { signedOut.increment() })
         let client = Stub.client { _, _, _ in Stub.empty(.internalServerError) }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(signedOut.count == 0)
         #expect(store.lastError != nil)
@@ -114,7 +114,7 @@ struct TimelineStoreTests {
         let client = Stub.client { _, _, _ in
             Stub.json(Stub.memoList(["a", "b", "c", "d"], nextCursor: "cursor-1"))
         }
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(!store.shouldLoadMore(after: 0, lookahead: 3))
         #expect(store.shouldLoadMore(after: 1, lookahead: 3))
@@ -127,7 +127,7 @@ struct TimelineStoreTests {
 extension TimelineStoreTests {
     private func seeded(_ uids: [String], client: any APIProtocol) async -> TimelineStore {
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         return store
     }
 
@@ -140,7 +140,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a", "b"], client: client)
 
-        #expect(await store.create(content: "hello", using: client, baseURL: Stub.baseURL))
+        #expect(await store.create(content: "hello", using: client.handle, baseURL: Stub.baseURL))
         #expect(store.memos.map(\.uid) == ["new", "a", "b"])
     }
 
@@ -153,7 +153,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a"], client: client)
 
-        #expect(!(await store.create(content: "", using: client, baseURL: Stub.baseURL)))
+        #expect(!(await store.create(content: "", using: client.handle, baseURL: Stub.baseURL)))
         #expect(store.memos.count == 1)
         #expect(store.lastError != nil)
     }
@@ -170,7 +170,10 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a"], client: client)
 
-        #expect(await store.edit(uid: "a", content: "edited", using: client, baseURL: Stub.baseURL))
+        let edited = await store.edit(
+            uid: "a", content: "edited", using: client.handle, baseURL: Stub.baseURL
+        )
+        #expect(edited)
         #expect(store.memos.first?.content == "edited")
         // A PATCH is a partial update: an edit that never touched the date must not carry one, or
         // every typo fixed would rewrite the display date to whatever the editor happened to hold.
@@ -210,7 +213,7 @@ extension TimelineStoreTests {
             uid: "b",
             content: "same words",
             createdAt: chosen,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL
         )
         #expect(edited)
@@ -240,7 +243,7 @@ extension TimelineStoreTests {
             uid: "c",
             content: "same words",
             createdAt: chosen,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL
         )
         #expect(edited)
@@ -269,7 +272,7 @@ extension TimelineStoreTests {
             uid: "c",
             content: "same words",
             createdAt: chosen,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL
         )
         #expect(edited)
@@ -296,7 +299,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a", "b"], client: client)
 
-        #expect(await store.create(content: "hello", using: client, baseURL: Stub.baseURL))
+        #expect(await store.create(content: "hello", using: client.handle, baseURL: Stub.baseURL))
         #expect(store.memos.map(\.uid) == ["new", "a", "b"])
     }
 
@@ -319,7 +322,7 @@ extension TimelineStoreTests {
             uid: "p",
             content: "same words",
             createdAt: chosen,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL
         )
         #expect(edited)
@@ -337,7 +340,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a", "b"], client: client)
 
-        #expect(await store.delete(uid: "a", using: client))
+        #expect(await store.delete(uid: "a", using: client.handle))
         #expect(store.memos.map(\.uid) == ["b"])
     }
 
@@ -350,7 +353,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a"], client: client)
 
-        #expect(!(await store.delete(uid: "a", using: client)))
+        #expect(!(await store.delete(uid: "a", using: client.handle)))
         #expect(store.memos.count == 1)
         #expect(store.lastError != nil)
     }
@@ -366,7 +369,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a", "b"], client: client)
 
-        #expect(await store.setPinned(true, uid: "b", using: client, baseURL: Stub.baseURL))
+        #expect(await store.setPinned(true, uid: "b", using: client.handle, baseURL: Stub.baseURL))
         #expect(
             store.memos.map(\.uid) == ["b", "a"], "the pinned memo leads the pinned-first list")
         #expect(paths.get().contains { $0.hasSuffix("/b/pin") })
@@ -382,7 +385,12 @@ extension TimelineStoreTests {
         let store = await seeded(["a"], client: client)
 
         #expect(
-            await store.setVisibility(.public, uid: "a", using: client, baseURL: Stub.baseURL)
+            await store.setVisibility(
+                .public,
+                uid: "a",
+                using: client.handle,
+                baseURL: Stub.baseURL
+            )
         )
         #expect(store.memos.first?.visibility == .public)
     }
@@ -410,7 +418,7 @@ extension TimelineStoreTests {
         let before = store.memos.first?.content
 
         let inFlight = Task {
-            await store.toggleTask(at: 0, in: "a", using: client, baseURL: Stub.baseURL)
+            await store.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
         }
         while !patchEntered.get() {
             await Task.yield()
@@ -442,7 +450,7 @@ extension TimelineStoreTests {
         }
         let store = await seeded(["a", "b"], client: client)
 
-        #expect(await store.setPinned(false, uid: "a", using: client, baseURL: Stub.baseURL))
+        #expect(await store.setPinned(false, uid: "a", using: client.handle, baseURL: Stub.baseURL))
         #expect(paths.get().contains { $0.hasSuffix("/a/unpin") })
         #expect(store.memos.first?.pinned == false)
     }
@@ -456,9 +464,9 @@ extension TimelineStoreTests {
                 ? Stub.empty(.forbidden)
                 : Stub.json(Stub.memoList(["a"], nextCursor: nil))
         }
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(!(await store.delete(uid: "a", using: client)))
+        #expect(!(await store.delete(uid: "a", using: client.handle)))
         #expect(!unauthorizedCalled.get(), "someone else's memo must not cost this session")
         #expect(store.lastError != nil)
     }
@@ -472,9 +480,9 @@ extension TimelineStoreTests {
                 ? Stub.empty(.unauthorized)
                 : Stub.json(Stub.memoList(["a"], nextCursor: nil))
         }
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(!(await store.delete(uid: "a", using: client)))
+        #expect(!(await store.delete(uid: "a", using: client.handle)))
         #expect(unauthorizedCalled.get())
     }
 
@@ -524,8 +532,8 @@ extension TimelineStoreTests {
             calendar: calendar
         )
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["a", "b"])
         let requests = paths.get().map { Self.sent($0) }
@@ -569,8 +577,8 @@ extension TimelineStoreTests {
         let store = TimelineStore(pageSize: 1)
         #expect(store.query.isEmpty, "the default query is the plain timeline")
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         let requests = paths.get().map { Self.sent($0) }
         #expect(requests.count == 2)
@@ -603,10 +611,10 @@ extension TimelineStoreTests {
             return Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["a"])
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
@@ -648,9 +656,9 @@ extension TimelineStoreTests {
             return Stub.json(Stub.memoList(["b"], nextCursor: nil))
         }
         let store = TimelineStore(pageSize: 1, query: MemoQuery(term: "travel"))
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
@@ -681,12 +689,12 @@ extension TimelineStoreTests {
         }
         let store = TimelineStore(pageSize: 1)
 
-        let inFlight = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
         store.setQuery(MemoQuery(term: "travel"))
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["travelled"], "the new query never got to read anything")
         #expect(!store.isLoading, "the store still says it is loading a query nobody is reading")
@@ -725,12 +733,12 @@ extension TimelineStoreTests {
             onUnauthorized: { unauthorizedCalled.set(true) }
         )
 
-        let inFlight = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
         store.setQuery(MemoQuery(term: "travel"))
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["travelled"])
 
         release.set(true)
@@ -742,7 +750,7 @@ extension TimelineStoreTests {
 
         // Control: the fence drops errors from a superseded lineage, not errors as such — the
         // current query's own 401 still reports and still ends the session.
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.lastError != nil, "control: a current failure was swallowed too")
         #expect(unauthorizedCalled.get(), "control: a current 401 no longer ends the session")
     }
@@ -761,9 +769,9 @@ extension TimelineStoreTests {
             return Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }

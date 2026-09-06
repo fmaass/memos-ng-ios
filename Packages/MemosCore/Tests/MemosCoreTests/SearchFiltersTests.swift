@@ -24,7 +24,8 @@ struct SearchFiltersTests {
         #"[{"name":"travel","count":9},{"name":"food","count":2},{"name":"stale","count":0}]"#
 
     private static func search(handler: @escaping StubTransport.Handler) -> MemoSearch {
-        MemoSearch(client: Stub.client(handler: handler), baseURL: Stub.baseURL)
+        MemoSearch(
+            handle: Stub.client(handler: handler).handle, baseURL: Stub.baseURL)
     }
 
     /// The query parameters of one request, as the server would read them: repeated names kept in
@@ -54,7 +55,7 @@ struct SearchFiltersTests {
         }
         let store = TagStore()
 
-        await store.load(using: client)
+        await store.load(using: client.handle)
 
         // Control: this is the tags endpoint, built by the generated client rather than by a
         // string in the test.
@@ -208,13 +209,14 @@ struct SearchFiltersTests {
                 ? Stub.json(Stub.memoList(["b"], nextCursor: nil))
                 : Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
         }
-        let search = MemoSearch(client: client, baseURL: Stub.baseURL, pageSize: 1)
+        let search = MemoSearch(
+            handle: client.handle, baseURL: Stub.baseURL, pageSize: 1)
 
         var filters = SearchFilters.empty
         filters.visibility = .protected
         search.apply(filters)
         await search.settled()
-        await search.results.loadMore(using: client, baseURL: Stub.baseURL)
+        await search.results.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(search.results.memos.map(\.uid) == ["a", "b"], "the list did not page")
         let requests = paths.get().map { Self.sent($0) }
@@ -241,10 +243,11 @@ struct SearchFiltersTests {
                 ? Stub.json(Stub.memoList(["b"], nextCursor: nil))
                 : Stub.json(Stub.memoList(["a"], nextCursor: "page-2"))
         }
-        let plain = MemoSearch(client: plainClient, baseURL: Stub.baseURL, pageSize: 1)
+        let plain = MemoSearch(
+            handle: plainClient.handle, baseURL: Stub.baseURL, pageSize: 1)
         plain.apply(SearchFilters.empty.toggling("travel"))
         await plain.settled()
-        await plain.results.loadMore(using: plainClient, baseURL: Stub.baseURL)
+        await plain.results.loadMore(using: plainClient.handle, baseURL: Stub.baseURL)
         for request in plainPaths.get().map({ Self.sent($0) }) {
             #expect(request["visibility"] == nil, "an unchosen visibility reached the wire")
             #expect(request["tag"] == ["travel"], "control: this page carried its own filter")
@@ -260,10 +263,10 @@ struct SearchFiltersTests {
     func aFilterComposesWithTheTerm() async {
         let paths = LockedValue<[String]>([])
         let search = MemoSearch(
-            client: Stub.client { request, _, _ in
+            handle: Stub.client { request, _, _ in
                 paths.set(paths.get() + [request.path ?? ""])
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL,
             coalescing: .zero
         )
@@ -310,7 +313,7 @@ struct SearchFiltersTests {
         let calls = Counter()
         let paths = LockedValue<[String]>([])
         let search = MemoSearch(
-            client: Stub.client { request, _, _ in
+            handle: Stub.client { request, _, _ in
                 paths.set(paths.get() + [request.path ?? ""])
                 calls.increment()
                 guard calls.count > 1 else {
@@ -320,7 +323,7 @@ struct SearchFiltersTests {
                     return Stub.json(Stub.page([], nextCursor: nil))
                 }
                 return Stub.json(Stub.memoList(["found"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL
         )
 
@@ -357,10 +360,10 @@ struct SearchFiltersTests {
     func anEmptyFieldStillSearchesItsFilters() async {
         let paths = LockedValue<[String]>([])
         let search = MemoSearch(
-            client: Stub.client { request, _, _ in
+            handle: Stub.client { request, _, _ in
                 paths.set(paths.get() + [request.path ?? ""])
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL,
             coalescing: .zero
         )

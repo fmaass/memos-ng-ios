@@ -28,7 +28,7 @@ struct HeatmapStoreTests {
         }
         let store = HeatmapStore()
 
-        await store.load(using: client)
+        await store.load(using: client.handle)
 
         #expect(store.counts == ["2026-08-24": 1, "2026-08-25": 2])
         #expect(store.lastError == nil)
@@ -51,7 +51,7 @@ struct HeatmapStoreTests {
         let store = HeatmapStore()
         #expect(!store.hasLoaded, "a store nobody has read says it has been answered")
 
-        let reading = Task { await store.load(using: client) }
+        let reading = Task { await store.load(using: client.handle) }
         while !store.isLoading {
             await Task.yield()
         }
@@ -78,10 +78,10 @@ struct HeatmapStoreTests {
                 : Stub.empty(.internalServerError)
         }
         let store = HeatmapStore()
-        await store.load(using: client)
+        await store.load(using: client.handle)
         #expect(store.counts == ["2026-08-20": 4])
 
-        await store.load(using: client)
+        await store.load(using: client.handle)
 
         #expect(store.counts == ["2026-08-20": 4], "a failed load emptied the heatmap")
         #expect(store.lastError != nil, "the failure was swallowed")
@@ -106,11 +106,11 @@ struct HeatmapStoreTests {
         }
         let store = HeatmapStore()
 
-        let stale = Task { await store.load(using: client) }
+        let stale = Task { await store.load(using: client.handle) }
         while !entered.get() {
             await Task.yield()
         }
-        await store.load(using: client)
+        await store.load(using: client.handle)
         #expect(store.counts == ["2026-08-02": 3], "the later load did not land")
 
         release.set(true)
@@ -134,7 +134,7 @@ struct HeatmapStoreTests {
         }
         let store = HeatmapStore()
 
-        let inFlight = Task { await store.load(using: client) }
+        let inFlight = Task { await store.load(using: client.handle) }
         while !entered.get() {
             await Task.yield()
         }

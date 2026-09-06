@@ -149,8 +149,11 @@ public struct TimelineView: View {
                 SearchSheet(
                     search: raised.search,
                     loadHeatmap: { store in
-                        guard let client = session.api else { return }
-                        await store.load(using: client)
+                        guard let handle = session.activeHandle else { return }
+                        // Named before the read, so a failure that never reached the server lands
+                        // in the session's one banner instead of on this card.
+                        store.reports(to: session)
+                        await store.load(using: handle)
                     },
                     chose: { choice in
                         jump(to: choice.anchor)
@@ -163,8 +166,9 @@ public struct TimelineView: View {
                         searchPresentation.chose(choice)
                     },
                     loadTags: { store in
-                        guard let client = session.api else { return }
-                        await store.load(using: client)
+                        guard let handle = session.activeHandle else { return }
+                        store.reports(to: session)
+                        await store.load(using: handle)
                     },
                     runSearch: { query, text in raised.search.run(query, showing: text) },
                     close: { searchPresentation.close() },
@@ -201,6 +205,17 @@ public struct TimelineView: View {
         // Decoded once, here, because the toolbar shows it on every frame of the timeline and the
         // Settings screen shows it again — one decode, handed to both.
         .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
+        // The foreground trigger, and one of only two the re-validation has. `initial: true`
+        // because a timeline created while the app is ALREADY active never sees a change — which
+        // is every launch — and the session's single-flight absorbs the overlap with the launch
+        // check this joins.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            switch phase {
+            case .active: Task { await session.enteredForeground() }
+            case .background, .inactive: session.enteredBackground()
+            @unknown default: break
+            }
+        }
         .task {
             if timeline == nil {
                 timeline = TimelineStore(
@@ -214,6 +229,9 @@ public struct TimelineView: View {
                     }
                 )
             }
+            // A failure that never reached the server belongs to the session's one banner, not to
+            // an error card over this list (`SessionReporting`).
+            timeline?.reports(to: session)
             await load()
             // What "Default" resolves to is the account's setting, not something the app can
             // guess. It is fetched here rather than during sign-in so a slow or missing
@@ -274,11 +292,12 @@ public struct TimelineView: View {
         case .push:
             path.append(MemoRoute(uid: uid))
         case .fetchThenPush:
-            guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+            else { return }
             let outcome = await timeline.jump(
                 to: uid,
                 calendar: HeatmapDateJump.anchorCalendar,
-                using: client,
+                using: handle,
                 baseURL: baseURL
             )
             switch outcome {
@@ -450,9 +469,10 @@ public struct TimelineView: View {
                             guard let index = positions[memo.uid],
                                 timeline.shouldLoadMore(after: index)
                             else { return }
-                            guard let client = session.api, let baseURL = session.serverBaseURL
+                            guard let handle = session.activeHandle,
+                                let baseURL = session.serverBaseURL
                             else { return }
-                            await timeline.loadMore(using: client, baseURL: baseURL)
+                            await timeline.loadMore(using: handle, baseURL: baseURL)
                         }
                     }
                 } header: {
@@ -488,11 +508,11 @@ public struct TimelineView: View {
             ForEach(MemoVisibility.allCases, id: \.self) { option in
                 Button {
                     Task {
-                        guard let client = session.api,
+                        guard let handle = session.activeHandle,
                             let baseURL = session.serverBaseURL
                         else { return }
                         await timeline.setVisibility(
-                            option, uid: memo.uid, using: client, baseURL: baseURL
+                            option, uid: memo.uid, using: handle, baseURL: baseURL
                         )
                     }
                 } label: {
@@ -534,14 +554,16 @@ public struct TimelineView: View {
     /// without a session is not a search: signed out there is no timeline either, and a loupe that
     /// opened an empty sheet would be the only control on the screen that pretended to work.
     private func openSearch() {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        searchPresentation.open(
-            MemoSearch(
-                client: client,
-                baseURL: baseURL,
-                onUnauthorized: { [session] in await session.handle(.unauthorized) }
-            )
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        let search = MemoSearch(
+            handle: handle,
+            baseURL: baseURL,
+            onUnauthorized: { [session] in await session.handle(.unauthorized) }
         )
+        // The second `TimelineStore` in the app, and its failures are as much the session's as the
+        // first one's (`SessionReporting`).
+        search.reports(to: session)
+        searchPresentation.open(search)
     }
 
     /// Every way the sheet closes funnels through here.
@@ -606,28 +628,37 @@ public struct TimelineView: View {
     private func runMediaChannel() async {
         guard mediaChannelRuns,
             let timeline,
-            let client = session.api,
+            let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
         else { return }
+        // The channel reconnects for as long as this screen is up, so what it presents has to
+        // keep proving it belongs to a session this device holds — asked by the transport, at
+        // each connect. The session's OWN authority, not one assembled here: it carries the
+        // credential and its epoch as well as the verdict, which is what lets the transport
+        // present the token the device is holding NOW and the client tell a refusal of that from a
+        // refusal of one it has already replaced (`SendAuthority`).
         await MediaChannel.consume(
-            MediaEventClient.device().stream(),
+            MediaEventClient.device(
+                grant: { [session] in session.credentialGrant() },
+                authority: session.sendAuthority()
+            ).stream(),
             into: timeline,
             alongside: { [searchPresentation] in searchPresentation.liveResults },
-            using: client,
+            using: handle,
             baseURL: baseURL
         )
     }
 
     private func delete(_ memo: Memo, in timeline: TimelineStore) async {
-        guard let client = session.api else { return }
-        if await timeline.delete(uid: memo.uid, using: client) {
+        guard let handle = session.activeHandle else { return }
+        if await timeline.delete(uid: memo.uid, using: handle) {
             feedback.fire(.deleted)
         }
     }
 
     private func setPinned(_ pinned: Bool, on memo: Memo, in timeline: TimelineStore) async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        guard await timeline.setPinned(pinned, uid: memo.uid, using: client, baseURL: baseURL)
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        guard await timeline.setPinned(pinned, uid: memo.uid, using: handle, baseURL: baseURL)
         else { return }
         feedback.fire(pinned ? .pinned : .unpinned)
     }
@@ -653,7 +684,7 @@ public struct TimelineView: View {
                 sources: submission.attachments.map(\.stagedSource)
             )
         case .edit(let uid, _, let createdAt):
-            guard let client = session.api, let baseURL = session.serverBaseURL else {
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return false
             }
             posted = await timeline.edit(
@@ -666,7 +697,7 @@ public struct TimelineView: View {
                 // the outbox above owns new captures, and a queued edit cannot be retried safely
                 // until an edit key exists to make the retry idempotent.
                 attaching: submission.attachments.map(\.stagedSource),
-                using: client,
+                using: handle,
                 baseURL: baseURL
             )
         }
@@ -682,8 +713,8 @@ public struct TimelineView: View {
     /// of (MEMNG-166); it belongs to the search sheet now and is read when that opens
     /// (MEMNG-126).
     private func load() async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        await timeline?.refresh(using: client, baseURL: baseURL)
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        await timeline?.refresh(using: handle, baseURL: baseURL)
     }
 
     /// A day chosen on the sheet: the list comes back anchored at that day.
@@ -725,8 +756,8 @@ public struct TimelineView: View {
     /// out, so arriving at the top repeatedly costs one request, not one per frame.
     private func loadNewer(in timeline: TimelineStore) async {
         guard timeline.shouldLoadNewer(before: 0) else { return }
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        guard let top = await timeline.loadNewer(using: client, baseURL: baseURL) else { return }
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        guard let top = await timeline.loadNewer(using: handle, baseURL: baseURL) else { return }
         restoreTop = top
         restores += 1
     }

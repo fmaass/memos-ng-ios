@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 import Testing
 
 @testable import MemosCore
@@ -21,7 +22,9 @@ private struct StubDownloads: MediaDownloadTransport {
         self.status = status
     }
 
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
         seen.set(request)
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try bytes.write(to: url)
@@ -40,7 +43,11 @@ private struct StubDownloads: MediaDownloadTransport {
 private struct FailingDownloads: MediaDownloadTransport {
     struct Offline: Error {}
 
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) { throw Offline() }
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
+        throw Offline()
+    }
 }
 
 /// A download that answers with a file that is not there.
@@ -49,7 +56,9 @@ private struct FailingDownloads: MediaDownloadTransport {
 /// system's temporary copy is its own, and it deletes it the moment `download` returns — so a
 /// caller that is a moment too late finds nothing to move.
 private struct VanishingDownloads: MediaDownloadTransport {
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: "https://example.invalid")!,
@@ -78,7 +87,9 @@ private final class GatedDownloads: MediaDownloadTransport, @unchecked Sendable 
         self.bytes = bytes
     }
 
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
         calls.set(calls.get() + 1)
         entered.set(true)
         while !release.get() {
@@ -103,7 +114,9 @@ private final class CountingDownloads: MediaDownloadTransport, @unchecked Sendab
 
     let calls = LockedValue<Int>(0)
 
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
         calls.set(calls.get() + 1)
         throw Unused()
     }

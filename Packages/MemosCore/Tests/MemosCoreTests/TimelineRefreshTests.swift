@@ -28,7 +28,7 @@ struct TimelineRefreshTests {
     /// A store with one waiting memo in it, loaded the way the app loads one.
     private func loaded(_ client: any APIProtocol) async -> TimelineStore {
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         return store
     }
 
@@ -54,11 +54,11 @@ struct TimelineRefreshTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["older", Self.uid])
 
         let refreshed = await store.refreshMemo(
-            uid: Self.uid, using: client, baseURL: Stub.baseURL
+            uid: Self.uid, using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(refreshed)
@@ -83,14 +83,14 @@ struct TimelineRefreshTests {
         #expect(store.lastError == nil)
 
         let refreshed = await store.refreshMemo(
-            uid: Self.uid, using: client, baseURL: Stub.baseURL
+            uid: Self.uid, using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(!refreshed)
         #expect(store.lastError == nil, "a background re-read painted an error on the timeline")
         // The control: a foreground refresh through the same failing transport DOES report, so
         // the silence above is this method's own decision and not a broken stub.
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.lastError == nil)
     }
 
@@ -121,13 +121,13 @@ struct TimelineRefreshTests {
 
         // The control first: the method this one exists beside genuinely drops it.
         let applied = await store.refreshMemo(
-            uid: "far-away", using: client, baseURL: Stub.baseURL
+            uid: "far-away", using: client.handle, baseURL: Stub.baseURL
         )
         #expect(applied, "control: the server did answer")
         #expect(store.memos.map(\.uid) == ["loaded"], "control: apply kept it out of the list")
 
         let fetched = try #require(
-            await store.fetchMemo(uid: "far-away", using: client, baseURL: Stub.baseURL)
+            await store.fetchMemo(uid: "far-away", using: client.handle, baseURL: Stub.baseURL)
         )
 
         #expect(fetched.uid == "far-away")
@@ -152,7 +152,7 @@ struct TimelineRefreshTests {
         #expect(store.memos.first?.content == "stale")
 
         let fetched = try #require(
-            await store.fetchMemo(uid: "m1", using: client, baseURL: Stub.baseURL)
+            await store.fetchMemo(uid: "m1", using: client.handle, baseURL: Stub.baseURL)
         )
 
         #expect(fetched.content == "fresh")
@@ -196,7 +196,7 @@ struct TimelineRefreshTests {
         #expect(store.memos.map(\.uid) == ["recent"], "control: the memo starts outside the window")
 
         let outcome = await store.jump(
-            to: far, calendar: Self.utcDays, using: client, baseURL: Stub.baseURL
+            to: far, calendar: Self.utcDays, using: client.handle, baseURL: Stub.baseURL
         )
 
         guard case .ready(let opened) = outcome else {
@@ -209,7 +209,10 @@ struct TimelineRefreshTests {
 
         // The blocker this exists for: an edit through the store must reach the loaded row.
         let edited = await store.edit(
-            uid: far, content: "edited on the detail screen", using: client, baseURL: Stub.baseURL
+            uid: far,
+            content: "edited on the detail screen",
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
         #expect(edited)
         #expect(
@@ -234,7 +237,7 @@ struct TimelineRefreshTests {
         let store = await loaded(client)
 
         let outcome = await store.jump(
-            to: "gone", calendar: Self.utcDays, using: client, baseURL: Stub.baseURL
+            to: "gone", calendar: Self.utcDays, using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(outcome == .unavailable)
@@ -256,7 +259,7 @@ struct TimelineRefreshTests {
         let store = await loaded(client)
 
         let outcome = await store.jump(
-            to: "here", calendar: Self.utcDays, using: client, baseURL: Stub.baseURL
+            to: "here", calendar: Self.utcDays, using: client.handle, baseURL: Stub.baseURL
         )
 
         if case .unavailable = outcome { Issue.record("a loaded memo came back unavailable") }
@@ -277,7 +280,7 @@ struct TimelineRefreshTests {
         let store = await loaded(client)
 
         let fetched = await store.fetchMemo(
-            uid: "gone", using: client, baseURL: Stub.baseURL
+            uid: "gone", using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(fetched == nil)

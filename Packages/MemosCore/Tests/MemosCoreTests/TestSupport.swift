@@ -29,6 +29,16 @@ struct StubTransport: ClientTransport {
     }
 }
 
+extension APIProtocol {
+    /// The store seam, for a client with no session behind it.
+    ///
+    /// Generation zero, and that is the honest value: these suites are about paging, merging and
+    /// what a request carries, and none of them names a session — a store with no session has no
+    /// incarnation to be wrong about (`TimelineStore.sessionStillCurrent`). The suites that ARE
+    /// about the fence build their handles from a real `SessionStore`.
+    var handle: SessionHandle { SessionHandle(client: self, generation: 0) }
+}
+
 enum Stub {
     static let baseURL = URL(string: "https://memos.example.invalid")!
 

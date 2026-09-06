@@ -1,3 +1,4 @@
+import MemosCore
 import SwiftUI
 
 /// The signed-in app's surfaces, as a value rather than as two literals inside a `TabView`.
@@ -34,6 +35,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
 /// position every time. Both tabs keep their own navigation stack, which is what makes going back
 /// and forth between them cost nothing.
 struct MainTabView: View {
+    @Environment(SessionStore.self) private var session
     @State private var selection: MainTab = .timeline
     /// A memo asked for from a tab that cannot open one.
     ///
@@ -44,6 +46,21 @@ struct MainTabView: View {
     @State private var jump = MemoJump()
 
     var body: some View {
+        VStack(spacing: 0) {
+            // Above the tabs rather than inside one, because it is true of the whole app: the
+            // library is as stale as the timeline when the server cannot be reached. Persistent
+            // and not dismissable — it is not a notification of an event, it is the state the
+            // session is in, and it goes away when the session leaves that state.
+            if let notice = SessionBanner.text(for: session.verification) {
+                NoticeCard(text: notice, tone: .warning)
+                    .padding(.horizontal, DesignTokens.Space.regular)
+                    .padding(.top, DesignTokens.Space.regular)
+            }
+            tabs
+        }
+    }
+
+    private var tabs: some View {
         TabView(selection: $selection) {
             Tab(
                 MainTab.timeline.title,

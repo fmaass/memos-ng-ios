@@ -27,9 +27,31 @@ public final class TagStore {
     /// put a deleted tag back.
     private var attempt = 0
 
+    /// Where a failure that never reached the server goes instead of `lastError`.
+    ///
+    /// Named by the owner rather than taken at construction, because this store is a view's
+    /// `@State` initial value and there is no environment to read when that is built.
+    private var session: (any SessionReporting)?
+
     public init() {}
 
-    public func load(using client: any APIProtocol) async {
+    /// Whether the session that ISSUED an operation is still the one this device is running — the
+    /// same rule, for the same reason, as `TimelineStore.sessionStillCurrent`.
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
+    }
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
+
+    public func load(using handle: SessionHandle) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         attempt += 1
         let mine = attempt
         isLoading = true
@@ -47,9 +69,13 @@ public final class TagStore {
                 MemosLog.api.info("GET /api/tags answered for a load that was overtaken")
                 return
             }
-            tags = loaded
-            hasLoaded = true
-            lastError = nil
+            if sessionStillCurrent(handle) {
+                tags = loaded
+                hasLoaded = true
+                lastError = nil
+            } else {
+                MemosLog.api.info("an answer for a session that has ended is not applied")
+            }
         } catch {
             guard mine == attempt else { return }
             // The chips already on screen stay. A tag row that empties itself because one read
@@ -58,7 +84,19 @@ public final class TagStore {
             // A cancellation is not a read that failed. This store's `.task` is torn down every
             // time the sheet goes away, and the `-999` that unwinds out of it is this app's own
             // doing — `StoreFailure` is where that is decided, once, for every store (MEMNG-180).
-            if let apiError = StoreFailure.reportable(error) {
+            //
+            // Neither is a server that never answered. That one belongs to the session, which says
+            // it once in a banner; saying it here as well is a second copy of the same sentence
+            // over a row nobody can do anything about.
+            // Fenced like every other apply point: an answer for a session that has ended is
+            // not this one's to speak about — see `TimelineStore.report`. It falls THROUGH rather
+            // than returning, because the spinner below is this call's own and nobody else is
+            // coming to take it down.
+            if !sessionStillCurrent(handle) {
+                MemosLog.api.info("a failure for a session that has ended is not reported")
+            } else if let failure = StoreFailure.transportFailure(error) {
+                session?.noteTransportFailure(failure, issuedUnder: handle.generation)
+            } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }
         }

@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import MemosOutbox
 import SwiftUI
 import Testing
 import UIKit
@@ -24,7 +25,9 @@ actor ScriptedTransport: MediaTransport {
         self.status = status
     }
 
-    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
         calls += 1
         requests.append(request)
         let response = HTTPURLResponse(
@@ -41,7 +44,9 @@ actor ScriptedTransport: MediaTransport {
 /// go near it: `cached(for:)` is not `async`, so if it ever needed the network this could not
 /// compile, and with this in place it could not return either.
 actor NeverAnsweringTransport: MediaTransport {
-    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
         await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
         throw URLError(.cancelled)
     }
@@ -52,7 +57,9 @@ actor NeverAnsweringTransport: MediaTransport {
 actor RefusingTransport: MediaTransport {
     private(set) var calls = 0
 
-    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
         calls += 1
         throw URLError(.notConnectedToInternet)
     }
@@ -86,7 +93,9 @@ actor GatedTransport: MediaTransport {
         for waiter in waiting { waiter.resume() }
     }
 
-    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
         requests.append(request)
         hasStarted = true
         let waiting = startWaiters

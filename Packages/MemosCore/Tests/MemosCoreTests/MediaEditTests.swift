@@ -91,9 +91,9 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "edited", using: client, baseURL: Stub.baseURL
+            uid: "a", content: "edited", using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(saved)
@@ -135,12 +135,12 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
             uid: "a",
             content: "with a photo",
             attaching: [file],
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL
         )
 
@@ -179,9 +179,9 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "big", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a", content: "big", attaching: [file], using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(saved)
@@ -212,9 +212,13 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "never", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a",
+            content: "never",
+            attaching: [file],
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
 
         #expect(!saved)
@@ -245,9 +249,13 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "refused", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a",
+            content: "refused",
+            attaching: [file],
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
 
         #expect(!saved)
@@ -272,9 +280,9 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         await store.edit(
-            uid: "a", content: "no", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a", content: "no", attaching: [file], using: client.handle, baseURL: Stub.baseURL
         )
 
         // The upload lane wraps the API's own error to say which step failed; the wrapping must
@@ -306,16 +314,16 @@ struct MediaEditTests {
                 : Stub.json(Stub.memo(uid: "a", content: "two"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client.handle, baseURL: Stub.baseURL)
         // The same Save, tapped again.
-        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client.handle, baseURL: Stub.baseURL)
         // A DIFFERENT Save, while the previous one is still unresolved: the words were changed
         // before the second tap. Sharing the earlier key would have the server replay the earlier
         // edit and answer 200 while these words went nowhere.
-        await store.edit(uid: "a", content: "two", using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "two", using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "two", using: client, baseURL: Stub.baseURL
+            uid: "a", content: "two", using: client.handle, baseURL: Stub.baseURL
         )
 
         let sent = keys.get()
@@ -363,23 +371,28 @@ struct MediaEditTests {
             return Stub.json(Stub.memo(uid: "a", content: "first"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let first = Task {
-            await store.edit(uid: "a", content: "first", using: client, baseURL: Stub.baseURL)
+            await store.edit(
+                uid: "a",
+                content: "first",
+                using: client.handle,
+                baseURL: Stub.baseURL
+            )
         }
         while !entered.get() {
             await Task.yield()
         }
         // Submitted while the first is still out: it mints its own key into the slot.
         let second = await store.edit(
-            uid: "a", content: "second", using: client, baseURL: Stub.baseURL
+            uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL
         )
         #expect(!second, "control: the second save failed, so it is the one with a retry to make")
         release.set(true)
         #expect(await first.value, "control: the first save landed, which is what tidies up")
 
         // The retry of the SECOND save — the one whose response was lost.
-        await store.edit(uid: "a", content: "second", using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL)
 
         let secondKeys = seen.get()["second"] ?? []
         #expect(secondKeys.count == 2)
@@ -426,16 +439,16 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let first = Task {
-            await store.edit(uid: "a", content: "same", using: client, baseURL: Stub.baseURL)
+            await store.edit(uid: "a", content: "same", using: client.handle, baseURL: Stub.baseURL)
         }
         while calls.get() < 1 {
             await Task.yield()
         }
         // Identical fields, so this one shares the first one's key rather than minting another.
         let second = Task {
-            await store.edit(uid: "a", content: "same", using: client, baseURL: Stub.baseURL)
+            await store.edit(uid: "a", content: "same", using: client.handle, baseURL: Stub.baseURL)
         }
         while calls.get() < 2 {
             await Task.yield()
@@ -447,7 +460,7 @@ struct MediaEditTests {
         #expect(await second.value == false, "control: the second save is the one with a retry")
 
         // The retry of the save whose response was lost.
-        await store.edit(uid: "a", content: "same", using: client, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "same", using: client.handle, baseURL: Stub.baseURL)
 
         let sent = keys.get()
         #expect(sent.count == 3)
@@ -471,9 +484,9 @@ struct MediaEditTests {
             return Stub.json(Stub.memo(uid: "a", content: "one"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
-        await store.edit(uid: "a", content: "one", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client.handle, baseURL: Stub.baseURL)
+        await store.edit(uid: "a", content: "one", using: client.handle, baseURL: Stub.baseURL)
 
         // Held past the success, the second one would be answered as a replay of the first — a
         // 200, and the edit not applied — which is indistinguishable on screen from a save that
@@ -582,9 +595,13 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "gapped", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a",
+            content: "gapped",
+            attaching: [file],
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
 
         #expect(!saved)
@@ -629,9 +646,13 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "gapped", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a",
+            content: "gapped",
+            attaching: [file],
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
 
         #expect(saved, "an offset gap abandoned an edit the session had answered")
@@ -668,9 +689,13 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "stuck", attaching: [file], using: client, baseURL: Stub.baseURL
+            uid: "a",
+            content: "stuck",
+            attaching: [file],
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
 
         #expect(!saved)
@@ -714,9 +739,9 @@ struct MediaEditTests {
             }
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let first = await store.edit(
-            uid: "a", content: "with a photo", attaching: [file], using: client,
+            uid: "a", content: "with a photo", attaching: [file], using: client.handle,
             baseURL: Stub.baseURL
         )
         #expect(!first)
@@ -725,7 +750,7 @@ struct MediaEditTests {
         // The person taps Save again on the sheet that stayed open.
         chunkFails.set(false)
         let second = await store.edit(
-            uid: "a", content: "with a photo", attaching: [file], using: client,
+            uid: "a", content: "with a photo", attaching: [file], using: client.handle,
             baseURL: Stub.baseURL
         )
 
@@ -760,9 +785,13 @@ struct MediaEditTests {
             return Stub.json(Stub.memoList(["a"], nextCursor: nil))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let saved = await store.edit(
-            uid: "a", content: "no", attaching: [missing], using: client, baseURL: Stub.baseURL
+            uid: "a",
+            content: "no",
+            attaching: [missing],
+            using: client.handle,
+            baseURL: Stub.baseURL
         )
 
         #expect(!saved)

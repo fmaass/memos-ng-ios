@@ -25,7 +25,11 @@ public enum MemoCompletionOutcome: Sendable, Equatable {
 /// transport safe to keep — a schema re-sync that moves any of these fields fails a test rather
 /// than silently changing what the outbox sends.
 public protocol MemoCompleting: Sendable {
-    func create(job: UploadJob, credentials: OutboxCredentials) async -> MemoCompletionOutcome
+    func create(
+        job: UploadJob,
+        credentials: OutboxCredentials,
+        under authority: SendAuthority
+    ) async -> MemoCompletionOutcome
 }
 
 /// The completion path, spoken to the strict contract.
@@ -51,7 +55,8 @@ public struct MemoCompletionEndpoint: MemoCompleting {
 
     public func create(
         job: UploadJob,
-        credentials: OutboxCredentials
+        credentials: OutboxCredentials,
+        under authority: SendAuthority
     ) async -> MemoCompletionOutcome {
         let request: URLRequest
         do {
@@ -66,9 +71,20 @@ public struct MemoCompletionEndpoint: MemoCompleting {
 
         let response: OutboxHTTPResponse
         do {
-            response = try await http.perform(request)
+            response = try await http.perform(request, under: authority)
+        } catch is SendAuthorityWithdrawn {
+            // Not a failure of the memo: the account this job belongs to is no longer the one this
+            // device is signed in as. Retried, so the next pass under the right authority sends it.
+            return .retry("The account this memo belongs to is not signed in any more.")
         } catch {
             return .retry(error.localizedDescription)
+        }
+        // A 401 earned by a grant that has SINCE been replaced is not a refusal of the one this
+        // device is holding, and holding the job on it strands a capture behind a "sign in again"
+        // the person has already done. Retried, so the next pass sends under the current grant —
+        // and if THAT is refused, its epoch is the current one and the job holds.
+        if response.statusCode == 401, !authority.holds() {
+            return .retry("The credential this memo was sent under was replaced.")
         }
         return outcome(for: response)
     }

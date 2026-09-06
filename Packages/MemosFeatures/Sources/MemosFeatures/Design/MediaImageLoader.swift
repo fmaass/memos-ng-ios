@@ -1,4 +1,5 @@
 import MemosCore
+import MemosOutbox
 import SwiftUI
 import UIKit
 
@@ -244,7 +245,10 @@ public enum MediaImageLoader {
         // name them. See `GenerationScopedURLCache`.
         MediaFetchGeneration.stamp(&request, generation: generation)
 
-        guard let answer = try? await transport.fetch(request) else { return nil }
+        // `.unfenced`: a derived tier is served from a SIGNED url and carries no credential, so
+        // there is no authority to withdraw — the media identity is what scopes what it may fill
+        // (`MediaFetchGeneration`).
+        guard let answer = try? await transport.fetch(request, under: .unfenced) else { return nil }
         let (data, response) = answer
         guard isUsable(response) else { return nil }
         let decoded = await Task.detached(priority: .userInitiated) {
