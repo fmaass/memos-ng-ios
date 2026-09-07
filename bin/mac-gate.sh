@@ -168,10 +168,20 @@ if [ "$QUICK" -eq 1 ] && [ "$CLASSIFY_ONLY" -eq 1 ]; then
   die_refuse "--quick and --classify-only ask for different things: one builds and tests, the other only says whether a build is owed"
 fi
 if [ -n "$QUICK_BUNDLE" ]; then
-  case " $TEST_BUNDLES " in
-    *" $QUICK_BUNDLE "*) ;;
-    *) die_refuse "--bundle $QUICK_BUNDLE: not one of the test bundles this gate builds ($TEST_BUNDLES)" ;;
+  # Whitespace first, and then a whole-word comparison. The bundle list is one space-separated
+  # string, so a substring test against it accepts a value that spans two names — "MemosAPITests
+  # MemosCoreTests" is inside " $TEST_BUNDLES " and names no bundle at all — and a trailing space
+  # turns a good name into one xcodebuild would read as an identifier that matches nothing.
+  case "$QUICK_BUNDLE" in
+    *[[:space:]]*)
+      die_refuse "--bundle names ONE test bundle, and $(printf '%q' "$QUICK_BUNDLE") contains whitespace (one of: $TEST_BUNDLES)" ;;
   esac
+  quick_bundle_known=0
+  for known_bundle in $TEST_BUNDLES; do
+    [ "$QUICK_BUNDLE" != "$known_bundle" ] || quick_bundle_known=1
+  done
+  [ "$quick_bundle_known" -eq 1 ] \
+    || die_refuse "--bundle $QUICK_BUNDLE: not one of the test bundles this gate builds ($TEST_BUNDLES)"
 fi
 
 # Single-quote escaping for values interpolated into a script sent to the build host, so a branch
@@ -2015,27 +2025,43 @@ scope = sys.argv[1]
 bundle = scope.split("/")[0] if scope else ""
 data = json.load(open(".gate-artifacts/quick-test-results.json"))
 
-def walk(node, current, counts):
+# A case that SKIPPED did not run, and this count exists to answer "did anything run". Several
+# suites here skip themselves when their preconditions are absent (no server credentials, no
+# device capability), so a scope of nothing but those would otherwise come back green having
+# exercised no code at all. Only the outcomes that mean a body executed are counted; everything
+# else — Skipped, and any result this walker has never been shown — is counted apart and named.
+EXECUTED = ("Passed", "Failed", "Expected Failure")
+
+def walk(node, current, ran, idle):
     kind = node.get("nodeType")
     name = node.get("name", "")
     if kind in ("Unit test bundle", "UI test bundle"):
         current = name[:-len(".xctest")] if name.endswith(".xctest") else name
-        counts.setdefault(current, 0)
+        ran.setdefault(current, 0)
+        idle.setdefault(current, 0)
     if kind == "Test Case" and current:
-        counts[current] = counts.get(current, 0) + 1
+        if node.get("result") in EXECUTED:
+            ran[current] = ran.get(current, 0) + 1
+        else:
+            idle[current] = idle.get(current, 0) + 1
     for child in node.get("children", []) or []:
-        walk(child, current, counts)
+        walk(child, current, ran, idle)
 
-counts = {}
+ran, idle = {}, {}
 for root in data.get("testNodes", []) or []:
-    walk(root, None, counts)
-print("test counts for the quick scope: "
-      + (", ".join("%s=%d" % (k, v) for k, v in sorted(counts.items())) or "(none)"))
-ran = counts.get(bundle, 0) if bundle else sum(counts.values())
-if ran < 1:
-    print("QUICK FAIL: %s ran %d test cases" % (scope or "every bundle", ran))
+    walk(root, None, ran, idle)
+print("executed test cases for the quick scope: "
+      + (", ".join("%s=%d" % (k, v) for k, v in sorted(ran.items())) or "(none)"))
+print("skipped or not run: "
+      + (", ".join("%s=%d" % (k, v) for k, v in sorted(idle.items())) or "(none)"))
+executed = ran.get(bundle, 0) if bundle else sum(ran.values())
+skipped = idle.get(bundle, 0) if bundle else sum(idle.values())
+if executed < 1:
+    print("QUICK FAIL: %s executed %d test cases (%d skipped or not run)"
+          % (scope or "every bundle", executed, skipped))
     sys.exit(1)
-print("Executed %d test cases for %s" % (ran, scope or "every bundle"))
+print("Executed %d test cases for %s (%d skipped or not run)"
+      % (executed, scope or "every bundle", skipped))
 QUICKCOUNT_PY
     if [ $? -ne 0 ] && [ "$quick_run_rc" -eq 0 ]; then quick_run_rc=1; fi
     return "$quick_run_rc"

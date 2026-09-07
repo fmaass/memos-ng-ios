@@ -78,6 +78,11 @@ refuse "--only-testing with no value at all" "needs an xcodebuild test identifie
 refuse "--quick beside --classify-only"      "ask for different things"         --quick --classify-only
 refuse "--classify-only beside --quick"      "ask for different things"         --classify-only --quick
 refuse "--bundle naming an unbuilt bundle"   "not one of the test bundles"      --quick --bundle NotABundleTests
+# " $TEST_BUNDLES " contains "MemosAPITests MemosCoreTests" as a substring, so a membership test
+# written that way accepts a value naming no bundle; a trailing space is the same defect wearing a
+# real name.
+refuse "--bundle naming two bundles at once" "contains whitespace"                --quick --bundle "MemosAPITests MemosCoreTests"
+refuse "--bundle with a trailing space"      "contains whitespace"                --quick --bundle "MemosCoreTests "
 
 # --- the fixture ----------------------------------------------------------------------------------
 # A repository shaped like this one in the only ways the local half of the gate reads: a HEAD, an
@@ -444,7 +449,113 @@ else
   printf '%s\n' "$OUT" | sed 's/^/     | /'
 fi
 
+# --- part 8: a skipped case is not an executed case -------------------------------------------------
+# The counter the build host runs, taken out of the gate and asked the question directly. It exists
+# to answer "did anything actually run": xcodebuild reports success for a scope whose every case
+# skipped itself, and several suites here skip when their preconditions are absent — so a scope of
+# nothing but skips must be a failure, and one real case among them must not.
+counter="$tmp/quick-count.py"
+awk '/<<.QUICKCOUNT_PY./{f=1;next} f && /^QUICKCOUNT_PY$/{f=0} f{print}' "$GATE" > "$counter"
+counter_control=0
+if [ -s "$counter" ] && grep -q 'nodeType' "$counter" && grep -q 'QUICK FAIL' "$counter"; then
+  counter_control=1
+  ok "the executed-test counter was found in the gate and extracted (control)"
+else
+  bad "no executed-test counter could be extracted from $GATE — the cases below would prove nothing"
+fi
+
+# The shape `xcrun xcresulttool get test-results tests --format json` emits: a tree of nodes, each
+# with a nodeType, and a Test Case carrying its own result.
+write_fixture() { # $1 = file, $2... = "<case name>|<result>" (none = a bundle that ran nothing)
+  local out="$1"; shift
+  {
+    printf '{"testNodes":[{"nodeType":"Test Plan","name":"MemosNG","children":['
+    printf '{"nodeType":"Unit test bundle","name":"MemosCoreTests.xctest","children":['
+    printf '{"nodeType":"Test Suite","name":"LiveWriteTests","children":['
+    local first=1 entry
+    for entry in "$@"; do
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      printf '{"nodeType":"Test Case","name":"%s","result":"%s"}' "${entry%%|*}" "${entry##*|}"
+    done
+    printf ']}]}]}]}\n'
+  } > "$out"
+}
+
+run_counter() { # $1 = fixture, $2 = scope
+  local dir="$tmp/counter-run"
+  rm -rf "$dir"; mkdir -p "$dir/.gate-artifacts"
+  cp "$1" "$dir/.gate-artifacts/quick-test-results.json"
+  OUT="$(cd "$dir" && python3 "$counter" "$2" 2>&1)"
+  RC=$?
+}
+
+if [ "$counter_control" -eq 1 ]; then
+  # The finding itself: a suite that skips itself without its preconditions.
+  write_fixture "$tmp/skipped-only.json" "writesAMemo()|Skipped" "writesAnAttachment()|Skipped"
+  run_counter "$tmp/skipped-only.json" MemosCoreTests/LiveWriteTests
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'QUICK FAIL' \
+     && printf '%s\n' "$OUT" | grep -q 'MemosCoreTests/LiveWriteTests' \
+     && printf '%s\n' "$OUT" | grep -q '2 skipped'; then
+    ok "a scope whose every case skipped is a failure naming the scope and the skips"
+  else
+    bad "a skipped-only scope did not fail with the scope and the skip count (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  write_fixture "$tmp/passed-only.json" "writesAMemo()|Passed"
+  run_counter "$tmp/passed-only.json" MemosCoreTests/LiveWriteTests
+  if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q 'Executed 1 test cases'; then
+    ok "a scope with one passing case is not a failure"
+  else
+    bad "a passing scope was rejected (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  # One real case among the skips is enough; and a failing case ran, whatever it decided.
+  write_fixture "$tmp/mixed.json" "a()|Skipped" "b()|Passed" "c()|Skipped"
+  run_counter "$tmp/mixed.json" MemosCoreTests/LiveWriteTests
+  if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q 'Executed 1 test cases'; then
+    ok "one executed case among skips passes, and the skips are still counted apart"
+  else
+    bad "a mixed scope did not count only the executed case (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  write_fixture "$tmp/failed-only.json" "a()|Failed"
+  run_counter "$tmp/failed-only.json" MemosCoreTests/LiveWriteTests
+  if [ "$RC" -eq 0 ]; then
+    ok "a failing case counts as executed (the test result is xcodebuild's verdict, not this count's)"
+  else
+    bad "a failing case was counted as not executed (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  write_fixture "$tmp/empty.json"
+  run_counter "$tmp/empty.json" MemosCoreTests/LiveWriteTests
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'QUICK FAIL'; then
+    ok "a bundle that ran nothing at all is a failure"
+  else
+    bad "an empty result bundle was not a failure (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  # With no scope, --quick alone, the whole bundle is the question.
+  write_fixture "$tmp/skipped-noscope.json" "a()|Skipped"
+  run_counter "$tmp/skipped-noscope.json" ""
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'every bundle'; then
+    ok "an unscoped run of nothing but skips is a failure naming every bundle"
+  else
+    bad "an unscoped skipped-only run was not a failure (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+fi
+
 # --- verdict ----------------------------------------------------------------------------------------
+if [ "$counter_control" -ne 1 ]; then
+  echo "FAIL: the executed-test counter was never extracted, so no case above exercised it"
+  fails=$((fails + 1))
+fi
 if [ "$quick_line_seen" -ne 1 ]; then
   echo "FAIL: no case ever saw a MAC_GATE_QUICK line — this suite proves nothing about a quick mode that prints none"
   fails=$((fails + 1))
