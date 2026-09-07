@@ -48,6 +48,15 @@ a version bump can never take the fast path. Every run writes what it classified
 `.gate-artifacts/classification.txt`, fast path or not. `bin/mac-gate.sh --classify-only` prints
 that classification and stops, without needing a build host.
 
+Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-gate.sh --quick
+[--bundle <name>|--only-testing <id>]` runs the selftests, the release-version check, the
+classification, the same lane lock and load gate, then rsyncs and — on the lane's private
+simulator, reusing its DerivedData — generates, compiles for testing and runs the named bundle or
+suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the pins and
+the entitlement, dependency-rule and share-link greps; it prints its own
+`MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only the full
+gate writes `mac-gate SUMMARY`.
+
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
 
