@@ -34,10 +34,28 @@
 #
 # Usage:
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
+#   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh --quick [--bundle <name> | --only-testing <id>]
+#                                     the ITERATION loop, never a verdict: compile for testing on
+#                                     this branch's warm lane and run the named scope on it.
+#                                     --bundle names one of the gate's test bundles;
+#                                     --only-testing takes an xcodebuild identifier
+#                                     (Bundle, Bundle/Suite or Bundle/Suite/test). Neither means
+#                                     anything without --quick, and only one of them at a time.
+#                                     With --quick alone every bundle runs.
 #   bin/mac-gate.sh --classify-only   print how this branch's change set classifies, and stop.
 #                                     Needs no build host. Exit 0 = the docs-only fast path
 #                                     applies, 10 = the full gate is owed.
 #   bin/mac-gate.sh --help            print this usage.
+#
+# What the quick mode SKIPS is the whole difference: the package rebuilds with warnings fatal, the
+# warnings canary, the pin check, the entitlement, dependency-rule and share-link greps, the
+# shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
+# a run safe to start: the selftests, the release-version check, the classification, this branch's
+# lane lock, the load gate and the private simulator. It prints one line of its own,
+# MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's summary
+# line — a quick run can never be read, or pasted, as a verdict. The verdict is the full gate.
+# It reuses the lane's DerivedData, which is why it is quick and why it takes the same lock: the
+# tree it compiles into is the tree a full run of this branch would rsync --delete.
 #
 # Two gates for two branches can run at the same time. They must not share a simulator: the
 # device holds ONE installation per bundle id, so a second branch installing over the first
@@ -111,13 +129,50 @@ usage() {
 # answerable without a Mac: it is what the gate's own test suite drives, and a classification that
 # needed the build host would be the gate rather than a decision about it.
 CLASSIFY_ONLY=0
-for arg in "$@"; do
-  case "$arg" in
+QUICK=0
+QUICK_BUNDLE=""
+QUICK_ONLY_TESTING=""
+# A while/shift loop rather than `for arg`, because two of these take a value. The value is
+# checked where it is read: a flag whose argument is missing would otherwise swallow the NEXT
+# flag, and `--quick --bundle --only-testing X` would run a scope nobody asked for.
+while [ $# -gt 0 ]; do
+  case "$1" in
     --classify-only) CLASSIFY_ONLY=1 ;;
+    --quick) QUICK=1 ;;
+    --bundle)
+      case "${2:-}" in
+        ""|-*) die_refuse "--bundle needs a test bundle name (one of: $TEST_BUNDLES)" ;;
+      esac
+      QUICK_BUNDLE="$2"; shift ;;
+    --only-testing)
+      case "${2:-}" in
+        ""|-*) die_refuse "--only-testing needs an xcodebuild test identifier (Bundle, Bundle/Suite or Bundle/Suite/test)" ;;
+      esac
+      QUICK_ONLY_TESTING="$2"; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) die_refuse "unknown argument: $(printf '%q' "$arg") (see --help)" ;;
+    *) die_refuse "unknown argument: $(printf '%q' "$1") (see --help)" ;;
   esac
+  shift
 done
+
+# The combinations, refused here rather than half-honoured later. A scope is a thing only the
+# quick mode has; the full gate runs every bundle and always will, so a scope beside it is an
+# instruction this script cannot carry out, not a preference it can ignore.
+if [ -n "$QUICK_BUNDLE" ] && [ -n "$QUICK_ONLY_TESTING" ]; then
+  die_refuse "--bundle and --only-testing are two ways to name one scope; pass one of them"
+fi
+if [ "$QUICK" -eq 0 ] && { [ -n "$QUICK_BUNDLE" ] || [ -n "$QUICK_ONLY_TESTING" ]; }; then
+  die_refuse "--bundle and --only-testing only mean something with --quick; the full gate runs every bundle"
+fi
+if [ "$QUICK" -eq 1 ] && [ "$CLASSIFY_ONLY" -eq 1 ]; then
+  die_refuse "--quick and --classify-only ask for different things: one builds and tests, the other only says whether a build is owed"
+fi
+if [ -n "$QUICK_BUNDLE" ]; then
+  case " $TEST_BUNDLES " in
+    *" $QUICK_BUNDLE "*) ;;
+    *) die_refuse "--bundle $QUICK_BUNDLE: not one of the test bundles this gate builds ($TEST_BUNDLES)" ;;
+  esac
+fi
 
 # Single-quote escaping for values interpolated into a script sent to the build host, so a branch
 # name can never become remote shell syntax.
@@ -386,6 +441,10 @@ REL_EOF
 die_locked() {
   printf 'mac-gate: REFUSED: %s\n' "$1" >&2
   printf 'mac-gate: REFUSED: %s\n' "$1" >> "$log" 2>/dev/null
+  # A quick run that never got the lock built nothing, so it reports nothing built — but it still
+  # reports, on its own line, because that line is what the caller reads.
+  [ "${QUICK:-0}" -eq 0 ] \
+    || printf 'MAC_GATE_QUICK: build=- tests=- | exit=3\n' | tee -a "$log"
   exit 3
 }
 
@@ -428,6 +487,23 @@ summary_and_exit() {
   say "$line"
   exit "$first_fail"
 }
+# The quick mode's line is a different sentence on purpose. `mac-gate SUMMARY: … | exit=0` is the
+# one thing in this repo that means "this change may merge", and a run that skipped the pins, the
+# warnings rebuilds and the shipping-bundle read-back must not be able to produce it — not by
+# accident, and not by a copy-paste out of a terminal. So the quick mode says what it did (the
+# build and the tests it ran) under a name of its own, and never reaches summary_and_exit.
+# A dash means "never got that far": the build host was never asked, or it stopped before saying.
+QUICK_BUILD_RC="-"
+QUICK_TESTS_RC="-"
+quick_summary_and_exit() {
+  say "MAC_GATE_QUICK: build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
+  say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
+  exit "$first_fail"
+}
+end_run() {
+  if [ "$QUICK" -eq 1 ]; then quick_summary_and_exit; fi
+  summary_and_exit
+}
 
 # --- the gate's own integrity check --------------------------------------------------------------
 # The classifier decides whether anything gets built at all, which makes it the one part of this
@@ -458,7 +534,7 @@ for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
 done
 record selftest "$selftest_rc"
-[ "$first_fail" -eq 0 ] || summary_and_exit
+[ "$first_fail" -eq 0 ] || end_run
 
 # --- release-version authority ------------------------------------------------------------------
 # Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
@@ -531,7 +607,7 @@ fi
 say "classify    : written to $artifacts/classification.txt"
 record classify 0
 
-if [ "$CLASSIFY_VERDICT" = fastpath ]; then
+if [ "$CLASSIFY_VERDICT" = fastpath ] && [ "$QUICK" -eq 0 ]; then
   # No device was ever created and no lock was ever taken, so nothing is owed back to the build
   # host; cleared here so the exit trap does not ssh over there to delete a device that was
   # only ever a name.
@@ -540,6 +616,13 @@ if [ "$CLASSIFY_VERDICT" = fastpath ]; then
   say "fast path   : nothing was copied to a build host — $CLASSIFY_REASON"
   printf 'verdict : PASS (fast path: docs-only)\n' >> "$artifacts/classification.txt"
   summary_and_exit
+fi
+# The fast path answers "does this change set owe a build". A quick run is not asking that: it is
+# an explicit request to compile and test, and the change set it is asked about is usually one the
+# author is in the middle of writing. So it goes to the build host regardless — and, because it is
+# not a verdict, skipping it would have saved nothing anyone could merge on.
+if [ "$CLASSIFY_VERDICT" = fastpath ]; then
+  say "classify    : docs-only, but --quick was asked for a build rather than for a verdict — continuing"
 fi
 
 # --- (2) resolve the remote target and refuse anything outside the gate root -------------------
@@ -842,7 +925,7 @@ rsync -a --delete \
   -e ssh \
   "$repo_root"/ "$host:$target/" 2>&1 | tee -a "$log"
 record rsync "${PIPESTATUS[0]}"
-[ "$first_fail" -eq 0 ] || summary_and_exit
+[ "$first_fail" -eq 0 ] || end_run
 
 # --- (4) the ordered, fail-fast checks on the build host --------------------------------------
 say "--- step: remote ---"
@@ -854,6 +937,9 @@ say "--- step: remote ---"
   printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
   printf "GATE_BRANCH='%s'\n" "$(esc "$branch")"
+  printf "GATE_QUICK='%s'\n" "$(esc "$QUICK")"
+  printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
+  printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
   cat "$repo_root/scripts/reap-gate-lanes.sh"
   cat <<'REMOTE_EOF'
 set -uo pipefail
@@ -1861,6 +1947,125 @@ sys.exit(rc)
 PY
 }
 
+# --- the quick mode's own sequence ----------------------------------------------------------------
+# Everything above this line is the preamble both modes share: the lock check, the work
+# directories, the disk sweep, this run's private device and its accessibility keys. From here the
+# two part company. The quick sequence generates the project (which is also what puts the tracked
+# Package.resolved where SwiftPM reads it), compiles the test bundles, and runs the scope it was
+# given on the device — nothing else. It ends by exiting, so the full gate's steps below are never
+# reached and MAC_GATE_REMOTE_SUMMARY, the line a verdict is read from, is never printed.
+if [ "${GATE_QUICK:-0}" -eq 1 ]; then
+  QUICK_XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG-quick.xcresult"
+  # One scope, already validated on the controller: --only-testing is passed through verbatim,
+  # --bundle is the same thing spelled with a bundle name. Empty means every bundle.
+  if [ -n "$GATE_QUICK_ONLY_TESTING" ]; then
+    quick_scope="$GATE_QUICK_ONLY_TESTING"
+  else
+    quick_scope="$GATE_QUICK_BUNDLE"
+  fi
+
+  s_quick_generate() {
+    [ -f project.yml ] || { echo "no project.yml in $GATE_TARGET — nothing to generate"; return 3; }
+    bin/generate.sh --spec project.yml
+  }
+
+  s_quick_build() {
+    # -onlyUsePackageVersionsFromResolvedFile for the same reason the full gate's test build
+    # carries it: a lockfile pins only the builds that READ it, and a quick build free to resolve
+    # its own way would compile against a graph nothing in this repo names.
+    xcodebuild build-for-testing \
+      -scheme MemosNG \
+      -destination "$GATE_DESTINATION" \
+      -derivedDataPath "$DERIVED" \
+      -onlyUsePackageVersionsFromResolvedFile \
+      -skipPackagePluginValidation 2>&1 | tee .gate-artifacts/quick-build.log
+    return "${PIPESTATUS[0]}"
+  }
+
+  s_quick_tests() {
+    rm -rf "$QUICK_XCRESULT"
+    set -- xcodebuild test-without-building \
+      -scheme MemosNG \
+      -destination "$GATE_DESTINATION" \
+      -derivedDataPath "$DERIVED" \
+      -resultBundlePath "$QUICK_XCRESULT" \
+      -onlyUsePackageVersionsFromResolvedFile \
+      -skipPackagePluginValidation
+    [ -z "$quick_scope" ] || set -- "$@" "-only-testing:$quick_scope"
+    "$@" 2>&1 | tee .gate-artifacts/quick-test.log
+    quick_run_rc="${PIPESTATUS[0]}"
+    # A green run of nothing is the failure this counts for. xcodebuild accepts an -only-testing
+    # identifier that names no test and reports success, and Swift Testing emits no "Executed N
+    # tests" line to contradict it — so the count comes from the result bundle, the same walk the
+    # full gate's testcount step uses, scoped to what was asked for.
+    if [ ! -d "$QUICK_XCRESULT" ]; then
+      echo "QUICK FAIL: no result bundle at $QUICK_XCRESULT, so nothing says a test ran"
+      [ "$quick_run_rc" -ne 0 ] || quick_run_rc=1
+      return "$quick_run_rc"
+    fi
+    if ! xcrun xcresulttool get test-results tests --path "$QUICK_XCRESULT" --format json \
+         > .gate-artifacts/quick-test-results.json; then
+      echo "QUICK FAIL: the result bundle at $QUICK_XCRESULT could not be read"
+      [ "$quick_run_rc" -ne 0 ] || quick_run_rc=1
+      return "$quick_run_rc"
+    fi
+    /usr/bin/python3 - "$quick_scope" <<'QUICKCOUNT_PY'
+import json, sys
+scope = sys.argv[1]
+bundle = scope.split("/")[0] if scope else ""
+data = json.load(open(".gate-artifacts/quick-test-results.json"))
+
+def walk(node, current, counts):
+    kind = node.get("nodeType")
+    name = node.get("name", "")
+    if kind in ("Unit test bundle", "UI test bundle"):
+        current = name[:-len(".xctest")] if name.endswith(".xctest") else name
+        counts.setdefault(current, 0)
+    if kind == "Test Case" and current:
+        counts[current] = counts.get(current, 0) + 1
+    for child in node.get("children", []) or []:
+        walk(child, current, counts)
+
+counts = {}
+for root in data.get("testNodes", []) or []:
+    walk(root, None, counts)
+print("test counts for the quick scope: "
+      + (", ".join("%s=%d" % (k, v) for k, v in sorted(counts.items())) or "(none)"))
+ran = counts.get(bundle, 0) if bundle else sum(counts.values())
+if ran < 1:
+    print("QUICK FAIL: %s ran %d test cases" % (scope or "every bundle", ran))
+    sys.exit(1)
+print("Executed %d test cases for %s" % (ran, scope or "every bundle"))
+QUICKCOUNT_PY
+    if [ $? -ne 0 ] && [ "$quick_run_rc" -eq 0 ]; then quick_run_rc=1; fi
+    return "$quick_run_rc"
+  }
+
+  quick_tests_rc="-"
+  echo "::: generate :::"
+  s_quick_generate
+  quick_build_rc=$?
+  echo "MAC_GATE_STEP generate $quick_build_rc"
+  if [ "$quick_build_rc" -eq 0 ]; then
+    echo "::: build :::"
+    s_quick_build
+    quick_build_rc=$?
+    echo "MAC_GATE_STEP build $quick_build_rc"
+  fi
+  if [ "$quick_build_rc" -eq 0 ]; then
+    echo "::: tests${quick_scope:+ ($quick_scope)} :::"
+    s_quick_tests
+    quick_tests_rc=$?
+    echo "MAC_GATE_STEP tests $quick_tests_rc"
+    quick_exit="$quick_tests_rc"
+  else
+    echo "::: tests skipped (the build failed) :::"
+    quick_exit="$quick_build_rc"
+  fi
+  echo "MAC_GATE_QUICK_REMOTE: build=$quick_build_rc tests=$quick_tests_rc"
+  exit "$quick_exit"
+fi
+
 step xcodegen   s_xcodegen
 step entitlements s_entitlements
 step swiftformat s_format
@@ -1879,10 +2084,28 @@ REMOTE_EOF
 remote_rc="${PIPESTATUS[1]}"
 record remote "$remote_rc"
 
+# The quick mode's two numbers come from the line the build host printed, read back out of the log
+# the stream above was tee'd into. Anything that is not a run of digits is not a number this
+# script will repeat: a remote that stopped before it said anything leaves both as "-", which is
+# the honest answer and cannot be misread as a zero.
+if [ "$QUICK" -eq 1 ]; then
+  quick_remote_line="$(sed -n 's/^MAC_GATE_QUICK_REMOTE: //p' "$log" | tail -1)"
+  quick_field() {
+    local value
+    value="$(printf '%s\n' "$quick_remote_line" | sed -n "s/.*$1=\\([^ ]*\\).*/\\1/p")"
+    case "$value" in
+      ''|*[!0-9]*) printf -- '-' ;;
+      *) printf '%s' "$value" ;;
+    esac
+  }
+  QUICK_BUILD_RC="$(quick_field build)"
+  QUICK_TESTS_RC="$(quick_field tests)"
+fi
+
 # --- (7) copy the evidence back ---------------------------------------------------------------
 say "--- step: copyback ---"
 rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
 record copyback "${PIPESTATUS[0]}"
 say "artifacts   : $artifacts"
 
-summary_and_exit
+end_run
