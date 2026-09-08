@@ -263,6 +263,22 @@ actor FaultyPersistence: OutboxPersisting {
         try await inner.save(job)
     }
 
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        guard refusals == 0 else {
+            refusals -= 1
+            refusedSaves += 1
+            throw Refused()
+        }
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
     func sweepOrphans() async throws { try await inner.sweepOrphans() }
@@ -338,6 +354,180 @@ actor GatedPersistence: OutboxPersisting {
         try await inner.save(job)
     }
 
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        if held > 0 {
+            held -= 1
+            await gate.pass()
+        }
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// Supersedes the grant on the way INTO the write — the hop `OutboxEngine` makes into
+/// `OutboxRepository`, and the one no engine-side comparison can close.
+///
+/// It intercepts `save(_:ifStillCurrent:else:)`, NOT `save(_:)`: every refusal path calls the new
+/// signature, so a double that hooked the old one would witness nothing and its test would pass
+/// without exercising the hop at all. Because the CHOICE is made inside `inner`, after the line
+/// below, the fallback is what lands.
+actor SupersedingPersister: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let provider: SwitchableCredentials
+    private(set) var fencedSaves = 0
+
+    init(_ inner: OutboxRepository, superseding provider: SwitchableCredentials) {
+        self.inner = inner
+        self.provider = provider
+    }
+
+    func save(_ job: UploadJob) async throws { try await inner.save(job) }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        fencedSaves += 1
+        // The renewal commits between the engine's decision and the repository's write.
+        provider.supersede()
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// Credentials that let another pass land INSIDE the acquisition hop.
+///
+/// `OutboxEngine.handle` reads the manifest, matches the answer against the offset on disk, and
+/// only then awaits `currentCredentials()`. That await is a suspension, and a sibling drain or a
+/// newer chunk answer can advance the capture — or finish it and delete the manifest — while it is
+/// open. This double is that other pass, on demand and deterministically: the action runs once, at
+/// the acquisition, so the handler resumes holding a snapshot that no longer describes the disk.
+final class InterferingCredentials: OutboxCredentialsProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: OutboxCredentials?
+    private var epoch = 0
+    private var fired = false
+    private let onAcquire: @Sendable () async -> Void
+
+    init(_ current: OutboxCredentials?, onAcquire: @escaping @Sendable () async -> Void) {
+        self.current = current
+        self.onAcquire = onAcquire
+    }
+
+    func currentCredentials() async -> OutboxCredentials? {
+        // Once. A drain acquires more than once, and the point is one interleaving, not a loop.
+        let shouldFire: Bool = lock.withLock {
+            let first = !fired
+            fired = true
+            return first
+        }
+        if shouldFire { await onAcquire() }
+        return lock.withLock {
+            guard var acquired = current else { return nil }
+            acquired.epoch = epoch
+            return acquired
+        }
+    }
+
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        lock.withLock { epoch == credentials.epoch }
+    }
+
+    func stillCurrent(epoch: Int) -> Bool { lock.withLock { self.epoch == epoch } }
+}
+
+/// Refuses the FIRST fenced write and moves the capture while doing it, so the storage-failure
+/// recovery runs against a manifest that has changed underneath it.
+///
+/// The recovery is one more write, and the window that swallowed the first one is still open. This
+/// double is that window, on demand: the interference lands inside the throwing call, and the
+/// recovery call that follows is let through to the real repository so the test can read back what
+/// it actually did.
+actor FailingThenInterferingPersister: OutboxPersisting {
+    struct Refused: Error {}
+
+    private let inner: OutboxRepository
+    private let interfere: @Sendable () async -> Void
+    private var refusedFirst = false
+    private(set) var recoveryWrites = 0
+
+    init(_ inner: OutboxRepository, interfering: @escaping @Sendable () async -> Void) {
+        self.inner = inner
+        self.interfere = interfering
+    }
+
+    func save(_ job: UploadJob) async throws {
+        recoveryWrites += 1
+        try await inner.save(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        guard refusedFirst else {
+            refusedFirst = true
+            // The other pass lands while this write is failing.
+            await interfere()
+            throw Refused()
+        }
+        recoveryWrites += 1
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
     func sweepOrphans() async throws { try await inner.sweepOrphans() }
@@ -407,6 +597,10 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
     func isCurrent(_ credentials: OutboxCredentials) -> Bool {
         lock.withLock { epoch == credentials.epoch }
     }
+
+    func stillCurrent(epoch: Int) -> Bool {
+        lock.withLock { self.epoch == epoch }
+    }
 }
 
 struct StaticCredentials: OutboxCredentialsProviding {
@@ -416,6 +610,8 @@ struct StaticCredentials: OutboxCredentialsProviding {
 
     /// Nothing moves under this one, so what it granted always still stands.
     func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
+
+    func stillCurrent(epoch: Int) -> Bool { true }
 }
 
 enum Fixture {

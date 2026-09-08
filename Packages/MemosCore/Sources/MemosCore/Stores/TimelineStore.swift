@@ -83,7 +83,7 @@ public final class TimelineStore {
     /// The calendar an anchored query's day is read in — injected rather than reached for, so what
     /// a chosen day becomes on the wire is decided by a time zone a test can name.
     private let calendar: Calendar
-    private let onUnauthorized: @MainActor @Sendable () async -> Void
+    private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     /// Where a failure that never reached the server goes instead of `lastError`, and the seam
     /// this store reads the session's incarnation from (`SessionReporting`).
     ///
@@ -159,7 +159,8 @@ public final class TimelineStore {
         snapshots: TimelineSnapshotWriter? = nil,
         snapshotIdentity: TimelineSnapshotIdentity? = nil,
         persists: Bool = false,
-        onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
+        onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
+            { _ in .superseded }
     ) {
         self.pageSize = pageSize
         self.query = query
@@ -461,7 +462,8 @@ public final class TimelineStore {
             await commit(admitted(page.memos), under: authority)
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
-            // any more would put an error over a list that loaded perfectly well — and, on a 401,
+            // any more would put an error over a list that loaded perfectly well — and, for a
+            // refusal,
             // end the session on the word of a request that has been superseded. The current
             // lineage asks the server the same question and is the one entitled to answer it.
             guard lineage == self.lineage else {
@@ -686,7 +688,7 @@ public final class TimelineStore {
     /// recognition in every store rather than five that drift apart.
     private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
         // A FAILURE is as much this session's as a success is, and the fence is the same one. A
-        // stale 401 reaching `onUnauthorized` below wipes the session running NOW — the single
+        // stale refusal reaching `onUnauthorized` below wipes the session running NOW — the single
         // worst thing a missing fence can do here — and a stale sentence lands on a screen that
         // never asked for it. Neither is a list-lineage question, so the lineage guards at the
         // call sites cannot answer it.
@@ -707,15 +709,24 @@ public final class TimelineStore {
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
+        // The server ANSWERED, so whatever this list last said about being unable to reach it is
+        // out of date — true of a refusal as much as of anything else it said.
+        if let refusal = StoreFailure.refusal(error) {
+            serverUnreachable = false
+            // The SESSION owns the verdict; this store owns only what it says about it. A refusal
+            // of a credential the device has already replaced is not this list's news, and "sign
+            // in again" over a session that renewed a second ago is a false instruction.
+            if await onUnauthorized(refusal) == .endedSession {
+                lastError = refusal.errorDescription
+            }
+            return
+        }
         guard let apiError = StoreFailure.reportable(error) else {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
-        // The server ANSWERED, so whatever this list last said about being unable to reach it is
-        // out of date.
         serverUnreachable = false
         lastError = apiError.errorDescription
-        if apiError == .unauthorized { await onUnauthorized() }
     }
 
     /// Empties the loaded list.
@@ -1040,8 +1051,8 @@ public final class TimelineStore {
         let authority = issuedAuthority()
         do {
             // Each response is switched on rather than reached through the generated throwing
-            // accessors: those throw an untyped "unexpected status" error, and a 401 that does not
-            // arrive as `APIError.unauthorized` never reaches the rule that ends the session.
+            // accessors: those throw an untyped "unexpected status" error, and a refusal that does
+            // not arrive as the API's own refusal case never reaches the rule that ends the session.
             let json: Components.Schemas.MemoOut
             if pinned {
                 switch try await client.pinMemoApiMemosUidPinPost(.init(path: .init(uid: uid))) {
@@ -1255,7 +1266,7 @@ public final class TimelineStore {
     ///
     /// A failure is deliberately NOT reported into `lastError`: this runs in the background,
     /// behind a screen nobody asked to refresh, and a blip on it must not paint an error banner
-    /// over a timeline that is working. A 401 is different — it ends the session wherever it
+    /// over a timeline that is working. A refusal is different — it ends the session wherever it
     /// happens — so that one is still handed on.
     ///
     /// It is also MERGED around whatever the stream said while it was in the air. The answer
@@ -1300,9 +1311,9 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            // Same rule as `report`: a 401 about a session that has ended must not end this one.
+            // Same rule as `report`: a refusal about a session that has ended must not end this one.
             guard sessionStillCurrent(handle) else { return false }
-            if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
+            if let refusal = StoreFailure.refusal(error) { _ = await onUnauthorized(refusal) }
             return false
         }
     }
@@ -1375,10 +1386,10 @@ public final class TimelineStore {
             }
         } catch {
             // A memo that cannot be read is a navigation that does not happen, which the caller can
-            // see from the nil. A 401 still ends the session wherever it happens — as long as it
+            // see from the nil. A refusal still ends the session wherever it happens — as long as it
             // is THIS session the refusal was about.
             guard sessionStillCurrent(handle) else { return nil }
-            if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
+            if let refusal = StoreFailure.refusal(error) { _ = await onUnauthorized(refusal) }
             return nil
         }
     }

@@ -127,7 +127,7 @@ struct CompletionTests {
         }
         #expect(message.contains("same key"))
         // Nothing was stored under the key, so this must never look like a refusal that holds.
-        #expect(outcome != .refused(message))
+        #expect(outcome != .refused(message, nil))
     }
 
     @Test(

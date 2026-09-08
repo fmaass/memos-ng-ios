@@ -228,8 +228,8 @@ public struct TimelineView: View {
                     snapshotIdentity: snapshotIdentity,
                     // The one list in the app that is worth opening on tomorrow.
                     persists: true,
-                    onUnauthorized: { [session] in
-                        await session.handle(.unauthorized)
+                    onUnauthorized: { [session] refusal in
+                        await session.handle(refusal)
                     }
                 )
                 // Before anything is read off the disk: a store that persists reads the session's
@@ -580,7 +580,7 @@ public struct TimelineView: View {
         let search = MemoSearch(
             handle: handle,
             baseURL: baseURL,
-            onUnauthorized: { [session] in await session.handle(.unauthorized) }
+            onUnauthorized: { [session] refusal in await session.handle(refusal) }
         )
         // The second `TimelineStore` in the app, and its failures are as much the session's as the
         // first one's (`SessionReporting`).

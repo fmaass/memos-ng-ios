@@ -148,7 +148,8 @@ public final class MemoSearch {
         pageSize: Int = 20,
         calendar: Calendar = .current,
         sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
-        onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
+        onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
+            { _ in .superseded }
     ) {
         self.handle = handle
         self.baseURL = baseURL

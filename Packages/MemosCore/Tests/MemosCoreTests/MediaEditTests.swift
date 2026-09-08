@@ -270,7 +270,10 @@ struct MediaEditTests {
         defer { try? FileManager.default.removeItem(at: file.url) }
 
         let ended = Counter()
-        let store = TimelineStore(onUnauthorized: { ended.increment() })
+        let store = TimelineStore(onUnauthorized: { _ in
+            ended.increment()
+            return .endedSession
+        })
         let client = Stub.client { _, _, operation in
             switch operation {
             case startUploadOperation:

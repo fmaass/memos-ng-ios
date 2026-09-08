@@ -314,7 +314,7 @@ struct TimelineSnapshotTests {
         await store(writer: writer).refresh(using: page(["a"]).handle, baseURL: Stub.baseURL)
         #expect(exists(root), "control: a snapshot was written")
 
-        await session.handle(.unauthorized)
+        await session.handle(CredentialRefusal(issuedUnder: nil))
 
         #expect(!exists(root))
     }

@@ -361,10 +361,10 @@ struct OfflineSessionTests {
         #expect(file.stored == nil, "the identity goes with the credential it was bound to")
     }
 
-    /// The middleware turns a refusal of a replaced credential into `CredentialSuperseded` before
-    /// it can ever reach the rule that ends sessions. Whichever of the two guards catches it, the
-    /// session has to survive AND something has to be scheduled — a discarded answer that
-    /// scheduled nothing leaves the app in `.verifying` for ever.
+    /// A refusal naming a generation this device has already left behind is discarded before it
+    /// can reach the rule that ends sessions. The session has to survive AND something has to be
+    /// scheduled — a discarded answer that scheduled nothing leaves the app in `.verifying` for
+    /// ever.
     @Test("a refusal of a replaced credential is discarded and replaced at once")
     func supersededIsDiscardedAndReplaced() async {
         let calls = Counter()
@@ -378,7 +378,9 @@ struct OfflineSessionTests {
         ) { _, _, _ in
             calls.increment()
             guard answering.get() else { throw offline() }
-            throw CredentialSuperseded()
+            // A generation nothing on this device holds: the check answered about a credential
+            // that is gone.
+            throw CredentialRefusal(issuedUnder: 99)
         }
         await session.enteredForeground()
 
@@ -1147,9 +1149,9 @@ struct InvalidationFenceTests {
     /// of the predecessor, was discarded as stale, and the rejected session was kept.
     ///
     /// The classification now belongs where the credential is attached: `BearerAuthMiddleware`
-    /// records the epoch it presented and turns a refusal of a REPLACED one into
-    /// `CredentialSuperseded`, which never reaches that branch. An `APIError.unauthorized` that
-    /// does is therefore already a refusal of the credential in hand.
+    /// records the epoch it presented and throws a `CredentialRefusal` carrying it, and the rule
+    /// that ends sessions asks that value — at the instant it acts — whether the credential it
+    /// names is still this device's.
     @Test("a 401 earned by the renewed token signs out, rather than being filed as a stale one")
     func aRefusalOfTheRenewedTokenSignsOut() async throws {
         let vault = InMemoryCredentials()

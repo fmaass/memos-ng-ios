@@ -281,7 +281,11 @@ struct OriginalMediaTests {
     func refusalKeepsItsStatus() async {
         let transport = StubDownloads(status: 401)
 
-        await #expect(throws: OriginalMediaError.refused(.unauthorized)) {
+        // Nothing asked this fetch's authority for a credential, so there is no generation to
+        // name — and unknown is treated as current, which ends a session exactly as a 401 always
+        // did.
+        let refused = OriginalMediaError.credentialRefused(CredentialRefusal(issuedUnder: nil))
+        await #expect(throws: refused) {
             try await OriginalMedia.fetch(
                 url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
                 transport: transport
@@ -357,11 +361,34 @@ struct OriginalMediaTests {
         try? FileManager.default.removeItem(at: saved)
     }
 
+    /// The shape an upload against a session's own client actually throws — the generated client's
+    /// envelope around a `CredentialRefusal` — read back through the rule every store reports by.
+    /// A `reportable` that stopped reaching through that envelope would answer `.unexpected(…)`,
+    /// and a dead credential would stop ending the session.
+    @Test("a 401 from an installed client is still the API's own 401 to every store")
+    func anInstalledClientsRefusalIsUnwrappedForTheStores() async throws {
+        let thrown = try #require(
+            await Stub.uploadRefusalFromAnInstalledClient(),
+            "the upload was not refused, so this asserts nothing"
+        )
+
+        #expect(StoreFailure.reportable(thrown) == .unauthorized)
+        #expect(StoreFailure.refusal(thrown) == CredentialRefusal(issuedUnder: 0))
+        #expect(StoreFailure.transportFailure(thrown) == nil, "a refusal is not a dead network")
+    }
+
     @Test("a 401 inside a download is still the API's own 401")
     func theErrorIsUnwrappedForTheStores() {
         // The wrapping is how this lane says which step failed; it must not cost a dead credential
         // the rule that ends the session (`StoreFailure.reportable`).
+        #expect(
+            StoreFailure.reportable(
+                OriginalMediaError.credentialRefused(CredentialRefusal(issuedUnder: nil))
+            ) == .unauthorized
+        )
         #expect(StoreFailure.reportable(OriginalMediaError.refused(.unauthorized)) == .unauthorized)
+        // The BARE-TOKEN lane's shape, kept because that lane is real — a client with no credential
+        // behind it reports its 401 as a plain `APIError` inside this wrapper.
         #expect(StoreFailure.reportable(MediaUploadError.refused(.unauthorized)) == .unauthorized)
         // Something that is NOT the server's word keeps its own sentence instead.
         #expect(StoreFailure.reportable(MediaUploadError.stalled) != .unauthorized)

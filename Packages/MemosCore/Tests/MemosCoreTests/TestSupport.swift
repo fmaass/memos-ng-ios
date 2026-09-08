@@ -2,6 +2,7 @@ import Foundation
 import HTTPTypes
 import MemosAPI
 @testable import MemosCore
+import MemosOutbox
 import OpenAPIRuntime
 
 /// Substitutes the network, not the client.
@@ -37,6 +38,40 @@ extension APIProtocol {
     /// incarnation to be wrong about (`TimelineStore.sessionStillCurrent`). The suites that ARE
     /// about the fence build their handles from a real `SessionStore`.
     var handle: SessionHandle { SessionHandle(client: self, generation: 0) }
+}
+
+/// Lands a renewal in the ONE instant nothing else can reach: after `BearerAuthMiddleware`
+/// compared the epoch and THREW, and before the store's continuation resumes.
+///
+/// The hook is the CATCH, not the ordinary continuation. Once the bearer middleware throws on a
+/// 401 its caller's post-`next` code never runs, so a hook placed there could only ever fire
+/// BEFORE the fix — a test that passed for the wrong reason. `swift-openapi-runtime` applies the
+/// first element of the middleware array outermost, so this one sees the throw last;
+/// `PresentedCredential.replace(with:)` is synchronous and nonisolated, so landing it needs no hop
+/// and there is no scheduling race at all.
+struct RenewingOnRefusal: ClientMiddleware {
+    typealias Answer = (HTTPResponse, HTTPBody?)
+    /// `@concurrent` is not decoration. This target has MainActor default isolation, under which
+    /// a `@Sendable` async function parameter is inferred `nonisolated(nonsending)`, which does
+    /// not match `ClientMiddleware`'s requirement — the conformance simply fails.
+    typealias Next = @concurrent @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> Answer
+
+    let install: @Sendable () -> Void
+
+    nonisolated func intercept(
+        _ request: HTTPRequest,
+        body: HTTPBody?,
+        baseURL: URL,
+        operationID: String,
+        next: Next
+    ) async throws -> Answer {
+        do {
+            return try await next(request, body, baseURL)
+        } catch {
+            install()
+            throw error
+        }
+    }
 }
 
 enum Stub {
@@ -77,6 +112,59 @@ enum Stub {
             configuration: ServerConfiguration(baseURL: baseURL),
             credential: token,
             transport: StubTransport(handler: handler)
+        )
+    }
+
+    /// The error an upload against an INSTALLED credential actually throws for a 401.
+    ///
+    /// Made by performing the real request through `StubTransport` rather than by constructing a
+    /// wrapper by hand: what a store meets is the generated client's envelope around a
+    /// `CredentialRefusal` carrying the epoch the request presented, and a test that builds that
+    /// value itself asserts only that the test agrees with itself. A bare-token client's plain
+    /// `APIError.unauthorized` is a DIFFERENT shape and is asserted beside this one, never instead
+    /// of it.
+    ///
+    /// - Returns: the thrown error, or nil if the call unexpectedly succeeded — which a caller
+    ///   turns into a named failure rather than a silent pass.
+    static func uploadRefusalFromAnInstalledClient() async -> (any Error)? {
+        let credential = PresentedCredential("memos_pat_a")
+        credential.install()
+        let client = client(token: credential) { _, _, _ in Stub.empty(.unauthorized) }
+        do {
+            _ = try await MediaUpload.start(
+                StagedSource(
+                    url: URL(filePath: "/tmp/never-read.jpg"),
+                    filename: "never-read.jpg",
+                    mime: "image/jpeg"
+                ),
+                size: 1,
+                using: client
+            )
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// The session's own client with a renewal armed on the refusal path — the window every
+    /// checkpoint-6 test is about.
+    ///
+    /// Built from the app's OWN runtime configuration rather than a second one, as CLAUDE.md
+    /// requires: a client that quietly used the default date handling would pass here and fail on
+    /// every memo in production.
+    static func client(
+        token: PresentedCredential,
+        afterRefusal install: @escaping @Sendable () -> Void,
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        Client(
+            serverURL: baseURL,
+            configuration: APIClientFactory.runtimeConfiguration,
+            transport: StubTransport(handler: handler),
+            middlewares: [
+                RenewingOnRefusal(install: install),
+                BearerAuthMiddleware(credential: token),
+            ]
         )
     }
 

@@ -64,4 +64,10 @@ public struct DeviceOutboxCredentials: OutboxCredentialsProviding {
     public func isCurrent(_ credentials: OutboxCredentials) -> Bool {
         epoch() == credentials.epoch
     }
+
+    /// The same question of a number kept without the credential it came with — see
+    /// `OutboxCredentialsProviding.stillCurrent(epoch:)`. Same box, same synchronous read.
+    public func stillCurrent(epoch: Int) -> Bool {
+        self.epoch() == epoch
+    }
 }

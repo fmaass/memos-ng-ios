@@ -123,6 +123,16 @@ memory of them.
   framework can answer through more than one callback (success + terminal-failure pairs),
   exactly one delivery wins, claimed BEFORE any actor hop — hop ordering is not guaranteed.
   Precedent: PhotoDelegate's oneAnswer claim.
+- **A refusal carries the epoch of the credential that earned it, all the way to the
+  effect.** Classifying a 401 where the answer arrives and acting on it hops later is the
+  same defect written twice: the decision is taken about an instant that has passed. So the
+  401 becomes ONE typed value — `CredentialRefusal` for the generated-client and download
+  lanes, `OutboxRefusal` for the outbox — carrying which generation the request PRESENTED,
+  and the ONE decision rule is asked synchronously on the isolation that performs the
+  effect: the main actor for a sign-out or a wipe, `OutboxRepository` for a hold, with
+  nothing awaited between the question and the write. Never re-derive it per site, and never
+  hand a Bool across a hop. Enforced by `scripts/refusal-sites-rule.sh` — rule 1 (the
+  literal, a hint) and rule 2 (pinned entry points and call counts, the fence).
 
 ## Tests
 

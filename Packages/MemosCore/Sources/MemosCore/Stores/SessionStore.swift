@@ -42,6 +42,19 @@ public enum SignOutOutcome: Sendable, Equatable {
     }
 }
 
+/// What the refusal rule decided about one refusal.
+///
+/// Returned rather than implied. A caller that must tell a superseded refusal from a rejected
+/// session — `download` does, and the reporting stores do for the sentence they leave behind —
+/// cannot re-derive it without re-deriving the epoch, which is the thing this design removes from
+/// every site but the funnel.
+public enum RefusalOutcome: Sendable, Equatable {
+    /// The credential that earned it is the one this device holds. The session is over.
+    case endedSession
+    /// It named a credential this device has already replaced. Nothing happened.
+    case superseded
+}
+
 /// How a renewal ended.
 ///
 /// Three answers rather than a `Bool`, because the middle one is not a failure and must not read
@@ -781,6 +794,11 @@ public final class SessionStore {
         lastError = nil
         restoreFailure = nil
         let credential = PresentedCredential(storedToken)
+        // It came OUT of the keychain, so it is this device's before anything asks the server:
+        // a launch whose stored credential is genuinely refused MUST end the session, and only an
+        // installed credential's refusal carries the epoch that decides. True on both branches
+        // below, the provisional admission and `.signingIn`.
+        credential.install()
         let client = makeClient(configuration, credential)
 
         // PROVISIONAL ADMISSION. Both halves or neither: a file naming this server is what an
@@ -871,37 +889,42 @@ public final class SessionStore {
                 MemosLog.session.info("a check answered for a credential this device replaced")
             }
             enterVerified()
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return }
-            // NOT re-judged here. This used to compare `presented.epoch`, read before the await,
-            // and that is a different credential from the one the request carried whenever a
-            // renewal landed in between: the middleware presents what the device holds NOW, so a
-            // 401 earned by the successor was being filed as a refusal of the predecessor and the
-            // rejected session was kept. The classification belongs where the credential is
-            // attached — `BearerAuthMiddleware` records the epoch it presented and turns a refusal
-            // of a replaced one into `CredentialSuperseded`, which lands in the generic catch below
-            // as neither outcome. An `APIError.unauthorized` reaching HERE is therefore already a
-            // refusal of the credential this device is holding.
-            let wiped = await wipeCredential()
-            // The wipe is an await of its own, and its tail refuses when something overtook it.
-            // The sentence it leaves behind is one more write and follows the same rule — judged
-            // against the generation the WIPE installed, because that is the only number that can
-            // still be current when nothing overtook it.
-            if owns(wiped) { lastError = error.errorDescription }
         } catch let error as APIError {
             // The server answered and refused. Its own sentence is built from a status code and
             // nothing the request carried, so it is the better one. It is never terminal: a
-            // reachable server that is unwell is not a revoked token.
+            // reachable server that is unwell is not a revoked token. A refusal cannot arrive
+            // here — the middleware throws it as a value of its own, inside the generated client's
+            // envelope — so this arm no longer has to say so.
             guard generation == sessionGeneration else { return }
             unconfirmed(.server(error), admitted: admitted, attempt: attempt)
         } catch {
             guard generation == sessionGeneration else { return }
+            // The rule spelled out here rather than routed through `handle`, and this is one of
+            // exactly two places that is true: a discarded check has to reach `discard`, which is
+            // what schedules the replacement, and the sentence a wipe leaves behind is this call's
+            // own. The PREDICATE is the shared one; only the call is local.
+            if let refusal = StoreFailure.refusal(error) {
+                guard refusal.concernsCurrentCredential(of: credential) else {
+                    MemosLog.session.info("a check answered for a credential this device replaced")
+                    // Neither outcome. The state stands, the attempt is not counted, and a
+                    // replacement goes out at once.
+                    discard(error, admitted: admitted, attempt: attempt, host: host)
+                    return
+                }
+                let wiped = await wipeCredential()
+                // The wipe is an await of its own, and its tail refuses when something overtook
+                // it. The sentence it leaves behind is one more write and follows the same rule —
+                // judged against the generation the WIPE installed, because that is the only
+                // number that can still be current when nothing overtook it.
+                if owns(wiped) { lastError = refusal.errorDescription }
+                return
+            }
             // Neither outcome. A cancellation is this app's own doing — a suspension, a screen
-            // going away — and a supersede is an answer about a credential that is gone. The state
-            // stands, the attempt is not counted, and a replacement goes out at once rather than
-            // waiting for whatever trigger comes next. The chain cannot spin: what cancels a check
-            // is the app leaving the foreground, and `scheduleRetry` runs nowhere else.
-            if StoreFailure.isCancellation(error) || StoreFailure.isSuperseded(error) {
+            // going away. The state stands, the attempt is not counted, and a replacement goes out
+            // at once rather than waiting for whatever trigger comes next. The chain cannot spin:
+            // what cancels a check is the app leaving the foreground, and `scheduleRetry` runs
+            // nowhere else.
+            if StoreFailure.isCancellation(error) {
                 MemosLog.session.info("a cancelled credential check is not an answer about it")
                 discard(error, admitted: admitted, attempt: attempt, host: host)
                 return
@@ -1087,19 +1110,34 @@ public final class SessionStore {
                 if owns(wiped) { lastError = signOutComplaint }
                 return .revoked
             case .undocumented(let statusCode, _):
-                guard statusCode == 401 else {
-                    let error = APIError.fromStatus(statusCode)
-                    lastError = error.errorDescription
-                    return .revokeFailed(error)
-                }
-                MemosLog.session.info("POST /api/auth/native/logout -> 401, token already gone")
-                let wiped = await wipeCredential()
-                // Same await, same fence — see the 204 branch above.
-                if owns(wiped) { lastError = signOutComplaint }
-                return .alreadyRevoked
+                // A refusal no longer arrives here: the middleware throws it, and the catch below
+                // is where "the token was already gone" is told apart from "the token this revoke
+                // named was replaced while it was on the wire". Everything else is a server that
+                // failed to revoke, and the credential stays exactly where it is.
+                let error = APIError.fromStatus(statusCode)
+                lastError = error.errorDescription
+                return .revokeFailed(error)
             }
         } catch {
             guard owns(issued) else { return .revokeFailed(.transport(description: "superseded")) }
+            if let refusal = StoreFailure.refusal(error) {
+                guard refusal.concernsCurrentCredential(of: credential) else {
+                    // The token this revoke named was replaced while it was on the wire. The
+                    // SUCCESSOR is live and has NOT been revoked, so wiping now would leave a
+                    // working token in whatever holds it while this device shows a sign-in
+                    // screen — precisely the state `revokeFailed` exists to prevent. The
+                    // credential is kept and the screen offers the sign-out again, which then
+                    // revokes the token this device is actually holding.
+                    lastError = refusal.errorDescription
+                    return .revokeFailed(.unauthorized)
+                }
+                MemosLog.session.info("the revoke was refused: this token was already gone")
+                let wiped = await wipeCredential()
+                // The `owns(issued)` above fenced the ANSWER; this fences the SENTENCE — see the
+                // 204 branch.
+                if owns(wiped) { lastError = signOutComplaint }
+                return .alreadyRevoked
+            }
             let apiError =
                 (error as? APIError) ?? .transport(description: error.localizedDescription)
             lastError = apiError.errorDescription
@@ -1119,18 +1157,29 @@ public final class SessionStore {
         lastError = signOutComplaint
     }
 
-    /// The 401 rule, in one place: any feature that sees `.unauthorized` calls this.
+    /// The refusal rule, in one place: any feature that meets one calls this.
     ///
     /// No revoke is attempted. A 401 is the server saying this token is already dead, so there is
     /// nothing to revoke and nothing to keep — this is not the failed-revoke case.
-    public func handle(_ error: APIError) async {
-        guard error == .unauthorized else { return }
+    ///
+    /// The answer is RETURNED rather than implied. A caller that has to tell a superseded refusal
+    /// from a rejected session — `download` does, and the reporting stores do for the sentence
+    /// they leave behind — cannot re-derive it without re-deriving the epoch, which is the thing
+    /// this rule exists to remove from every call site but this one.
+    @discardableResult
+    public func handle(_ refusal: CredentialRefusal) async -> RefusalOutcome {
+        // SYNCHRONOUSLY, before the first await: the answer has to be about the credential this
+        // device holds at the instant the wipe STARTS, not at the instant the answer arrived.
+        guard refusal.concernsCurrentCredential(of: credential) else {
+            MemosLog.session.info("a refusal of a credential this device replaced does not end it")
+            return .superseded
+        }
         let wiped = await wipeCredential()
-        guard owns(wiped) else { return }
-        // The 401 keeps the headline: a dead token is what the person needs to hear. A wipe that
-        // also failed is on the log and in `credentialWipeFailed`, and the next sign-out or
+        // The refusal keeps the headline: a dead token is what the person needs to hear. A wipe
+        // that also failed is on the log and in `credentialWipeFailed`, and the next sign-out or
         // restore says so.
-        lastError = error.errorDescription
+        if owns(wiped) { lastError = refusal.errorDescription }
+        return .endedSession
     }
 
     // MARK: - internals
@@ -1158,6 +1207,10 @@ public final class SessionStore {
     ) {
         self.configuration = configuration
         self.client = client
+        // The one place a session ADOPTS a credential — the native sign-in, and the pasted one
+        // after it succeeded. From here a renewal can move it, which is what makes its refusals
+        // ambiguous about which token they name.
+        credential.install()
         self.credential = credential
         // The row belongs to the credential, and this is a different credential. Cleared here for
         // the same reason the account's settings below are: showing the previous device's name and
@@ -1661,10 +1714,12 @@ public final class SessionStore {
                 return
             }
             apply(settings)
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return }
-            await handle(.unauthorized)
         } catch {
+            guard generation == sessionGeneration else { return }
+            if let refusal = StoreFailure.refusal(error) {
+                await handle(refusal)
+                return
+            }
             MemosLog.session.info("GET /api/settings did not answer; the default stays unnamed")
         }
     }
@@ -1694,11 +1749,12 @@ public final class SessionStore {
             }
             apply(settings)
             return true
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return false }
-            await handle(.unauthorized)
-            return false
         } catch {
+            guard generation == sessionGeneration else { return false }
+            if let refusal = StoreFailure.refusal(error) {
+                await handle(refusal)
+                return false
+            }
             MemosLog.session.info("PATCH /api/settings was refused; the default is unchanged")
             return false
         }
@@ -1728,11 +1784,12 @@ public final class SessionStore {
             }
             deviceToken = row
             deviceTokenNotice = nil
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return }
-            await handle(.unauthorized)
         } catch {
             guard generation == sessionGeneration else { return }
+            if let refusal = StoreFailure.refusal(error) {
+                await handle(refusal)
+                return
+            }
             // Whatever was already on the row stays: a read that failed is not evidence that the
             // token changed, and blanking the name because the network dropped would be the screen
             // forgetting something it knows.
@@ -1763,12 +1820,12 @@ public final class SessionStore {
             deviceToken = row
             deviceTokenNotice = nil
             return true
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return false }
-            await handle(.unauthorized)
-            return false
         } catch {
             guard generation == sessionGeneration else { return false }
+            if let refusal = StoreFailure.refusal(error) {
+                await handle(refusal)
+                return false
+            }
             deviceTokenNotice = Self.tokenRenameRefused
             return false
         }
@@ -1825,16 +1882,16 @@ public final class SessionStore {
         let successor: String
         do {
             successor = try await Self.renew(client)
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return .failed }
-            await handle(.unauthorized)
-            return .failed
         } catch is NotRenewable {
             guard generation == sessionGeneration else { return .failed }
             deviceTokenNotice = Self.tokenNotRenewable
             return .notRenewable
         } catch {
             guard generation == sessionGeneration else { return .failed }
+            if let refusal = StoreFailure.refusal(error) {
+                await handle(refusal)
+                return .failed
+            }
             // "It failed" is not the same claim as "nothing happened", and only one of them is
             // safe to make. See `isAmbiguous`.
             guard Self.isAmbiguous(error) else {
@@ -1939,16 +1996,24 @@ public final class SessionStore {
             guard generation == sessionGeneration else { return .failed }
             deviceTokenNotice = Self.tokenRenewalFailed
             return .failed
-        } catch let error as APIError where error == .unauthorized {
-            guard generation == sessionGeneration else { return .failed }
-            MemosLog.session.error(
-                "a renewal rotated and its successor was lost; this device has to sign in again"
-            )
-            let wiped = await wipeCredential()
-            if owns(wiped) { lastError = Self.renewalLostCredential }
-            return .failed
         } catch {
             guard generation == sessionGeneration else { return .failed }
+            // The OTHER place the rule is spelled out by hand, and the reason is the sentence.
+            // This refusal means the opposite of a supersede — the rotation happened and its
+            // successor was lost — so `renewalLostCredential` is what belongs on the screen and
+            // `handle` would write something else. The probe presents the token the device is
+            // still holding, so the predicate passes it through; `replace` has one call site and
+            // it is inside the single-flight renewal, so nothing can move the generation under it.
+            if let refusal = StoreFailure.refusal(error),
+                refusal.concernsCurrentCredential(of: credential)
+            {
+                MemosLog.session.error(
+                    "a renewal rotated and its successor was lost; this device has to sign in again"
+                )
+                let wiped = await wipeCredential()
+                if owns(wiped) { lastError = Self.renewalLostCredential }
+                return .failed
+            }
             // Still unanswerable. The device keeps what it has, which is right either way: if the
             // rotation did happen, the next ordinary request is refused and the usual rule ends the
             // session then, with the credential correctly treated as dead.
@@ -2132,30 +2197,33 @@ public final class SessionStore {
                 throw OriginalMediaError.superseded
             }
             return file
-        } catch OriginalMediaError.refused(let error) {
+        } catch OriginalMediaError.credentialRefused(let refused) {
             guard generation == sessionGeneration else {
                 MemosLog.session.info("a download failed for a session that has ended")
                 throw OriginalMediaError.superseded
             }
-            // The epoch that was SENT, not the one read before the send. A renewal landing in
-            // between installs T1 and revokes T0; the transport correctly presents T1, and judging
-            // its refusal by T0's epoch would report a rejection of the credential this device is
-            // holding as an answer about one it had replaced — retaining a session the server has
-            // just ended. `presented()` is nil only if nothing ever asked the authority, which no
-            // production transport does; then the caller's own snapshot is the best it has.
-            let sentEpoch = authority.presented()?.epoch ?? presented.epoch
-            if error == .unauthorized, !credential.isCurrent(sentEpoch) {
-                MemosLog.session.info(
-                    "a download was refused for a credential this device replaced; not a sign-out"
-                )
-                // Reported as superseded rather than rethrown as a refusal. Ending the session is
-                // only half of what `.refused(.unauthorized)` does — it is also the shape every
-                // screen turns into "your access was rejected, sign in again", which on a live
-                // session that has just renewed is a false instruction that costs someone a
-                // working sign-in.
+            // The refusal carries the epoch the send PRESENTED, read off the grant the transport
+            // recorded. It names none only when nothing ever asked the authority, which no
+            // production transport does; then this caller's own pre-send snapshot is the best
+            // there is, and handing over an unnamed epoch instead would end the session on a
+            // refusal nobody can date.
+            let refusal =
+                refused.issuedUnder == nil
+                ? CredentialRefusal(issuedUnder: presented.epoch) : refused
+            switch await handle(refusal) {
+            // Reported as superseded rather than rethrown as a refusal. Ending the session is only
+            // half of what a refusal does — it is also the shape every screen turns into "your
+            // access was rejected, sign in again", which on a live session that has just renewed
+            // is a false instruction that costs someone a working sign-in.
+            case .superseded: throw OriginalMediaError.superseded
+            case .endedSession: throw OriginalMediaError.credentialRefused(refusal)
+            }
+        } catch OriginalMediaError.refused(let error) {
+            // Every NON-refusal status, unchanged.
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("a download failed for a session that has ended")
                 throw OriginalMediaError.superseded
             }
-            if error == .unauthorized { await handle(.unauthorized) }
             throw OriginalMediaError.refused(error)
         }
     }
@@ -2249,4 +2317,10 @@ public final class SessionStore {
 }
 
 /// The session as the reporting stores see it — see `SessionReporting`.
-extension SessionStore: SessionReporting {}
+extension SessionStore: SessionReporting {
+    /// The rule without the effect. Same predicate as the funnel's, asked by a store that reports
+    /// a refusal rather than acting on one.
+    public func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool {
+        refusal.concernsCurrentCredential(of: credential)
+    }
+}

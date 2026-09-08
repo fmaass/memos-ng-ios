@@ -392,11 +392,32 @@ struct ComposeFailureTests {
             "the replacement went out under the replaced file's key, so it can be replayed away")
     }
 
+    /// The shape the app ACTUALLY meets: a session's client is built on an installed credential,
+    /// so its 401 is a `CredentialRefusal` carrying the epoch the request presented, inside the
+    /// generated client's envelope. Read as an opaque error that is a session failure reported as
+    /// the server refusing somebody's words — and a `classify` that stopped reaching through the
+    /// envelope would say exactly that.
+    @Test("an upload refused through an installed client is an authorization failure")
+    func anInstalledClientsUploadRefusalIsAuthorization() async throws {
+        let thrown = try #require(
+            await Stub.uploadRefusalFromAnInstalledClient(),
+            "the upload was not refused, so this asserts nothing"
+        )
+
+        #expect(ComposeFailure.classify(thrown, sent: false) == .authorization)
+        // The premise, asserted rather than assumed: it really is the wrapped refusal, and the
+        // epoch the request presented really did travel out with it.
+        #expect(StoreFailure.refusal(thrown) == CredentialRefusal(issuedUnder: 0))
+    }
+
     @Test("an upload refused for an ended session is an authorization failure, not a rejection")
     func aCarriedUnauthorizedIsAuthorization() {
         // The REAL wrapper the upload throws, not a synthetic one: `MediaUpload` reports an ended
         // session as a refusal carrying the API error, and read as an opaque error it looks exactly
         // like the server refusing somebody's words.
+        // The BARE-TOKEN lane: a client with no credential behind it still reports its 401 as a
+        // plain `APIError`, and this wrapper is what carries it. Kept because that lane is real —
+        // the share extension's — not because it stands in for the one below.
         let refused = MediaUploadError.refused(.unauthorized)
         #expect(ComposeFailure.classify(refused, sent: false) == .authorization)
         // And one that really IS a refusal stays a rejection.

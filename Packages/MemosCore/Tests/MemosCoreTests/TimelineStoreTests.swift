@@ -86,7 +86,10 @@ struct TimelineStoreTests {
     @Test("a 401 ends the session instead of being retried")
     func unauthorizedSignsOut() async {
         let signedOut = Counter()
-        let store = TimelineStore(onUnauthorized: { signedOut.increment() })
+        let store = TimelineStore(onUnauthorized: { _ in
+            signedOut.increment()
+            return .endedSession
+        })
         let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
 
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
@@ -99,7 +102,10 @@ struct TimelineStoreTests {
     @Test("a server fault is reported without ending the session")
     func serverFaultKeepsSession() async {
         let signedOut = Counter()
-        let store = TimelineStore(onUnauthorized: { signedOut.increment() })
+        let store = TimelineStore(onUnauthorized: { _ in
+            signedOut.increment()
+            return .endedSession
+        })
         let client = Stub.client { _, _, _ in Stub.empty(.internalServerError) }
 
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
@@ -458,7 +464,10 @@ extension TimelineStoreTests {
     @Test("a 403 on a write reports without ending the session")
     func forbiddenWriteDoesNotSignOut() async {
         let unauthorizedCalled = LockedValue<Bool>(false)
-        let store = TimelineStore(onUnauthorized: { unauthorizedCalled.set(true) })
+        let store = TimelineStore(onUnauthorized: { _ in
+            unauthorizedCalled.set(true)
+            return .endedSession
+        })
         let client = Stub.client { _, _, operation in
             operation == "delete_memo_api_memos__uid__delete"
                 ? Stub.empty(.forbidden)
@@ -474,7 +483,10 @@ extension TimelineStoreTests {
     @Test("a 401 on a write does end the session")
     func unauthorizedWriteSignsOut() async {
         let unauthorizedCalled = LockedValue<Bool>(false)
-        let store = TimelineStore(onUnauthorized: { unauthorizedCalled.set(true) })
+        let store = TimelineStore(onUnauthorized: { _ in
+            unauthorizedCalled.set(true)
+            return .endedSession
+        })
         let client = Stub.client { _, _, operation in
             operation == "delete_memo_api_memos__uid__delete"
                 ? Stub.empty(.unauthorized)
@@ -730,7 +742,10 @@ extension TimelineStoreTests {
         }
         let store = TimelineStore(
             pageSize: 1,
-            onUnauthorized: { unauthorizedCalled.set(true) }
+            onUnauthorized: { _ in
+                unauthorizedCalled.set(true)
+                return .endedSession
+            }
         )
 
         let inFlight = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }

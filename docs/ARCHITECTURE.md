@@ -79,6 +79,13 @@ so the code is not on it. That delegate is log-only.
   **A failed revoke KEEPS the credential** and reports `revokeFailed`: a device that believes it
   is signed out while a live token sits in whatever took it is the worse of the two states.
   Discarding it anyway is a deliberate choice made on the screen (`signOutWithoutRevoking`).
+  A 401 to the revoke means "already dead" only when it names the credential this device is STILL
+  holding. A renewal landing while the revoke is on the wire makes the server refuse it because the
+  token it named is gone — and the successor is live, was never revoked, and is valid for up to a
+  year in whatever holds it. That case reports `revokeFailed(.unauthorized)` and KEEPS the
+  credential; the screen offers the sign-out again, which then revokes the token this device is
+  actually holding. Same rule as the line above, applied to the one refusal that looks like
+  permission to wipe (MEMNG-270).
 - A stored credential is **re-validated at launch**, not trusted, and removed when the server
   rejects it.
 
