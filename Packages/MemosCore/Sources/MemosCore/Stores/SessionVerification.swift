@@ -118,6 +118,15 @@ public protocol SessionReporting: AnyObject {
     /// sending, at the instant it sends (`SendAuthority`).
     nonisolated var sessionIncarnation: SessionEpoch { get }
 
+    /// Whether a refusal still names the credential this device is holding.
+    ///
+    /// The read-only half of the refusal rule, for the two stores that only SAY something about a
+    /// refusal and never end anything (`TagStore`, `HeatmapStore`). It is here rather than on
+    /// `SessionStore` because those two hold a `SessionReporting`, and it is SYNCHRONOUS on a
+    /// `@MainActor` protocol so a `@MainActor` store asks it with no hop and no await — an await
+    /// between the question and the sentence is one more instant for the thing it exists to catch.
+    func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool
+
     /// A failure that never reached the server, judged against the incarnation that ISSUED the
     /// request rather than the one running now.
     ///

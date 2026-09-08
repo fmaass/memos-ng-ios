@@ -57,7 +57,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Read as well as written: the viewer measures its own near-end lookahead in pages of this
     /// size, so a store built with a different one moves the trigger with it.
     public let pageSize: Int
-    private let onUnauthorized: @MainActor @Sendable () async -> Void
+    private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     /// Where a failure that never reached the server goes instead of `lastError`, and the seam
     /// this store reads the session's incarnation from — its twin's, for its twin's reason
     /// (`TimelineStore`).
@@ -67,7 +67,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         pageSize: Int = 60,
         filter: MediaLibraryFilter = .all,
         order: MediaLibraryOrder = .newestFirst,
-        onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
+        onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
+            { _ in .superseded }
     ) {
         self.pageSize = pageSize
         self.filter = filter
@@ -291,12 +292,19 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
+        // The SESSION owns the verdict; this store owns only what it says about it — the same
+        // rule, and the same reason, as `TimelineStore.report`.
+        if let refusal = StoreFailure.refusal(error) {
+            if await onUnauthorized(refusal) == .endedSession {
+                lastError = refusal.errorDescription
+            }
+            return
+        }
         guard let apiError = StoreFailure.reportable(error) else {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
         lastError = apiError.errorDescription
-        if apiError == .unauthorized { await onUnauthorized() }
     }
 
     /// Whether the session that ISSUED an operation is still the one this device is running — the

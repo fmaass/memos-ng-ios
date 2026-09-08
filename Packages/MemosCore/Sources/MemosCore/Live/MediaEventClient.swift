@@ -351,8 +351,13 @@ public final class MediaEventClient: Sendable {
                 // about the token this device has since replaced then it says nothing about the one
                 // it is holding. Ending the channel on it takes live updates away from a session
                 // that is perfectly valid.
-                if connection.statusCode == 401, let sent = authority.presented(),
-                    authority.currentEpoch() != sent.epoch
+                // The same value, and the same one rule, as every other lane — minted here because
+                // this connection never goes through the generated client. `.superseded` is a
+                // RECONNECT signal rather than a discard, which is why the answer is read locally
+                // instead of being handed to the session's funnel.
+                let refusal = CredentialRefusal(issuedUnder: authority.presented()?.epoch)
+                if connection.statusCode == 401,
+                    !refusal.concernsCurrentCredential(ofEpoch: authority.currentEpoch())
                 {
                     MemosLog.media.info("a 401 for a replaced credential does not end the channel")
                     return result(.superseded)

@@ -83,7 +83,7 @@ public final class TimelineStore {
     /// The calendar an anchored query's day is read in — injected rather than reached for, so what
     /// a chosen day becomes on the wire is decided by a time zone a test can name.
     private let calendar: Calendar
-    private let onUnauthorized: @MainActor @Sendable () async -> Void
+    private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     /// Where a failure that never reached the server goes instead of `lastError`, and the seam
     /// this store reads the session's incarnation from (`SessionReporting`).
     ///
@@ -159,7 +159,8 @@ public final class TimelineStore {
         snapshots: TimelineSnapshotWriter? = nil,
         snapshotIdentity: TimelineSnapshotIdentity? = nil,
         persists: Bool = false,
-        onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
+        onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
+            { _ in .superseded }
     ) {
         self.pageSize = pageSize
         self.query = query
@@ -707,15 +708,24 @@ public final class TimelineStore {
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
+        // The server ANSWERED, so whatever this list last said about being unable to reach it is
+        // out of date — true of a refusal as much as of anything else it said.
+        if let refusal = StoreFailure.refusal(error) {
+            serverUnreachable = false
+            // The SESSION owns the verdict; this store owns only what it says about it. A refusal
+            // of a credential the device has already replaced is not this list's news, and "sign
+            // in again" over a session that renewed a second ago is a false instruction.
+            if await onUnauthorized(refusal) == .endedSession {
+                lastError = refusal.errorDescription
+            }
+            return
+        }
         guard let apiError = StoreFailure.reportable(error) else {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
-        // The server ANSWERED, so whatever this list last said about being unable to reach it is
-        // out of date.
         serverUnreachable = false
         lastError = apiError.errorDescription
-        if apiError == .unauthorized { await onUnauthorized() }
     }
 
     /// Empties the loaded list.
@@ -1302,7 +1312,7 @@ public final class TimelineStore {
         } catch {
             // Same rule as `report`: a 401 about a session that has ended must not end this one.
             guard sessionStillCurrent(handle) else { return false }
-            if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
+            if let refusal = StoreFailure.refusal(error) { _ = await onUnauthorized(refusal) }
             return false
         }
     }
@@ -1378,7 +1388,7 @@ public final class TimelineStore {
             // see from the nil. A 401 still ends the session wherever it happens — as long as it
             // is THIS session the refusal was about.
             guard sessionStillCurrent(handle) else { return nil }
-            if StoreFailure.reportable(error) == .unauthorized { await onUnauthorized() }
+            if let refusal = StoreFailure.refusal(error) { _ = await onUnauthorized(refusal) }
             return nil
         }
     }

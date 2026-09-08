@@ -48,7 +48,7 @@ extension ComposeFailure {
     /// `sent` is the caller's knowledge, not the error's: only the code that issued the request
     /// knows whether it had gone out by the time this came back, and no error carries that fact.
     public static func classify(_ error: any Error, sent: Bool) -> ComposeFailure {
-        if StoreFailure.isSuperseded(error) { return .authorization }
+        if StoreFailure.refusal(error) != nil { return .authorization }
         if StoreFailure.transportFailure(error) != nil { return .transport(sent: sent) }
         if StoreFailure.isCancellation(error) { return .transport(sent: sent) }
         // Down the chain, not at the top of it: the generated client wraps what it is given, and an

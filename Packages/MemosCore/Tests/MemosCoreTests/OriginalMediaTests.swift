@@ -281,7 +281,11 @@ struct OriginalMediaTests {
     func refusalKeepsItsStatus() async {
         let transport = StubDownloads(status: 401)
 
-        await #expect(throws: OriginalMediaError.refused(.unauthorized)) {
+        // Nothing asked this fetch's authority for a credential, so there is no generation to
+        // name — and unknown is treated as current, which ends a session exactly as a 401 always
+        // did.
+        let refused = OriginalMediaError.credentialRefused(CredentialRefusal(issuedUnder: nil))
+        await #expect(throws: refused) {
             try await OriginalMedia.fetch(
                 url: url, token: "t", uid: "a1", mime: "image/jpeg", server: Stub.baseURL,
                 transport: transport
@@ -361,6 +365,11 @@ struct OriginalMediaTests {
     func theErrorIsUnwrappedForTheStores() {
         // The wrapping is how this lane says which step failed; it must not cost a dead credential
         // the rule that ends the session (`StoreFailure.reportable`).
+        #expect(
+            StoreFailure.reportable(
+                OriginalMediaError.credentialRefused(CredentialRefusal(issuedUnder: nil))
+            ) == .unauthorized
+        )
         #expect(StoreFailure.reportable(OriginalMediaError.refused(.unauthorized)) == .unauthorized)
         #expect(StoreFailure.reportable(MediaUploadError.refused(.unauthorized)) == .unauthorized)
         // Something that is NOT the server's word keeps its own sentence instead.

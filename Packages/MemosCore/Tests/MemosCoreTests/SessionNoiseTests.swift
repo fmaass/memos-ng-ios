@@ -197,8 +197,8 @@ struct SessionNoiseTests {
                 return Stub.empty(.unauthorized)
             }
         )
-        let timeline = TimelineStore(onUnauthorized: { [session] in
-            await session.handle(.unauthorized)
+        let timeline = TimelineStore(onUnauthorized: { [session] refusal in
+            await session.handle(refusal)
         })
         timeline.reports(to: session)
         let underA = try #require(session.activeHandle)
@@ -318,7 +318,10 @@ struct SessionNoiseTests {
 
         #expect(await session.renewDeviceToken() == .renewed, "the premise: the token rotated")
         transport.release.set(true)
-        await #expect(throws: OriginalMediaError.refused(.unauthorized)) {
+        // Under the SUCCESSOR's generation, which is the whole point: the send presented
+        // `memos_pat_next`, so the refusal names generation 1 and the funnel ends the session.
+        let refused = OriginalMediaError.credentialRefused(CredentialRefusal(issuedUnder: 1))
+        await #expect(throws: refused) {
             try await download.value
         }
 

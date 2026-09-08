@@ -53,24 +53,37 @@ public enum StoreFailure {
         return false
     }
 
-    /// Whether the middleware refused this on behalf of a credential the device has since
-    /// replaced.
+    /// The refusal this error carries, or nil for one that is not a refusal at all.
     ///
-    /// It arrives wrapped in the generated client's envelope, exactly as a cancellation does, so
-    /// it is looked for down the chain rather than at the top of it. A caller that treats it as a
-    /// failure of the credential in hand ends a session that has just renewed.
-    public static func isSuperseded(_ error: any Error) -> Bool {
+    /// The chain, not the top: the generated client's envelope wraps whatever it is given, exactly
+    /// as it does a cancellation. A `Bool` was the old shape and it is the wrong one — a verdict
+    /// taken here is a verdict about the instant the answer arrived, and the effect it triggers
+    /// happens hops later. What comes back is the epoch, so the effect can ask the question itself
+    /// (`CredentialRefusal.concernsCurrentCredential`).
+    ///
+    /// A refusal that names no epoch is still a refusal. A client built from a bare token closure
+    /// records no generation, so its 401 arrives as `APIError.unauthorized` — plain, and about a
+    /// credential nothing here can date. `nil` for `issuedUnder` is that state, and unknown is
+    /// treated as current: the share extension's lane and every bare-token caller end a session on
+    /// a 401 exactly as they always did.
+    public static func refusal(_ error: any Error) -> CredentialRefusal? {
         var current: (any Error)? = error
         for _ in 0..<maximumDepth {
-            guard let error = current else { return false }
-            if error is CredentialSuperseded { return true }
+            guard let error = current else { return nil }
+            if let refusal = error as? CredentialRefusal { return refusal }
+            if let api = error as? APIError, api == .unauthorized {
+                return CredentialRefusal(issuedUnder: nil)
+            }
+            if let carried = (error as? any APIErrorCarrying)?.apiError, carried == .unauthorized {
+                return CredentialRefusal(issuedUnder: nil)
+            }
             if let client = error as? ClientError {
                 current = client.underlyingError
                 continue
             }
             current = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
         }
-        return false
+        return nil
     }
 
     /// The classification of a failure that never reached the server, or nil for one that did.
@@ -81,7 +94,7 @@ public enum StoreFailure {
     /// reported where it always was. A cancellation is neither: it is this app's own supersede
     /// coming back at it.
     public static func transportFailure(_ error: any Error) -> NativeLoginTransportFailure? {
-        guard !isCancellation(error), !isSuperseded(error) else { return nil }
+        guard !isCancellation(error), refusal(error) == nil else { return nil }
         guard !(error is APIError), (error as? any APIErrorCarrying)?.apiError == nil else {
             return nil
         }
@@ -102,6 +115,10 @@ public enum StoreFailure {
     /// reaches the rule that ends the session.
     public static func reportable(_ error: any Error) -> APIError? {
         guard !isCancellation(error) else { return nil }
+        // Before the unwrapping below, because a refusal is neither an `APIError` nor a carrier of
+        // one: read as an opaque error it becomes `.unexpected(description:)`, and the sentence
+        // that produces is about this device's own bookkeeping rather than about the server.
+        if refusal(error) != nil { return .unauthorized }
         if let error = error as? APIError { return error }
         if let carried = (error as? any APIErrorCarrying)?.apiError { return carried }
         return .unexpected(description: error.localizedDescription)

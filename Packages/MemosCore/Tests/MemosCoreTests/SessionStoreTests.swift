@@ -190,7 +190,7 @@ struct SessionStoreTests {
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
         #expect(session.state.user != nil)
 
-        await session.handle(.unauthorized)
+        await session.handle(CredentialRefusal(issuedUnder: nil))
 
         #expect(session.state == .signedOut)
         #expect(credentials.isEmpty)
@@ -897,7 +897,7 @@ extension SessionStoreTests {
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
         #expect(account.published != nil)
 
-        await session.handle(.unauthorized)
+        await session.handle(CredentialRefusal(issuedUnder: nil))
 
         #expect(account.published == nil)
     }

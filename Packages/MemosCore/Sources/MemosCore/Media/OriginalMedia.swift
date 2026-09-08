@@ -43,6 +43,10 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
     case foreignHost
     /// The server answered, and the answer was not the file.
     case refused(APIError)
+    /// The server REFUSED the credential, and this is which credential it refused. Its own case
+    /// rather than a `refused(.unauthorized)`, because the epoch is what the effect needs and a
+    /// bare `APIError` has thrown it away by the time anything can act on it (MEMNG-270).
+    case credentialRefused(CredentialRefusal)
     /// It arrived and could not be kept.
     case notStored(String)
     /// The sign-in that asked for it moved on while it was on its way. Two ways that happens: the
@@ -59,6 +63,7 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
         case .foreignHost:
             "This file is hosted somewhere other than the server you are signed in to."
         case .refused(let error): error.errorDescription
+        case .credentialRefused(let refusal): refusal.errorDescription
         case .notStored(let detail): "The download could not be saved: \(detail)"
         case .superseded: "The download was cancelled because this device's sign-in changed."
         }
@@ -68,8 +73,13 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
 extension OriginalMediaError: APIErrorCarrying {
     /// Only a refusal is the server's word; the rest describe this device.
     public var apiError: APIError? {
-        guard case .refused(let error) = self else { return nil }
-        return error
+        switch self {
+        case .refused(let error): error
+        // The status it stands for, so `StoreFailure.reportable` and `ComposeOutcome` keep
+        // reading this lane exactly as they did.
+        case .credentialRefused: .unauthorized
+        default: nil
+        }
     }
 }
 
@@ -272,7 +282,16 @@ public enum OriginalMedia {
         } catch {
             throw OriginalMediaError.refused(.transport(description: error.localizedDescription))
         }
-        try accept(response)
+        do {
+            try accept(response)
+        } catch OriginalMediaError.refused(.unauthorized) {
+            // Minted HERE rather than in `accept`, which has no authority to read an epoch from.
+            // What the send actually PRESENTED is the only number this refusal is about, and the
+            // grant is the one thing that recorded it (`SendAuthority.presented`).
+            throw OriginalMediaError.credentialRefused(
+                CredentialRefusal(issuedUnder: authority.presented()?.epoch)
+            )
+        }
         let enclosure = directory.appending(path: UUID().uuidString)
         let destination = enclosure.appending(path: filename(uid: uid, mime: mime))
         do {

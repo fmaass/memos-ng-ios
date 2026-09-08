@@ -286,7 +286,13 @@ struct MediaLibraryStoreTests {
     func unauthorizedIsHandled() async {
         let handled = LockedValue<Bool>(false)
         let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
-        let store = MediaLibraryStore(pageSize: 2, onUnauthorized: { handled.set(true) })
+        let store = MediaLibraryStore(
+            pageSize: 2,
+            onUnauthorized: { _ in
+                handled.set(true)
+                return .endedSession
+            }
+        )
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(handled.get(), "a 401 did not reach the session")

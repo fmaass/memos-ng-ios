@@ -33,6 +33,7 @@ public final class PresentedCredential: @unchecked Sendable {
     private let lock = NSLock()
     private var token: String
     private var generation: UInt64 = 0
+    private var installed = false
 
     public init(_ token: String) {
         self.token = token
@@ -65,19 +66,21 @@ public final class PresentedCredential: @unchecked Sendable {
     public func isCurrent(_ epoch: UInt64) -> Bool {
         lock.withLock { epoch == generation }
     }
-}
 
-/// A refusal of a credential this device has already replaced.
-///
-/// Thrown INSTEAD of letting the 401 through, which is the whole of its job. The unauthorized case
-/// is the app's one "this session is over" signal, read by the session and by every screen that
-/// reports one, and a stale refusal reaching it would end a session that is perfectly alive. As an
-/// error of its own it lands in the ordinary failure path — the caller reports it, retries it, or
-/// ignores it — and nothing treats it as evidence about the token in hand.
-public struct CredentialSuperseded: Error, Equatable, LocalizedError {
-    public init() {}
+    /// Whether this is a credential the device has ADOPTED, rather than one being examined.
+    ///
+    /// The distinction the refusal fence turns on. A renewal can only ever move a credential the
+    /// session is holding, so only such a credential's refusal is ever ambiguous about which
+    /// token it names. A candidate — a pasted token being validated before anything installs it —
+    /// cannot be renewed underneath its own check, and its 401 is the plainest possible answer:
+    /// the server said no to what was typed in. Wrapping that would cost its owner the sentence
+    /// that says so.
+    public var isInstalled: Bool { lock.withLock { installed } }
 
-    public var errorDescription: String? {
-        "That request was made with a credential this device has since replaced."
+    /// Marks this credential as the device's own. One-way, and called at the two moments a
+    /// session adopts one: a launch restoring what the keychain held, and a sign-in establishing
+    /// what it just obtained.
+    public func install() {
+        lock.withLock { installed = true }
     }
 }

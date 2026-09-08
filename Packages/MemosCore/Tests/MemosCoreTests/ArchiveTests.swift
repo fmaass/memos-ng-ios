@@ -138,7 +138,10 @@ struct ArchiveTests {
     @Test("a 401 on an archive ends the session")
     func unauthorizedArchiveEndsTheSession() async {
         let ended = Counter()
-        let store = TimelineStore(onUnauthorized: { ended.increment() })
+        let store = TimelineStore(onUnauthorized: { _ in
+            ended.increment()
+            return .endedSession
+        })
         let client = Stub.client { _, _, operation in
             operation == patchMemoOperation
                 ? Stub.empty(.unauthorized)

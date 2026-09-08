@@ -399,6 +399,11 @@ struct ComposeFailureTests {
         // like the server refusing somebody's words.
         let refused = MediaUploadError.refused(.unauthorized)
         #expect(ComposeFailure.classify(refused, sent: false) == .authorization)
+        // And the shape an upload against an ended session ACTUALLY throws now: the typed refusal
+        // the middleware raises, wrapped in whatever the lane wraps it in.
+        #expect(
+            ComposeFailure.classify(CredentialRefusal(issuedUnder: nil), sent: false)
+                == .authorization)
         // And one that really IS a refusal stays a rejection.
         #expect(
             ComposeFailure.classify(MediaUploadError.refused(.server(status: 500)), sent: false)

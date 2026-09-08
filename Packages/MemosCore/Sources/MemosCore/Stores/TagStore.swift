@@ -96,6 +96,14 @@ public final class TagStore {
                 MemosLog.api.info("a failure for a session that has ended is not reported")
             } else if let failure = StoreFailure.transportFailure(error) {
                 session?.noteTransportFailure(failure, issuedUnder: handle.generation)
+            } else if let refusal = StoreFailure.refusal(error) {
+                // One more arm in the chain and deliberately no `return`: the spinner below is this
+                // call's own. A refusal of a credential this device has already replaced is not
+                // this row's news, and "sign in again" over a session that renewed a second ago is
+                // a false instruction.
+                if session?.stillNamesCurrentCredential(refusal) ?? true {
+                    lastError = refusal.errorDescription
+                }
             } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }

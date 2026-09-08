@@ -13,12 +13,13 @@ import OpenAPIRuntime
 /// can be revoked or RENEWED mid-session, and a middleware holding a stale copy would keep
 /// presenting a dead token.
 ///
-/// When it is built from a `PresentedCredential` it also fences the 401. A renewal destroys the
-/// presenting token as it mints the successor, so every request already in the air comes back 401 —
-/// correctly, about a token that no longer exists. Deciding that here is what keeps the rest of the
-/// app simple: `APIError.unauthorized` remains the one signal that ends a session, and it can only
-/// ever mean the credential this device is holding NOW was refused. Every caller, in the stores and
-/// in the screens, gets that guarantee without a line of its own.
+/// When it is built from a `PresentedCredential` the device has ADOPTED, it also stamps the 401. A
+/// renewal destroys the presenting token as it mints the successor, so every request already in the
+/// air comes back 401 — correctly, about a token that no longer exists. Which of the two a given
+/// refusal is about cannot be answered here, because the effect it triggers happens hops later and
+/// the answer changes in between. So this layer records rather than decides: it throws a
+/// `CredentialRefusal` carrying the generation the request PRESENTED, and every effect asks the one
+/// question of that value at the instant it acts (MEMNG-270).
 public struct BearerAuthMiddleware: ClientMiddleware {
     private let token: @Sendable () async -> String?
     /// Nil for a client built from a bare token closure — the share extension's, and the tests
@@ -49,10 +50,23 @@ public struct BearerAuthMiddleware: ClientMiddleware {
             request.headerFields[.authorization] = presented.header
         }
         let (response, responseBody) = try await next(request, body, baseURL)
-        if response.status == .unauthorized, let credential, let epoch = presented?.epoch,
-            !credential.isCurrent(epoch)
+        // EVERY refusal of an INSTALLED credential, not only the ones this instant can already
+        // call stale. Whether it is stale is not this middleware's question — it is the question
+        // the EFFECT asks, one or more hops later; the only thing knowable here is which
+        // credential earned it, and that is what travels.
+        //
+        // The epoch's presence is half the test, and it is exact: `authorization()` returns nil
+        // for an empty token, so the ANONYMOUS credential the login exchange presents never
+        // reaches here — its 401 stays a `.undocumented(401)`. A client built from a bare token
+        // closure has no generation at all, so the share extension's lane is untouched.
+        //
+        // INSTALLED is the other half: a pasted token being validated before anything adopts it
+        // is a candidate, not this device's credential. Nothing can renew it, so wrapping its
+        // refusal would only cost its owner the sentence that says the server refused it.
+        if response.status == .unauthorized, let epoch = presented?.epoch,
+            credential?.isInstalled == true
         {
-            throw CredentialSuperseded()
+            throw CredentialRefusal(issuedUnder: epoch)
         }
         return (response, responseBody)
     }

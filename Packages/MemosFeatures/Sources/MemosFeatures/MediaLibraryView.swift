@@ -63,8 +63,8 @@ struct MediaLibraryView: View {
             if library == nil {
                 library = MediaLibraryStore(
                     order: preferences.order,
-                    onUnauthorized: { [session] in
-                        await session.handle(.unauthorized)
+                    onUnauthorized: { [session] refusal in
+                        await session.handle(refusal)
                     }
                 )
             }
