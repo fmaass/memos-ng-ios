@@ -10,6 +10,19 @@ public enum OutboxStorageError: Error, Equatable {
     case queueBusy(OutboxLockFailure)
 }
 
+extension OutboxStorageError: LocalizedError {
+    /// One case, one sentence — the only one of these a person can do anything about, and now the
+    /// only one that can reach a screen after the caller has already waited out its bound. Every
+    /// other case keeps the description it has always had, which is why the rest answer nil rather
+    /// than a sentence somebody would have to keep true.
+    public var errorDescription: String? {
+        switch self {
+        case .queueBusy: "The memos queue on this device is busy. Try posting again in a moment."
+        default: nil
+        }
+    }
+}
+
 /// What a sweep did, or why it did nothing.
 ///
 /// A deferral is not a failure. A pass that does not run costs disk until the next one and never

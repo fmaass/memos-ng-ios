@@ -44,6 +44,9 @@ public enum ShareIngest {
     ///   later, from somewhere else.
     /// - Parameter read: how a file's own capture date is read. Injected so the ORDER and the DATE
     ///   can be tested without a real photograph, and so this stays one read per file.
+    /// - Parameter clock: the time a queue held by the app is waited out on — the deadline and the
+    ///   waiting are one clock, so a test can drive both without spending either. The default is
+    ///   real time, which is what the extension runs on.
     public static func commit(
         items: [SharedItem],
         note: String,
@@ -55,6 +58,7 @@ public enum ShareIngest {
         read: (SharedFile) async -> CaptureReading = {
             await CaptureReader.read(fileAt: $0.url, mime: $0.mime)
         },
+        waitingOn clock: any OutboxWaitClock = OutboxSystemWaitClock(),
         into repository: OutboxRepository
     ) async throws -> ShareOutcome {
         // Everything that can be answered without leaving is answered first, so a share with
@@ -93,14 +97,23 @@ public enum ShareIngest {
             // The copy is the slow part, and the licence is asked for AGAIN inside the repository,
             // immediately before the manifest is committed: an account that changes while the bytes
             // are being copied must not leave a capture stamped with the one that has gone.
-            let job = try await repository.enqueue(
-                content: content,
-                visibility: visibility?.rawValue,
-                capturedAt: auto.instant ?? capturedAt,
-                binding: licence,
-                sources: ordered.map(\.file.stagedSource),
-                under: SendAuthority { binding() == opening }
-            )
+            // And retried while the QUEUE is the thing refusing: the app holds the outbox root for
+            // the length of a sweep, and a share sheet that gave up on that instant would ask
+            // somebody to write their memo again over a lock they cannot see. Bounded, so a hold
+            // that does not end is still an answer. The whole attempt is inside the wait rather
+            // than the copy alone — the authority below is a fresh closure over the same opening
+            // licence on every attempt, so a capture accepted on the third one is as fenced as one
+            // accepted on the first.
+            let job = try await retryingWhileQueueBusy(on: clock) {
+                try await repository.enqueue(
+                    content: content,
+                    visibility: visibility?.rawValue,
+                    capturedAt: auto.instant ?? capturedAt,
+                    binding: licence,
+                    sources: ordered.map(\.file.stagedSource),
+                    under: SendAuthority { binding() == opening }
+                )
+            }
             return .enqueued(job.id)
         } catch is SendAuthorityWithdrawn {
             return .accountChanged
