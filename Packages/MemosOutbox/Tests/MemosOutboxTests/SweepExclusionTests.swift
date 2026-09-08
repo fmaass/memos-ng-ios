@@ -148,12 +148,18 @@ struct SweepExclusionTests {
         )
         #expect(held >= 0, "the repository put its lock file at the root")
         #expect(systemFlock(held, LOCK_SH | LOCK_NB) == 0)
+        // The hold is dropped in the middle of this test, and every line between here and there
+        // can throw: without this, a failing expectation leaves the root locked for whatever runs
+        // next in the process.
+        var droppedHold = false
+        defer { if !droppedHold { close(held) } }
 
         #expect(try await queue.sweepOrphans() == .deferred(.contended))
         #expect(exists(orphanDirectory), "nothing is deleted without the lease")
         #expect(exists(orphanChunk), "and that covers the chunks, not only the media")
 
         close(held)
+        droppedHold = true
 
         #expect(try await queue.sweepOrphans() == .swept(media: 1, chunks: 1))
         #expect(!exists(orphanDirectory))
