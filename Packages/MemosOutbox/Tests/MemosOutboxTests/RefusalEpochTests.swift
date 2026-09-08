@@ -153,6 +153,122 @@ struct OutboxRefusalEpochTests {
         #expect(saved.lastError?.contains("was replaced") == true)
     }
 
+    // MARK: - the OTHER thing that can move inside the hop: the capture itself
+
+    /// A refusal handler holds a snapshot of the manifest from BEFORE it suspended. While it is
+    /// suspended in the acquisition, a sibling pass can advance the capture — and writing the
+    /// handler's stale candidate then puts the cursor back to where the server has already moved
+    /// past, so the next drain re-sends bytes the server holds.
+    @Test("a refusal answered about a capture that has since advanced is not written")
+    func aStaleRefusalDoesNotOverwriteProgress() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let moved = LockedFlag()
+        let box = RepositoryBox()
+        let provider = InterferingCredentials(Fixture.credentials()) {
+            await box.advanceOnce(moved)
+        }
+        let repository = try OutboxRepository(
+            root: root.appending(path: "outbox"),
+            stillCurrent: { provider.stillCurrent(epoch: $0) }
+        )
+        await box.attach(repository)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let source = try Fixture.file(in: root, named: "one.heic", bytes: 1000)
+        let job = try await repository.enqueue(
+            content: "on the beach",
+            visibility: "PRIVATE",
+            capturedAt: now,
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+        )
+        let preferences = Fixture.preferences()
+        defer { Fixture.forgetting(preferences.name) }
+        let engine = OutboxEngine(
+            repository: repository,
+            credentials: provider,
+            http: ScriptedHTTP.standard(chunkSize: 400),
+            scheduler: ScriptedScheduler(),
+            completion: MemoCompletionEndpoint(http: ScriptedHTTP.standard()),
+            network: StubNetworkPath(),
+            preferences: preferences.store,
+            clock: { now }
+        )
+        let fileID = job.files[0].id
+
+        await engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: 0),
+                statusCode: 401,
+                epoch: 0
+            )
+        )
+
+        #expect(moved.get(), "the premise: the sibling pass really did land in the hop")
+        let saved = try #require(await repository.job(job.id))
+        #expect(
+            saved.files[0].bytesConfirmed == 400,
+            "a refusal about a capture that had already advanced put the cursor back"
+        )
+        #expect(saved.state != JobState.held, "and it held the capture on the way past")
+        #expect(saved.lastError == nil)
+    }
+
+    /// The same window, and the worse half of it: the sibling pass FINISHED the capture and deleted
+    /// the manifest. A capture leaves the outbox whole — the manifest first, then the originals —
+    /// so putting the row back writes a job whose files are gone, and the next drain reads a
+    /// capture it can never send.
+    @Test("a refusal answered about a capture that has since finished does not resurrect it")
+    func aStaleRefusalDoesNotResurrectADeletedCapture() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let removed = LockedFlag()
+        let box = RepositoryBox()
+        let provider = InterferingCredentials(Fixture.credentials()) {
+            await box.deleteOnce(removed)
+        }
+        let repository = try OutboxRepository(
+            root: root.appending(path: "outbox"),
+            stillCurrent: { provider.stillCurrent(epoch: $0) }
+        )
+        await box.attach(repository)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let source = try Fixture.file(in: root, named: "one.heic", bytes: 1000)
+        let job = try await repository.enqueue(
+            content: "on the beach",
+            visibility: "PRIVATE",
+            capturedAt: now,
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+        )
+        let preferences = Fixture.preferences()
+        defer { Fixture.forgetting(preferences.name) }
+        let engine = OutboxEngine(
+            repository: repository,
+            credentials: provider,
+            http: ScriptedHTTP.standard(chunkSize: 400),
+            scheduler: ScriptedScheduler(),
+            completion: MemoCompletionEndpoint(http: ScriptedHTTP.standard()),
+            network: StubNetworkPath(),
+            preferences: preferences.store,
+            clock: { now }
+        )
+
+        await engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(jobID: job.id, fileID: job.files[0].id, offset: 0),
+                statusCode: 401,
+                epoch: 0
+            )
+        )
+
+        #expect(removed.get(), "the premise: the sibling pass really did land in the hop")
+        #expect(
+            await repository.job(job.id) == nil,
+            "a refusal about a capture that had already left the outbox put it back"
+        )
+    }
+
     /// The control, and the reason the fence is a fence rather than a hole: with nothing moving in
     /// the write hop, the same refusal holds the capture exactly as it always did.
     @Test("a refusal whose grant still stands at the disk holds the capture")
@@ -195,5 +311,42 @@ struct OutboxRefusalEpochTests {
         let saved = try #require(await repository.job(job.id))
         #expect(saved.state == JobState.held, "a live refusal stopped holding the capture")
         #expect(saved.holdReason == .serverRefused)
+    }
+}
+
+/// A flag a test reads after the fact, so a premise can be asserted rather than assumed.
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() { lock.withLock { value = true } }
+    func get() -> Bool { lock.withLock { value } }
+}
+
+/// The sibling pass, holding the repository the interference acts on.
+///
+/// A box because the provider is built BEFORE the repository — the repository takes the provider's
+/// predicate — so the closure cannot capture something that does not exist yet.
+actor RepositoryBox {
+    private var repository: OutboxRepository?
+
+    func attach(_ repository: OutboxRepository) { self.repository = repository }
+
+    /// Advances the first file's confirmed count, exactly as a newer chunk answer would.
+    func advanceOnce(_ flag: LockedFlag) async {
+        guard let repository, !flag.get() else { return }
+        let jobs = (try? await repository.loadJobs()) ?? []
+        guard let job = jobs.first, let file = job.files.first else { return }
+        try? await repository.save(job.advancing(fileID: file.id, bytesConfirmed: 400))
+        flag.set()
+    }
+
+    /// Finishes the capture, exactly as a create that succeeded would.
+    func deleteOnce(_ flag: LockedFlag) async {
+        guard let repository, !flag.get() else { return }
+        let jobs = (try? await repository.loadJobs()) ?? []
+        guard let job = jobs.first else { return }
+        await repository.delete(job)
+        flag.set()
     }
 }

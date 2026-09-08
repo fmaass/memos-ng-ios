@@ -17,8 +17,8 @@ public enum SessionVerification: Sendable, Equatable {
     /// A check is in flight and nothing is known yet. No banner.
     case verifying
     /// The check did not confirm the credential — the phone could not reach the server, or the
-    /// server answered with something that is not a refusal. The session STANDS: only a 401
-    /// retires a credential. The string is the sentence the banner shows.
+    /// server answered with something that is not a refusal. The session STANDS: only the server
+    /// refusing the credential retires it. The string is the sentence the banner shows.
     case unverified(String)
 }
 

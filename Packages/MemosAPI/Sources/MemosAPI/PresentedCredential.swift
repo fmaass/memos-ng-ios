@@ -72,9 +72,9 @@ public final class PresentedCredential: @unchecked Sendable {
     /// The distinction the refusal fence turns on. A renewal can only ever move a credential the
     /// session is holding, so only such a credential's refusal is ever ambiguous about which
     /// token it names. A candidate — a pasted token being validated before anything installs it —
-    /// cannot be renewed underneath its own check, and its 401 is the plainest possible answer:
-    /// the server said no to what was typed in. Wrapping that would cost its owner the sentence
-    /// that says so.
+    /// cannot be renewed underneath its own check, and a refusal of it is the plainest possible
+    /// answer: the server said no to what was typed in. Wrapping that would cost its owner the
+    /// sentence that says so.
     public var isInstalled: Bool { lock.withLock { installed } }
 
     /// Marks this credential as the device's own. One-way, and called at the two moments a

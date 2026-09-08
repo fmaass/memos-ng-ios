@@ -79,7 +79,7 @@ public protocol OutboxCredentialsProviding: Sendable {
 /// The pair travels together on purpose. A response is classified against the credential that
 /// EARNED it, and a token without its generation cannot answer "was this refusal about the
 /// credential this device is holding now, or about one it has already replaced" — which is the
-/// difference between ending a live session and ignoring a stale 401.
+/// difference between ending a live session and ignoring a stale refusal.
 public struct PresentedGrant: Sendable, Equatable {
     public let token: String
     public let epoch: UInt64
@@ -135,7 +135,8 @@ public struct SendAuthority: Sendable {
     /// What the send actually presented — `nil` until something asked.
     ///
     /// This is what a response must be judged against. The epoch the caller read BEFORE the send
-    /// is a different number whenever a renewal landed in between, and judging a 401 by it reports
+    /// is a different number whenever a renewal landed in between, and judging a refusal by it
+    /// reports
     /// a refusal of the current credential as a refusal of a replaced one — which retains a
     /// session the server has just rejected.
     public func presented() -> PresentedGrant? { attached.current }

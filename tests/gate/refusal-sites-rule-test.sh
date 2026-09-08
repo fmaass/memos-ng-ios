@@ -88,21 +88,22 @@ check "the tree as it stands, copied" 0 "$w"
 w="$(new_tree synthetic-hex)" || exit 1
 printf 'import Foundation\n\nfunc gateSynthetic(code: Int) {\n    if code == 0x191 { }\n}\n' \
   > "$(core_sources "$w")/Synthetic.swift"
-check "a synthetic 0x191 comparison outside the allow-list" 1 "$w" "REFUSAL FAIL: a refusal is named in code"
+check "a synthetic 0x191 comparison outside the allow-list" 1 "$w" "REFUSAL FAIL: a refusal is named outside"
 
 # (i-b) rule 1's ordinary case, and the one a careless author actually writes.
 w="$(new_tree synthetic-literal)" || exit 1
 printf 'import Foundation\n\nfunc gateSynthetic(code: Int) {\n    if code == 401 { }\n}\n' \
   > "$(core_sources "$w")/Synthetic.swift"
-check "a synthetic 401 comparison outside the allow-list" 1 "$w" "REFUSAL FAIL: a refusal is named in code"
+check "a synthetic 401 comparison outside the allow-list" 1 "$w" "REFUSAL FAIL: a refusal is named outside"
 
-# (i-c) the deviation this rule carries, asserted rather than left implicit: rule 1 reads CODE, so
-# the same literal in a comment is NOT a failure. If a later edit restores the comment-inclusive
-# clause, this case turns red and its reader is sent to the script's header.
+# (i-c) a comment is not an exemption. The literal grep is chosen precisely so that the explanation
+# of the rule cannot be written using the thing the rule is about — otherwise a classification could
+# be reintroduced under a comment that reads like a warning about it. Prose outside the allow-listed
+# files says "a refusal", which is what it means.
 w="$(new_tree in-a-comment)" || exit 1
-printf '\n// A 401 here would end the session, and .unauthorized is what it becomes.\n' \
+printf '\n// A 401 here would end the session.\n' \
   >> "$(core_sources "$w")/Stores/TimelineStore.swift"
-check "the literal in a comment (deliberately not a failure)" 0 "$w"
+check "the literal inside a comment" 1 "$w" "REFUSAL FAIL: a refusal is named outside"
 
 # (ii) rule 2b — an eighth wipe call. A new way for a response to end a session is a DECLARATION.
 w="$(new_tree eighth-wipe)" || exit 1

@@ -288,6 +288,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             await save(
                 job.applying(refused.disposition(assumingCurrent: true), at: clock()),
                 ifStillCurrent: refused.issuedUnder,
+                matching: job,
                 else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
             )
             return nil
@@ -409,6 +410,7 @@ public actor OutboxEngine: OutboxChunkHandling {
                 await save(
                     current.held(.serverRefused, error: message),
                     ifStillCurrent: refused.issuedUnder,
+                    matching: current,
                     else: current.backingOff(at: clock(), error: refused.supersededMessage)
                 )
             } else {
@@ -510,9 +512,14 @@ public actor OutboxEngine: OutboxChunkHandling {
         // answer against the offset on disk, and one that no longer matches is thrown away.
         let written: UploadJob?
         if let refused {
+            // `job` is the manifest as it stood when this answer was matched against it, at the top
+            // of this method and before every suspension since. It is the snapshot both fences are
+            // asked about: a pass that advanced or finished this capture while the credential was
+            // being acquired owns it now, and this answer is no longer about the row on disk.
             written = await save(
                 next,
                 ifStillCurrent: refused.issuedUnder,
+                matching: job,
                 else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
             )
         } else {
@@ -557,20 +564,29 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
     }
 
-    /// The same write, with the refusal's grant carried into it so the CHOICE between holding the
-    /// capture and queueing it for the successor is made inside the repository — see
-    /// `OutboxPersisting.save(_:ifStillCurrent:else:)`. Same failure handling as above, and the
-    /// same rule for the caller: nil means the disk did not take it, so stop where you stand.
+    /// The same write, with the snapshot this decision was taken from and the grant it was taken
+    /// under carried into it, so BOTH fences are asked inside the repository — see
+    /// `OutboxPersisting.save(_:ifStillCurrent:matching:else:)`. Same failure handling as above, and
+    /// the same rule for the caller: nil means stop where you stand.
+    ///
+    /// The two nils mean the same thing to the caller — stop — but only ONE of them is a storage
+    /// failure. A write the fences refused is a capture a later pass already owns, so nothing is
+    /// reported and nothing is held: holding for that would be this queue inventing a problem out
+    /// of another pass doing its job. That is why the refusal path leaves `lastPersistenceFailure`
+    /// cleared and never reaches `holdUnsaved`.
     ///
     /// - Returns: the job that actually landed, which is not always the one that was offered.
     @discardableResult
     private func save(
         _ job: UploadJob,
         ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
         else fallback: UploadJob
     ) async -> UploadJob? {
         do {
-            let written = try await repository.save(job, ifStillCurrent: epoch, else: fallback)
+            let written = try await repository.save(
+                job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+            )
             lastPersistenceFailure = nil
             return written
         } catch {

@@ -264,14 +264,19 @@ actor FaultyPersistence: OutboxPersisting {
     }
 
     func save(
-        _ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob
-    ) async throws -> UploadJob {
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
         guard refusals == 0 else {
             refusals -= 1
             refusedSaves += 1
             throw Refused()
         }
-        return try await inner.save(job, ifStillCurrent: epoch, else: fallback)
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
     }
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
@@ -350,13 +355,18 @@ actor GatedPersistence: OutboxPersisting {
     }
 
     func save(
-        _ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob
-    ) async throws -> UploadJob {
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
         if held > 0 {
             held -= 1
             await gate.pass()
         }
-        return try await inner.save(job, ifStillCurrent: epoch, else: fallback)
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
     }
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
@@ -396,12 +406,17 @@ actor SupersedingPersister: OutboxPersisting {
     func save(_ job: UploadJob) async throws { try await inner.save(job) }
 
     func save(
-        _ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob
-    ) async throws -> UploadJob {
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
         fencedSaves += 1
         // The renewal commits between the engine's decision and the repository's write.
         provider.supersede()
-        return try await inner.save(job, ifStillCurrent: epoch, else: fallback)
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
     }
 
     func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
@@ -423,6 +438,47 @@ actor SupersedingPersister: OutboxPersisting {
     nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
         inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
     }
+}
+
+/// Credentials that let another pass land INSIDE the acquisition hop.
+///
+/// `OutboxEngine.handle` reads the manifest, matches the answer against the offset on disk, and
+/// only then awaits `currentCredentials()`. That await is a suspension, and a sibling drain or a
+/// newer chunk answer can advance the capture — or finish it and delete the manifest — while it is
+/// open. This double is that other pass, on demand and deterministically: the action runs once, at
+/// the acquisition, so the handler resumes holding a snapshot that no longer describes the disk.
+final class InterferingCredentials: OutboxCredentialsProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: OutboxCredentials?
+    private var epoch = 0
+    private var fired = false
+    private let onAcquire: @Sendable () async -> Void
+
+    init(_ current: OutboxCredentials?, onAcquire: @escaping @Sendable () async -> Void) {
+        self.current = current
+        self.onAcquire = onAcquire
+    }
+
+    func currentCredentials() async -> OutboxCredentials? {
+        // Once. A drain acquires more than once, and the point is one interleaving, not a loop.
+        let shouldFire: Bool = lock.withLock {
+            let first = !fired
+            fired = true
+            return first
+        }
+        if shouldFire { await onAcquire() }
+        return lock.withLock {
+            guard var acquired = current else { return nil }
+            acquired.epoch = epoch
+            return acquired
+        }
+    }
+
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        lock.withLock { epoch == credentials.epoch }
+    }
+
+    func stillCurrent(epoch: Int) -> Bool { lock.withLock { self.epoch == epoch } }
 }
 
 /// A clock a test can move, for the parts of the drain that only happen later.

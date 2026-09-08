@@ -67,19 +67,38 @@ public protocol OutboxPersisting: Sendable {
     func job(_ id: UUID) async -> UploadJob?
     func save(_ job: UploadJob) async throws
 
-    /// Writes `job` — but only if the authority `job` was decided under still stands; otherwise
-    /// writes `fallback`.
+    /// Writes `job` — but only if the manifest on disk is still the one `snapshot` was read from,
+    /// and only if the authority `job` was decided under still stands; otherwise writes `fallback`,
+    /// or nothing at all.
     ///
-    /// The choice is made HERE, inside the implementation, immediately before the bytes go down and
-    /// with nothing awaited in between. Made by the CALLER it is a verdict carried across a hop
-    /// into this actor, and a hold decided under a credential the device has since replaced is a
-    /// capture stranded behind a "sign in again" its owner already did.
+    /// TWO fences, and they answer different questions:
+    ///
+    /// - **is this still the same capture?** `snapshot` is what the caller read before it began.
+    ///   Between that read and this write the caller suspended, and inside that suspension another
+    ///   pass can advance the job — or finish it and delete the manifest whole. Writing then either
+    ///   overwrites progress the server has already confirmed or resurrects a capture that is gone,
+    ///   without the originals it named. Neither candidate is about the manifest that is on disk
+    ///   now, so NEITHER is written. It is the same rule the drain already applies to a chunk answer
+    ///   whose offset no longer matches, taken where nothing can land after it.
+    /// - **is this still the same authority?** A hold decided under a credential the device has
+    ///   since replaced is a capture stranded behind a "sign in again" its owner already did, so
+    ///   `fallback` is written instead and the next pass sends under the successor.
+    ///
+    /// Both are asked HERE, inside the implementation, immediately before the bytes go down and with
+    /// nothing awaited in between. Asked by the caller they are verdicts carried across a hop into
+    /// this actor, which is the whole class this exists to close.
     ///
     /// A `nil` epoch is unknown, which writes `job` — the behaviour this lane always had.
     ///
-    /// - Returns: the job actually written, so the caller knows which one it is carrying on with.
-    func save(_ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob) async throws
-        -> UploadJob
+    /// - Returns: the job actually written, or `nil` when the manifest moved on and nothing was
+    ///   written at all. `nil` is not a storage failure: there is nothing to report and nothing to
+    ///   retry, because a later pass already owns this capture.
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob?
     func delete(_ job: UploadJob) async
     func sweepOrphans() async throws
     func sliceChunk(
@@ -223,14 +242,23 @@ public actor OutboxRepository {
         try encoder.encode(job).write(to: manifestURL(job.id), options: .atomic)
     }
 
-    /// The choice and the write, on one isolation with no suspension between them — see
-    /// `OutboxPersisting`. `save` below is synchronous `Data.write`, so from the question to the
-    /// bytes there is no instant for a renewal to land in.
+    /// Both questions and the write, on one isolation with no suspension between them — see
+    /// `OutboxPersisting`. `job(_:)` and `save(_:)` below are a synchronous read and a synchronous
+    /// `Data.write`, so from the first question to the bytes there is no instant for a renewal, a
+    /// sibling drain or a background callback to land in.
     public func save(
         _ job: UploadJob,
         ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
         else fallback: UploadJob
-    ) throws -> UploadJob {
+    ) throws -> UploadJob? {
+        // The manifest IS the capture: no row means a pass that finished ahead of this one deleted
+        // it, and writing either candidate now would put it back without the originals it names.
+        guard let onDisk = self.job(snapshot.id) else { return nil }
+        // Value equality rather than a field: `UploadJob` is `Equatable`, every mutation this queue
+        // makes produces a different value, and a comparison that named some of the fields would be
+        // a second copy of "what counts as progress" to keep in step with the first.
+        guard onDisk == snapshot else { return nil }
         let stands = epoch.map(stillCurrent) ?? true
         let chosen = stands ? job : fallback
         try save(chosen)

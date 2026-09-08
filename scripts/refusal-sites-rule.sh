@@ -29,17 +29,11 @@
 # deliberately not chased: each further clause buys a narrower evasion and none of them changes the
 # type-level fence that already stands.
 #
-# ONE DEVIATION FROM THE DESIGN, RECORDED HERE RATHER THAN IN A COMMIT MESSAGE. The design says
-# comments are not exempt from rule 1, in the idiom of scripts/sharelink-rule.sh. That clause does
-# not survive contact with this tree and it is not carried: the literal `401` is the subject of this
-# app's most-documented invariant, and it is named in ordinary explanatory prose in
-# TimelineStore, MediaLibraryStore, SessionVerification, MediaUpload, PresentedCredential and
-# OutboxCredentials. Growing the allow-list to cover them would allow-list exactly the files the
-# ticket is about; rewording them would delete the documentation that explains the fence. The
-# sharelink rule can afford the clause because naming `ShareLink` in a comment sits beside code that
-# could quietly use it; naming `401` in a comment cannot create a classification site. So rule 1
-# reads CODE lines only — a line whose first non-blank characters are `//` or `*` is skipped — and
-# rule 2, which is the fence, is untouched by this.
+# COMMENTS ARE NOT EXEMPT, in the idiom of scripts/sharelink-rule.sh: a check a comment can defeat
+# is not a check, and an allow-list that has to grow to hold explanatory prose is an allow-list that
+# stops meaning anything. Prose outside the allow-listed files says "a refusal", "a rejected
+# credential", "the server refusing the credential" — which is what it means anyway, and which
+# nothing has to keep in step with a status code.
 #
 # Usage: refusal-sites-rule.sh [<repo-root>]     (default: the current directory)
 # Exit:  0 = both rules hold and every control was found
@@ -130,8 +124,8 @@ if [ "$grep_rc" -ge 2 ] && [ -z "$raw_hits" ]; then
   exit 2
 fi
 
-# Comment lines are dropped — see the deviation recorded in the header. The path is made relative to
-# the tree so the allow-list is one list whatever the tree is called.
+# Every line, comment or code — see the header. The path is made relative to the tree so the
+# allow-list is one list whatever the tree is called.
 stray="$(
   printf '%s\n' "$raw_hits" | awk -v prefix="$root/" -v allowed="$(printf '%s\n' "${allow_list[@]}")" '
     BEGIN { n = split(allowed, list, "\n"); for (i = 1; i <= n; i++) if (list[i] != "") ok[list[i]] = 1 }
@@ -140,9 +134,6 @@ stray="$(
       idx = index(line, ":")
       path = substr(line, 1, idx - 1)
       rest = substr(line, idx + 1)
-      body = rest
-      sub(/^[0-9]+:[ \t]*/, "", body)
-      if (body ~ /^(\/\/|\*|\/\*)/) next
       relative = path
       sub("^" prefix, "", relative)
       if (relative in ok) next
@@ -151,16 +142,18 @@ stray="$(
 )"
 
 if [ -n "$stray" ]; then
-  echo "REFUSAL FAIL: a refusal is named in code outside the places that mint one. A refusal is ONE"
+  echo "REFUSAL FAIL: a refusal is named outside the places that mint one. A refusal is ONE"
   echo "              typed value carrying the epoch of the credential that earned it"
   echo "              (CredentialRefusal, OutboxRefusal); a site that classifies a 401 of its own"
   echo "              re-derives a decision that has to be taken at the effect, which is the whole"
   echo "              of MEMNG-270. Add the file to this script's allow-list in the same diff if it"
-  echo "              is genuinely a new attach point — control 2 then holds it to minting one."
+  echo "              is genuinely a new attach point — control 2 then holds it to minting one. Comments
+              count: a comment says \"a refusal\" or \"a rejected credential\", which is what it
+              means; reword the explanation, do not silence the check."
   printf '%s\n' "$stray"
   rc=1
 else
-  echo "REFUSAL ok (rule 1): no refusal literal in code outside the ${#allow_list[@]}-file allow-list"
+  echo "REFUSAL ok (rule 1): no refusal literal, in code or comment, outside the ${#allow_list[@]}-file allow-list"
 fi
 
 # --- control 2: every allow-listed file exists AND still attaches ---------------------------------
@@ -306,7 +299,7 @@ pin "'PresentedCredential(' in SessionStore.swift" 3 \
 pin "'self.credential = ' in SessionStore.swift" 1 \
   "$(grep -caF 'self.credential = ' "$session_store")" \
   "A second assignment is a second moment a credential becomes this device's."
-pin "'OutboxRepository(' constructions" 22 \
+pin "'OutboxRepository(' constructions" 24 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

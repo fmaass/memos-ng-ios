@@ -23,7 +23,8 @@ public enum MediaUploadError: Error, Equatable, LocalizedError {
 }
 
 extension MediaUploadError: APIErrorCarrying {
-    /// A refusal is the server's answer and keeps its identity — above all a 401, which ends the
+    /// A refusal is the server's answer and keeps its identity — above all a rejected credential,
+    /// which ends the
     /// session wherever it happens. The other two are this device's own trouble and carry none.
     public var apiError: APIError? {
         guard case .refused(let error) = self else { return nil }

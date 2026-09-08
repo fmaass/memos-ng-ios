@@ -178,7 +178,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             generation += 1
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
-            // any more would put an error over a list that loaded perfectly well — and, on a 401,
+            // any more would put an error over a list that loaded perfectly well — and, for a
+            // refusal,
             // end the session on the word of a request that has been superseded.
             guard lineage == self.lineage else {
                 MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
@@ -280,7 +281,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Same rule, same helper, as `TimelineStore.report`: a supersede cancels the transport before
     /// it moves the lineage, so the fence above cannot tell that `-999` from a real failure.
     private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
-        // Fenced for the reason `TimelineStore.report` is: a stale 401 reaching `onUnauthorized`
+        // Fenced for the reason `TimelineStore.report` is: a stale refusal reaching `onUnauthorized`
         // ends the session running now, and a stale sentence lands on a grid that never asked.
         guard sessionStillCurrent(handle) else {
             MemosLog.api.info("a failure for a session that has ended is not reported")
