@@ -481,6 +481,70 @@ final class InterferingCredentials: OutboxCredentialsProviding, @unchecked Senda
     func stillCurrent(epoch: Int) -> Bool { lock.withLock { self.epoch == epoch } }
 }
 
+/// Refuses the FIRST fenced write and moves the capture while doing it, so the storage-failure
+/// recovery runs against a manifest that has changed underneath it.
+///
+/// The recovery is one more write, and the window that swallowed the first one is still open. This
+/// double is that window, on demand: the interference lands inside the throwing call, and the
+/// recovery call that follows is let through to the real repository so the test can read back what
+/// it actually did.
+actor FailingThenInterferingPersister: OutboxPersisting {
+    struct Refused: Error {}
+
+    private let inner: OutboxRepository
+    private let interfere: @Sendable () async -> Void
+    private var refusedFirst = false
+    private(set) var recoveryWrites = 0
+
+    init(_ inner: OutboxRepository, interfering: @escaping @Sendable () async -> Void) {
+        self.inner = inner
+        self.interfere = interfering
+    }
+
+    func save(_ job: UploadJob) async throws {
+        recoveryWrites += 1
+        try await inner.save(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        guard refusedFirst else {
+            refusedFirst = true
+            // The other pass lands while this write is failing.
+            await interfere()
+            throw Refused()
+        }
+        recoveryWrites += 1
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
 /// A clock a test can move, for the parts of the drain that only happen later.
 final class MutableClock: @unchecked Sendable {
     private let lock = NSLock()

@@ -269,6 +269,82 @@ struct OutboxRefusalEpochTests {
         )
     }
 
+    /// The same window one write later. A fenced write that THROWS runs a recovery — the job, held,
+    /// saying the disk would not take it — and that recovery is one more write into a window still
+    /// open. Unfenced, it puts back exactly what the fence had just refused to put back.
+    @Test(
+        "a storage-failure recovery does not write back a capture that has moved on",
+        arguments: [Interference.advance, .delete]
+    )
+    func aRecoveryWriteDoesNotResurrectAMovedCapture(_ interference: Interference) async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let moved = LockedFlag()
+        let box = RepositoryBox()
+        let provider = SwitchableCredentials(Fixture.credentials())
+        let repository = try OutboxRepository(
+            root: root.appending(path: "outbox"),
+            stillCurrent: { provider.stillCurrent(epoch: $0) }
+        )
+        await box.attach(repository)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let source = try Fixture.file(in: root, named: "one.heic", bytes: 1000)
+        let job = try await repository.enqueue(
+            content: "on the beach",
+            visibility: "PRIVATE",
+            capturedAt: now,
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
+        )
+        let persistence = FailingThenInterferingPersister(repository) {
+            switch interference {
+            case .advance: await box.advanceOnce(moved)
+            case .delete: await box.deleteOnce(moved)
+            }
+        }
+        let preferences = Fixture.preferences()
+        defer { Fixture.forgetting(preferences.name) }
+        let engine = OutboxEngine(
+            repository: persistence,
+            credentials: provider,
+            http: ScriptedHTTP.standard(chunkSize: 400),
+            scheduler: ScriptedScheduler(),
+            completion: MemoCompletionEndpoint(http: ScriptedHTTP.standard()),
+            network: StubNetworkPath(),
+            preferences: preferences.store,
+            clock: { now }
+        )
+
+        await engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(jobID: job.id, fileID: job.files[0].id, offset: 0),
+                statusCode: 401,
+                epoch: 0
+            )
+        )
+
+        #expect(moved.get(), "the premise: the other pass landed inside the failed write")
+        #expect(
+            await persistence.recoveryWrites > 0,
+            "the premise: the storage-failure recovery really ran"
+        )
+        switch interference {
+        case .advance:
+            let saved = try #require(await repository.job(job.id))
+            #expect(
+                saved.files[0].bytesConfirmed == 400,
+                "the recovery wrote a stale snapshot back over confirmed progress"
+            )
+            #expect(saved.state != JobState.held, "and held a capture another pass owns")
+            #expect(saved.holdReason == nil)
+        case .delete:
+            #expect(
+                await repository.job(job.id) == nil,
+                "the recovery resurrected a capture that had already left the outbox"
+            )
+        }
+    }
+
     /// The control, and the reason the fence is a fence rather than a hole: with nothing moving in
     /// the write hop, the same refusal holds the capture exactly as it always did.
     @Test("a refusal whose grant still stands at the disk holds the capture")
@@ -312,6 +388,12 @@ struct OutboxRefusalEpochTests {
         #expect(saved.state == JobState.held, "a live refusal stopped holding the capture")
         #expect(saved.holdReason == .serverRefused)
     }
+}
+
+/// What the other pass does while the first write is failing.
+enum Interference: Sendable {
+    case advance
+    case delete
 }
 
 /// A flag a test reads after the fact, so a premise can be asserted rather than assumed.

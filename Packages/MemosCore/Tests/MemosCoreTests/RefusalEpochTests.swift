@@ -402,6 +402,33 @@ struct RefusalEpochTests {
         expectStanding(superseded, "a stale refusal ended the session")
     }
 
+    /// `refreshMemo`'s catch is its OWN — it never reaches `report`, so it leaves no sentence
+    /// behind and answers `false` either way. The design's C21 cited this catch and named it
+    /// `setPinned`; `setPinned` is a real effect with a row of its own above, and this is the one
+    /// C21 was actually about.
+    @Test("TimelineStore.refreshMemo — and it still answers false, and says nothing, either way")
+    func timelineMemoRefresh() async throws {
+        let current = await signedIn(renewing: false)
+        let currentStore = timeline(for: current)
+        let currentHandle = try #require(current.session.activeHandle)
+        let refreshedCurrent = await currentStore.refreshMemo(
+            uid: "a", using: currentHandle, baseURL: Stub.baseURL
+        )
+        #expect(refreshedCurrent == false)
+        expectEnded(current, "a refusal of the credential in hand did not end the session")
+        #expect(currentStore.lastError == nil, "this catch leaves no sentence, and never did")
+
+        let superseded = await signedIn(renewing: true)
+        let supersededStore = timeline(for: superseded)
+        let supersededHandle = try #require(superseded.session.activeHandle)
+        let refreshedSuperseded = await supersededStore.refreshMemo(
+            uid: "a", using: supersededHandle, baseURL: Stub.baseURL
+        )
+        #expect(refreshedSuperseded == false)
+        expectStanding(superseded, "a stale refusal ended the session")
+        #expect(supersededStore.lastError == nil)
+    }
+
     @Test("MediaLibraryStore.report — the grid's sentence follows the session's verdict")
     func mediaLibraryReport() async throws {
         let current = await signedIn(renewing: false)

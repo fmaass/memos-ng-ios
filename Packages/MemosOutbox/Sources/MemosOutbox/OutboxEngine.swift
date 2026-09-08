@@ -559,15 +559,17 @@ public actor OutboxEngine: OutboxChunkHandling {
             return true
         } catch {
             lastPersistenceFailure = Self.storageMessage(error)
-            await holdUnsaved(job, error: error)
+            // No snapshot: these are the writes this branch did not fence, and their recovery keeps
+            // the behaviour they always had — see the enumeration in the MEMNG-270 ledger.
+            await holdUnsaved(job, error: error, matching: nil)
             return false
         }
     }
 
     /// The same write, with the snapshot this decision was taken from and the grant it was taken
     /// under carried into it, so BOTH fences are asked inside the repository — see
-    /// `OutboxPersisting.save(_:ifStillCurrent:matching:else:)`. Same failure handling as above, and
-    /// the same rule for the caller: nil means stop where you stand.
+    /// `OutboxPersisting.save(_:ifStillCurrent:matching:else:)`. Same failure handling as above,
+    /// and the same rule for the caller: nil means stop where you stand.
     ///
     /// The two nils mean the same thing to the caller — stop — but only ONE of them is a storage
     /// failure. A write the fences refused is a capture a later pass already owns, so nothing is
@@ -591,15 +593,40 @@ public actor OutboxEngine: OutboxChunkHandling {
             return written
         } catch {
             lastPersistenceFailure = Self.storageMessage(error)
-            await holdUnsaved(job, error: error)
+            // The recovery is ONE MORE WRITE, and the window that swallowed the first one is still
+            // open: the throw, this continuation and the write below are all suspensions another
+            // pass can advance or finish the capture inside. Carrying the same snapshot is what
+            // stops a failed fenced write from putting back, as a hold, the state the fence had
+            // just refused to write.
+            await holdUnsaved(job, error: error, matching: snapshot)
             return nil
         }
     }
 
-    private func holdUnsaved(_ job: UploadJob, error: any Error) async {
+    /// - Parameter snapshot: the manifest this hold is about, for a caller whose write was fenced
+    ///   on one. `nil` writes unconditionally, which is what the unfenced callers have always done.
+    ///   Where a snapshot IS given and no longer matches the disk, NOTHING is written: a capture
+    ///   another pass has advanced or finished is not this failure's to describe, and describing it
+    ///   would resurrect exactly what the fence above refused to resurrect.
+    private func holdUnsaved(
+        _ job: UploadJob,
+        error: any Error,
+        matching snapshot: UploadJob?
+    ) async {
         guard job.state != .held || job.holdReason != .storageFailed else { return }
+        let held = job.held(.storageFailed, error: Self.storageMessage(error))
         do {
-            try await repository.save(job.held(.storageFailed, error: Self.storageMessage(error)))
+            if let snapshot {
+                // The same checked write, so there is one implementation of "is this still the
+                // capture I decided about" and not a second one here. The epoch is deliberately
+                // unknown — a storage failure is not the server's word about a credential — and the
+                // fallback is unreachable because unknown reads as current.
+                _ = try await repository.save(
+                    held, ifStillCurrent: nil, matching: snapshot, else: held
+                )
+            } else {
+                try await repository.save(held)
+            }
         } catch {
             // Nothing more can be written. It is already reported above, and the next pass finds
             // the job exactly as the last write that did land left it.
