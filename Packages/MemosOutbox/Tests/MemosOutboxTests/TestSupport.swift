@@ -281,7 +281,7 @@ actor FaultyPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
-    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
@@ -371,7 +371,7 @@ actor GatedPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
-    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
@@ -425,7 +425,7 @@ actor SupersedingPersister: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
-    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
@@ -530,7 +530,7 @@ actor FailingThenInterferingPersister: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
-    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int

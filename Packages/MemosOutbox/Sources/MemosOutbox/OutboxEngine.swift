@@ -33,6 +33,11 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
     /// job's own manifest, saying it is held and why — is exactly what could not be written.
+    ///
+    /// It carries one thing that is not a write: a housekeeping pass that could not take its lease
+    /// because the lock does not work on this device. That is the same kind of fact — the queue
+    /// could not do something to itself, and no job's manifest can say so — and it is the only
+    /// signal a device pass has that the exclusion is not really there.
     public private(set) var lastPersistenceFailure: String?
 
     public init(
@@ -64,7 +69,16 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// scheduled — that ordering is what keeps a relaunch from uploading the same bytes twice.
     @discardableResult
     public func reconcile() async throws -> ReconciliationPlan {
-        try await repository.sweepOrphans()
+        switch try await repository.sweepOrphans() {
+        case .swept, .deferred(.contended):
+            // A pass that deferred deleted nothing, which costs disk and never correctness:
+            // everything below reads manifests and the session's surviving tasks, never the files
+            // the sweep would have removed. The next launch sweeps them.
+            break
+        case .deferred(.lockUnavailable(let code)):
+            lastPersistenceFailure =
+                "The queue's housekeeping could not run on this device (lock error \(code))."
+        }
         let jobs = try await repository.loadJobs()
         let plan = OutboxReconciliation.plan(jobs: jobs, inFlight: await scheduler.inFlight())
         if !plan.cancelled.isEmpty {
