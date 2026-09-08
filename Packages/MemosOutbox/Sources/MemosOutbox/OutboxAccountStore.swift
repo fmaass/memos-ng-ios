@@ -11,10 +11,59 @@ import Foundation
 /// A missing file means "nobody is signed in as far as anything outside the app can tell", which
 /// is the safe answer: an extension that cannot bind a capture refuses to take it rather than
 /// queueing one that would be held for the wrong account later.
+/// The licence as it is published: who a capture binds to, and WHICH grant of that licence this is.
+///
+/// The pair exists because the two answer different questions. A binding says whose memo this
+/// would be; an issue says under which grant of permission it was admitted. Signing out and back
+/// into the same account republishes the identical binding — the extension cannot tell that from
+/// having never been signed out at all — so a capture admitted before the revocation would publish
+/// under a session that has ended. The issue is what makes those two different, and it is the only
+/// thing here that a sheet standing open for three seconds needs that the binding cannot give it.
+///
+/// Written FLAT, over the binding's own two keys plus one: a licence from a build that predates
+/// issues decodes with none, and a build that predates this one reads the file it has always read
+/// and ignores the extra key.
+public struct PublishedLicence: Sendable, Equatable, Codable {
+    public let binding: AccountBinding
+    /// Nil only for a licence written before there were issues. It fences nothing, which is the
+    /// honest answer about a file that never carried the fact.
+    public let incarnation: UUID?
+
+    public init(binding: AccountBinding, incarnation: UUID?) {
+        self.binding = binding
+        self.incarnation = incarnation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case serverBaseURL
+        case ownerSubject
+        case incarnation
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        binding = AccountBinding(
+            serverBaseURL: try fields.decode(URL.self, forKey: .serverBaseURL),
+            ownerSubject: try fields.decode(String.self, forKey: .ownerSubject)
+        )
+        incarnation = try fields.decodeIfPresent(UUID.self, forKey: .incarnation)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(binding.serverBaseURL, forKey: .serverBaseURL)
+        try fields.encode(binding.ownerSubject, forKey: .ownerSubject)
+        try fields.encodeIfPresent(incarnation, forKey: .incarnation)
+    }
+}
+
 public protocol OutboxAccountPublishing: Sendable {
     /// What the licence currently says — read back rather than remembered, because the writer and
     /// the reader are different processes and the only shared truth is the file.
     func current() -> AccountBinding?
+    /// The same read, with the grant it belongs to — what a caller has to hold on to when there is
+    /// any time at all between admitting a capture and writing it.
+    func currentLicence() -> PublishedLicence?
     /// Best effort by design: a binding that could not be written costs the share extension its
     /// next capture, and must never cost the app a sign-in. Failing CLOSED is the whole point —
     /// no licence means no enqueue.
@@ -23,6 +72,14 @@ public protocol OutboxAccountPublishing: Sendable {
     /// revoked identity that can still queue captures. That must be visible to the caller and
     /// retried, never swallowed.
     func clear() throws
+}
+
+extension OutboxAccountPublishing {
+    /// For a publisher that models no grants at all — a test double, or a build that only ever had
+    /// a binding. It fences nothing, and says so, rather than minting an issue nobody granted.
+    public func currentLicence() -> PublishedLicence? {
+        current().map { PublishedLicence(binding: $0, incarnation: nil) }
+    }
 }
 
 public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
@@ -44,12 +101,27 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     /// signed out. A file that cannot be decoded reads as nil: a binding nobody can parse is not
     /// one to stamp a capture with.
     public func current() -> AccountBinding? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(AccountBinding.self, from: data)
+        currentLicence()?.binding
     }
 
+    /// The whole licence: the pair, and the grant it was published under.
+    public func currentLicence() -> PublishedLicence? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(PublishedLicence.self, from: data)
+    }
+
+    /// The grant is minted HERE, and only where one is actually being granted: onto no licence at
+    /// all, or onto another account's. A licence republished over itself keeps the issue it has —
+    /// the app republishes the same pair every time it revalidates the session in the foreground,
+    /// and a fresh issue there would refuse a share that is doing nothing but waiting its turn.
     public func publish(_ binding: AccountBinding) {
-        guard let data = try? JSONEncoder().encode(binding) else { return }
+        let standing = currentLicence()
+        let issue = standing?.binding == binding ? standing?.incarnation ?? UUID() : UUID()
+        guard
+            let data = try? JSONEncoder().encode(
+                PublishedLicence(binding: binding, incarnation: issue)
+            )
+        else { return }
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )

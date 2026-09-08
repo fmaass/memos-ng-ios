@@ -158,7 +158,7 @@ struct RepositoryTests {
             let orphan = root.appending(path: "outbox").appending(path: "media")
                 .appending(path: UUID().uuidString)
             try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
-            try await repository.sweepOrphans()
+            _ = try await repository.sweepOrphans()
             #expect(!FileManager.default.fileExists(atPath: orphan.path(percentEncoded: false)))
         }
     }
@@ -200,7 +200,7 @@ struct RepositoryTests {
 
             // And the sweep goes on counting those originals as spoken for, exactly as it would
             // for a job it could read. This is what "its files are kept" has to survive.
-            try await repository.sweepOrphans()
+            _ = try await repository.sweepOrphans()
             #expect(try Data(contentsOf: media) == mediaBefore)
         }
     }

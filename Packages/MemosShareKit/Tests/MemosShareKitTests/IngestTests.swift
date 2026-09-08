@@ -39,7 +39,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "on the beach",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
                 into: repository
@@ -73,7 +73,7 @@ struct IngestTests {
                 items: [.text("An Article"), .link(URL(string: "https://example.invalid/a")!)],
                 note: "",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -96,7 +96,7 @@ struct IngestTests {
                 items: [.text("just me")],
                 note: "",
                 visibility: .private,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -118,7 +118,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "a memo nobody may own",
                 visibility: nil,
-                binding: { nil },
+                licence: { nil },
                 expecting: nil,
                 into: repository
             )
@@ -135,7 +135,7 @@ struct IngestTests {
                 items: [.text("   ")],
                 note: "  ",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -157,7 +157,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "shared before signing out",
                 visibility: nil,
-                binding: { nil },
+                licence: { nil },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -180,7 +180,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "composed for one account",
                 visibility: nil,
-                binding: { somebodyElse },
+                licence: { Fixture.licence(for: somebodyElse) },
                 expecting: Fixture.binding(),
                 into: repository
             )
@@ -209,7 +209,7 @@ struct IngestTests {
                     items: [.file(real), .file(vanished)],
                     note: "half a share",
                     visibility: nil,
-                    binding: { Fixture.binding() },
+                    licence: { Fixture.licence() },
                     expecting: Fixture.binding(),
                     into: repository
                 )
@@ -251,7 +251,7 @@ struct IngestTests {
                 items: files,
                 note: "the walk",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 // The moment of sharing, which the photographs are supposed to beat.
                 capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
@@ -290,7 +290,7 @@ struct IngestTests {
                 note: "on the beach",
                 visibility: nil,
                 // Signed in when the sheet posted; signed out by the time the read came back.
-                binding: { reads.count == 0 ? Fixture.binding() : nil },
+                licence: { reads.count == 0 ? Fixture.licence() : nil },
                 expecting: Fixture.binding(),
                 read: { _ in
                     reads.increment()
@@ -315,7 +315,7 @@ struct IngestTests {
         try await withOutbox { repository, root in
             let staged = try Fixture.file(in: root, named: "IMG_0012.heic", bytes: 32)
             let file = try SharedFile.imported(staged, into: root)
-            let licence = ShareReadCounter()
+            let reads = ShareReadCounter()
 
             let outcome = try await ShareIngest.commit(
                 items: [.file(file)],
@@ -324,15 +324,15 @@ struct IngestTests {
                 // The first two reads are the opening check and the re-read after the capture
                 // reads; every read after them is the authority the repository asks while it is
                 // copying, and by then the account has gone.
-                binding: {
-                    licence.increment()
-                    return licence.count <= 2 ? Fixture.binding() : nil
+                licence: {
+                    reads.increment()
+                    return reads.count <= 2 ? Fixture.licence() : nil
                 },
                 expecting: Fixture.binding(),
                 read: { _ in .empty },
                 into: repository
             )
-            #expect(licence.count > 2, "the repository never asked for the licence while copying")
+            #expect(reads.count > 2, "the repository never asked for the licence while copying")
 
             #expect(outcome == .accountChanged)
             #expect(
@@ -358,7 +358,7 @@ struct IngestTests {
                 items: [.file(file)],
                 note: "",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
                 zone: berlin,
@@ -390,7 +390,7 @@ struct IngestTests {
                 items: [.file(try SharedFile.imported(staged, into: root))],
                 note: "",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 capturedAt: shared,
                 read: { _ in .empty },

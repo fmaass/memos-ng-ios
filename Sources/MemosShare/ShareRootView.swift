@@ -131,7 +131,7 @@ struct ShareRootView: View {
                 // Handed as a READ rather than as a value: the commit awaits the capture reads
                 // before it writes anything, and what stamps the job has to be the licence as it
                 // stands then.
-                binding: { OutboxAccountStore.live()?.current() },
+                licence: { OutboxAccountStore.live()?.currentLicence() },
                 expecting: account,
                 into: repository
             )
