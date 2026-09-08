@@ -43,7 +43,7 @@ struct IngestQueueWaitTests {
             items: [item],
             note: "on the beach",
             visibility: nil,
-            binding: { Fixture.binding() },
+            licence: { Fixture.licence() },
             expecting: Fixture.binding(),
             capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
             waitingOn: clock,
@@ -86,7 +86,7 @@ struct IngestQueueWaitTests {
                 items: [item],
                 note: "on the beach",
                 visibility: nil,
-                binding: { Fixture.binding() },
+                licence: { Fixture.licence() },
                 expecting: Fixture.binding(),
                 waitingOn: clock,
                 into: repository
@@ -106,5 +106,87 @@ struct IngestQueueWaitTests {
             try mediaDirectories(in: outbox).isEmpty,
             "a share refused for the whole budget leaves no media directory behind"
         )
+    }
+
+    @Test("a licence revoked and granted again during the wait takes the share with it")
+    func refusesALicenceReissuedDuringTheWait() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outbox = root.appending(path: "outbox")
+        let repository = try OutboxRepository(root: outbox)
+        let item = try staged(in: root)
+
+        let held = try #require(ForeignRootLock(exclusiveOn: outbox))
+        defer { held.release() }
+        let standing = StandingLicence(Fixture.licence())
+        // Between the first attempt and the second: the account is forgotten and signed into
+        // again. The pair the extension reads is identical either side of that — only the grant
+        // differs — and the queue is free from here, so nothing but the fence can stop this.
+        let clock = FakeWaitClock { count in
+            if count == 1 {
+                standing.reissue()
+                held.release()
+            }
+        }
+
+        let outcome = try await ShareIngest.commit(
+            items: [item],
+            note: "composed under a licence that has since been revoked",
+            visibility: nil,
+            licence: { standing.read() },
+            expecting: Fixture.binding(),
+            waitingOn: clock,
+            into: repository
+        )
+
+        #expect(outcome == .accountChanged)
+        #expect(clock.sleeps.count == 1, "one wait: the queue was free on the second attempt")
+        #expect(
+            try mediaDirectories(in: outbox).isEmpty,
+            "a capture admitted under a licence that has ended is not published under its successor"
+        )
+        #expect(try await repository.loadJobs().isEmpty)
+    }
+
+    @Test("the account is re-read on every attempt, so a switch during the wait refuses the share")
+    func refusesAnAccountSwitchedDuringTheWait() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outbox = root.appending(path: "outbox")
+        let repository = try OutboxRepository(root: outbox)
+        let item = try staged(in: root)
+
+        let held = try #require(ForeignRootLock(exclusiveOn: outbox))
+        defer { held.release() }
+        let standing = StandingLicence(Fixture.licence())
+        // The licence the FIRST attempt was refused under is not the one the second would write
+        // under. A stored answer would publish this; a re-read refuses it.
+        let clock = FakeWaitClock { count in
+            if count == 1 {
+                standing.replace(
+                    with: Fixture.licence(
+                        for: AccountBinding(
+                            serverBaseURL: Fixture.server, ownerSubject: "someone-else"
+                        )
+                    )
+                )
+                held.release()
+            }
+        }
+
+        let outcome = try await ShareIngest.commit(
+            items: [item],
+            note: "composed for one account",
+            visibility: nil,
+            licence: { standing.read() },
+            expecting: Fixture.binding(),
+            waitingOn: clock,
+            into: repository
+        )
+
+        #expect(outcome == .accountChanged)
+        #expect(clock.sleeps.count == 1)
+        #expect(try mediaDirectories(in: outbox).isEmpty)
+        #expect(try await repository.loadJobs().isEmpty)
     }
 }

@@ -9,6 +9,17 @@ enum Fixture {
         AccountBinding(serverBaseURL: server, ownerSubject: owner)
     }
 
+    /// One grant, fixed. A commit reads the licence several times, and a fresh issue per read would
+    /// refuse every share in this bundle for a revocation nobody performed.
+    static let grant = UUID(uuidString: "1D0F5A7C-2B44-4E19-9C6A-0F2E7B3D8A51")!
+
+    static func licence(
+        for binding: AccountBinding = Fixture.binding(),
+        under grant: UUID = Fixture.grant
+    ) -> PublishedLicence {
+        PublishedLicence(binding: binding, incarnation: grant)
+    }
+
     /// A temporary directory that the caller removes.
     static func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
@@ -109,5 +120,32 @@ final class ForeignRootLock: @unchecked Sendable {
 
     deinit {
         release()
+    }
+}
+
+/// The licence file as a share sees it: a value the app can revoke and grant again between two of
+/// this commit's reads, which is exactly what a three-second wait made possible.
+final class StandingLicence: @unchecked Sendable {
+    private let mutex = NSLock()
+    private var value: PublishedLicence?
+
+    init(_ value: PublishedLicence?) {
+        self.value = value
+    }
+
+    /// What `ShareIngest.commit` is handed. Every read goes through here, so a change made between
+    /// two attempts is a change the commit can actually see.
+    func read() -> PublishedLicence? { mutex.withLock { value } }
+
+    /// Forgotten, and granted again to the SAME account: the identical binding under a grant that
+    /// is not the one the share was admitted under.
+    func reissue() {
+        mutex.withLock {
+            value = value.map { PublishedLicence(binding: $0.binding, incarnation: UUID()) }
+        }
+    }
+
+    func replace(with licence: PublishedLicence?) {
+        mutex.withLock { value = licence }
     }
 }
