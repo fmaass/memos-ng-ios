@@ -121,7 +121,12 @@ public final class Outbox {
         let root =
             OutboxRepository.appGroupRoot(appGroup: appGroup)
             ?? URL.applicationSupportDirectory.appending(path: "outbox")
-        let repository = try OutboxRepository(root: root)
+        // The predicate the repository decides a refusal under, threaded from the one provider
+        // this outbox drains as. Defaulting it here would leave every hold decided as if nothing
+        // ever moved, which is the fence's whole subject (`OutboxPersisting`).
+        let repository = try OutboxRepository(
+            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) }
+        )
         let scheduler = BackgroundChunkScheduler(appGroup: appGroup)
         let http = URLSessionHTTPPerformer()
         let outbox = Outbox(

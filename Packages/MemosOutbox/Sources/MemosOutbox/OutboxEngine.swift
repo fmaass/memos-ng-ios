@@ -279,15 +279,16 @@ public actor OutboxEngine: OutboxChunkHandling {
             return nil
         }
         guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
+            // No verdict here. `save` below hops into `OutboxRepository`, a different actor, and a
+            // renewal landing in that hop is exactly what this fence is about — so both candidate
+            // outcomes travel and the CHOICE is made where the bytes are written.
+            let refused = OutboxRefusal(
+                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload"
+            )
             await save(
-                refusal(
-                    job,
-                    statusCode: response.statusCode,
-                    what: "upload",
-                    // Asked NOW, of the grant this request went out under: a renewal that landed
-                    // while it was on the wire makes its 401 an answer about a token that is gone.
-                    credentialSuperseded: !mayStillSend(credentials)
-                )
+                job.applying(refused.disposition(assumingCurrent: true), at: clock()),
+                ifStillCurrent: refused.issuedUnder,
+                else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
             )
             return nil
         }
@@ -401,8 +402,18 @@ public actor OutboxEngine: OutboxChunkHandling {
         case .retry(let message):
             await save(current.backingOff(at: clock(), error: message))
             return nil
-        case .refused(let message):
-            await save(current.held(.serverRefused, error: message))
+        case .refused(let message, let refused):
+            // Not at the answer, and not here either: `save` hops into `OutboxRepository`, so the
+            // choice travels WITH the write and is made under that actor's isolation.
+            if let refused {
+                await save(
+                    current.held(.serverRefused, error: message),
+                    ifStillCurrent: refused.issuedUnder,
+                    else: current.backingOff(at: clock(), error: refused.supersededMessage)
+                )
+            } else {
+                await save(current.held(.serverRefused, error: message))
+            }
             return nil
         }
     }
@@ -437,6 +448,9 @@ public actor OutboxEngine: OutboxChunkHandling {
         // Set when only the server can say where the upload stands, which is the one decision
         // here that cannot be made offline.
         var askTheServer: String?
+        // Set when the answer was a refusal, so the write below can choose between holding it and
+        // queueing it for the successor under the isolation that performs the write.
+        var refused: OutboxRefusal?
 
         switch result.statusCode {
         case .some(let code) where (200..<300).contains(code):
@@ -456,11 +470,15 @@ public actor OutboxEngine: OutboxChunkHandling {
             // by then the only thing that knows which credential earned it is the answer itself.
             // A nil epoch is a task from before this record existed, or one adopted across a
             // relaunch: unknown, so it is treated as current and holds, exactly as it did before.
-            let replaced =
-                result.epoch.flatMap { sent in credentials.map { $0.epoch != sent } } ?? false
-            next = refusal(
-                job, statusCode: code, what: "chunk", credentialSuperseded: replaced
+            //
+            // No verdict here either, and for the same reason as `startUpload`: the write is a hop
+            // away. The snapshot at the top of this method is still what `resync` sends under; it
+            // is simply no longer what any decision is read from.
+            let refusal = OutboxRefusal(
+                statusCode: code, issuedUnder: result.epoch, what: "chunk"
             )
+            refused = refusal
+            next = job.applying(refusal.disposition(assumingCurrent: true), at: clock())
         case .some(let code):
             next = job.backingOff(at: clock(), error: "The upload failed (\(code)).")
         case .none:
@@ -490,9 +508,19 @@ public actor OutboxEngine: OutboxChunkHandling {
         // The cursor moves HERE or not at all. Going on to the next chunk from a count only this
         // process holds is what makes the server's answer to it unusable: `handle` matches an
         // answer against the offset on disk, and one that no longer matches is thrown away.
-        let persisted = await save(next)
+        let written: UploadJob?
+        if let refused {
+            written = await save(
+                next,
+                ifStillCurrent: refused.issuedUnder,
+                else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
+            )
+        } else {
+            written = await save(next) ? next : nil
+        }
         await onChange()
-        guard persisted else { return }
+        guard let written else { return }
+        next = written
         // Nobody is signed in yet (a cold background wake, before the session is restored). What
         // the server said is on disk; the next drain carries on from there. The same is true of a
         // session that ENDED while the chunk was in flight: the answer is recorded, and the next
@@ -503,36 +531,6 @@ public actor OutboxEngine: OutboxChunkHandling {
     }
 
     // MARK: - helpers
-
-    /// - Parameter credentialSuperseded: whether the grant this request was SENT under has since
-    ///   been replaced. A 401 earned by a credential the device no longer holds says nothing about
-    ///   the one it does, and holding the job on it strands a capture behind a "sign in again" that
-    ///   the person has already done. It backs off instead, and the next pass sends under the
-    ///   current grant — ONCE: if that attempt is refused too, its epoch IS the current one and the
-    ///   job holds.
-    private func refusal(
-        _ job: UploadJob,
-        statusCode: Int,
-        what: String,
-        credentialSuperseded: Bool = false
-    ) -> UploadJob {
-        switch statusCode {
-        case 401 where credentialSuperseded:
-            return job.backingOff(
-                at: clock(), error: "The credential that \(what) was sent under was replaced."
-            )
-        case 401:
-            return job.held(.serverRefused, error: "Sign in again to send this memo.")
-        case 413:
-            return job.held(.serverRefused, error: "The server will not accept a file this large.")
-        case 408, 429, 500...599:
-            return job.backingOff(at: clock(), error: "The server could not take the \(what).")
-        default:
-            return job.held(
-                .serverRefused, error: "The server rejected the \(what) (\(statusCode))."
-            )
-        }
-    }
 
     private func hold(_ job: UploadJob, reason: HoldReason) async {
         guard job.state != .held || job.holdReason != reason else { return }
@@ -556,6 +554,29 @@ public actor OutboxEngine: OutboxChunkHandling {
             lastPersistenceFailure = Self.storageMessage(error)
             await holdUnsaved(job, error: error)
             return false
+        }
+    }
+
+    /// The same write, with the refusal's grant carried into it so the CHOICE between holding the
+    /// capture and queueing it for the successor is made inside the repository — see
+    /// `OutboxPersisting.save(_:ifStillCurrent:else:)`. Same failure handling as above, and the
+    /// same rule for the caller: nil means the disk did not take it, so stop where you stand.
+    ///
+    /// - Returns: the job that actually landed, which is not always the one that was offered.
+    @discardableResult
+    private func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        else fallback: UploadJob
+    ) async -> UploadJob? {
+        do {
+            let written = try await repository.save(job, ifStillCurrent: epoch, else: fallback)
+            lastPersistenceFailure = nil
+            return written
+        } catch {
+            lastPersistenceFailure = Self.storageMessage(error)
+            await holdUnsaved(job, error: error)
+            return nil
         }
     }
 
@@ -583,6 +604,20 @@ public actor OutboxEngine: OutboxChunkHandling {
             return "This capture could not be read from the queue."
         case .storageFailed:
             return "This capture could not be saved on this device."
+        }
+    }
+}
+
+extension UploadJob {
+    /// What a disposition IS, as a job.
+    ///
+    /// The other half of `OutboxRefusal.disposition(assumingCurrent:)`, and it lives here rather
+    /// than on the refusal because only the engine holds a clock — a back-off is an instant as much
+    /// as it is a sentence.
+    func applying(_ disposition: OutboxRefusal.Disposition, at instant: Date) -> UploadJob {
+        switch disposition {
+        case .hold(let message): held(.serverRefused, error: message)
+        case .backOff(let message): backingOff(at: instant, error: message)
         }
     }
 }

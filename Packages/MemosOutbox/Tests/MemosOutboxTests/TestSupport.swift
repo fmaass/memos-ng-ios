@@ -263,6 +263,17 @@ actor FaultyPersistence: OutboxPersisting {
         try await inner.save(job)
     }
 
+    func save(
+        _ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob
+    ) async throws -> UploadJob {
+        guard refusals == 0 else {
+            refusals -= 1
+            refusedSaves += 1
+            throw Refused()
+        }
+        return try await inner.save(job, ifStillCurrent: epoch, else: fallback)
+    }
+
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
     func sweepOrphans() async throws { try await inner.sweepOrphans() }
@@ -338,6 +349,65 @@ actor GatedPersistence: OutboxPersisting {
         try await inner.save(job)
     }
 
+    func save(
+        _ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob
+    ) async throws -> UploadJob {
+        if held > 0 {
+            held -= 1
+            await gate.pass()
+        }
+        return try await inner.save(job, ifStillCurrent: epoch, else: fallback)
+    }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// Supersedes the grant on the way INTO the write — the hop `OutboxEngine` makes into
+/// `OutboxRepository`, and the one no engine-side comparison can close.
+///
+/// It intercepts `save(_:ifStillCurrent:else:)`, NOT `save(_:)`: every refusal path calls the new
+/// signature, so a double that hooked the old one would witness nothing and its test would pass
+/// without exercising the hop at all. Because the CHOICE is made inside `inner`, after the line
+/// below, the fallback is what lands.
+actor SupersedingPersister: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let provider: SwitchableCredentials
+    private(set) var fencedSaves = 0
+
+    init(_ inner: OutboxRepository, superseding provider: SwitchableCredentials) {
+        self.inner = inner
+        self.provider = provider
+    }
+
+    func save(_ job: UploadJob) async throws { try await inner.save(job) }
+
+    func save(
+        _ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob
+    ) async throws -> UploadJob {
+        fencedSaves += 1
+        // The renewal commits between the engine's decision and the repository's write.
+        provider.supersede()
+        return try await inner.save(job, ifStillCurrent: epoch, else: fallback)
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
     func sweepOrphans() async throws { try await inner.sweepOrphans() }
@@ -407,6 +477,10 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
     func isCurrent(_ credentials: OutboxCredentials) -> Bool {
         lock.withLock { epoch == credentials.epoch }
     }
+
+    func stillCurrent(epoch: Int) -> Bool {
+        lock.withLock { self.epoch == epoch }
+    }
 }
 
 struct StaticCredentials: OutboxCredentialsProviding {
@@ -416,6 +490,8 @@ struct StaticCredentials: OutboxCredentialsProviding {
 
     /// Nothing moves under this one, so what it granted always still stands.
     func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
+
+    func stillCurrent(epoch: Int) -> Bool { true }
 }
 
 enum Fixture {

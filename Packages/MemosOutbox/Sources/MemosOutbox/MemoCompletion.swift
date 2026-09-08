@@ -14,7 +14,12 @@ public enum MemoCompletionOutcome: Sendable, Equatable {
     /// construction — a replay of a create that DID commit returns the original memo.
     case retry(String)
     /// A refusal that repeating cannot fix. The job is held and surfaced; it is never looped on.
-    case refused(String)
+    ///
+    /// The second value is which GRANT earned it, when the server is the one that refused. It
+    /// rides the return because the hold is written one actor hop away, inside `OutboxRepository`,
+    /// and by then nothing else knows which credential this refusal was about. `nil` where the
+    /// refusal is this device's own — a memo that could not even be prepared.
+    case refused(String, OutboxRefusal?)
 }
 
 /// The seam the completion path lives behind.
@@ -66,7 +71,7 @@ public struct MemoCompletionEndpoint: MemoCompleting {
                 job: job
             )
         } catch {
-            return .refused("The memo could not be prepared: \(error.localizedDescription)")
+            return .refused("The memo could not be prepared: \(error.localizedDescription)", nil)
         }
 
         let response: OutboxHTTPResponse
@@ -86,11 +91,18 @@ public struct MemoCompletionEndpoint: MemoCompleting {
         if response.statusCode == 401, !authority.holds() {
             return .retry("The credential this memo was sent under was replaced.")
         }
-        return outcome(for: response)
+        return outcome(for: response, issuedUnder: credentials.epoch)
     }
 
     /// Separated from the call so the status-to-decision mapping is asserted directly.
-    public func outcome(for response: OutboxHTTPResponse) -> MemoCompletionOutcome {
+    ///
+    /// - Parameter issuedUnder: the authority epoch the request went out under, stamped onto a
+    ///   refusal so the write that acts on it can ask whether that grant still stands. Defaulted
+    ///   for the callers that are only asserting the mapping.
+    public func outcome(
+        for response: OutboxHTTPResponse,
+        issuedUnder epoch: Int? = nil
+    ) -> MemoCompletionOutcome {
         switch response.statusCode {
         case 200, 201:
             guard let uid = Self.uid(from: response.body) else {
@@ -104,17 +116,24 @@ public struct MemoCompletionEndpoint: MemoCompleting {
             if let failure = UploadsUnlinkableFailure.decode(response.body) {
                 return .unlinkable(failure)
             }
-            return .refused("The server refused the memo (409).")
+            return .refused("The server refused the memo (409).", refusal(409, epoch))
         case 503 where OutboxWire.detailCode(response.body) == Self.racedCode:
             // Concurrent writes raced this keyed create and nothing was stored under the key.
             return .retry("The server raced this memo; retrying with the same key.")
         case 408, 425, 429, 500...599:
             return .retry("The server could not take the memo (\(response.statusCode)).")
         case 401:
-            return .refused("Sign in again to finish sending this memo.")
+            return .refused("Sign in again to finish sending this memo.", refusal(401, epoch))
         default:
-            return .refused("The server rejected the memo (\(response.statusCode)).")
+            return .refused(
+                "The server rejected the memo (\(response.statusCode)).",
+                refusal(response.statusCode, epoch)
+            )
         }
+    }
+
+    private func refusal(_ statusCode: Int, _ epoch: Int?) -> OutboxRefusal {
+        OutboxRefusal(statusCode: statusCode, issuedUnder: epoch, what: "this memo")
     }
 
     /// The one refusal code that means "nothing was stored, repeat the identical request".

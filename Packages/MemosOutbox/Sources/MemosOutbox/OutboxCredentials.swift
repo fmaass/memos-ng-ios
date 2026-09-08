@@ -52,6 +52,17 @@ public protocol OutboxCredentialsProviding: Sendable {
     /// would be one more instant for an account switch to land in — which is the whole of what
     /// this exists to catch, since a drain pass outlives the switch that happens during it.
     func isCurrent(_ credentials: OutboxCredentials) -> Bool
+
+    /// Whether an epoch handed out earlier still names this device's authority.
+    ///
+    /// The same question as `isCurrent`, asked by something that kept the NUMBER rather than the
+    /// whole credential — a chunk answer that comes back in a later pass, a refusal on its way
+    /// into the write that acts on it. A REQUIREMENT for the reason `isCurrent` is one: a default
+    /// of `true` would let a provider silently defeat the fence.
+    ///
+    /// SYNCHRONOUS for the same reason, and it matters more here: the caller asks it with the
+    /// bytes about to go to disk and nothing awaited in between.
+    func stillCurrent(epoch: Int) -> Bool
 }
 
 /// The authority a send is made under, asked at the LAST instant before it goes out.

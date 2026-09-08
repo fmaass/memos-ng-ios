@@ -1918,6 +1918,26 @@ s_sharelink() {
   return 1
 }
 
+s_refusal() {
+  # A refusal is judged where the answer arrives and acted on one or more actor hops later, and in
+  # between a renewal can replace the credential it was about. The fix is one typed value carrying
+  # the epoch of the credential that EARNED the refusal and one decision taken at the effect
+  # (MEMNG-270); what this step adds is that a NEW classification or effect site cannot be added
+  # without a reviewer seeing it. Two rules, and they are not equal: rule 1 is a literal grep and a
+  # HINT, rule 2 is the fence — pinned entry points and pinned call counts. The arithmetic lives in
+  # a script of its own for the reason the share-link rule's does: that script's text must carry the
+  # literal, and the scope it checks may not.
+  echo "--- refusal-sites rule (one typed refusal, an enumerated set of effects) ---"
+  local refusal_rule="$GATE_TARGET/scripts/refusal-sites-rule.sh"
+  if [ -x "$refusal_rule" ]; then
+    "$refusal_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "REFUSAL FAIL: $refusal_rule is missing or not executable, so the refusal sites were never"
+  echo "              checked and this step proves nothing"
+  return 1
+}
+
 s_testcount() {
   # Swift Testing does not emit XCTest's "Executed N tests" line (a correct Swift Testing bundle
   # reads 0 there), so the per-bundle counts come from the result bundle, which is authoritative
@@ -2100,6 +2120,7 @@ step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck
 step warnaserr  s_warnings
 step deps       s_deps
+step refusal    s_refusal
 step sharelink  s_sharelink
 step testcount  s_testcount
 

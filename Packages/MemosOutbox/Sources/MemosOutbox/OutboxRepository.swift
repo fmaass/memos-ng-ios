@@ -66,6 +66,20 @@ public protocol OutboxPersisting: Sendable {
     func loadJobs() async throws -> [UploadJob]
     func job(_ id: UUID) async -> UploadJob?
     func save(_ job: UploadJob) async throws
+
+    /// Writes `job` — but only if the authority `job` was decided under still stands; otherwise
+    /// writes `fallback`.
+    ///
+    /// The choice is made HERE, inside the implementation, immediately before the bytes go down and
+    /// with nothing awaited in between. Made by the CALLER it is a verdict carried across a hop
+    /// into this actor, and a hold decided under a credential the device has since replaced is a
+    /// capture stranded behind a "sign in again" its owner already did.
+    ///
+    /// A `nil` epoch is unknown, which writes `job` — the behaviour this lane always had.
+    ///
+    /// - Returns: the job actually written, so the caller knows which one it is carrying on with.
+    func save(_ job: UploadJob, ifStillCurrent epoch: Int?, else fallback: UploadJob) async throws
+        -> UploadJob
     func delete(_ job: UploadJob) async
     func sweepOrphans() async throws
     func sliceChunk(
@@ -90,9 +104,18 @@ public protocol OutboxPersisting: Sendable {
 /// and never a job whose files are missing.
 public actor OutboxRepository {
     private let root: URL
+    /// Whether an authority epoch handed out earlier still stands, asked at the instant of a write.
+    ///
+    /// A closure rather than the provider itself, so the durability layer takes no dependency on
+    /// the credentials protocol and the on-disk format is untouched. The default answers "nothing
+    /// moves", which is correct for every repository that no drain is behind — the share
+    /// extension's, and the fixtures with no engine — and wrong for one that is, which is why the
+    /// call sites that feed an engine pass the real predicate.
+    private let stillCurrent: @Sendable (Int) -> Bool
 
-    public init(root: URL) throws {
+    public init(root: URL, stillCurrent: @escaping @Sendable (Int) -> Bool = { _ in true }) throws {
         self.root = root
+        self.stillCurrent = stillCurrent
         for directory in [jobsRoot, mediaRoot, chunksRoot, quarantineRoot] {
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true
@@ -198,6 +221,20 @@ public actor OutboxRepository {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(job).write(to: manifestURL(job.id), options: .atomic)
+    }
+
+    /// The choice and the write, on one isolation with no suspension between them — see
+    /// `OutboxPersisting`. `save` below is synchronous `Data.write`, so from the question to the
+    /// bytes there is no instant for a renewal to land in.
+    public func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        else fallback: UploadJob
+    ) throws -> UploadJob {
+        let stands = epoch.map(stillCurrent) ?? true
+        let chosen = stands ? job : fallback
+        try save(chosen)
+        return chosen
     }
 
     /// A job leaves the outbox whole: the manifest goes first, so a crash between the two calls

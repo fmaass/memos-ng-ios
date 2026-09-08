@@ -38,7 +38,14 @@ private struct Harness {
         allowsMobileData: Bool = false
     ) async throws -> Harness {
         let root = try Fixture.temporaryDirectory()
-        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        // The provider is built BEFORE the repository, because the repository decides a refusal
+        // under this provider's predicate: defaulted, every hold would be decided as if nothing
+        // ever moved, and the three `SupersededRefusalTests` below would go red.
+        let provider = SwitchableCredentials(credentials)
+        let repository = try OutboxRepository(
+            root: root.appending(path: "outbox"),
+            stillCurrent: { provider.stillCurrent(epoch: $0) }
+        )
         var sources: [StagedSource] = []
         if bytes > 0 {
             let source = try Fixture.file(in: root, named: "one.heic", bytes: bytes)
@@ -46,7 +53,6 @@ private struct Harness {
         }
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let clock = MutableClock(now)
-        let provider = SwitchableCredentials(credentials)
         let preferences = Fixture.preferences(allowsMobileData: allowsMobileData)
         // Nil means the REAL completion path, driven by the same scripted server: the tests that
         // care about what a create actually sends and reads use that rather than a stand-in.
@@ -422,7 +428,7 @@ struct EngineTests {
     @Test("a refusal that repeating cannot fix holds the job instead of looping")
     func holdsOnRefusal() async throws {
         let completion = ScriptedCompletion(
-            [.refused("The memo was rejected (422).")], repeating: .refused("again")
+            [.refused("The memo was rejected (422).", nil)], repeating: .refused("again", nil)
         )
         let harness = try await Harness.make(bytes: 0, http: .standard(), completion: completion)
         defer { harness.cleanUp() }
@@ -1088,7 +1094,13 @@ struct OutboxAdoptionTests {
     func adoptionNeedsNoAuthority() async throws {
         let root = try Fixture.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        // Nothing is signed in, so nothing can move — passed explicitly rather than defaulted, so
+        // the intent is written down beside the repository that carries it.
+        let signedOut = StaticCredentials(credentials: nil)
+        let repository = try OutboxRepository(
+            root: root.appending(path: "outbox"),
+            stillCurrent: { signedOut.stillCurrent(epoch: $0) }
+        )
         let source = try Fixture.file(in: root, named: "one.heic", bytes: 400)
         _ = try await repository.enqueue(
             content: "on the beach",
@@ -1103,7 +1115,7 @@ struct OutboxAdoptionTests {
         let outbox = Outbox(
             repository: repository,
             // Nobody is signed in — the cold background wake this is about.
-            credentials: StaticCredentials(credentials: nil),
+            credentials: signedOut,
             http: http,
             scheduler: ScriptedScheduler(),
             completion: ScriptedCompletion([.retry("not now")], repeating: .retry("not now")),
