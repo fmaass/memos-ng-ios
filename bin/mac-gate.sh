@@ -661,6 +661,7 @@ preflight_out="$(
     printf "reap_skip_reason='%s'\n" "$(esc "$reap_skip_reason")"
     printf "surviving_branches='%s'\n" "$(esc "$surviving_branches")"
     cat "$repo_root/scripts/reap-gate-lanes.sh"
+    cat "$repo_root/scripts/gate-work-dir.sh"
     cat <<'PRE_EOF'
 set -uo pipefail
 gate_root_raw="$HOME/build/memos-ng-ios/gate"
@@ -706,9 +707,11 @@ if [ "$origin_fetched" -eq 1 ]; then
   survivors_file="$(mktemp "${TMPDIR:-/tmp}/gate-survivors-XXXXXX")" || exit 2
   trap 'rm -f "$survivors_file"' EXIT
   printf '%s\n' "$surviving_branches" > "$survivors_file" || exit 2
-  # The work root is resolved the same way as the gate root: the reaper compares physical paths,
-  # and a symlinked ~/build (the likely answer to a full disk) would otherwise refuse every run.
-  work_root="$(cd "$HOME/build/memos-ng-ios/work" 2>/dev/null && pwd -P)" || work_root="$HOME/build/memos-ng-ios/work"
+  # The work root comes off the resolved gate root, the same sibling the build half will use: a
+  # symlinked ~/build or ~/build/memos-ng-ios (the likely answer to a full disk) would otherwise
+  # leave the two halves reaping different trees. Resolved, because the reaper compares physical
+  # paths and refuses a symlinked root — a work tree moved onto another volume is ordinary here.
+  work_root="$(gate_work_root_resolved "$gate_root")" || exit 2
   reap_gate_lanes "$gate_root" "$work_root" "$branch" "$survivors_file" || exit 2
 else
   echo "GATE_REAP skipped: $reap_skip_reason"
@@ -941,6 +944,7 @@ record rsync "${PIPESTATUS[0]}"
 say "--- step: remote ---"
 {
   printf "GATE_TARGET='%s'\n" "$(esc "$target")"
+  printf "GATE_ROOT='%s'\n" "$(esc "$gate_root")"
   printf "GATE_SIMULATOR='%s'\n" "$(esc "$SIMULATOR")"
   printf "GATE_DEVICE_NAME='%s'\n" "$(esc "$DEVICE_NAME")"
   printf "GATE_DEVICE_TYPE='%s'\n" "$(esc "$DEVICE_TYPE")"
@@ -951,6 +955,7 @@ say "--- step: remote ---"
   printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
   printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
   cat "$repo_root/scripts/reap-gate-lanes.sh"
+  cat "$repo_root/scripts/gate-work-dir.sh"
   cat <<'REMOTE_EOF'
 set -uo pipefail
 
@@ -985,9 +990,11 @@ XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG.xcresult"
 # Build scratch lives OUTSIDE the mirrored tree. Inside it, `swift format lint --recursive .`
 # would walk the dependency checkouts SwiftPM drops in DerivedData and lint other people's code;
 # keeping it outside also lets the incremental build survive the next `rsync --delete`.
-GATE_WORK="$(printf '%s' "$GATE_TARGET" \
-  | sed 's#/build/memos-ng-ios/gate/#/build/memos-ng-ios/work/#')"
-[ "$GATE_WORK" != "$GATE_TARGET" ] || { echo "remote: cannot derive a work directory"; exit 2; }
+# It is the work/ sibling of the gate root the preflight resolved and this run was handed, never
+# a rewritten substring of the gate path: ~/build/memos-ng-ios may resolve anywhere at all.
+GATE_WORK="$(gate_work_dir "$GATE_ROOT" "$GATE_BRANCH")" \
+  || { echo "remote: cannot derive a work directory"; exit 2; }
+[ "$GATE_WORK" != "$GATE_TARGET" ] || { echo "remote: the work directory is the gate target"; exit 2; }
 mkdir -p "$GATE_WORK" || { echo "remote: cannot create $GATE_WORK"; exit 2; }
 DERIVED="$GATE_WORK/DerivedData"
 
