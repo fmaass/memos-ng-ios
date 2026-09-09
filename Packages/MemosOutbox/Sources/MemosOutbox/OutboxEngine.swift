@@ -320,8 +320,10 @@ public actor OutboxEngine: OutboxChunkHandling {
         let next = job.startingUpload(fileID: fileID, session: session)
         // The server has handed out a session. Carrying on with it while the manifest still knows
         // nothing about it is how a chunk gets sent against a uid a relaunch cannot resume.
-        guard await save(next, matching: job) != nil else { return nil }
-        return next
+        //
+        // What comes BACK is what carries on, never the candidate: the next write this pass makes
+        // is fenced on this value, and the disk keeps dates to whole seconds.
+        return await save(next, matching: job)
     }
 
     private func schedule(
@@ -403,10 +405,10 @@ public actor OutboxEngine: OutboxChunkHandling {
         // against. Matching the job as it stood BEFORE the create was recorded would reject the
         // create's own bookkeeping; matching the recovery candidate would judge each outcome
         // against a value nothing ever persisted.
-        let creating = job.creatingMemo()
         // Nothing is created against a queue that could not be written: the capture waits, whole,
-        // rather than being sent while the disk has no record that it was ever tried.
-        guard await save(creating, matching: job) != nil else { return nil }
+        // rather than being sent while the disk has no record that it was ever tried. And it is the
+        // WRITTEN value that stands for the row from here on — see `OutboxPersisting`.
+        guard let creating = await save(job.creatingMemo(), matching: job) else { return nil }
         // The manifest write above was an await; the create is the send it precedes, on another
         // executor again — so the authority travels rather than being asked here.
         switch await completion.create(
@@ -434,8 +436,7 @@ public actor OutboxEngine: OutboxChunkHandling {
                     current = next
                 }
             }
-            guard await save(current, matching: creating) != nil else { return nil }
-            return current
+            return await save(current, matching: creating)
         case .retry(let message):
             await save(creating.backingOff(at: clock(), error: message), matching: creating)
             return nil

@@ -575,6 +575,47 @@ struct OrdinaryWriteFenceLivenessTests {
         )
     }
 
+    /// A value that was SAVED is not automatically a value that can be fenced on: the fence is a
+    /// full-value compare and the manifest keeps dates to whole seconds, so a candidate carrying a
+    /// fraction of a second describes a row this device never held. The shortest path through both
+    /// is one pass that backs a chunk off and then holds the capture — the planner answers the
+    /// account before it looks at any retry deadline — with nothing else competing for the row.
+    @Test("a hold decided from a back-off the same pass just saved still lands")
+    func aHoldAfterItsOwnBackOffLands() async throws {
+        let harness = try await Harness.make(
+            bytes: 400,
+            http: .standard(chunkSize: 400),
+            binding: Fixture.binding(owner: "someone-else"),
+            clockStart: Date(timeIntervalSince1970: 1_750_000_000.75)
+        )
+        defer { harness.cleanUp() }
+        var started = harness.job
+        started.files[0].uploadUID = "u1"
+        started.files[0].chunkSize = 400
+        started.state = .uploading
+        try await harness.repository.save(started)
+
+        await harness.engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(
+                    jobID: started.id, fileID: started.files[0].id, offset: 0
+                ),
+                statusCode: 500
+            )
+        )
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.attemptCount == 1, "the premise: the back-off itself landed")
+        #expect(
+            saved.state == JobState.held,
+            """
+            a hold nothing was competing for was dropped: it was fenced on a value carrying a \
+            fraction of a second the manifest cannot hold
+            """
+        )
+        #expect(saved.holdReason == .accountMismatch)
+    }
+
     /// The write fails, and so does the hold that says so. Nothing is written, nothing is asked of
     /// the server a second time, and the pass ends.
     @Test("a pass whose write and whose recovery both fail stops, having asked once")
@@ -583,6 +624,7 @@ struct OrdinaryWriteFenceLivenessTests {
             bytes: 1000, http: .standard(chunkSize: 400), refusedSaves: .max
         )
         defer { harness.cleanUp() }
+        let before = try #require(await harness.reload())
 
         await harness.engine.drain()
 
@@ -593,11 +635,10 @@ struct OrdinaryWriteFenceLivenessTests {
         )
         #expect(harness.http.requests(method: "POST").count == 1, "one upload start, not a loop")
         #expect(harness.scheduler.uploads.isEmpty)
-        let saved = try #require(await harness.reload())
-        #expect(saved.files[0].uploadUID == nil, "the manifest is exactly as it was")
-        #expect(saved.state == JobState.waiting)
-        #expect(saved.holdReason == nil)
-        #expect(saved.attemptCount == 0)
+        #expect(
+            try #require(await harness.reload()) == before,
+            "the manifest is not, whole, what it was before the pass that could not write"
+        )
         #expect(await harness.engine.lastPersistenceFailure != nil, "and it is said out loud")
     }
 }
