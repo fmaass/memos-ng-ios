@@ -74,8 +74,10 @@
 #   MAC_GATE_DEVICE_TYPE device type identifier for the private device
 #                        (e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro). Default:
 #                        chosen on the build host from the newest installed iOS runtime.
-#   MAC_GATE_ARTIFACTS   local directory for the copied-back .xcresult/screenshots/log
-#                        (default: <repo>/.gate-artifacts)
+#   MAC_GATE_ARTIFACTS   local directory for the copied-back .xcresult/screenshots and for this
+#                        run's own log, mac-gate-<branch>-<run token>.log — one file per run, so
+#                        two runs cannot write over each other and a caller's redirect cannot
+#                        truncate either (default: <repo>/.gate-artifacts)
 #   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The three
 #                        bundles below are always enforced and cannot be removed by setting
 #                        this — an override that could shrink the list would let a suite stop
@@ -371,43 +373,65 @@ gate_classify() {
   return 0
 }
 
+# --- this run's own log ---------------------------------------------------------------------------
+# The gate keeps its whole output itself, at a path no other run can have produced: the artifacts
+# directory, the branch, and this run's token. A caller may redirect stdout wherever it likes and
+# none of it can reach this file — which is the point. Two agents once pointed two runs at one
+# generic name in a shared scratch directory; the second `>` truncated the first run's evidence
+# while it was still being written, the reader watching that file was left with nothing, and the
+# run had to be started again (2026-09-09). So two runs of the SAME branch write two files, and
+# every exit path names the one it wrote on the line before its verdict.
+branch_slug="$(printf '%s' "$branch" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-')"
+branch_slug="${branch_slug:0:40}"
+# A token, because a pid is not proof of identity to the far side: the remote half of this run has
+# to be able to ask "is the lock in that directory still MINE", and a reap replaces the directory
+# with one that carries somebody else's token. The log is named for it for the same reason the lock
+# carries it — one run, one name, and a re-run of a branch never lands on the file its predecessor
+# is still writing.
+RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
+artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
+log="$artifacts/mac-gate-$branch_slug-$RUN_TOKEN.log"
+# Opened where the run wants it rather than on the way past, because the default artifacts
+# directory is INSIDE the tree the classifier reads: a log created before the classification would
+# be an untracked path in the change set it is classifying.
+open_run_log() {
+  mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
+  : > "$log" || die_refuse "cannot write $log"
+}
+say() { printf '%s\n' "$*" | tee -a "$log"; }
+
 if [ "$CLASSIFY_ONLY" -eq 1 ]; then
   gate_classify
-  printf 'CLASSIFY verdict=%s\n' "$CLASSIFY_VERDICT"
-  printf 'CLASSIFY base=%s\n' "$CLASSIFY_BASE"
-  printf 'CLASSIFY reason=%s\n' "$CLASSIFY_REASON"
-  if [ -n "$CLASSIFY_PATHS" ]; then
-    printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/CLASSIFY path /'
-  fi
+  # Opened after the classification, never before it: see open_run_log.
+  open_run_log
+  {
+    printf 'CLASSIFY verdict=%s\n' "$CLASSIFY_VERDICT"
+    printf 'CLASSIFY base=%s\n' "$CLASSIFY_BASE"
+    printf 'CLASSIFY reason=%s\n' "$CLASSIFY_REASON"
+    if [ -n "$CLASSIFY_PATHS" ]; then
+      printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/CLASSIFY path /'
+    fi
+    printf 'CLASSIFY log=%s\n' "$log"
+  } | tee -a "$log"
   [ "$CLASSIFY_VERDICT" = fastpath ] && exit 0
   exit 10
 fi
 
 # The private device is named here, where the branch and this process are known: the branch so a
 # stray device says which run left it behind, the pid so two runs of the SAME branch (a re-run
-# started before the first one let go) still cannot land on one device. Reduced to the character
-# set the branch validation above already allows, minus '/', and cut short enough to stay a
-# readable name in `simctl list`.
-branch_slug="$(printf '%s' "$branch" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-')"
-branch_slug="${branch_slug:0:40}"
+# started before the first one let go) still cannot land on one device. It reuses the branch slug
+# the run log is named from, which is already reduced to the character set the branch validation
+# above allows, minus '/', and cut short enough to stay a readable name in `simctl list`.
 DEVICE_NAME="gate-${branch_slug}-$$"
 
 # Who this run is, for the gate lock below. The host is in it because the pid alone is only
-# meaningful to the machine that issued it, and the lock is read by whoever comes next.
+# meaningful to the machine that issued it, and the lock is read by whoever comes next; the token
+# is the one this run's log is named for.
 LOCK_DIR=""
-# A token, because a pid is not proof of identity to the far side: the remote half of this run has
-# to be able to ask "is the lock in that directory still MINE", and a reap replaces the directory
-# with one that carries somebody else's token.
-RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-[ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
 LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) token=$RUN_TOKEN"
 
-artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
-mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
-log="$artifacts/mac-gate.log"
-: > "$log" || die_refuse "cannot write $log"
-
-say() { printf '%s\n' "$*" | tee -a "$log"; }
+open_run_log
 
 # The build host deletes the device when the remote script ends, however it ends. That covers a
 # failing step and a refusal — it does NOT cover this script being interrupted: a remote shell
@@ -494,6 +518,7 @@ summary_and_exit() {
   local line="mac-gate SUMMARY:" i
   for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
   line="$line | exit=$first_fail"
+  say "run log     : $log"
   say "$line"
   exit "$first_fail"
 }
@@ -506,6 +531,7 @@ summary_and_exit() {
 QUICK_BUILD_RC="-"
 QUICK_TESTS_RC="-"
 quick_summary_and_exit() {
+  say "run log     : $log"
   say "MAC_GATE_QUICK: build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
