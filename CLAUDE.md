@@ -60,6 +60,13 @@ gate writes `mac-gate SUMMARY`.
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
 
+The gate keeps its own complete log of every run at
+`MAC_GATE_ARTIFACTS/mac-gate-<branch>-<run token>.log` and names that path on the line before its
+verdict, so two runs — two branches, or two runs of the same branch — can never write the same
+file. Any redirect of a gate's output by a caller uses a path unique to the branch and the run
+too, never a generic name in a shared directory: that is how one run's evidence gets truncated
+mid-write by another's (`tests/gate/concurrent-log-test.sh` holds the gate to its half of it).
+
 **Git is the only medium between the two machines.** The gate directory is a mirror, never a
 checkout, and it is never opened in Xcode. A hands-on clone on the Mac lives at
 `~/projects/memos-ng-ios`, is never an rsync target, and nothing writes there.
