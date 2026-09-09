@@ -57,6 +57,18 @@ the entitlement, dependency-rule and share-link greps; it prints its own
 `MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only the full
 gate writes `mac-gate SUMMARY`.
 
+Each branch has its own lane on the build host — `~/build/memos-ng-ios/gate/<branch>` for the
+mirror and `~/build/memos-ng-ios/work/<branch>` for its DerivedData — and runs of one branch are
+serialised by a lock on that lane: a second run says who holds it and stops (exit 3). That tree
+carries a stated retention policy, and the gate enforces it on every run before it copies
+anything. After a successful pruned fetch, unlocked lanes older than 24 hours whose branch exists
+neither locally nor on origin are reaped (the current lane is always protected); and when the
+build host's volume has less than 15G free, the oldest-stamped sibling trees go, newest last,
+until 20G is free or nothing unlocked remains. Both sweeps are lock-aware
+(`scripts/reap-gate-lanes.sh`, self-tested by `tests/gate/reap-lanes-test.sh`) and log directory
+sizes and free space before and after, so a lane outlives its branch by at most a day and the
+whole tree is bounded by the branches that are alive.
+
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
 
