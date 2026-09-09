@@ -28,6 +28,13 @@ import Testing
 ///     in NEITHER                        | nothing is owed: no row      | nothing is owed: the
 ///                                       | holds it and the answer does | answer did not introduce
 ///                                       | not introduce it             | it either
+///     in the loaded row but NOT in the  | the removal wins: the event  | the removal wins: the row
+///     answer (the read REMOVES it)      | moves a row the answer then  | no longer holds it, so
+///                                       | takes the attachment out of  | nothing is updated
+///
+/// The fourth row is the one the read is the only word on: an attachment gone from the answer is
+/// gone from the memo, whatever the stream said about it a moment ago — that is `reconciled`
+/// building its list out of the READ's attachments and nothing else.
 ///
 /// One test per cell, each with the GET parked at the scripted server so the ordering is stated
 /// rather than raced for, plus the two fences the retain-replay needs: what a read kept is spent
@@ -79,7 +86,14 @@ struct TimelineReconcileRaceTests {
     ///
     /// - Parameter answers: what each successive read answers, in order; `nil` is a read that
     ///   fails, which is one of the two ways a kept event has to be let go of.
-    private func parked(loaded: String, answering answers: [String?]) async -> Parked {
+    /// - Parameter holdingReads: which of those reads park at the server; `nil` parks every one.
+    ///   Naming a subset is how a test gets a SECOND request to complete while the first is still
+    ///   in the air.
+    private func parked(
+        loaded: String,
+        answering answers: [String?],
+        holdingReads holds: Set<Int>? = nil
+    ) async -> Parked {
         let entered = LockedValue<Bool>(false)
         let release = LockedValue<Bool>(false)
         let reads = Counter()
@@ -91,7 +105,7 @@ struct TimelineReconcileRaceTests {
                 let index = min(reads.count, answers.count - 1)
                 reads.increment()
                 entered.set(true)
-                try await Self.hold(until: release)
+                if holds?.contains(index) ?? true { try await Self.hold(until: release) }
                 guard let answer = answers[index] else { return Stub.empty(.internalServerError) }
                 return Stub.json(answer)
             default:
@@ -154,10 +168,17 @@ struct TimelineReconcileRaceTests {
         let landed = await read(fixture, deliveringWhileParked: Self.heldReady)
 
         #expect(landed)
+        let tile = attachment(Self.held, in: fixture.store)
         #expect(
-            attachment(Self.held, in: fixture.store)?.readiness == .ready,
+            tile?.readiness == .ready,
             "the answer's older snapshot put a finished tile back under the waiting treatment"
         )
+        // That event is the server's synthetic ready with every layout field null, so the tile
+        // keeps the one it was read with: a dimension moved without its pair is a ratio neither
+        // source has.
+        #expect(tile?.width == 1000)
+        #expect(tile?.height == 1000)
+        #expect(tile?.blurhash == nil)
     }
 
     /// The same two facts in the other order, which needs no fence at all: by the time the event
@@ -177,7 +198,10 @@ struct TimelineReconcileRaceTests {
             "the answer landed finished, so the event below proves nothing"
         )
         await fixture.store.apply(Self.heldReady)
-        #expect(attachment(Self.held, in: fixture.store)?.readiness == .ready)
+        let tile = attachment(Self.held, in: fixture.store)
+        #expect(tile?.readiness == .ready)
+        #expect(tile?.width == 1000, "an event with no layout pair moved the tile's layout")
+        #expect(tile?.blurhash == nil)
     }
 
     // MARK: - the attachment is in the ANSWER only (MEMNG-197)
@@ -245,6 +269,7 @@ struct TimelineReconcileRaceTests {
         #expect(tile?.readiness == .ready)
         #expect(tile?.width == 4032)
         #expect(tile?.height == 3024)
+        #expect(tile?.blurhash == "LEHV6nWB2yk8pyo0adR*.7kCMdnj")
     }
 
     // MARK: - the attachment is in NEITHER
@@ -266,10 +291,13 @@ struct TimelineReconcileRaceTests {
             fixture.store.memos.first?.attachments.map(\.uid) == [Self.held],
             "an event for an attachment nothing holds put one into the list"
         )
+        let untouched = attachment(Self.held, in: fixture.store)
         #expect(
-            attachment(Self.held, in: fixture.store)?.readiness == .waiting,
+            untouched?.readiness == .waiting,
             "an event for another attachment entirely moved this one"
         )
+        #expect(untouched?.width == 1000, "another attachment's layout landed on this one")
+        #expect(untouched?.blurhash == nil)
 
         // Control: the event this list DOES hold an attachment for moves it, on the same store.
         await fixture.store.apply(Self.heldReady)
@@ -330,6 +358,8 @@ struct TimelineReconcileRaceTests {
             tile?.readiness == .waiting,
             "an event kept for a read that has already answered coloured a later one"
         )
+        #expect(tile?.width == 1000, "a kept event's layout landed on a later read's answer")
+        #expect(tile?.blurhash == nil)
         #expect(fixture.reads.count == 2)
     }
 
@@ -356,6 +386,206 @@ struct TimelineReconcileRaceTests {
         #expect(
             tile?.readiness == .waiting,
             "an event kept for a read that failed was replayed into the next one"
+        )
+        #expect(tile?.width == 1000, "a failed read's kept layout landed on the next answer")
+        #expect(tile?.blurhash == nil)
+    }
+
+    // MARK: - two reads for one memo are ONE read
+
+    /// A store serializes its own mutations, and two reconciling reads of the same memo are two
+    /// invocations of one operation.
+    ///
+    /// Left overlapping they undo each other's work: both are handed the event, the first replays
+    /// it onto the attachment its answer introduces, and the second — whose answer describes the
+    /// same attachment as it was before — finds the attachment now HELD, skips its own replay, and
+    /// writes the older snapshot over it. So the second call JOINS the first: one request on the
+    /// wire, and both callers get that read's outcome. Refusing would be the other answer, and it
+    /// is the wrong one here, because the caller's question is "is the list up to date now" and a
+    /// refusal does not answer it.
+    @Test("two reconciling reads of one memo are one request, and neither undoes the other")
+    func overlappingReadsOfOneMemoJoin() async {
+        let fixture = await parked(
+            loaded: Self.memo([(Self.held, "ready")]),
+            answering: [Self.memo([(Self.held, "ready"), (Self.introduced, "pending")])]
+        )
+
+        let first = Task {
+            await fixture.store.refreshMemo(
+                uid: Self.uid, using: fixture.client.handle, baseURL: Stub.baseURL
+            )
+        }
+        while !fixture.entered.get() {
+            await Task.yield()
+        }
+        let second = Task {
+            await fixture.store.refreshMemo(
+                uid: Self.uid, using: fixture.client.handle, baseURL: Stub.baseURL
+            )
+        }
+        // Let the second call reach whatever it does with a read already in flight — join it, or
+        // go to the server. Without this the assertion below would pass on a call that has not
+        // started yet.
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        await fixture.store.apply(Self.introducedReady)
+        fixture.release.set(true)
+        let landedFirst = await first.value
+        let landedSecond = await second.value
+
+        #expect(
+            fixture.reads.count == 1,
+            "a second read of the same memo went to the wire: \(fixture.reads.count) requests"
+        )
+        #expect(landedFirst)
+        #expect(landedSecond, "the joined caller was told the read did not reach the list")
+        let tile = attachment(Self.introduced, in: fixture.store)
+        #expect(
+            tile?.readiness == .ready,
+            "one of the two reads wrote its own older snapshot over the event"
+        )
+        #expect(tile?.width == 4032)
+        #expect(tile?.height == 3024)
+        #expect(tile?.blurhash == "LEHV6nWB2yk8pyo0adR*.7kCMdnj")
+    }
+
+    // MARK: - a kept event is only ever the OLDER word
+
+    /// An event that moves the list retires everything kept about that attachment.
+    ///
+    /// The stream repeats itself — it is a poll — so a duplicate of a state the list is already in
+    /// moves nothing and is kept, and the event that follows it moves the list and is counted. If
+    /// the duplicate stays kept it outlives the newer one, and any later landing that finds the
+    /// attachment absent from the loaded row replays it: the failure comes back over the finish.
+    /// So a live application supersedes every kept entry for its own attachment.
+    @Test("an event that moves the list retires the older ones kept for that attachment")
+    func aMovingEventSupersedesWhatWasKept() async {
+        let fixture = await parked(
+            loaded: Self.memo([(Self.held, "failed")]),
+            answering: [Self.memo([(Self.held, "ready")]), Self.memo([])],
+            holdingReads: [0]
+        )
+        let reading = Task {
+            await fixture.store.refreshMemo(
+                uid: Self.uid, using: fixture.client.handle, baseURL: Stub.baseURL
+            )
+        }
+        while !fixture.entered.get() {
+            await Task.yield()
+        }
+
+        // The stream says `failed` again about an attachment already failed: nothing moves, so
+        // nothing counts it — it is kept.
+        await fixture.store.apply(SSEFixture.liveEvents[3])
+        #expect(
+            attachment(Self.held, in: fixture.store)?.readiness == .failed,
+            "the duplicate moved the list, so it was never the kept kind"
+        )
+        // Then the retry finishes. THIS one moves the row and is counted.
+        await fixture.store.apply(Self.heldReady)
+        #expect(attachment(Self.held, in: fixture.store)?.readiness == .ready)
+        // And the attachment leaves the loaded row by a route that keeps no tombstone: another
+        // read of the same memo, answering without it.
+        _ = await fixture.store.fetchMemo(
+            uid: Self.uid, using: fixture.client.handle, baseURL: Stub.baseURL
+        )
+        #expect(
+            attachment(Self.held, in: fixture.store) == nil,
+            "the row still holds the attachment, so the landing below is not the one under test"
+        )
+
+        fixture.release.set(true)
+        #expect(await reading.value)
+
+        #expect(
+            attachment(Self.held, in: fixture.store)?.readiness == .ready,
+            "a kept failure outlived the finish that superseded it"
+        )
+    }
+
+    // MARK: - what is kept is replayed IN ORDER
+
+    /// Keeping is not a mailbox with room for one letter.
+    ///
+    /// The stream is a poll, so a snapshot taken before a job finished can be delivered after the
+    /// terminal event: `ready` then a late `processing`, about the same attachment, in that order.
+    /// Applied one after the other that late one does nothing — a finished tile is never talked
+    /// back into waiting. Kept by replacement it is the only thing left, and the finish, with the
+    /// layout the worker wrote, is gone. So what a read keeps is a sequence, replayed in the order
+    /// it arrived, through the same transform the live channel applies.
+    @Test("a late in-flight event does not erase the finish kept before it")
+    func keptEventsAreReplayedInOrder() async {
+        let fixture = await parked(
+            loaded: Self.memo([(Self.held, "ready")]),
+            answering: [Self.memo([(Self.held, "ready"), (Self.introduced, "pending")])]
+        )
+        let reading = Task {
+            await fixture.store.refreshMemo(
+                uid: Self.uid, using: fixture.client.handle, baseURL: Stub.baseURL
+            )
+        }
+        while !fixture.entered.get() {
+            await Task.yield()
+        }
+
+        await fixture.store.apply(Self.introducedReady)
+        // The poll's older snapshot, delivered after the finish it predates.
+        await fixture.store.apply(SSEFixture.liveEvents[1])
+
+        fixture.release.set(true)
+        #expect(await reading.value)
+
+        let tile = attachment(Self.introduced, in: fixture.store)
+        #expect(
+            tile?.readiness == .ready,
+            "a late in-flight event erased the finish that was kept before it"
+        )
+        #expect(tile?.width == 4032, "the finish's layout went with it")
+        #expect(tile?.height == 3024)
+        #expect(tile?.blurhash == "LEHV6nWB2yk8pyo0adR*.7kCMdnj")
+    }
+
+    // MARK: - the attachment is in the loaded row but NOT in the answer
+
+    /// The read is the only word on what a memo still HAS. An attachment gone from the answer is
+    /// gone from the memo — the file was deleted, from this device or another — and an event that
+    /// moved it a moment earlier does not bring it back.
+    @Test("an event before the answer does not survive the answer removing its attachment")
+    func removedByTheAnswerAfterAnEvent() async {
+        let fixture = await parked(
+            loaded: Self.memo([(Self.held, "pending")]),
+            answering: [Self.memo([])]
+        )
+
+        let landed = await read(fixture, deliveringWhileParked: Self.heldReady)
+
+        #expect(landed)
+        #expect(
+            fixture.store.memos.first?.attachments.isEmpty == true,
+            "an event put back an attachment the read says the memo no longer has"
+        )
+    }
+
+    /// And the other order, which has nothing to act on at all: the row lost the attachment when
+    /// the answer landed, so the event that follows finds no memo holding it.
+    @Test("an event after the answer has nothing to update once the attachment is gone")
+    func removedByTheAnswerBeforeAnEvent() async {
+        let fixture = await parked(
+            loaded: Self.memo([(Self.held, "pending")]),
+            answering: [Self.memo([])]
+        )
+
+        let landed = await read(fixture)
+        #expect(landed)
+        #expect(fixture.store.memos.first?.attachments.isEmpty == true)
+        let before = fixture.store.memos
+
+        await fixture.store.apply(Self.heldReady)
+
+        #expect(
+            fixture.store.memos == before,
+            "an event resurrected an attachment the read had removed"
         )
     }
 }

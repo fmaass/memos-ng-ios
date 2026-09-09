@@ -1283,8 +1283,40 @@ public final class TimelineStore {
     /// and an ordinary edit or refresh is a reader's own action rather than a background snapshot,
     /// so a re-transcode that honestly returns an attachment to waiting still reaches the list
     /// through those.
+    ///
+    /// Two reads of the SAME memo under the same session JOIN: the second sends nothing and awaits
+    /// the first's outcome. Left overlapping they undo each other — both are handed whatever the
+    /// stream says while they are out, the first replays it onto the attachment its answer
+    /// introduces, and the second, whose answer describes that attachment as it was before, now
+    /// finds it HELD, skips its own replay and writes the older snapshot over it. Joining rather
+    /// than refusing, because the caller's question is "is this card up to date now", which a
+    /// refusal does not answer. The slot is claimed BEFORE the first suspension point, so two
+    /// passes arriving in one turn of the main actor cannot both find it empty; it is keyed by the
+    /// session incarnation as well as the memo, because a read issued by a session that has since
+    /// been replaced is not the read a later caller is asking for.
     @discardableResult
     public func refreshMemo(
+        uid: String,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> Bool {
+        let slot = ReconcileSlot(uid: uid, generation: handle.generation)
+        if let running = reconcileJoins[slot] { return await running.value }
+        let read = Task { [self] in
+            let outcome = await performReconcilingRead(uid: uid, using: handle, baseURL: baseURL)
+            // Cleared HERE rather than by the caller that started it, for the reason
+            // `deleteAttachment` clears its own slot inside the task: that caller can be resumed
+            // long after a later one has legitimately begun the next read of this memo.
+            self.reconcileJoins[slot] = nil
+            return outcome
+        }
+        reconcileJoins[slot] = read
+        return await read.value
+    }
+
+    /// One memo, read from the server once and merged into the list. `refreshMemo`'s body, behind
+    /// the slot that makes two overlapping calls for one memo a single request.
+    private func performReconcilingRead(
         uid: String,
         using handle: SessionHandle,
         baseURL: URL
@@ -1353,14 +1385,14 @@ public final class TimelineStore {
     ///
     /// An attachment this read INTRODUCES has no history to be judged against: the loaded row does
     /// not hold it, so an event about it moved nothing and was counted nowhere. Those are the ones
-    /// the read kept while it was in the air, and they are applied here, on top of the read,
-    /// through the same pure transform the live channel uses — so the terminal-versus-in-flight
-    /// rule is the one rule it has always been, rather than a second copy of it written for this
-    /// lane.
+    /// the read kept while it was in the air, and they are replayed here IN ORDER, on top of the
+    /// read, through the same pure transform the live channel uses — so the terminal-versus-
+    /// in-flight rule is the one rule it has always been, rather than a second copy of it written
+    /// for this lane, and a sequence of them lands exactly as it would have landed live.
     private func reconciled(
         _ read: Memo,
         issuedWith applications: [String: Int],
-        replaying retained: [String: MediaEvent]
+        replaying retained: [String: [MediaEvent]]
     ) -> Memo {
         guard let loaded = memos.first(where: { $0.uid == read.uid }) else { return read }
         var merged = read
@@ -1373,8 +1405,16 @@ public final class TimelineStore {
         guard !retained.isEmpty else { return merged }
         let alreadyHeld = Set(loaded.attachments.map(\.uid))
         for uid in merged.attachments.map(\.uid) where !alreadyHeld.contains(uid) {
-            guard let event = retained[uid] else { continue }
-            merged = applyMediaEvent(event, to: [merged]).first ?? merged
+            for event in retained[uid] ?? [] {
+                let before = merged.attachments.first { $0.uid == uid }
+                merged = applyMediaEvent(event, to: [merged]).first ?? merged
+                guard merged.attachments.first(where: { $0.uid == uid }) != before else { continue }
+                // Counted exactly as the live path counts it. This IS a live application, taken
+                // late: without the count, the next answer to land would find no change against
+                // its own snapshot, decide the read is the newer word on this attachment, and put
+                // the state the event replaced straight back.
+                liveApplications[uid, default: 0] += 1
+            }
         }
         return merged
     }
@@ -1499,6 +1539,12 @@ public final class TimelineStore {
             keepForReadsInFlight(event)
             return
         }
+        // This event is the newer word on this attachment, and it has just been applied where
+        // everything can see it. Anything a read is still holding about the same file is older
+        // than it and must never be replayed over it — a duplicate `failed` kept a moment before
+        // the retry's `ready` would otherwise come back as the failure, on any landing that finds
+        // the attachment gone from the loaded row.
+        retireKept(event.uid)
         // The one attachment this event named, and only because it really moved: a read already
         // in the air is now the older word on THIS file and still the newer word on every other
         // one — see `reconciled(_:issuedWith:replaying:)`.
@@ -1525,16 +1571,27 @@ public final class TimelineStore {
     ///
     /// It grows by one entry per attachment the stream has ever moved, which is bounded by the
     /// uploads a session sees.
+    ///
+    /// A replay out of `reconcileReads` turns it too, and must: an event kept while a read was in
+    /// the air and applied to the attachment that read introduced is a live application that
+    /// happened late, and anything landing after it has to see that it happened.
     private var liveApplications: [String: Int] = [:]
 
     /// What each reconciling read now in flight has been handed while it waits.
     ///
-    /// Keyed by the read, and inside that by attachment — because the answer is merged per
-    /// attachment and because a transcode emits an event every second and a half, so last word
-    /// wins rather than a queue that grows with somebody else's upload. An entry exists only
-    /// between `openReconcileRead` and the `defer` that closes it, which is why nothing here needs
-    /// sweeping: with no read in the air this dictionary is empty and keeping is a no-op.
-    private var reconcileReads: [Int: [String: MediaEvent]] = [:]
+    /// Keyed by the read, and inside that by attachment, holding the events IN THE ORDER THEY
+    /// ARRIVED. A sequence rather than a last-word slot, because the stream is a poll: `ready`
+    /// followed by a late `processing` is an ordinary pair, and applied one after the other the
+    /// late one does nothing — a finished tile is never talked back into waiting. Kept by
+    /// replacement it would be the only thing left, and the finish, with the layout the worker
+    /// wrote, would be gone. Replaying the sequence in order through the same transform the live
+    /// channel uses is what makes keeping equivalent to having been there.
+    ///
+    /// What bounds it: an entry exists only between `openReconcileRead` and the `defer` that
+    /// closes it — one round trip — a live application retires everything kept about its own
+    /// attachment (`retireKept`), and only events that moved NOTHING are kept at all. With no read
+    /// in the air this dictionary is empty and keeping is a no-op.
+    private var reconcileReads: [Int: [String: [MediaEvent]]] = [:]
 
     /// The number the next reconciling read is known by. Monotonic, so a read that has closed can
     /// never be confused with the one that took its place.
@@ -1558,9 +1615,30 @@ public final class TimelineStore {
     private func keepForReadsInFlight(_ event: MediaEvent) {
         guard !reconcileReads.isEmpty else { return }
         for read in reconcileReads.keys {
-            reconcileReads[read]?[event.uid] = event
+            reconcileReads[read]?[event.uid, default: []].append(event)
         }
     }
+
+    /// Drops everything kept about one attachment, everywhere it is kept.
+    ///
+    /// Called when an event for that attachment MOVED the list: what is kept is by definition
+    /// older than that, and older is exactly what must not be replayed later.
+    private func retireKept(_ uid: String) {
+        guard !reconcileReads.isEmpty else { return }
+        for read in reconcileReads.keys {
+            reconcileReads[read]?[uid] = nil
+        }
+    }
+
+    /// The memo a reconciling read is for, and which session incarnation asked.
+    private struct ReconcileSlot: Hashable {
+        let uid: String
+        let generation: Int
+    }
+
+    /// The reconciling read in flight for each memo, so a second call for the same one joins it
+    /// instead of racing it. See `refreshMemo`.
+    private var reconcileJoins: [ReconcileSlot: Task<Bool, Never>] = [:]
 
     /// Ticks or unticks the Nth rendered checkbox of a memo.
     ///
