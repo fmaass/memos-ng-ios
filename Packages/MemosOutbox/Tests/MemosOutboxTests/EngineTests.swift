@@ -3,7 +3,11 @@ import MemosOutbox
 import Testing
 
 /// One capture on disk, one scripted server, one engine — the world a drain runs in.
-private struct Harness {
+///
+/// Internal rather than file-private since MEMNG-289: the ordinary-write witnesses in
+/// `OrdinaryWriteFenceTests` run in this same world, and a second copy of it there would be a
+/// second set of defaults to keep in step with these.
+struct Harness {
     let root: URL
     let repository: OutboxRepository
     /// What the ENGINE writes through — the repository itself, unless a test asked for a disk that
@@ -34,6 +38,10 @@ private struct Harness {
         binding: AccountBinding = Fixture.binding(),
         refusedSaves: Int = 0,
         holdingFirstSave: TestGate? = nil,
+        // What the ENGINE writes through, built around the real repository. Passed as a factory
+        // because the engine takes its persistence at construction and the repository does not
+        // exist until this function has made one.
+        persistence makePersistence: (@Sendable (OutboxRepository) -> any OutboxPersisting)? = nil,
         network: StubNetworkPath = StubNetworkPath(),
         allowsMobileData: Bool = false
     ) async throws -> Harness {
@@ -70,6 +78,9 @@ private struct Harness {
         }
         if let holdingFirstSave {
             persistence = GatedPersistence(repository, gate: holdingFirstSave)
+        }
+        if let makePersistence {
+            persistence = makePersistence(repository)
         }
         let engine = OutboxEngine(
             repository: persistence,
