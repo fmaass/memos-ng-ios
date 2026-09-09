@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Source this file and call gate_work_dir GATE_ROOT BRANCH (or gate_work_root GATE_ROOT).
+# Source this file and call gate_work_dir GATE_ROOT BRANCH, gate_work_root GATE_ROOT, or
+# gate_work_root_resolved GATE_ROOT.
 #
 # The build scratch of a lane is the `work/` sibling of the gate root the preflight RESOLVED —
 # the same root the refusal check measures the target against. It is derived from that root and
@@ -44,4 +45,14 @@ gate_work_dir() {
   esac
   work_root="$(gate_work_root "$gate_root")" || return 2
   printf '%s\n' "$work_root/$branch"
+}
+
+# The reaper compares physical paths and refuses a root that is a symlink, and a work tree moved
+# onto another volume is how this host has bought space before — so what reaches it is resolved,
+# the way the code this replaced resolved ~/build/memos-ng-ios/work. A tree that does not exist
+# yet keeps its derived name: the first run of a lane still has to be told where to make one.
+gate_work_root_resolved() {
+  local raw
+  raw="$(gate_work_root "${1:-}")" || return 2
+  ( cd "$raw" 2>/dev/null && pwd -P ) || printf '%s\n' "$raw"
 }

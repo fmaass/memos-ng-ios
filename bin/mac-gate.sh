@@ -707,10 +707,11 @@ if [ "$origin_fetched" -eq 1 ]; then
   survivors_file="$(mktemp "${TMPDIR:-/tmp}/gate-survivors-XXXXXX")" || exit 2
   trap 'rm -f "$survivors_file"' EXIT
   printf '%s\n' "$surviving_branches" > "$survivors_file" || exit 2
-  # The work root comes off the resolved gate root, the same sibling the build half will use: the
-  # reaper compares physical paths, and a symlinked ~/build or ~/build/memos-ng-ios (the likely
-  # answer to a full disk) would otherwise leave the two halves reaping different trees.
-  work_root="$(gate_work_root "$gate_root")" || exit 2
+  # The work root comes off the resolved gate root, the same sibling the build half will use: a
+  # symlinked ~/build or ~/build/memos-ng-ios (the likely answer to a full disk) would otherwise
+  # leave the two halves reaping different trees. Resolved, because the reaper compares physical
+  # paths and refuses a symlinked root — a work tree moved onto another volume is ordinary here.
+  work_root="$(gate_work_root_resolved "$gate_root")" || exit 2
   reap_gate_lanes "$gate_root" "$work_root" "$branch" "$survivors_file" || exit 2
 else
   echo "GATE_REAP skipped: $reap_skip_reason"
