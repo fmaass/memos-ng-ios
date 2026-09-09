@@ -231,6 +231,9 @@ public final class TimelineStore {
         hasNewer = false
         lastError = nil
         timelineGeneration += 1
+        // Events kept for a read in flight are this identity's news as much as the rows are. The
+        // read itself will be refused on arrival; what it was holding goes now.
+        reconcileReads.removeAll()
     }
 
     /// The one place the published list changes — and, with it, the picture of it on the disk.
@@ -1273,8 +1276,8 @@ public final class TimelineStore {
     /// describes the memo as it was when the request went out, so an attachment an event moved in
     /// the meantime is kept as the stream left it while the rest of the answer — including the
     /// attachments no event will ever mention, which are the reason this pass exists — still
-    /// lands. `reconciled(_:issuedWith:)` is that rule; `true` therefore still means what it
-    /// always did, that the read reached the list.
+    /// lands. `reconciled(_:issuedWith:replaying:)` is that rule; `true` therefore still means what
+    /// it always did, that the read reached the list.
     ///
     /// Only this lane is merged: `fetchMemo` answers a caller that needs the memo it asked for,
     /// and an ordinary edit or refresh is a reader's own action rather than a background snapshot,
@@ -1297,13 +1300,29 @@ public final class TimelineStore {
         // Read BEFORE the request goes out. What it is compared against on the way back is which
         // attachments the stream spoke about while the answer was in the air.
         let appliedWhenIssued = liveApplications
+        // The same instant, on the other side of the same problem. An event about an attachment no
+        // loaded row holds yet moves nothing, so it is never counted above and nothing else
+        // remembers it — and THIS read may be the one that introduces that attachment. So the read
+        // declares itself in flight and every such event is kept against ITS number, to be spent on
+        // its own answer: the fence is the generation that issued the request, never the list as it
+        // stands when the answer lands. The close is unconditional, so a read that fails, is
+        // refused or is superseded takes what it kept with it (MEMNG-197).
+        let readID = openReconcileRead()
+        defer { closeReconcileRead(readID) }
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return false }
                 let read = Memo(try ok.body.json, baseURL: baseURL)
-                await apply(reconciled(read, issuedWith: appliedWhenIssued), under: authority)
+                await apply(
+                    reconciled(
+                        read,
+                        issuedWith: appliedWhenIssued,
+                        replaying: reconcileReads[readID] ?? [:]
+                    ),
+                    under: authority
+                )
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -1331,7 +1350,18 @@ public final class TimelineStore {
     /// the ones an event moved since this read went out, and the read for all the rest. Everything
     /// no event can carry — the content, the visibility, the dates, an attachment added or removed
     /// since — is the read's, because on those the read is the only word there is.
-    private func reconciled(_ read: Memo, issuedWith applications: [String: Int]) -> Memo {
+    ///
+    /// An attachment this read INTRODUCES has no history to be judged against: the loaded row does
+    /// not hold it, so an event about it moved nothing and was counted nowhere. Those are the ones
+    /// the read kept while it was in the air, and they are applied here, on top of the read,
+    /// through the same pure transform the live channel uses — so the terminal-versus-in-flight
+    /// rule is the one rule it has always been, rather than a second copy of it written for this
+    /// lane.
+    private func reconciled(
+        _ read: Memo,
+        issuedWith applications: [String: Int],
+        replaying retained: [String: MediaEvent]
+    ) -> Memo {
         guard let loaded = memos.first(where: { $0.uid == read.uid }) else { return read }
         var merged = read
         merged.attachments = read.attachments.map { attachment in
@@ -1339,6 +1369,12 @@ public final class TimelineStore {
                 let moved = loaded.attachments.first(where: { $0.uid == attachment.uid })
             else { return attachment }
             return moved
+        }
+        guard !retained.isEmpty else { return merged }
+        let alreadyHeld = Set(loaded.attachments.map(\.uid))
+        for uid in merged.attachments.map(\.uid) where !alreadyHeld.contains(uid) {
+            guard let event = retained[uid] else { continue }
+            merged = applyMediaEvent(event, to: [merged]).first ?? merged
         }
         return merged
     }
@@ -1456,10 +1492,16 @@ public final class TimelineStore {
 
     private func apply(_ event: MediaEvent, under authority: Int) async {
         let next = applyMediaEvent(event, to: memos)
-        guard next != memos else { return }
+        guard next != memos else {
+            // Nothing moved, so nothing counted it — and an event nothing counted is an event
+            // nothing repeats. If a reconciling read is in the air it may be the read that
+            // introduces this attachment, and this is the only word about it there will ever be.
+            keepForReadsInFlight(event)
+            return
+        }
         // The one attachment this event named, and only because it really moved: a read already
         // in the air is now the older word on THIS file and still the newer word on every other
-        // one — see `reconciled(_:issuedWith:)`.
+        // one — see `reconciled(_:issuedWith:replaying:)`.
         liveApplications[event.uid, default: 0] += 1
         await commit(next, under: authority)
     }
@@ -1484,6 +1526,41 @@ public final class TimelineStore {
     /// It grows by one entry per attachment the stream has ever moved, which is bounded by the
     /// uploads a session sees.
     private var liveApplications: [String: Int] = [:]
+
+    /// What each reconciling read now in flight has been handed while it waits.
+    ///
+    /// Keyed by the read, and inside that by attachment — because the answer is merged per
+    /// attachment and because a transcode emits an event every second and a half, so last word
+    /// wins rather than a queue that grows with somebody else's upload. An entry exists only
+    /// between `openReconcileRead` and the `defer` that closes it, which is why nothing here needs
+    /// sweeping: with no read in the air this dictionary is empty and keeping is a no-op.
+    private var reconcileReads: [Int: [String: MediaEvent]] = [:]
+
+    /// The number the next reconciling read is known by. Monotonic, so a read that has closed can
+    /// never be confused with the one that took its place.
+    private var reconcileReadsIssued = 0
+
+    private func openReconcileRead() -> Int {
+        reconcileReadsIssued += 1
+        reconcileReads[reconcileReadsIssued] = [:]
+        return reconcileReadsIssued
+    }
+
+    private func closeReconcileRead(_ read: Int) {
+        reconcileReads[read] = nil
+    }
+
+    /// Hands one event to every reconciling read that is still waiting for its answer.
+    ///
+    /// Every one of them, because which memo an attachment belongs to is exactly what this list
+    /// does not know yet — that is what the answer is going to say. A read whose answer does not
+    /// introduce the attachment ignores what it was given; see `reconciled`.
+    private func keepForReadsInFlight(_ event: MediaEvent) {
+        guard !reconcileReads.isEmpty else { return }
+        for read in reconcileReads.keys {
+            reconcileReads[read]?[event.uid] = event
+        }
+    }
 
     /// Ticks or unticks the Nth rendered checkbox of a memo.
     ///
