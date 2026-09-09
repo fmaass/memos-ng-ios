@@ -3,7 +3,11 @@ import MemosOutbox
 import Testing
 
 /// One capture on disk, one scripted server, one engine — the world a drain runs in.
-private struct Harness {
+///
+/// Internal rather than file-private since MEMNG-289: the ordinary-write witnesses in
+/// `OrdinaryWriteFenceTests` run in this same world, and a second copy of it there would be a
+/// second set of defaults to keep in step with these.
+struct Harness {
     let root: URL
     let repository: OutboxRepository
     /// What the ENGINE writes through — the repository itself, unless a test asked for a disk that
@@ -34,8 +38,16 @@ private struct Harness {
         binding: AccountBinding = Fixture.binding(),
         refusedSaves: Int = 0,
         holdingFirstSave: TestGate? = nil,
+        // What the ENGINE writes through, built around the real repository. Passed as a factory
+        // because the engine takes its persistence at construction and the repository does not
+        // exist until this function has made one.
+        persistence makePersistence: (@Sendable (OutboxRepository) -> any OutboxPersisting)? = nil,
         network: StubNetworkPath = StubNetworkPath(),
-        allowsMobileData: Bool = false
+        allowsMobileData: Bool = false,
+        // Where the engine's clock starts. Whole seconds unless a test says otherwise; the
+        // round-trip witness starts it on a fraction, which is what a real clock hands out and
+        // what the manifest cannot keep.
+        clockStart: Date? = nil
     ) async throws -> Harness {
         let root = try Fixture.temporaryDirectory()
         // The provider is built BEFORE the repository, because the repository decides a refusal
@@ -52,7 +64,7 @@ private struct Harness {
             sources = [StagedSource(url: source, filename: "one.heic", mime: "image/heic")]
         }
         let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let clock = MutableClock(now)
+        let clock = MutableClock(clockStart ?? now)
         let preferences = Fixture.preferences(allowsMobileData: allowsMobileData)
         // Nil means the REAL completion path, driven by the same scripted server: the tests that
         // care about what a create actually sends and reads use that rather than a stand-in.
@@ -70,6 +82,9 @@ private struct Harness {
         }
         if let holdingFirstSave {
             persistence = GatedPersistence(repository, gate: holdingFirstSave)
+        }
+        if let makePersistence {
+            persistence = makePersistence(repository)
         }
         let engine = OutboxEngine(
             repository: persistence,

@@ -389,10 +389,13 @@ actor GatedPersistence: OutboxPersisting {
 /// Supersedes the grant on the way INTO the write — the hop `OutboxEngine` makes into
 /// `OutboxRepository`, and the one no engine-side comparison can close.
 ///
-/// It intercepts `save(_:ifStillCurrent:else:)`, NOT `save(_:)`: every refusal path calls the new
-/// signature, so a double that hooked the old one would witness nothing and its test would pass
-/// without exercising the hop at all. Because the CHOICE is made inside `inner`, after the line
-/// below, the fallback is what lands.
+/// It intercepts the REFUSAL writes, which are the ones that name an epoch: since MEMNG-289 every
+/// ordinary write crosses this signature too, and superseding on those would renew the grant during
+/// the setup drain of every test below — the premise each of them asserts (`the chunk really was
+/// sent under the grant the engine still holds`) would be false before the answer it is about ever
+/// arrived. An ordinary write asks nothing about a credential, which is exactly what
+/// `ifStillCurrent: nil` says, so it is let through untouched. Because the CHOICE is made inside
+/// `inner`, after the line below, the fallback is what lands.
 actor SupersedingPersister: OutboxPersisting {
     private let inner: OutboxRepository
     private let provider: SwitchableCredentials
@@ -411,6 +414,11 @@ actor SupersedingPersister: OutboxPersisting {
         matching snapshot: UploadJob,
         else fallback: UploadJob
     ) async throws -> UploadJob? {
+        guard epoch != nil else {
+            return try await inner.save(
+                job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+            )
+        }
         fencedSaves += 1
         // The renewal commits between the engine's decision and the repository's write.
         provider.supersede()
@@ -519,6 +527,85 @@ actor FailingThenInterferingPersister: OutboxPersisting {
             throw Refused()
         }
         recoveryWrites += 1
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// The other pass, landing INSIDE the write hop of ONE chosen write.
+///
+/// `FailingThenInterferingPersister` above is this shape for the recovery window; this is the
+/// ordinary one, and it is what a witness for a fenced write is made of. The write is named by a
+/// predicate over the CANDIDATE the engine offers — a line number would not survive the next edit,
+/// and the candidate is what the site is — the interference runs once, before that write is let
+/// through to the real repository, and what the fence reads inside `inner` is therefore a manifest
+/// the other pass has already changed.
+///
+/// Nothing is parked and no continuation is held: the interference is awaited inside the save the
+/// engine is suspended in, which IS the interleaving, deterministically and with no sleeping.
+actor InterferingPersistence: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let matches: @Sendable (UploadJob) -> Bool
+    private let interfere: @Sendable () async -> Void
+    /// Whether the chosen write was reached at all — a premise a test asserts rather than assumes.
+    private(set) var didInterfere = false
+    /// Writes the engine attempted AFTER the overtaken one, so "and nothing further was written for
+    /// that capture" is a number rather than a hope.
+    private(set) var attemptsAfter = 0
+
+    init(
+        _ inner: OutboxRepository,
+        when matches: @escaping @Sendable (UploadJob) -> Bool,
+        interfering: @escaping @Sendable () async -> Void
+    ) {
+        self.inner = inner
+        self.matches = matches
+        self.interfere = interfering
+    }
+
+    private func arrive(_ job: UploadJob) async {
+        guard !didInterfere else {
+            attemptsAfter += 1
+            return
+        }
+        guard matches(job) else { return }
+        didInterfere = true
+        await interfere()
+    }
+
+    func save(_ job: UploadJob) async throws {
+        await arrive(job)
+        try await inner.save(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        await arrive(job)
         return try await inner.save(
             job, ifStillCurrent: epoch, matching: snapshot, else: fallback
         )
