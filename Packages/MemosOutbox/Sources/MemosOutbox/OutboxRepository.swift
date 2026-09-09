@@ -140,9 +140,12 @@ public protocol OutboxPersisting: Sendable {
     ///
     /// A `nil` epoch is unknown, which writes `job` — the behaviour this lane always had.
     ///
-    /// - Returns: the job actually written, or `nil` when the manifest moved on and nothing was
-    ///   written at all. `nil` is not a storage failure: there is nothing to report and nothing to
-    ///   retry, because a later pass already owns this capture.
+    /// - Returns: the job actually written, AS THE DISK NOW HOLDS IT — dates are persisted to
+    ///   whole seconds, so this is not always the value that was offered, and a caller that
+    ///   fences its next write on what it just saved must carry this value on rather than its own.
+    ///   `nil` when the manifest moved on and nothing was written at all. `nil` is not a storage
+    ///   failure: there is nothing to report and nothing to retry, because a later pass already
+    ///   owns this capture.
     func save(
         _ job: UploadJob,
         ifStillCurrent epoch: Int?,
@@ -319,9 +322,29 @@ public actor OutboxRepository {
     }
 
     public func save(_ job: UploadJob) throws {
+        _ = try persist(job)
+    }
+
+    /// The write, and the value the DISK now holds — which is not always the value it was handed.
+    ///
+    /// Dates go down as ISO 8601, whole seconds (`.iso8601` on both sides), so a job carrying a
+    /// fractional instant — every `backingOff(at:)` and `released(at:)` taken from a real clock —
+    /// is NOT equal to what the next read decodes. That matters because the fence below is a
+    /// full-value compare: a caller that saves a value and then fences its next write on the
+    /// value it saved would be asking about a manifest this device never held, and a legitimate
+    /// write would be dropped with nobody competing for the row. So what comes back here is the
+    /// round trip, and a caller that carries on carries on with what is on disk.
+    private func persist(_ job: UploadJob) throws -> UploadJob {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(job).write(to: manifestURL(job.id), options: .atomic)
+        let data = try encoder.encode(job)
+        try data.write(to: manifestURL(job.id), options: .atomic)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        // The bytes ARE written by now, so a round trip that somehow could not be read back is not
+        // a failed write and must not be reported as one: the candidate is handed back, which is
+        // what every caller got before this returned anything else.
+        return (try? decoder.decode(UploadJob.self, from: data)) ?? job
     }
 
     /// Both questions and the write, on one isolation with no suspension between them — see
@@ -343,8 +366,9 @@ public actor OutboxRepository {
         guard onDisk == snapshot else { return nil }
         let stands = epoch.map(stillCurrent) ?? true
         let chosen = stands ? job : fallback
-        try save(chosen)
-        return chosen
+        // As persisted, not as offered — see `persist`. A caller that fences its NEXT write on
+        // this value is asking about the row on disk, so this has to BE the row on disk.
+        return try persist(chosen)
     }
 
     /// A job leaves the outbox whole: the manifest goes first, so a crash between the two calls

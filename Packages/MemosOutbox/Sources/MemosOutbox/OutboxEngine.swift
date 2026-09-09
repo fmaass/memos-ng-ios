@@ -166,7 +166,7 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
         guard let job = await repository.job(jobID) else { return }
-        await save(job.released(at: clock()))
+        await save(job.released(at: clock()), matching: job)
         await onChange()
     }
 
@@ -216,7 +216,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             }
         }
         // Out of steps without settling: space it out rather than spin.
-        await save(current.backingOff(at: clock(), error: "The server kept asking to start over."))
+        await save(
+            current.backingOff(at: clock(), error: "The server kept asking to start over."),
+            matching: current
+        )
     }
 
     // MARK: - the network the phone is on
@@ -260,7 +263,7 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// mobile data for a week does not rewrite every manifest on every drain.
     private func waitForNetwork(_ job: UploadJob) async {
         guard job.state != .waiting || job.waitReason != .homeNetwork else { return }
-        await save(job.waitingForNetwork())
+        await save(job.waitingForNetwork(), matching: job)
     }
 
     // MARK: - the four calls
@@ -284,12 +287,19 @@ public actor OutboxEngine: OutboxChunkHandling {
                 baseURL: credentials.serverBaseURL, token: credentials.token, file: file
             )
         } catch {
-            await save(job.held(.serverRefused, error: error.localizedDescription))
+            // Fenced like every other write here, and the one site no test can drive: the only
+            // `try` above is `OutboxWire.encode` over a struct of strings and integers, which
+            // `JSONEncoder` cannot fail on. The fence costs nothing and the alternative is a site
+            // that reads differently from its seventeen neighbours for no reason a reader can see.
+            await save(job.held(.serverRefused, error: error.localizedDescription), matching: job)
             return nil
         }
         guard let response = try? await http.perform(request, under: authority(under: credentials))
         else {
-            await save(job.backingOff(at: clock(), error: "The server could not be reached."))
+            await save(
+                job.backingOff(at: clock(), error: "The server could not be reached."),
+                matching: job
+            )
             return nil
         }
         guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
@@ -310,8 +320,10 @@ public actor OutboxEngine: OutboxChunkHandling {
         let next = job.startingUpload(fileID: fileID, session: session)
         // The server has handed out a session. Carrying on with it while the manifest still knows
         // nothing about it is how a chunk gets sent against a uid a relaunch cannot resume.
-        guard await save(next) else { return nil }
-        return next
+        //
+        // What comes BACK is what carries on, never the candidate: the next write this pass makes
+        // is fenced on this value, and the disk keeps dates to whole seconds.
+        return await save(next, matching: job)
     }
 
     private func schedule(
@@ -328,7 +340,9 @@ public actor OutboxEngine: OutboxChunkHandling {
                 job: job, file: file, offset: offset, length: length
             )
         } catch {
-            await save(job.backingOff(at: clock(), error: error.localizedDescription))
+            await save(
+                job.backingOff(at: clock(), error: error.localizedDescription), matching: job
+            )
             return
         }
         let request = OutboxRequests.chunk(
@@ -338,6 +352,15 @@ public actor OutboxEngine: OutboxChunkHandling {
             offset: offset
         )
         let identity = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: offset)
+        // Written down BEFORE the hand-off, and the hand-off does not happen if it was not.
+        //
+        // The other order — send first, record afterwards — is the one overtake this queue makes
+        // against itself: the answer to that chunk re-reads the manifest, and a bookkeeping write
+        // that lands after it either loses the cursor the answer just moved or, fenced, is refused
+        // for a change this same upload made. So the write goes first and the snapshot every
+        // answer is judged against already contains it. Nothing is sent on a state nobody wrote,
+        // which is the rule the upload session above is handled under too.
+        guard await save(job.with { $0.state = .uploading }, matching: job) != nil else { return }
         // The slice above was an await, and a chunk handed to the background session outlives this
         // pass entirely — it is the one send that cannot be taken back. The authority goes WITH it
         // rather than being checked here, because `upload` is another actor and the hop to it is
@@ -349,10 +372,6 @@ public actor OutboxEngine: OutboxChunkHandling {
             under: authority(under: credentials),
             issuedUnder: credentials.epoch
         )
-        // The chunk is already with the background session, and this write only records that. Its
-        // failure is reported, not acted on: the answer is applied against the manifest as it
-        // stands, which is exactly what `handle` re-reads.
-        await save(job.with { $0.state = .uploading })
     }
 
     /// The offset HEAD: the server's own count, which is the only thing a resume trusts.
@@ -382,53 +401,57 @@ public actor OutboxEngine: OutboxChunkHandling {
         _ job: UploadJob,
         credentials: OutboxCredentials
     ) async -> UploadJob? {
-        var current = job.creatingMemo()
+        // The value the disk holds from here on, and the snapshot every outcome below is judged
+        // against. Matching the job as it stood BEFORE the create was recorded would reject the
+        // create's own bookkeeping; matching the recovery candidate would judge each outcome
+        // against a value nothing ever persisted.
         // Nothing is created against a queue that could not be written: the capture waits, whole,
-        // rather than being sent while the disk has no record that it was ever tried.
-        guard await save(current) else { return nil }
+        // rather than being sent while the disk has no record that it was ever tried. And it is the
+        // WRITTEN value that stands for the row from here on — see `OutboxPersisting`.
+        guard let creating = await save(job.creatingMemo(), matching: job) else { return nil }
         // The manifest write above was an await; the create is the send it precedes, on another
         // executor again — so the authority travels rather than being asked here.
         switch await completion.create(
-            job: current, credentials: credentials, under: authority(under: credentials)
+            job: creating, credentials: credentials, under: authority(under: credentials)
         ) {
         case .created:
             // The one exit. Everything the capture owns goes with it.
-            await repository.delete(current)
+            await repository.delete(creating)
             await onChange()
             return nil
         case .unlinkable(let failure):
-            let recovery = OutboxPlanner.recovery(for: current, failure: failure)
+            let recovery = OutboxPlanner.recovery(for: creating, failure: failure)
             guard !recovery.isEmpty else {
                 await save(
-                    current.held(
+                    creating.held(
                         .serverRefused, error: "The server could not link this memo's files."
-                    )
+                    ),
+                    matching: creating
                 )
                 return nil
             }
-            current = current.applying(recovery)
+            var current = creating.applying(recovery)
             for fileID in recovery.resync {
                 if let next = await resync(current, fileID: fileID, credentials: credentials) {
                     current = next
                 }
             }
-            guard await save(current) else { return nil }
-            return current
+            return await save(current, matching: creating)
         case .retry(let message):
-            await save(current.backingOff(at: clock(), error: message))
+            await save(creating.backingOff(at: clock(), error: message), matching: creating)
             return nil
         case .refused(let message, let refused):
             // Not at the answer, and not here either: `save` hops into `OutboxRepository`, so the
             // choice travels WITH the write and is made under that actor's isolation.
             if let refused {
                 await save(
-                    current.held(.serverRefused, error: message),
+                    creating.held(.serverRefused, error: message),
                     ifStillCurrent: refused.issuedUnder,
-                    matching: current,
-                    else: current.backingOff(at: clock(), error: refused.supersededMessage)
+                    matching: creating,
+                    else: creating.backingOff(at: clock(), error: refused.supersededMessage)
                 )
             } else {
-                await save(current.held(.serverRefused, error: message))
+                await save(creating.held(.serverRefused, error: message), matching: creating)
             }
             return nil
         }
@@ -508,7 +531,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             // other. On a network this capture may not use it is not asked: the capture parks,
             // with nothing counted against it, because nothing was tried.
             guard permitsNetwork() else {
-                await save(job.waitingForNetwork())
+                await save(job.waitingForNetwork(), matching: job)
                 await onChange()
                 return
             }
@@ -537,7 +560,10 @@ public actor OutboxEngine: OutboxChunkHandling {
                 else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
             )
         } else {
-            written = await save(next) ? next : nil
+            // The same snapshot the refusal fence above is asked about, and for the same reason:
+            // this answer is about the row `job` describes. A pass that released, held, advanced
+            // or finished the capture while the credential was being acquired owns it now.
+            written = await save(next, matching: job)
         }
         await onChange()
         guard let written else { return }
@@ -555,35 +581,31 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     private func hold(_ job: UploadJob, reason: HoldReason) async {
         guard job.state != .held || job.holdReason != reason else { return }
-        await save(job.held(reason, error: Self.message(for: reason)))
+        await save(job.held(reason, error: Self.message(for: reason)), matching: job)
     }
 
-    /// Writes a transition down, and says whether it actually happened.
+    /// An ORDINARY write: no server has said anything about a credential, so there is no epoch to
+    /// ask about — but there is still a snapshot, and it is still the whole question.
     ///
-    /// The disk is the truth, so every caller stops where it stands when this returns false: a step
-    /// taken on a state only memory holds is how the drain cursor and the server's own count come
-    /// apart. One more thing is attempted first — the job, held, saying why — because when it is
-    /// this one manifest that cannot be written, that hold is what a person sees; when it is the
-    /// whole container, that write fails too and `lastPersistenceFailure` is the only answer left.
+    /// Every write this drain makes crosses the hop into `OutboxRepository`, and every one of them
+    /// was decided from a value read before that hop. So each is asked the same question as a
+    /// refusal is, through the same fence: is this still the capture I decided about. `nil` means
+    /// it is not — the person released it, deleted it or held it, or another pass advanced or
+    /// finished it — and the caller stops where it stands, writing nothing further for that job.
+    /// Nothing is re-queued: whoever overtook the capture owns its next step.
+    ///
+    /// The fallback is the candidate itself and is unreachable, because an unknown epoch reads as
+    /// current — the choice this signature exists for is the refusal's, not this one's.
     @discardableResult
-    private func save(_ job: UploadJob) async -> Bool {
-        do {
-            try await repository.save(job)
-            lastPersistenceFailure = nil
-            return true
-        } catch {
-            lastPersistenceFailure = Self.storageMessage(error)
-            // No snapshot: these are the writes this branch did not fence, and their recovery keeps
-            // the behaviour they always had — see the enumeration in the MEMNG-270 ledger.
-            await holdUnsaved(job, error: error, matching: nil)
-            return false
-        }
+    private func save(_ job: UploadJob, matching snapshot: UploadJob) async -> UploadJob? {
+        await save(job, ifStillCurrent: nil, matching: snapshot, else: job)
     }
 
     /// The same write, with the snapshot this decision was taken from and the grant it was taken
     /// under carried into it, so BOTH fences are asked inside the repository — see
-    /// `OutboxPersisting.save(_:ifStillCurrent:matching:else:)`. Same failure handling as above,
-    /// and the same rule for the caller: nil means stop where you stand.
+    /// `OutboxPersisting.save(_:ifStillCurrent:matching:else:)`. Every write this file makes lands
+    /// through here — the ordinary ones through the convenience above, which leaves the epoch
+    /// unknown — so there is one rule for every caller: nil means stop where you stand.
     ///
     /// The two nils mean the same thing to the caller — stop — but only ONE of them is a storage
     /// failure. A write the fences refused is a capture a later pass already owns, so nothing is
@@ -617,30 +639,27 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
     }
 
-    /// - Parameter snapshot: the manifest this hold is about, for a caller whose write was fenced
-    ///   on one. `nil` writes unconditionally, which is what the unfenced callers have always done.
-    ///   Where a snapshot IS given and no longer matches the disk, NOTHING is written: a capture
-    ///   another pass has advanced or finished is not this failure's to describe, and describing it
-    ///   would resurrect exactly what the fence above refused to resurrect.
+    /// - Parameter snapshot: the manifest this hold is about — the same one the write that failed
+    ///   was fenced on. Where it no longer matches the disk NOTHING is written: a capture another
+    ///   pass has advanced or finished is not this failure's to describe, and describing it would
+    ///   resurrect exactly what the fence above refused to resurrect. There is no unconditional
+    ///   form: every caller of both `save`s has a snapshot, so a recovery without one would be a
+    ///   second answer to a question this file answers once.
     private func holdUnsaved(
         _ job: UploadJob,
         error: any Error,
-        matching snapshot: UploadJob?
+        matching snapshot: UploadJob
     ) async {
         guard job.state != .held || job.holdReason != .storageFailed else { return }
         let held = job.held(.storageFailed, error: Self.storageMessage(error))
         do {
-            if let snapshot {
-                // The same checked write, so there is one implementation of "is this still the
-                // capture I decided about" and not a second one here. The epoch is deliberately
-                // unknown — a storage failure is not the server's word about a credential — and the
-                // fallback is unreachable because unknown reads as current.
-                _ = try await repository.save(
-                    held, ifStillCurrent: nil, matching: snapshot, else: held
-                )
-            } else {
-                try await repository.save(held)
-            }
+            // The same checked write, so there is one implementation of "is this still the capture
+            // I decided about" and not a second one here. The epoch is deliberately unknown — a
+            // storage failure is not the server's word about a credential — and the fallback is
+            // unreachable because unknown reads as current.
+            _ = try await repository.save(
+                held, ifStillCurrent: nil, matching: snapshot, else: held
+            )
         } catch {
             // Nothing more can be written. It is already reported above, and the next pass finds
             // the job exactly as the last write that did land left it.
