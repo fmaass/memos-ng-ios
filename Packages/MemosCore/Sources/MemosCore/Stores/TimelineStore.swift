@@ -1552,6 +1552,23 @@ public final class TimelineStore {
         await commit(next, under: authority)
     }
 
+    /// Takes one live event this list cannot apply, only so a read in the air can have it.
+    ///
+    /// The channel decides what an event MEANS before any store is touched, and an event about an
+    /// attachment no loaded row holds means `.unchanged`: nothing a reader can see moves. That is
+    /// right about the LIST and silent about the READ — an attachment absent from every row is
+    /// exactly what a reconciling read is about to introduce, and this store cannot keep what it is
+    /// never told (MEMNG-197).
+    ///
+    /// Deliberately NOT `apply`: that one commits, and committing awaits the picture of this list
+    /// reaching the disk. Skipping that await is the whole purpose of the `.unchanged` branch — a
+    /// transcode emits an event every second and a half, most of them about attachments this list
+    /// never holds — so this is synchronous, writes nothing, and does nothing at all when no
+    /// reconciling read is open.
+    public func keep(_ event: MediaEvent) {
+        keepForReadsInFlight(event)
+    }
+
     /// How many live media events this list has APPLIED to each ATTACHMENT.
     ///
     /// A read is a snapshot of the moment it was ISSUED, and the stream is faster than a round

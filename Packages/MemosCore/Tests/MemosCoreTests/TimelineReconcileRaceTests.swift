@@ -1,6 +1,6 @@
 import Foundation
 import MemosAPI
-import MemosCore
+@testable import MemosCore
 import Testing
 
 /// The reconciling read and one live event, at every ordering the two can arrive in.
@@ -61,6 +61,17 @@ struct TimelineReconcileRaceTests {
             uid: uid,
             attachments: attachments.map { Stub.attachment(uid: $0.uid, status: $0.status) }
         )
+    }
+
+    /// A finite channel of exactly these items, already buffered — an event really does sit in the
+    /// stream's buffer between arriving and being consumed.
+    private nonisolated static func channel(
+        _ items: [MediaEventStreamItem]
+    ) -> AsyncStream<MediaEventStreamItem> {
+        AsyncStream { continuation in
+            for item in items { continuation.yield(item) }
+            continuation.finish()
+        }
     }
 
     /// Keeps a scripted request open until the test lets it go. `nonisolated`, because the
@@ -587,5 +598,70 @@ struct TimelineReconcileRaceTests {
             fixture.store.memos == before,
             "an event resurrected an attachment the read had removed"
         )
+    }
+
+    // MARK: - the path the app actually runs an event down
+
+    /// Everything above is reachable only if the CHANNEL hands the event over, and for the case
+    /// this ticket is about it very nearly does not.
+    ///
+    /// `MediaChannel` decides what an event means before any store is touched, and an event about
+    /// an attachment no loaded row holds is `.unchanged` — nothing a reader can see moves. That
+    /// answer is right about the list and wrong about the read: an attachment absent from every
+    /// row is exactly what a reconciling read is about to introduce, and the store cannot keep
+    /// what it is never told. So the loop is driven here for real, with a read parked at the
+    /// server, rather than the store being handed the event by a test that knows to.
+    @Test("an event the channel calls unchanged still reaches the read it is racing")
+    func theChannelHandsOnWhatItCannotApplyItself() async {
+        let fixture = await parked(
+            loaded: Self.memo([(Self.held, "pending")]),
+            answering: [Self.memo([(Self.held, "pending"), (Self.introduced, "pending")])]
+        )
+        let reading = Task {
+            await fixture.store.refreshMemo(
+                uid: Self.uid, using: fixture.client.handle, baseURL: Stub.baseURL
+            )
+        }
+        while !fixture.entered.get() {
+            await Task.yield()
+        }
+
+        await MediaChannel.consume(
+            Self.channel([.event(MediaEventEnvelope(event: Self.introducedReady, generation: 0))]),
+            into: fixture.store,
+            using: fixture.client.handle,
+            baseURL: Stub.baseURL,
+            identity: MediaIdentity()
+        )
+
+        fixture.release.set(true)
+        let landed = await reading.value
+        #expect(landed)
+
+        let tile = attachment(Self.introduced, in: fixture.store)
+        #expect(tile != nil, "the answer did not introduce the attachment")
+        #expect(
+            tile?.readiness == .ready,
+            "the channel dropped the event before the store it was racing could keep it"
+        )
+        #expect(tile?.width == 4032)
+        #expect(tile?.height == 3024)
+        #expect(tile?.blurhash == "LEHV6nWB2yk8pyo0adR*.7kCMdnj")
+
+        // Control, through the same loop and the same fixture: an event for an attachment the row
+        // DOES hold still moves it where it sits. Without this the silence above could be a
+        // channel that reaches this store under no condition at all.
+        await MediaChannel.consume(
+            Self.channel([.event(MediaEventEnvelope(event: Self.heldReady, generation: 0))]),
+            into: fixture.store,
+            using: fixture.client.handle,
+            baseURL: Stub.baseURL,
+            identity: MediaIdentity()
+        )
+        #expect(
+            attachment(Self.held, in: fixture.store)?.readiness == .ready,
+            "the channel cannot move this list at all, so the assertions above prove nothing"
+        )
+        #expect(fixture.reads.count == 1, "the channel re-read a memo it had no reason to")
     }
 }

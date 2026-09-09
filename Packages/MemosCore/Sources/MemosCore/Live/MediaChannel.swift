@@ -194,7 +194,14 @@ public enum MediaChannel {
                     // there is no longer anything to change.
                     switch mediaEventOutcome(event, for: list.memos, at: now()) {
                     case .unchanged:
-                        break
+                        // Nothing a reader of THIS list can see moves — and that is not the same
+                        // as nothing being owed. An attachment none of these rows holds is exactly
+                        // what a reconciling read in the air is about to introduce, and the store
+                        // is the only thing that knows whether one is open, so it is told and
+                        // decides. Synchronous on purpose: this branch exists to skip the await
+                        // that writes the list's picture to disk, and a percentage climbing every
+                        // second and a half must not start paying for one (MEMNG-197).
+                        list.keep(event)
                     case .applied:
                         await list.apply(event)
                     case .refresh(let uid):
