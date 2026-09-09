@@ -1974,8 +1974,8 @@ s_refusal() {
 s_testcount() {
   # Swift Testing does not emit XCTest's "Executed N tests" line (a correct Swift Testing bundle
   # reads 0 there), so the per-bundle counts come from the result bundle, which is authoritative
-  # for both harnesses. A bundle that ran zero tests is a failure: a suite that silently stops
-  # being built would otherwise pass the gate.
+  # for both harnesses. A bundle that EXECUTED zero cases is a failure: a suite that silently stops
+  # being built, or one whose every case skipped itself, would otherwise pass the gate.
   [ -d "$XCRESULT" ] || { echo "no result bundle at $XCRESULT"; return 1; }
   xcrun xcresulttool get test-results tests --path "$XCRESULT" --format json \
     > .gate-artifacts/test-results.json || return 1
@@ -1984,27 +1984,43 @@ import json, sys
 wanted = sys.argv[1].split()
 data = json.load(open(".gate-artifacts/test-results.json"))
 
-def walk(node, bundle, counts):
+# A case that SKIPPED did not run, and this count exists to answer "did each bundle run anything".
+# Several suites here skip themselves when their preconditions are absent (no server credentials,
+# no device capability), so a bundle counted by its Test Case NODES reports a full suite while
+# having executed nothing — the failure this step was written to catch, passing it. Only the
+# outcomes that mean a body executed are counted; everything else — Skipped, and any result this
+# walker has never been shown — is counted apart and named. The tuple is the quick mode's counter's,
+# kept in step by hand: the two are separate heredocs, and only this one is fed a full-gate result
+# bundle.
+EXECUTED = ("Passed", "Failed", "Expected Failure")
+
+def walk(node, bundle, ran, idle):
     kind = node.get("nodeType")
     name = node.get("name", "")
     if kind in ("Unit test bundle", "UI test bundle"):
         bundle = name[:-len(".xctest")] if name.endswith(".xctest") else name
-        counts.setdefault(bundle, 0)
+        ran.setdefault(bundle, 0)
+        idle.setdefault(bundle, 0)
     if kind == "Test Case" and bundle:
-        counts[bundle] = counts.get(bundle, 0) + 1
+        if node.get("result") in EXECUTED:
+            ran[bundle] = ran.get(bundle, 0) + 1
+        else:
+            idle[bundle] = idle.get(bundle, 0) + 1
     for child in node.get("children", []) or []:
-        walk(child, bundle, counts)
+        walk(child, bundle, ran, idle)
 
-counts = {}
+ran, idle = {}, {}
 for root in data.get("testNodes", []) or []:
-    walk(root, None, counts)
-print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "(none)"))
+    walk(root, None, ran, idle)
+print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(ran.items())) or "(none)"))
+print("skipped or not run: " + (", ".join(f"{k}={v}" for k, v in sorted(idle.items())) or "(none)"))
 rc = 0
 for bundle in wanted:
-    n = counts.get(bundle, 0)
+    n = ran.get(bundle, 0)
+    skipped = idle.get(bundle, 0)
     print(f"Executed {n} tests in {bundle}")
     if n < 1:
-        print(f"TESTCOUNT FAIL: {bundle} ran {n} tests")
+        print(f"TESTCOUNT FAIL: {bundle} executed {n} test cases ({skipped} skipped or not run)")
         rc = 1
 sys.exit(rc)
 PY
