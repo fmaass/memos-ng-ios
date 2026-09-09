@@ -1,0 +1,774 @@
+{
+ "testNodes": [
+  {
+   "name": "MemosNG",
+   "nodeType": "Test Plan",
+   "result": "Passed",
+   "children": [
+    {
+     "children": [
+      {
+       "children": [
+        {
+         "duration": "0.001s",
+         "durationInSeconds": 0.0010471343994140625,
+         "name": "401 ends the session; 403 is someone else's memo, not a dead credential",
+         "nodeIdentifier": "APIErrorTests/mapsAuthFailures()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/APIErrorTests/mapsAuthFailures()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0001s",
+         "durationInSeconds": 0.00010013580322265625,
+         "name": "404 is distinct from a server fault",
+         "nodeIdentifier": "APIErrorTests/mapsNotFound()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/APIErrorTests/mapsNotFound()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00019s",
+         "durationInSeconds": 0.0001881122589111328,
+         "name": "anything else keeps its status",
+         "nodeIdentifier": "APIErrorTests/mapsServerFaults()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/APIErrorTests/mapsServerFaults()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "APIError",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/APIErrorTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      },
+      {
+       "children": [
+        {
+         "duration": "0.022s",
+         "durationInSeconds": 0.022494077682495117,
+         "name": "attaches the token as a bearer credential",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/attachesBearerHeader()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/attachesBearerHeader()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00016s",
+         "durationInSeconds": 0.000164031982421875,
+         "name": "sends no Authorization header when there is no token",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/omitsHeaderWhenSignedOut()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/omitsHeaderWhenSignedOut()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000083s",
+         "durationInSeconds": 8.296966552734375e-05,
+         "name": "sends no Authorization header for an empty token",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/omitsHeaderForEmptyToken()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/omitsHeaderForEmptyToken()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00014s",
+         "durationInSeconds": 0.0001380443572998047,
+         "name": "reads the token again for every request",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/readsTokenPerRequest()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/readsTokenPerRequest()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00013s",
+         "durationInSeconds": 0.00013399124145507812,
+         "name": "a credential presents whatever it holds now, without the client being rebuilt",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/presentsTheCurrentValue()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/presentsTheCurrentValue()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0089s",
+         "durationInSeconds": 0.008893013000488281,
+         "name": "a 401 for a token the credential has since replaced is not a 401 to anyone else",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/supersededRefusalIsFenced()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/supersededRefusalIsFenced()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00013s",
+         "durationInSeconds": 0.00013208389282226562,
+         "name": "a 401 for the token the credential still holds passes through untouched",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/currentRefusalPassesThrough()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/currentRefusalPassesThrough()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00012s",
+         "durationInSeconds": 0.00011706352233886719,
+         "name": "a replacement mid-flight does not disturb a response that succeeded",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/supersededSuccessIsUntouched()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/supersededSuccessIsUntouched()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00011s",
+         "durationInSeconds": 0.00011396408081054688,
+         "name": "a client with no credential behind it still reports its 401",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/tokenClosureClientDoesNotFence()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/tokenClosureClientDoesNotFence()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000083s",
+         "durationInSeconds": 8.296966552734375e-05,
+         "name": "an anonymous credential attaches nothing",
+         "nodeIdentifier": "BearerAuthMiddlewareTests/anonymousAttachesNothing()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests/anonymousAttachesNothing()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "BearerAuthMiddleware",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/BearerAuthMiddlewareTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      },
+      {
+       "children": [
+        {
+         "children": [
+          {
+           "name": "Test skipped",
+           "nodeType": "Failure Message"
+          }
+         ],
+         "duration": "0.00005s",
+         "durationInSeconds": 4.982948303222656e-05,
+         "name": "GET /api/memos answers 200 with at least one memo",
+         "nodeIdentifier": "LiveServerTests/listMemos()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/LiveServerTests/listMemos()",
+         "nodeType": "Test Case",
+         "result": "Skipped"
+        },
+        {
+         "children": [
+          {
+           "name": "Test skipped",
+           "nodeType": "Failure Message"
+          }
+         ],
+         "duration": "0.000031s",
+         "durationInSeconds": 3.0994415283203125e-05,
+         "name": "the same token answers /api/auth/user",
+         "nodeIdentifier": "LiveServerTests/whoami()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/LiveServerTests/whoami()",
+         "nodeType": "Test Case",
+         "result": "Skipped"
+        }
+       ],
+       "name": "live server round trip",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/LiveServerTests",
+       "nodeType": "Test Suite",
+       "result": "Skipped"
+      },
+      {
+       "children": [
+        {
+         "duration": "0.00025s",
+         "durationInSeconds": 0.00025200843811035156,
+         "name": "the authorize URL is the server's own login route in ios mode",
+         "nodeIdentifier": "NativeLoginTests/authorizeURLShape()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/authorizeURLShape()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00011s",
+         "durationInSeconds": 0.00010800361633300781,
+         "name": "a device name is trimmed and its apostrophes survive percent-encoding",
+         "nodeIdentifier": "NativeLoginTests/deviceNameIsTrimmed()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/deviceNameIsTrimmed()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "children": [
+          {
+           "duration": "0.000029s",
+           "durationInSeconds": 2.9087066650390625e-05,
+           "name": "\"   \"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000067s",
+           "durationInSeconds": 6.699562072753906e-05,
+           "name": "\"\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000028s",
+           "durationInSeconds": 2.8133392333984375e-05,
+           "name": "\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          }
+         ],
+         "duration": "0.000041s",
+         "durationInSeconds": 4.140535990397135e-05,
+         "name": "a device name the server would reject never leaves the device",
+         "nodeIdentifier": "NativeLoginTests/refusesUnusableDeviceName(_:)",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/refusesUnusableDeviceName(_:)",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00016s",
+         "durationInSeconds": 0.00016498565673828125,
+         "name": "a device name of exactly the server's maximum is accepted",
+         "nodeIdentifier": "NativeLoginTests/acceptsMaximumDeviceName()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/acceptsMaximumDeviceName()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "children": [
+          {
+           "duration": "0.000036s",
+           "durationInSeconds": 3.600120544433594e-05,
+           "name": "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000063s",
+           "durationInSeconds": 6.29425048828125e-05,
+           "name": "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.00003s",
+           "durationInSeconds": 3.0040740966796875e-05,
+           "name": "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.00011s",
+           "durationInSeconds": 0.00011086463928222656,
+           "name": "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000031s",
+           "durationInSeconds": 3.0994415283203125e-05,
+           "name": "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          }
+         ],
+         "duration": "0.000054s",
+         "durationInSeconds": 5.4168701171875e-05,
+         "name": "a code challenge outside RFC 7636's alphabet or bounds is refused",
+         "nodeIdentifier": "NativeLoginTests/refusesInvalidChallenge(_:)",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/refusesInvalidChallenge(_:)",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000095s",
+         "durationInSeconds": 9.489059448242188e-05,
+         "name": "an S256 challenge of the documented length is accepted",
+         "nodeIdentifier": "NativeLoginTests/acceptsRealChallenge()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/acceptsRealChallenge()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0011s",
+         "durationInSeconds": 0.0010561943054199219,
+         "name": "the callback host is the server's own, because the BFF redirects to itself",
+         "nodeIdentifier": "NativeLoginTests/callbackHost()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/callbackHost()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00021s",
+         "durationInSeconds": 0.00020599365234375,
+         "name": "a callback carrying a code yields the code",
+         "nodeIdentifier": "NativeLoginTests/readsCode()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/readsCode()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0001s",
+         "durationInSeconds": 0.00010395050048828125,
+         "name": "the tap-to-return lane carries the same parameters and is read the same way",
+         "nodeIdentifier": "NativeLoginTests/readsCodeFromTheCustomScheme()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/readsCodeFromTheCustomScheme()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000092s",
+         "durationInSeconds": 9.202957153320312e-05,
+         "name": "a refusal on the tap-to-return lane is a refusal, not a malformed callback",
+         "nodeIdentifier": "NativeLoginTests/readsErrorFromTheCustomScheme()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/readsErrorFromTheCustomScheme()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000082s",
+         "durationInSeconds": 8.177757263183594e-05,
+         "name": "a refused login comes back as an error parameter, not an HTTP status",
+         "nodeIdentifier": "NativeLoginTests/readsError()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/readsError()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "children": [
+          {
+           "duration": "0.00003s",
+           "durationInSeconds": 3.0040740966796875e-05,
+           "name": "\"https://memos.example.invalid/ios/auth/callback?code=\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000024s",
+           "durationInSeconds": 2.4080276489257812e-05,
+           "name": "\"https://memos.example.invalid/ios/auth/callback?error=\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000033s",
+           "durationInSeconds": 3.314018249511719e-05,
+           "name": "\"https://memos.example.invalid/ios/auth/callback?state=xyz\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000033s",
+           "durationInSeconds": 3.2901763916015625e-05,
+           "name": "\"https://memos.example.invalid/ios/auth/callback\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000062s",
+           "durationInSeconds": 6.198883056640625e-05,
+           "name": "\"memosng://auth-callback?code=\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000031s",
+           "durationInSeconds": 3.0994415283203125e-05,
+           "name": "\"memosng://auth-callback?error=\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.041s",
+           "durationInSeconds": 0.040535926818847656,
+           "name": "\"memosng://auth-callback\"",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          }
+         ],
+         "duration": "0.0058s",
+         "durationInSeconds": 0.005821296146937779,
+         "name": "a callback with no usable parameter is malformed rather than silently successful",
+         "nodeIdentifier": "NativeLoginTests/readsMalformed(_:)",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/readsMalformed(_:)",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "children": [
+          {
+           "duration": "0.000037s",
+           "durationInSeconds": 3.719329833984375e-05,
+           "name": "\"code_consumed\", .codeConsumed",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000076s",
+           "durationInSeconds": 7.605552673339844e-05,
+           "name": "\"code_expired\", .codeExpired",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.0011s",
+           "durationInSeconds": 0.001149892807006836,
+           "name": "\"code_invalid\", .codeInvalid",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          },
+          {
+           "duration": "0.000034s",
+           "durationInSeconds": 3.3855438232421875e-05,
+           "name": "\"verifier_mismatch\", .verifierMismatch",
+           "nodeType": "Arguments",
+           "result": "Passed"
+          }
+         ],
+         "duration": "0.00032s",
+         "durationInSeconds": 0.000324249267578125,
+         "name": "each of the server's four exchange failures is recognised",
+         "nodeIdentifier": "NativeLoginTests/readsExchangeFailure(_:_:)",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/readsExchangeFailure(_:_:)",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.002s",
+         "durationInSeconds": 0.0020449161529541016,
+         "name": "a validation error's list-shaped detail is not read as an exchange failure",
+         "nodeIdentifier": "NativeLoginTests/ignoresValidationDetail()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/ignoresValidationDetail()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.02s",
+         "durationInSeconds": 0.0202028751373291,
+         "name": "every failure says what to do next",
+         "nodeIdentifier": "NativeLoginTests/everyFailureHasAMessage()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests/everyFailureHasAMessage()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "NativeLogin",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/NativeLoginTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      },
+      {
+       "children": [
+        {
+         "duration": "0.00085s",
+         "durationInSeconds": 0.0008490085601806641,
+         "name": "reads a timestamp with fractional seconds",
+         "nodeIdentifier": "RFC3339DateTranscoderTests/fractional()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/RFC3339DateTranscoderTests/fractional()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000085s",
+         "durationInSeconds": 8.511543273925781e-05,
+         "name": "reads a timestamp without fractional seconds",
+         "nodeIdentifier": "RFC3339DateTranscoderTests/whole()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/RFC3339DateTranscoderTests/whole()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000078s",
+         "durationInSeconds": 7.796287536621094e-05,
+         "name": "round-trips a date through its own encoding",
+         "nodeIdentifier": "RFC3339DateTranscoderTests/roundTrip()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/RFC3339DateTranscoderTests/roundTrip()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.023s",
+         "durationInSeconds": 0.02292799949645996,
+         "name": "refuses something that is not a timestamp",
+         "nodeIdentifier": "RFC3339DateTranscoderTests/rejectsJunk()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/RFC3339DateTranscoderTests/rejectsJunk()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "RFC3339DateTranscoder",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/RFC3339DateTranscoderTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      },
+      {
+       "children": [
+        {
+         "duration": "0.00014s",
+         "durationInSeconds": 0.00013899803161621094,
+         "name": "adds https to a bare host",
+         "nodeIdentifier": "ServerConfigurationTests/addsScheme()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests/addsScheme()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000091s",
+         "durationInSeconds": 9.083747863769531e-05,
+         "name": "drops a trailing slash and any path so request paths stay absolute",
+         "nodeIdentifier": "ServerConfigurationTests/normalisesPath()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests/normalisesPath()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0001s",
+         "durationInSeconds": 0.000102996826171875,
+         "name": "keeps a non-default port",
+         "nodeIdentifier": "ServerConfigurationTests/keepsPort()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests/keepsPort()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00019s",
+         "durationInSeconds": 0.00018906593322753906,
+         "name": "refuses plain http, which would put the token on the wire in clear text",
+         "nodeIdentifier": "ServerConfigurationTests/refusesInsecureScheme()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests/refusesInsecureScheme()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0035s",
+         "durationInSeconds": 0.003454923629760742,
+         "name": "refuses input that is not an address",
+         "nodeIdentifier": "ServerConfigurationTests/refusesJunk()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests/refusesJunk()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00019s",
+         "durationInSeconds": 0.00019407272338867188,
+         "name": "trims surrounding whitespace from a pasted address",
+         "nodeIdentifier": "ServerConfigurationTests/trimsWhitespace()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests/trimsWhitespace()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "ServerConfiguration",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests/ServerConfigurationTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      }
+     ],
+     "name": "MemosAPITests",
+     "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosAPITests",
+     "nodeType": "Unit test bundle",
+     "result": "Passed"
+    },
+    {
+     "children": [
+      {
+       "children": [
+        {
+         "duration": "0.00042s",
+         "durationInSeconds": 0.0004200935363769531,
+         "name": "a note and a shared link become one memo, the note first",
+         "nodeIdentifier": "CompositionTests/mergesNoteAndLink()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/mergesNoteAndLink()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00012s",
+         "durationInSeconds": 0.00012493133544921875,
+         "name": "a browser hands over the title and the address, and both are kept",
+         "nodeIdentifier": "CompositionTests/keepsTitleAndAddress()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/keepsTitleAndAddress()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000099s",
+         "durationInSeconds": 9.894371032714844e-05,
+         "name": "what the note already says is not repeated underneath it",
+         "nodeIdentifier": "CompositionTests/doesNotRepeatWhatTheNoteSays()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/doesNotRepeatWhatTheNoteSays()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00026s",
+         "durationInSeconds": 0.00026416778564453125,
+         "name": "a share with only files is postable; an empty one is not",
+         "nodeIdentifier": "CompositionTests/postableWhenThereIsSomething()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/postableWhenThereIsSomething()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00014s",
+         "durationInSeconds": 0.00014495849609375,
+         "name": "an item that could not be read blocks the post and is said out loud",
+         "nodeIdentifier": "CompositionTests/refusesWhileSomethingCouldNotBeRead()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/refusesWhileSomethingCouldNotBeRead()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000088s",
+         "durationInSeconds": 8.797645568847656e-05,
+         "name": "a share where NOTHING could be read still says so",
+         "nodeIdentifier": "CompositionTests/speaksWhenEverythingFailed()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/speaksWhenEverythingFailed()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.000085s",
+         "durationInSeconds": 8.487701416015625e-05,
+         "name": "nothing is posted while the share is still being read",
+         "nodeIdentifier": "CompositionTests/refusesWhileBusy()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/refusesWhileBusy()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.00014s",
+         "durationInSeconds": 0.00014495849609375,
+         "name": "the summary counts files, and says nothing about words",
+         "nodeIdentifier": "CompositionTests/summarisesFiles()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests/summarisesFiles()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "What a share becomes as words",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/CompositionTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      },
+      {
+       "children": [
+        {
+         "duration": "0.01s",
+         "durationInSeconds": 0.01005697250366211,
+         "name": "a shared photo is queued whole, byte for byte, bound to the signed-in account",
+         "nodeIdentifier": "IngestTests/enqueuesASharedPhoto()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/enqueuesASharedPhoto()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0027s",
+         "durationInSeconds": 0.0027108192443847656,
+         "name": "a text-only share becomes a memo with no files at all",
+         "nodeIdentifier": "IngestTests/enqueuesTextOnly()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/enqueuesTextOnly()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0025s",
+         "durationInSeconds": 0.0024831295013427734,
+         "name": "the chosen visibility reaches the job in the server's own words",
+         "nodeIdentifier": "IngestTests/carriesTheChosenVisibility()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/carriesTheChosenVisibility()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0025s",
+         "durationInSeconds": 0.0024881362915039062,
+         "name": "nothing is written while nobody is signed in",
+         "nodeIdentifier": "IngestTests/refusesWithoutAnAccount()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/refusesWithoutAnAccount()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0015s",
+         "durationInSeconds": 0.0015320777893066406,
+         "name": "a share with neither files nor words leaves the queue untouched",
+         "nodeIdentifier": "IngestTests/refusesAnEmptyShare()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/refusesAnEmptyShare()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.01s",
+         "durationInSeconds": 0.010447025299072266,
+         "name": "a sign-out between opening the sheet and Post refuses the capture",
+         "nodeIdentifier": "IngestTests/refusesWhenTheLicenceWentAway()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/refusesWhenTheLicenceWentAway()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0022s",
+         "durationInSeconds": 0.0021619796752929688,
+         "name": "an account switch between opening the sheet and Post refuses it too",
+         "nodeIdentifier": "IngestTests/refusesWhenTheAccountChanged()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/refusesWhenTheAccountChanged()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.014s",
+         "durationInSeconds": 0.014129877090454102,
+         "name": "a share whose file has gone leaves no half a job behind",
+         "nodeIdentifier": "IngestTests/leavesNoHalfJob()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests/leavesNoHalfJob()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "A share on its way into the outbox",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/IngestTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      },
+      {
+       "children": [
+        {
+         "duration": "0.0023s",
+         "durationInSeconds": 0.0022559165954589844,
+         "name": "the copy is the original, and its type comes from its own extension",
+         "nodeIdentifier": "SharedFileTests/copiesByteForByte()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/SharedFileTests/copiesByteForByte()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        },
+        {
+         "duration": "0.0012s",
+         "durationInSeconds": 0.0011539459228515625,
+         "name": "each kind of shared file gets the type the server will see",
+         "nodeIdentifier": "SharedFileTests/namesEveryType()",
+         "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/SharedFileTests/namesEveryType()",
+         "nodeType": "Test Case",
+         "result": "Passed"
+        }
+       ],
+       "name": "A file taken over from a share provider",
+       "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests/SharedFileTests",
+       "nodeType": "Test Suite",
+       "result": "Passed"
+      }
+     ],
+     "name": "MemosShareKitTests",
+     "nodeIdentifierURL": "test://com.apple.xcode/MemosNG/MemosShareKitTests",
+     "nodeType": "Unit test bundle",
+     "result": "Passed"
+    }
+   ]
+  }
+ ]
+}
