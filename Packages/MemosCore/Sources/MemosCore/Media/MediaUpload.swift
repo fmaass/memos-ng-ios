@@ -105,34 +105,40 @@ public enum MediaUpload {
                 // stands and resend from there (`app/routers/uploads.py` — "Offset gap; re-sync
                 // via HEAD"). Same semantics as the background lane, over the generated client.
                 //
-                // It is asked, and today it cannot answer. The route is published with an
-                // `application/json` body it does not send — a HEAD carries a status and the
-                // `Upload-Offset` header and nothing else — so the generated client cannot read
-                // the answer back. That is measured rather than assumed: see
-                // `theOffsetRouteCannotBeReadAsPublished`, which fails on the real shape and
-                // succeeds on the same response with a body, naming the cause exactly.
+                // The ask is on a DEADLINE. The failure it meets is not always prompt: an answer
+                // this client cannot read fails as soon as it is parsed, but a session that simply
+                // does not answer is bounded only by the URL loading system's own request timeout
+                // — a minute of a Save sitting frozen on a screen somebody is waiting at. A few
+                // seconds is the whole of what a resume is worth here.
                 //
-                // The ask is on a DEADLINE for that reason. The failure it meets is not always
-                // prompt: a bodyless answer fails as soon as it is parsed, but a session that
-                // simply does not answer is bounded only by the URL loading system's own request
-                // timeout — a minute of a Save sitting frozen on a screen somebody is waiting at.
-                // A few seconds is the whole of what a resume is worth here.
-                //
-                // So a gap ends the upload instead, which is safe: no memo patch is sent, nothing
-                // is half-attached, and the retry the person makes carries the same edit key
-                // (`TimelineStore.edit`). Fixing the contract in memos-ng is what makes this
-                // branch resume on its own — and that test is what will say so when it does,
-                // rather than this comment quietly going stale.
+                // An answer that does not arrive, or does not say a number, ends the upload
+                // instead, which is safe: no memo patch is sent, nothing is half-attached, and the
+                // retry the person makes carries the same edit key (`TimelineStore.edit`).
                 resyncs += 1
-                guard
-                    let synced = try? await self.offset(
+                let synced: Int64
+                do {
+                    synced = try await self.offset(
                         of: started.uploadUid, using: client, within: deadline, under: authority
                     )
-                else { throw MediaUploadError.refused(.server(status: 409)) }
-                // Two ways this stops instead of spinning: a server that reports the very offset
-                // it just refused is not converging, and a run of gaps on a session nothing else
-                // is writing to means something is wrong that resending cannot fix.
-                guard synced != offset, resyncs <= maximumResyncs else {
+                } catch let refusal as MediaUploadError where refusal.apiError == .unauthorized {
+                    // A rejected credential keeps its identity all the way to the store, or the
+                    // session it killed carries on as if a conflict had happened
+                    // (`StoreFailure.reportable`): the one answer this branch must not flatten.
+                    throw refusal
+                } catch {
+                    throw MediaUploadError.refused(.server(status: 409))
+                }
+                // Three ways this stops instead of carrying on. A server that reports the very
+                // offset it just refused is not converging; a run of gaps on a session nothing
+                // else is writing to means something is wrong that resending cannot fix; and an
+                // offset PAST the last byte this upload has put on the wire is a position no
+                // session of ours can have reached — resuming at it would skip the bytes in
+                // between, call the upload whole and patch the memo to an attachment missing its
+                // middle.
+                guard
+                    synced != offset, synced <= offset + Int64(piece.count),
+                    resyncs <= maximumResyncs
+                else {
                     throw MediaUploadError.stalled
                 }
                 offset = synced
