@@ -12,10 +12,19 @@
     the app container) and NOT DDA9.1: the timestamp is sent to the server as an upload's
     `last_modified`, and DDA9.1 forbids sending the value off-device.
 
+    NSPrivacyAccessedAPICategoryUserDefaults — four values have to survive a launch, and each one
+    is written with the API that earns a reason here. Three live in THIS app's own defaults, which
+    is what CA92.1 covers: the appearance choice
+    (Packages/MemosFeatures/Sources/MemosFeatures/Settings/AppSettings.swift), the library's sort
+    direction (.../Settings/LibraryPreferences.swift) and the media fetch generation
+    (Packages/MemosCore/Sources/MemosCore/Media/MediaFetchGeneration.swift). The fourth is the
+    outbox's mobile-data choice, kept in the APP GROUP's suite so the share extension could honour
+    it (Packages/MemosOutbox/Sources/MemosOutbox/UploadPreferences.swift) — that is 1C8F.1, and the
+    fallback it degrades to when the group is unreachable is this app's own defaults, CA92.1 again.
+    Nothing reads a value another app or the system wrote, nothing writes one another app could
+    read, and none of it leaves the device.
+
   Audited and deliberately NOT declared:
-    - UserDefaults: this app has none. There is no @AppStorage, no UserDefaults and no
-      SceneStorage anywhere in the app or its packages; session state lives in the keychain and
-      the outbox in the app group's SQLite store.
     - Disk space: nothing reads a volume-capacity resource key. OutboxRepository reads
       `.fileSizeKey`, which is a file attribute and not in the disk-space category.
     - System boot time: nothing calls `systemUptime` or `mach_absolute_time`.
@@ -41,6 +50,15 @@
             <key>NSPrivacyAccessedAPITypeReasons</key>
             <array>
                 <string>C617.1</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+                <string>1C8F.1</string>
             </array>
         </dict>
     </array>

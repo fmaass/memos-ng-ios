@@ -4,7 +4,7 @@
   Privacy manifest for the MemosShare app extension.
 
   An .appex is its own bundle and Apple reads its manifest separately from the host app's, so
-  this file declares what THIS process does, which is a strict subset of the app:
+  this file declares what THIS bundle's executable can reach, which is a strict subset of the app:
 
     NSPrivacyAccessedAPICategoryFileTimestamp — SharedFile.imported() reads
     `.contentModificationDateKey` off the copy it just made of a shared file
@@ -12,9 +12,18 @@
     extension's own temporary directory, so the reason is C617.1; the timestamp reaches the
     server as an upload's `last_modified`, which rules out DDA9.1.
 
+    NSPrivacyAccessedAPICategoryUserDefaults — declared for what this bundle CARRIES rather than
+    for what it calls. The extension asks for no preference of its own, but MemosOutbox is linked
+    into it, and the one use of the API in this project is in there: the outbox's mobile-data
+    choice (Packages/MemosOutbox/Sources/MemosOutbox/UploadPreferences.swift). Apple reads each
+    bundle's manifest against the executable that bundle holds, so an .appex declares the reasons
+    the code inside it earns. 1C8F.1 for the app group's suite the choice is kept in — the group
+    this extension is a member of, which is the point of keeping it there — and CA92.1 for the
+    fallback to this process's own defaults when that group is unreachable.
+
   Audited and deliberately NOT declared: the extension links only MemosShareKit and MemosOutbox,
-  neither of which touches UserDefaults, volume capacity, system uptime or active input modes.
-  The extension carries no client, no session and no credential.
+  neither of which reads volume capacity, system uptime or active input modes. The extension
+  carries no client, no session and no credential.
 
   Nothing is collected and nothing is tracked: the extension writes a capture into the app
   group's outbox and returns.
@@ -35,6 +44,15 @@
             <key>NSPrivacyAccessedAPITypeReasons</key>
             <array>
                 <string>C617.1</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+                <string>1C8F.1</string>
             </array>
         </dict>
     </array>
