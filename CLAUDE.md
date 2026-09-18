@@ -28,7 +28,10 @@ tag cannot reach this step alone (`swift build -warnings-as-errors` for the four
 macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes from its own
 manifest) → the dependency-rule greps → the share-link rule
 (`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
-`Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → a
+`Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → the
+generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
+document is either named in the generator config's inclusion list or is one of the named
+exclusions, with the operation count it read as the control) → a
 per-bundle test-count check. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
@@ -53,7 +56,8 @@ Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-g
 classification, the same lane lock and load gate, then rsyncs and — on the lane's private
 simulator, reusing its DerivedData — generates, compiles for testing and runs the named bundle or
 suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the pins and
-the entitlement, dependency-rule and share-link greps; it prints its own
+the entitlement, dependency-rule and share-link greps and the generated-surface rule; it prints
+its own
 `MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only the full
 gate writes `mac-gate SUMMARY`.
 
