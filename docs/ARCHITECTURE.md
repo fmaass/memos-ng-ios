@@ -193,10 +193,18 @@ Recorded here rather than quietly absorbed, for the review that turns v0 into v1
 3. **`MemosCore` links `OpenAPIRuntime` directly.** The generated request types ARE OpenAPIRuntime
    types, and the default arguments Core inlines when it builds one are defined in that module.
    The layering rule is unchanged; this is a link-time fact, not a new direction of dependency.
-4. **The vendored `openapi.json` is normalised during the sync.** FastAPI's
-   `anyOf: [X, {"type": "null"}]` is rewritten to an OAS 3.1 type array, because the generator
-   otherwise drops every nullable property without failing. The rewrite is lossless and its
-   counts are recorded in `OPENAPI_SOURCE`; the real fix belongs in memos-ng's schema output.
+4. **The vendored `openapi.json` is copied verbatim, and what the generator cannot express is
+   excluded rather than rewritten.** The sync writes the file byte for byte as memos-ng emits it,
+   so its provenance is one `git show` away; nothing here transforms the contract. memos-ng has
+   written nullable scalars as OAS 3.1 type arrays since 433a3fe, which the generator handles, so
+   the normalisation step that used to run here is gone. What it never covered is a nullable
+   `$ref` — `anyOf: [{$ref: X}, {"type": "null"}]` — which this generator version skips with a
+   warning that fails nothing, leaving a property silently absent. Where that idiom appears on a
+   surface the app does not read, the operations that reach it are left out of
+   `openapi-generator-config.yaml`'s inclusion filter, so no half-generated type exists to be
+   trusted; `scripts/openapi-coverage-rule.sh` holds that list to the document so nothing else
+   drops out with it. The real fix belongs in memos-ng's schema output, and a local transform is
+   not a substitute for it.
 5. **The test bundles are Xcode targets, not SwiftPM test targets.** An XcodeGen scheme's test
    action cannot reference a package's test targets. The bundle names and the requirement that
    `xcodebuild test` runs all three are unchanged.
