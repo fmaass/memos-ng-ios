@@ -64,6 +64,10 @@ struct PlacesStoreTests {
             pin?.thumbnailURL?.absoluteString == "\(storedAddress)/api/attachments/x/thumb",
             "a tier path was not resolved against the server it came from"
         )
+        #expect(
+            pin?.downloadURL?.absoluteString == "\(storedAddress)/api/attachments/a/download",
+            "the original was not carried, so the viewer opened from the map loses Share and Save"
+        )
         #expect(pin?.takenAt == Date(timeIntervalSince1970: 1_789_726_272))
         #expect(store.status == .ready)
         #expect(store.hasSettledOnce)
