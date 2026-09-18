@@ -14,8 +14,10 @@
 
     NSPrivacyAccessedAPICategoryUserDefaults — declared for what this bundle CARRIES rather than
     for what it calls. The extension asks for no preference of its own, but MemosOutbox is linked
-    into it, and the one use of the API in this project is in there: the outbox's mobile-data
-    choice (Packages/MemosOutbox/Sources/MemosOutbox/UploadPreferences.swift). Apple reads each
+    into it, and among the packages this extension links it is the only one that uses the API:
+    the outbox's mobile-data choice
+    (Packages/MemosOutbox/Sources/MemosOutbox/UploadPreferences.swift). The app has three more
+    uses of its own, which is why the two manifests declare the same reasons for different code. Apple reads each
     bundle's manifest against the executable that bundle holds, so an .appex declares the reasons
     the code inside it earns. 1C8F.1 for the app group's suite the choice is kept in — the group
     this extension is a member of, which is the point of keeping it there — and CA92.1 for the

@@ -41,9 +41,9 @@ struct PrivacyManifestTests {
         #expect(reasons == Self.userDefaultsReasons)
     }
 
-    /// The extension never asks for a preference itself, but MemosOutbox — where the only use of
-    /// the API in this repository lives — is linked into the `.appex`, and Apple reads each
-    /// bundle's manifest against the executable that bundle carries.
+    /// The extension never asks for a preference itself, but MemosOutbox — the only package it
+    /// links that uses the API, while the app has three more uses of its own — is linked into the
+    /// `.appex`, and Apple reads each bundle's manifest against the executable that bundle carries.
     @Test("the share extension declares the user defaults the outbox linked into it reaches")
     func shareExtensionDeclaresUserDefaults() throws {
         let plugIns = try #require(Bundle.main.builtInPlugInsURL)
