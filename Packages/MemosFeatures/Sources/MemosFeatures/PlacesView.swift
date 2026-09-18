@@ -56,7 +56,10 @@ struct PlacesView: View {
             )
             .ignoresSafeArea(edges: .top)
         case .empty, .error:
-            notice(PlacesPresentation.notice(for: state, error: places.lastError), retry: state == .error)
+            notice(
+                PlacesPresentation.notice(for: state, error: places.lastError),
+                retry: state == .error
+            )
         }
     }
 

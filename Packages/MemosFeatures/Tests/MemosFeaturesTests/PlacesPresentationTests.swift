@@ -114,8 +114,11 @@ struct PlacesPresentationTests {
 
     @Test("a lone pin says how many photos are behind it, and says nothing when there is one")
     func pinBadgeCountsTheGroup() {
-        #expect(PlacesPresentation.pinBadge(for: pin(uid: "a", count: 1, takenAt: "2026-01-01T00:00:00Z").spec) == nil)
-        #expect(PlacesPresentation.pinBadge(for: pin(uid: "a", count: 3, takenAt: "2026-01-01T00:00:00Z").spec) == "3")
+        let lone = pin(uid: "a", count: 1, takenAt: "2026-01-01T00:00:00Z").spec
+        let group = pin(uid: "a", count: 3, takenAt: "2026-01-01T00:00:00Z").spec
+
+        #expect(PlacesPresentation.pinBadge(for: lone) == nil)
+        #expect(PlacesPresentation.pinBadge(for: group) == "3")
     }
 
     @Test("a cluster wears the newest lead photograph of its members")

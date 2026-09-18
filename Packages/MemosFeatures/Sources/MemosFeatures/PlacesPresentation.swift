@@ -40,7 +40,11 @@ nonisolated enum PlacesPresentation {
         for marker in markers { leads[marker.uid] = marker }
         return PlaceClustering.pins(from: markers).compactMap { spec in
             guard let lead = leads[spec.uid] else { return nil }
-            return PlacePin(spec: spec, leadTakenAt: lead.takenAt, leadThumbnailURL: lead.thumbnailURL)
+            return PlacePin(
+                spec: spec,
+                leadTakenAt: lead.takenAt,
+                leadThumbnailURL: lead.thumbnailURL
+            )
         }
     }
 

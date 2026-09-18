@@ -146,9 +146,10 @@ struct PlacesMapView: UIViewRepresentable {
             PlacePinView.self,
             forAnnotationViewWithReuseIdentifier: MKMapViewDefaultAnnotationViewReuseIdentifier
         )
+        let clusterReuseIdentifier = MKMapViewDefaultClusterAnnotationViewReuseIdentifier
         mapView.register(
             PlaceClusterView.self,
-            forAnnotationViewWithReuseIdentifier: MKMapViewDefaultClusterAnnotationViewReuseIdentifier
+            forAnnotationViewWithReuseIdentifier: clusterReuseIdentifier
         )
         context.coordinator.sink = MapViewAnnotationSink(mapView: mapView)
         return mapView

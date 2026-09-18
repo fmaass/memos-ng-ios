@@ -141,7 +141,7 @@ struct PlacesAnnotationTests {
 
         let born = try #require(sink.added.first)
         #expect(sink.refreshed.first === born)
-        #expect(born.coordinate.latitude == 47.5, "the map learns a pin moved through this property")
+        #expect(born.coordinate.latitude == 47.5, "the map learns a move through this property")
     }
 
     /// The one case that needs a live `MKMapView`: everything above is about which change the
@@ -158,10 +158,14 @@ struct PlacesAnnotationTests {
         let sink = MapViewAnnotationSink(mapView: mapView)
 
         coordinator.show(
-            [placePin(key: "a", latitude: 47.0, longitude: 8.0), placePin(key: "b", latitude: 47.4, longitude: 8.6)],
+            [
+                placePin(key: "a", latitude: 47.0, longitude: 8.0),
+                placePin(key: "b", latitude: 47.4, longitude: 8.6),
+            ],
             through: sink
         )
-        #expect(Set(mapView.annotations.compactMap { ($0 as? PlaceAnnotation)?.pin.spec.key }) == ["a", "b"])
+        let bothKeys = mapView.annotations.compactMap { ($0 as? PlaceAnnotation)?.pin.spec.key }
+        #expect(Set(bothKeys) == ["a", "b"])
 
         coordinator.show([placePin(key: "a", latitude: 47.0, longitude: 8.0)], through: sink)
         #expect(mapView.annotations.compactMap { ($0 as? PlaceAnnotation)?.pin.spec.key } == ["a"])

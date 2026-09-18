@@ -131,10 +131,13 @@ struct PlaceClusteringTests {
 
     @Test("one pin per coordinate, wearing the newest photo taken there")
     func oneGroupOnePin() {
+        let january = "2026-01-01T00:00:00Z"
+        let february = "2026-02-01T00:00:00Z"
+        let march = "2026-03-01T00:00:00Z"
         let pins = PlaceClustering.pins(from: [
-            placeMarker(uid: "old", latitude: 47.2, longitude: 8.4, takenAt: "2026-01-01T00:00:00Z"),
-            placeMarker(uid: "new", latitude: 47.2, longitude: 8.4, takenAt: "2026-03-01T00:00:00Z"),
-            placeMarker(uid: "far", latitude: 12.5, longitude: 3.1, takenAt: "2026-02-01T00:00:00Z"),
+            placeMarker(uid: "old", latitude: 47.2, longitude: 8.4, takenAt: january),
+            placeMarker(uid: "new", latitude: 47.2, longitude: 8.4, takenAt: march),
+            placeMarker(uid: "far", latitude: 12.5, longitude: 3.1, takenAt: february),
         ])
 
         #expect(pins.count == 2)
