@@ -134,7 +134,7 @@ public protocol SessionReporting: AnyObject {
     /// exactly one surface in this app. Four stores reporting it would paint four error cards on
     /// an offline launch, under a banner that already says it once.
     func noteTransportFailure(
-        _ failure: NativeLoginTransportFailure,
+        _ failure: ServerReachability.Reason,
         issuedUnder generation: Int
     )
 }

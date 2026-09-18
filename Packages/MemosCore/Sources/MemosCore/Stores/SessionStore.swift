@@ -2291,7 +2291,7 @@ public final class SessionStore {
     /// A report that arrives while the session is ALREADY unconfirmed changes nothing: the
     /// schedule is running and the sentence on screen is as good as this one.
     public func noteTransportFailure(
-        _ failure: NativeLoginTransportFailure,
+        _ failure: ServerReachability.Reason,
         issuedUnder generation: Int
     ) {
         guard generation == sessionGeneration else {
