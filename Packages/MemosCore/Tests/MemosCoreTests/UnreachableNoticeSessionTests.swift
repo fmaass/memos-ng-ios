@@ -257,6 +257,7 @@ struct UnreachableNoticeSessionTests {
         #expect(session.verification == .verified)
         #expect(session.showsUnreachableNotice == false, "the answer took it down")
         #expect(session.unverifiedSince == nil)
+        #expect(session.reachabilityRecoveries == 1, "one recovery, counted for the screens")
     }
 
     // MARK: - a wake that outlived its outage
@@ -330,5 +331,142 @@ struct UnreachableNoticeSessionTests {
         sleeper.release(second)
         await settle(until: { session.showsUnreachableNotice })
         #expect(session.showsUnreachableNotice)
+    }
+
+    // MARK: - signing out is not a recovery
+
+    /// The notice goes away because nobody is signed in any more, and that is a different sentence
+    /// from "the server came back". Nothing behind the screen may reload for it: there is no
+    /// session left to read anything with.
+    @Test("a sign-out takes the notice down without counting a recovery")
+    func aSignOutIsNotARecovery() async {
+        let sleeper = ParkingSleeper()
+        defer { sleeper.releaseAll() }
+        let session = makeSession(sleeper: sleeper) { _, _, operation in
+            guard operation == whoamiOperation else { return Stub.json(Stub.user) }
+            throw URLError(.timedOut)
+        }
+        await session.enteredForeground()
+
+        await session.restore()
+        await settle(until: { sleeper.waits.count >= 2 })
+        guard let wake = noticeWaits(sleeper).first else {
+            Issue.record("expected a notice wake, got \(sleeper.waits)")
+            return
+        }
+        clock.advance(3)
+        sleeper.release(wake)
+        await settle(until: { session.showsUnreachableNotice })
+        #expect(session.showsUnreachableNotice, "the notice is up before the sign-out")
+
+        await session.signOutWithoutRevoking()
+
+        #expect(session.verification == .verified, "nothing is owed an answer any more")
+        #expect(session.showsUnreachableNotice == false, "and nothing says otherwise on screen")
+        #expect(session.reachabilityRecoveries == 0, "a sign-out reloads nothing behind it")
+    }
+
+    // MARK: - the reader asks again
+
+    /// Two taps on Retry over a check that is already in the air.
+    ///
+    /// The wire is what is read: a tap is a request for an answer, not for a request. Both taps
+    /// are told what the one check said.
+    @Test("overlapping retries are one question on the wire, and every caller is told")
+    func retriesOverAnInFlightCheckAreOneRequest() async {
+        let sleeper = ParkingSleeper()
+        /// The whoami itself, held open, so the two later taps arrive while one is unanswered.
+        let wire = ParkingSleeper()
+        defer {
+            sleeper.releaseAll()
+            wire.releaseAll()
+        }
+        let whoamis = Counter()
+        let session = makeSession(sleeper: sleeper) { _, _, operation in
+            guard operation == whoamiOperation else { return Stub.json(Stub.user) }
+            whoamis.increment()
+            guard whoamis.count > 1 else { throw URLError(.timedOut) }
+            await wire.sleep(.seconds(1))
+            return Stub.json(Stub.user)
+        }
+        await session.enteredForeground()
+
+        await session.restore()
+        await settle(until: { sleeper.waits.count >= 2 })
+
+        let first = Task { await session.retryNow() }
+        await settle(until: { !wire.waits.isEmpty })
+        guard whoamis.count == 2 else {
+            Issue.record("the retry sent no check of its own, whoamis: \(whoamis.count)")
+            return
+        }
+        let second = Task { await session.retryNow() }
+        let third = Task { await session.retryNow() }
+        // Both taps get their turn on the main actor while the first check is still unanswered:
+        // whatever they do, they do it against a flight in progress.
+        await settle(until: { whoamis.count > 2 }, turns: 60)
+        #expect(whoamis.count == 2, "a second tap sent its own question")
+
+        wire.releaseAll()
+        await first.value
+        await second.value
+        await third.value
+
+        #expect(whoamis.count == 2, "three taps, one question")
+        #expect(session.verification == .verified, "and every caller waited for its answer")
+    }
+
+    /// A tap while the ladder is asleep between rungs. The ladder starts again from its first
+    /// rung: somebody is looking at the screen, which is the opposite of the situation the long
+    /// waits exist for.
+    @Test("a retry over a sleeping ladder puts the next wait back on the first rung")
+    func aRetryOverASleepingLadderRestartsIt() async {
+        let sleeper = ParkingSleeper()
+        defer { sleeper.releaseAll() }
+        let whoamis = Counter()
+        let session = makeSession(sleeper: sleeper) { _, _, operation in
+            guard operation == whoamiOperation else { return Stub.json(Stub.user) }
+            whoamis.increment()
+            throw URLError(.timedOut)
+        }
+        await session.enteredForeground()
+
+        await session.restore()
+        await settle(until: { sleeper.waits.count >= 2 })
+        let notices = noticeWaits(sleeper)
+        guard let rungOne = sleeper.waits.indices.first(where: { !notices.contains($0) }) else {
+            Issue.record("expected a ladder wait, got \(sleeper.waits)")
+            return
+        }
+        // One rung climbed and failed, so the ladder is asleep on its second wait, 10 s.
+        sleeper.release(rungOne)
+        await settle(until: { self.ladderWaits(sleeper).count >= 2 })
+        let rungs = sleeper.waits.count
+        guard ladderWaits(sleeper).count == 2 else {
+            Issue.record("expected two rungs, got \(sleeper.waits)")
+            return
+        }
+
+        await session.retryNow()
+        await settle(until: { sleeper.waits.count > rungs })
+
+        guard sleeper.waits.count == rungs + 1, let next = ladderWaits(sleeper).last else {
+            Issue.record("expected one further rung, got \(sleeper.waits)")
+            return
+        }
+        // The tap's own check failed, and what it schedules is the FIRST rung, 3 s before jitter —
+        // not the 30 s the ladder had climbed to.
+        let seconds = Double(next.components.seconds)
+            + Double(next.components.attoseconds) / 1e18
+        #expect(
+            seconds >= 3 * 0.8 && seconds <= 3 * 1.2,
+            "the retry carried the ladder's rung: next wait was \(seconds) s, not the first"
+        )
+    }
+
+    /// The recorded waits that are the ladder's, in order.
+    private func ladderWaits(_ sleeper: ParkingSleeper) -> [Duration] {
+        let notices = noticeWaits(sleeper)
+        return sleeper.waits.indices.filter { !notices.contains($0) }.map { sleeper.waits[$0] }
     }
 }

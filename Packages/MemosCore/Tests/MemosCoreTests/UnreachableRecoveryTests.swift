@@ -110,6 +110,13 @@ struct UnreachableRecoveryTests {
         #expect(session.showsUnreachableNotice == false)
         #expect(session.unverifiedSince == nil, "the outage is over, so nothing dates it")
         #expect(timeline.lastError == nil)
+        #expect(session.reachabilityRecoveries == 1, "the screens are told the server came back")
+
+        // A second page over a session that is already confirmed is not a recovery: nothing
+        // changed, so nothing reloads behind it.
+        await timeline.refresh(using: session.activeHandle!, baseURL: Stub.baseURL)
+        await settle(until: { session.reachabilityRecoveries > 1 }, turns: 60)
+        #expect(session.reachabilityRecoveries == 1, "a confirmed session recovers from nothing")
     }
 
     // MARK: - a success that is older than the failure after it

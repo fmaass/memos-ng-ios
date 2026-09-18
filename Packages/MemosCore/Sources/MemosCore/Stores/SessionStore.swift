@@ -103,6 +103,14 @@ public final class SessionStore {
     /// `UnreachableNotice.shows(…)` taken at a moment the store can name — the instant a
     /// verification was written, or the instant a wake armed for this outage came due.
     public private(set) var showsUnreachableNotice = false
+    /// How many times an unconfirmed session has been confirmed again.
+    ///
+    /// A number rather than a flag, because what a screen does with it is notice that it CHANGED:
+    /// a screen that was showing whatever it had while the server was away reloads once per
+    /// recovery, and nothing reloads on a first appearance. Only a transition is counted — a
+    /// confirmed session that is confirmed again is not a recovery, and a sign-out, which writes
+    /// `.verified` because nothing is owed an answer any more, is not one either.
+    public private(set) var reachabilityRecoveries = 0
     /// How long the app stays quiet about an unconfirmed session before it says anything.
     ///
     /// A healthy launch and a brief drop-out both pass through `.unverified` in less than this, and
@@ -1101,6 +1109,24 @@ public final class SessionStore {
         await revalidate(attempt: 0)
     }
 
+    /// Somebody asked for the check now — the notice's own button, and the only trigger a reader
+    /// owns.
+    ///
+    /// What is cancelled is the WAIT, never a check: a ladder asleep on a 45-second rung has
+    /// nobody to answer to while somebody is looking at the screen, so the schedule starts again
+    /// from its first rung. A check already in the air is a different thing — two taps over one
+    /// flight JOIN it through `validating` and are both told what it said, because the answer they
+    /// are waiting for is already on its way.
+    ///
+    /// The attempt is 0 where that can be observed and is whatever the joined flight carried where
+    /// it cannot: a join never runs this body, and a check in flight owns the rung it was asked
+    /// under.
+    public func retryNow() async {
+        retryInFlight?.cancel()
+        retryInFlight = nil
+        await revalidate(attempt: 0)
+    }
+
     /// The app went away. Nothing is scheduled behind it, and nothing is left running.
     ///
     /// The check in flight is cancelled too: it is a request nobody is waiting for, and the system
@@ -1406,6 +1432,10 @@ public final class SessionStore {
     /// two paths into `.verified` firing it twice is two drains of the same queue.
     private func enterVerified() {
         let wasUnconfirmed = verification != .verified
+        // Counted HERE rather than under the guard below, because that guard also wants an
+        // `onVerified` handler and most sessions have none — and the screens' reason to reload is
+        // the transition itself, whoever is or is not listening for the drain.
+        if wasUnconfirmed { reachabilityRecoveries += 1 }
         setVerification(.verified)
         retryInFlight?.cancel()
         retryInFlight = nil
@@ -2457,7 +2487,7 @@ public final class SessionStore {
     /// Confirming a session from a page instead would resurrect exactly the session a revoked
     /// token should have ended, because the revoked token's list read can still be in the air.
     ///
-    /// A confirmed session is a no-op — no counter, no request, no work — so the four stores may
+    /// A confirmed session is a no-op — no counter, no request, no work — so the stores may
     /// call this on every page they apply.
     public func noteTransportSuccess(issuedUnder generation: Int) {
         guard generation == sessionGeneration else { return }
