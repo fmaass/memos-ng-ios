@@ -199,6 +199,17 @@ nonisolated enum PlacesPresentation {
         PlaceOrder.newestFirst(PlaceGeo.markers(markers, within: box))
     }
 
+    /// What the grid holds while the map has not yet said what it shows.
+    ///
+    /// A map that has never settled has reported no region, and no region is not an empty one:
+    /// filtering by it would leave the grid blank under a map full of pins for as long as the
+    /// reader left the screen alone. Until the first report the grid is the whole read, in the
+    /// same order every later report leaves it in.
+    static func visibleGrid(_ markers: [PlaceMarker], in box: PlaceBBox?) -> [PlaceMarker] {
+        guard let box else { return PlaceOrder.newestFirst(markers) }
+        return grid(markers, in: box)
+    }
+
     /// The visible region as a box the pure layer can read. The only place MapKit's geometry is
     /// converted, which is what keeps `PlaceGeo` free of it.
     static func box(of region: MKCoordinateRegion) -> PlaceBBox {

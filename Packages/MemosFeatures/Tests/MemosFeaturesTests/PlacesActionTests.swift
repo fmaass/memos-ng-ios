@@ -210,4 +210,46 @@ struct PlacesActionTests {
 
         #expect(grid.map(\.uid) == ["west", "east"])
     }
+
+    @Test("before the map has said what it shows, the grid holds the whole read")
+    func theGridBeforeTheFirstReportHoldsEverything() {
+        let grid = PlacesPresentation.visibleGrid(three, in: nil)
+
+        #expect(grid.map(\.uid) == ["newest", "middle", "oldest"])
+    }
+
+    @Test("once the map has said what it shows, the grid holds that region only")
+    func theGridAfterAReportHoldsTheRegion() {
+        let markers = [
+            marker(uid: "here", takenAt: "2026-01-01T00:00:00Z", latitude: 47.2, longitude: 8.4),
+            marker(uid: "far", takenAt: "2026-01-04T00:00:00Z", latitude: 47.2, longitude: 20),
+        ]
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 47.2, longitude: 8.4),
+            span: MKCoordinateSpan(latitudeDelta: 0.4, longitudeDelta: 0.4)
+        )
+
+        let grid = PlacesPresentation.visibleGrid(markers, in: PlacesPresentation.box(of: region))
+
+        #expect(grid.map(\.uid) == ["here"])
+    }
+
+    @Test("a photograph opened from the map knows which memo to ask for")
+    func theOpenedPageCarriesTheMemoOfItsMarker() throws {
+        let selection = try #require(PlacesPresentation.open("oldest", in: three))
+
+        // The uid "Show Memo" hands the router is the page's memo, and a page built from a marker
+        // has to carry the MARKER's memo — its own file uid would ask for a memo that does not
+        // exist (`MediaViewerView` line 197-201).
+        #expect(selection.pages.map(\.memoUID) == ["memo-newest", "memo-middle", "memo-oldest"])
+        #expect(selection.startPage.memoUID == "memo-oldest")
+    }
+
+    @Test("asking for a memo from the map lands on the timeline, which is where memos are")
+    func askingForAMemoLeavesTheMap() {
+        #expect(MemoJumpRouting.tab(showing: .places, whenJumping: "memo-oldest") == .timeline)
+        // Nothing pending is not an instruction to go anywhere: a reader who chose this tab keeps
+        // it.
+        #expect(MemoJumpRouting.tab(showing: .places, whenJumping: nil) == .places)
+    }
 }

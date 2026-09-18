@@ -322,8 +322,10 @@ struct PlacesStoreTests {
                 return Stub.client(
                     token: presented,
                     afterRefusal: {
-                        // The window itself: the middleware has compared the epoch and thrown, and
-                        // the store has not resumed.
+                        // The window itself: the middleware has stamped the presented generation
+                        // onto the refusal and thrown it, and the store has not resumed. Whether
+                        // that generation is still the current one is nobody's question yet — the
+                        // effect asks it, hops later.
                         guard refusing.get() else { return }
                         presented.replace(with: successorToken)
                     }
