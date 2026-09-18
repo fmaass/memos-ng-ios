@@ -182,7 +182,10 @@ struct MediaImageLoaderTests {
         MediaImageLoader.transport = MediaSession.shared
     }
 
-    private func withTransport(_ transport: any MediaTransport, _ body: () async -> Void) async {
+    /// Not private because the Places pin view is a loader caller too, and its two cases belong in
+    /// THIS suite for the reason the suite exists (above) — they are declared in an extension of
+    /// it, from another file.
+    func withTransport(_ transport: any MediaTransport, _ body: () async -> Void) async {
         let previous = MediaImageLoader.transport
         MediaImageLoader.transport = transport
         await body()

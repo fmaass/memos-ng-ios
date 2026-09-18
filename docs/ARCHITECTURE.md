@@ -96,6 +96,17 @@ not outlive the signature that authorised it: `SignedMediaURL` parses `exp` out 
 the cache lifetime by whichever of `exp` and the server's `max-age` is shorter, and bypasses the
 cache entirely once the signature has expired. Asserted in a Core test, not assumed.
 
+## The basemap
+
+The map under the Places pins is Apple's, drawn by MapKit. The consequence is stated rather than
+implied: the viewport's tile requests go to Apple, and what a reader pans over is known to Apple as
+a viewport. Nothing else about the household's photographs is: the marker coordinates, the
+thumbnails on the pins and the memo content behind them are fetched only from the household's own
+server, over the same signed-URL media path everything else uses. The app fetches, caches and
+serves no map tiles of its own, and the self-hosted basemap the web client draws is deliberately
+not consumed here — a second tile pipeline on a phone buys a privacy property this app already has
+for the photographs and pays for it in cache, battery and a renderer nobody maintains.
+
 ## Markdown parity
 
 **The SPA renderer is the contract**, not a Swift re-interpretation of GFM: raw HTML renders as
