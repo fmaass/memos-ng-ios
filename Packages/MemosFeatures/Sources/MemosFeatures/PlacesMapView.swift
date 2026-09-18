@@ -34,6 +34,16 @@ nonisolated final class PlaceAnnotation: NSObject, MKAnnotation {
         )
     }
 
+    /// The same object and the same place, standing for the same photographs — but read again.
+    ///
+    /// The server signs a thumbnail URL afresh on every read, so an annotation kept across a
+    /// refresh is holding a signature that will lapse while the one that replaces it is thrown
+    /// away. Separate from `update(to:)` because writing `coordinate` is a KVO notification to the
+    /// map, and a pin that did not move must not send one.
+    func adopt(_ pin: PlacePin) {
+        self.pin = pin
+    }
+
     /// The same object, now standing for a different set of photographs.
     ///
     /// Mutating rather than replacing is what keeps a pin's view on screen across a refresh:
@@ -68,6 +78,16 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         wanted.reserveCapacity(pins.count)
         for pin in pins { wanted[pin.spec.key] = pin }
         apply(diff, from: wanted, through: sink)
+
+        // What the diff cannot see: a pin in no bucket is the same place with the same
+        // photographs, and its thumbnail URL is nonetheless a new one. The annotation takes it
+        // and nothing is repainted — the picture is cached under the uid, which did not change,
+        // so there is nothing new to draw until the old signature lapses.
+        var touched = Set(diff.added.map(\.key))
+        touched.formUnion(diff.updated.map(\.key))
+        for (key, pin) in wanted where !touched.contains(key) {
+            annotations[key]?.adopt(pin)
+        }
     }
 
     /// The diff, applied. A pin in none of the three buckets is not touched and produces no call

@@ -144,6 +144,26 @@ struct PlacesAnnotationTests {
         #expect(born.coordinate.latitude == 47.5, "the map learns a move through this property")
     }
 
+    @Test("a pin that did not change still takes the fresh load's thumbnail")
+    func anUnchangedPinTakesTheNewThumbnail() throws {
+        let coordinator = PlacesMapCoordinator()
+        let sink = RecordingSink()
+        let first = URL(string: "https://memos.example.invalid/a/thumb?exp=1&sig=one")!
+        let second = URL(string: "https://memos.example.invalid/a/thumb?exp=2&sig=two")!
+
+        coordinator.show([placePin(key: "a", thumbnail: first)], through: sink)
+        let afterFirst = sink.calls
+        coordinator.show([placePin(key: "a", thumbnail: second)], through: sink)
+
+        #expect(sink.calls == afterFirst, "an unchanged pin needs no repaint to hold a new URL")
+        #expect(sink.added.count == 1, "the pin was rebuilt rather than handed the new URL")
+        let born = try #require(sink.added.first)
+        #expect(
+            born.pin.leadThumbnailURL == second,
+            "the annotation kept a signature that lapses while a live one was thrown away"
+        )
+    }
+
     /// The one case that needs a live `MKMapView`: everything above is about which change the
     /// coordinator decided on, and this is about the production sink actually performing it.
     ///
@@ -252,6 +272,75 @@ extension MediaImageLoaderTests {
                 view.shownImage === laterImage,
                 "the first pin's photograph landed on the pin this view now stands for"
             )
+        }
+    }
+
+    @Test("a pin refuses a decoded photograph whose signature has lapsed")
+    func aPinViewDropsAPictureWhoseSignatureLapsed() async {
+        let transport = RefusingTransport()
+        await withTransport(transport) {
+            let key = MediaImageKey(uid: "place-lapsed", tier: MediaTier.thumb.rawValue)
+            let cached = UIImage(data: MediaFixture.png(.red))!
+            MediaImageLoader.store.store(
+                cached, forKey: key, generation: MediaImageLoader.store.generation
+            )
+            // It really is there beforehand, or the assertions below say nothing.
+            #expect(MediaImageLoader.cachedUIImage(for: key) === cached)
+
+            let view = PlacePinView(
+                annotation: PlaceAnnotation(
+                    pin: placePin(
+                        key: "lapsed",
+                        uid: "place-lapsed",
+                        // Long past whatever clock the simulator runs on.
+                        thumbnail: MediaFixture.signed(uid: "place-lapsed", exp: 1)
+                    )
+                ),
+                reuseIdentifier: "place"
+            )
+
+            #expect(
+                view.shownImage == nil,
+                "a pin painted a photograph the URL it holds can no longer authorise"
+            )
+            #expect(
+                MediaImageLoader.cachedUIImage(for: key) == nil,
+                "the decoded picture survived the lapse and paints on the next mount"
+            )
+            await view.loading?.value
+        }
+    }
+
+    @Test("a thumbnail asked for by one account is never fetched for the next")
+    func aQueuedPinFetchIsAbandonedAcrossARotation() async {
+        let transport = ScriptedTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let key = MediaImageKey(uid: "place-queued", tier: MediaTier.thumb.rawValue)
+            let view = PlacePinView(
+                annotation: PlaceAnnotation(
+                    pin: placePin(
+                        key: "queued",
+                        uid: "place-queued",
+                        thumbnail: MediaFixture.signed(uid: "place-queued")
+                    )
+                ),
+                reuseIdentifier: "place"
+            )
+
+            // Nothing has been awaited since the view read the generation, so the fetch it queued
+            // cannot have begun — and the device is somebody else before it can.
+            identity.rotate()
+            await view.loading?.value
+
+            #expect(
+                await transport.calls == 0,
+                "a URL the previous account signed was fetched for the one signed in now"
+            )
+            #expect(
+                MediaImageLoader.cachedUIImage(for: key) == nil,
+                "the previous account's photograph was filed under this account's number"
+            )
+            #expect(view.shownImage == nil)
         }
     }
 

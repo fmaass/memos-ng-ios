@@ -73,6 +73,11 @@ class PlaceAnnotationView: MKAnnotationView {
         let key = MediaImageKey(uid: uid, tier: MediaTier.thumb.rawValue)
         requested = key
 
+        // Before the cache is read, and the same one rule the tile applies: a lapsed signature
+        // takes the decoded picture with it, or the pin paints a frame this URL can no longer
+        // authorise and never asks for the one that would replace it.
+        if let url { MediaImageLoader.evictLapsedSignature(url: url, key: key) }
+
         // The same entry the library's tile fetched, so a photograph seen in the grid costs a pin
         // nothing.
         if let cached = MediaImageLoader.cachedUIImage(for: key) {
@@ -86,6 +91,11 @@ class PlaceAnnotationView: MKAnnotationView {
         // signed in when this started must not be painted for the one signed in now.
         let generation = MediaImageLoader.store.generation
         loading = Task { [weak self] in
+            // The task starts a turn later than the generation was read, and the loader would
+            // sample the clock itself: asking it now for a URL the previous account signed files
+            // those bytes under THIS account's number, where the refusal below no longer reaches
+            // them. So the fence is asked once more before the request exists at all.
+            guard MediaImageLoader.store.generation == generation else { return }
             let image = await MediaImageLoader.uiImage(for: key, url: url)
             guard let self else { return }
             guard MediaImageLoader.store.generation == generation else { return }
