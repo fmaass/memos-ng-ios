@@ -63,6 +63,7 @@ done
 # sense of is an unusable input (exit 2), never an empty list that would pass.
 /usr/bin/python3 - "$document" "$config" <<'PY'
 import json
+import re
 import sys
 
 document_path, config_path = sys.argv[1], sys.argv[2]
@@ -122,56 +123,125 @@ print("openapi-coverage: %d operationIds read from the vendored document" % len(
 if not documented:
     broken("the document declares no operations at all, so this rule checked nothing")
 
-# --- the config's inclusion list, by indentation ------------------------------------------------
+# --- the config's inclusion list, read as the whole file --------------------------------------
+# The reader below accepts ONLY the shapes this config is written in and refuses every other line,
+# by number. A reader that SEARCHES for the lines it wants instead accepts files that do not mean
+# what it read them to mean, and each of those still adds up here, because what it skipped is
+# missing from both sides of the subtraction: a list nested under a key the generator never looks
+# at is no filter at all; a second `filter:` or a second `operations:` is the block a real parser
+# would keep, not the one a search finds first; an item indented with a tab ends an
+# indentation-counted list early and takes every name after it along; a flow-style list read as
+# nothing is an empty filter reported as a full one. So the grammar is fixed: indentation of 0, 2
+# or 4 spaces, lines that are `key:`, `key: scalar` or `- scalar`, `operations:` a DIRECT child of
+# the one top-level `filter:`, and its items plain scalars. Anything else names its line and exits
+# 2 — this rule cannot judge a file it cannot read, and the answer to that is never a pass.
+KEY_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ ]+(.*))?$")
+ITEM_LINE = re.compile(r"^-[ ]+(.*)$")
+# A plain scalar as this file uses one. It admits no quote, bracket, brace, comma or `#`, so a flow
+# list, an anchor, a tag and a trailing comment are each refused rather than half-read.
+SCALAR = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
+LEVELS = (0, 2, 4)
+
 with open(config_path, "r", encoding="utf-8") as handle:
     lines = handle.read().splitlines()
-
-
-def indent_of(line):
-    return len(line) - len(line.lstrip(" "))
 
 
 def is_blank(line):
     return not line.strip() or line.lstrip().startswith("#")
 
 
+def unreadable(number, raw, why):
+    unusable("%s:%d %s: %r" % (config_path, number, why, raw))
+
+
 included = None
-index = 0
-while index < len(lines):
-    line = lines[index]
-    index += 1
-    if is_blank(line) or indent_of(line) != 0 or line.strip() != "filter:":
+top_keys = {}
+top_name = None
+top_shape = None  # what has been seen under the current top-level key: list, map or scalar
+child_keys = {}
+child_name = None
+child_shape = None
+
+for number, raw in enumerate(lines, 1):
+    line = raw.rstrip()
+    if is_blank(line):
         continue
-    # Inside filter:, find operations: and read the items indented under it.
-    while index < len(lines):
-        inner = lines[index]
-        if is_blank(inner):
-            index += 1
-            continue
-        if indent_of(inner) == 0:
-            break
-        index += 1
-        if inner.strip() != "operations:":
-            continue
-        operations_indent = indent_of(inner)
-        included = []
-        while index < len(lines):
-            item = lines[index]
-            if is_blank(item):
-                index += 1
-                continue
-            if indent_of(item) <= operations_indent:
-                break
-            index += 1
-            entry = item.strip()
-            if not entry.startswith("- "):
-                unusable(
-                    "%s:%d is indented under filter.operations but is not a list item: %r"
-                    % (config_path, index, item)
+    stripped = line.lstrip(" ")
+    if stripped != line.lstrip():
+        unreadable(number, raw, "is indented with a tab, which a space-counting reader cannot see")
+    indent = len(line) - len(stripped)
+    if indent not in LEVELS:
+        unreadable(number, raw, "is indented %d spaces, where this file uses 0, 2 and 4" % indent)
+
+    item = ITEM_LINE.match(stripped)
+    key = None if item else KEY_LINE.match(stripped)
+    if item is None and key is None:
+        unreadable(number, raw, "is neither a `key:` nor a `- item`")
+    value = item.group(1) if item else key.group(2)
+    if value is not None and not SCALAR.match(value):
+        unreadable(number, raw, "carries a value that is not a plain scalar")
+
+    if indent == 0:
+        if item:
+            unreadable(number, raw, "is a list item at the top level, where this file has only keys")
+        name = key.group(1)
+        if name in top_keys:
+            unreadable(
+                number, raw, "repeats the key %r, first seen at line %d" % (name, top_keys[name])
+            )
+        top_keys[name] = number
+        top_name, top_shape = name, ("scalar" if value is not None else None)
+        child_keys, child_name, child_shape = {}, None, None
+        continue
+
+    if top_name is None:
+        unreadable(number, raw, "is indented under no key at all")
+    if top_shape == "scalar":
+        unreadable(number, raw, "is indented under `%s`, which already carries a value" % top_name)
+
+    if indent == 2:
+        if item:
+            if top_shape == "map":
+                unreadable(
+                    number, raw, "is a list item under `%s`, which already holds keys" % top_name
                 )
-            included.append(entry[2:].strip().strip("'\""))
-        break
-    break
+            top_shape = "list"
+            child_name, child_shape = None, None
+            continue
+        if top_shape == "list":
+            unreadable(number, raw, "is a key under `%s`, which already holds list items" % top_name)
+        top_shape = "map"
+        name = key.group(1)
+        if name in child_keys:
+            unreadable(
+                number,
+                raw,
+                "repeats the key %r under `%s`, first seen at line %d"
+                % (name, top_name, child_keys[name]),
+            )
+        child_keys[name] = number
+        child_name, child_shape = name, ("scalar" if value is not None else None)
+        if top_name == "filter" and name == "operations":
+            if value is not None:
+                unreadable(number, raw, "gives filter.operations a value where a list belongs")
+            included = []
+        continue
+
+    # Indent 4: the only line this file has this deep is an item of a list opened at indent 2. A key
+    # here is the shape that hides a whole inclusion list under a name the generator never reads.
+    if key:
+        unreadable(
+            number,
+            raw,
+            "is a key nested deeper than this file's shape allows, where only `- item` lines appear",
+        )
+    if child_name is None:
+        unreadable(number, raw, "is indented under no key of `%s`" % top_name)
+    if child_shape == "scalar":
+        unreadable(number, raw, "is indented under `%s`, which already carries a value" % child_name)
+    child_shape = "list"
+    if top_name == "filter" and child_name == "operations":
+        included.append(value)
 
 if included is None:
     unusable(

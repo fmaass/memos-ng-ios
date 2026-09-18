@@ -174,7 +174,136 @@ w="$(new_tree empty-document)" || exit 1
 printf '{"openapi": "3.1.0", "paths": {}}' > "$w/$rel_dir/openapi.json"
 check "a document with no operations at all" 1 "$w" "checked nothing"
 
-# And the repository this suite ships in, which is the point of the whole exercise.
+# (viii) WHAT THE CONFIG SAYS, NOT WHAT A SEARCH FINDS IN IT. The rule reads the inclusion list
+# without a YAML library, so its reader is the weakest link: anything it does not understand but
+# skips is a list it silently read short, and a short list still adds up if the omission happens to
+# be a name the document does not define either. Every case below is a config no reader of YAML
+# would agree with this one's meaning about, so each must end as an unusable input (exit 2), named
+# by line — never as a pass.
+
+# (a) a file that stopped being YAML after the list. The list itself is untouched and correct.
+w="$(new_tree invalid-yaml-tail)" || exit 1
+printf 'invalid: [\n' >> "$w/$rel_dir/openapi-generator-config.yaml"
+check "trailing text that is not YAML" 2 "$w" "not a plain scalar"
+
+# (b) the whole list moved one level deeper, under a key the generator does not read. The names are
+# all still there to be found by a search; none of them is filtered by anything.
+w="$(new_tree nested-too-deep)" || exit 1
+/usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" <<'PY' || exit 1
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+out, inside = [], False
+for line in lines:
+    if line == "filter:":
+        out.extend(["filter:", "  tags:"])
+        inside = True
+        continue
+    if inside:
+        if line.strip() and not line.startswith(" "):
+            inside = False
+        else:
+            out.append(("  " + line) if line.strip() else line)
+            continue
+    out.append(line)
+open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+check "the list nested one level too deep" 2 "$w" "nested deeper than"
+
+# (c) the list at the top level, outside the filter the generator reads. Same names, no filter.
+w="$(new_tree operations-outside-filter)" || exit 1
+/usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" <<'PY' || exit 1
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+out, inside = [], False
+for line in lines:
+    if line == "filter:":
+        inside = True
+        continue
+    if inside:
+        if line.strip() and not line.startswith(" "):
+            inside = False
+        else:
+            out.append(line[2:] if line.startswith("  ") else line)
+            continue
+    out.append(line)
+open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+check "the list at the top level, outside filter" 2 "$w" "declares no filter.operations list"
+
+# (d) a flow-style list. It is valid YAML and means something, but this reader was written for the
+# block form — so it either reads it correctly or refuses it, and never reads it as empty.
+w="$(new_tree flow-style-list)" || exit 1
+/usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" <<'PY' || exit 1
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+out, inside = [], False
+for line in lines:
+    if line == "filter:":
+        out.extend(["filter:", "  operations: [create_memo_api_memos_post, list_memos_api_memos_get]"])
+        inside = True
+        continue
+    if inside:
+        if line.strip() and not line.startswith(" "):
+            inside = False
+        else:
+            continue
+    out.append(line)
+open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+check "a flow-style operations list" 2 "$w" "not a plain scalar"
+
+# (e) an item indented with a tab, which YAML forbids as indentation and an indentation-counting
+# reader cannot see at all: it ends the list early and everything after it disappears.
+w="$(new_tree tab-indented-item)" || exit 1
+printf '\t- gate_synthetic_tab_item\n' >> "$w/$rel_dir/openapi-generator-config.yaml"
+check "a list item indented with a tab" 2 "$w" "indented with a tab"
+
+# (f) a duplicate key, in both places it can hide: a second filter block whose list is the one a
+# reader would see last, and a second operations list inside the one filter.
+w="$(new_tree duplicate-filter)" || exit 1
+printf 'filter:\n  operations:\n    - health_health_get\n' >> "$w/$rel_dir/openapi-generator-config.yaml"
+check "a second filter block" 2 "$w" "repeats the key"
+
+w="$(new_tree duplicate-operations)" || exit 1
+printf '  operations:\n    - health_health_get\n' >> "$w/$rel_dir/openapi-generator-config.yaml"
+check "a second operations list inside filter" 2 "$w" "repeats the key"
+
+# (h) the two shapes that are a BROKEN rule rather than an unreadable file, pinned here so the
+# reader above cannot turn either of them into a refusal: an empty list generates nothing, and a
+# commented-out inclusion is an operation nobody generates.
+w="$(new_tree empty-operations)" || exit 1
+/usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" <<'PY' || exit 1
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+kept = [line for line in lines if not line.startswith("    - ")]
+open(path, "w", encoding="utf-8").write("\n".join(kept) + "\n")
+PY
+check "an empty inclusion list" 1 "$w" "empty filter.operations list"
+
+w="$(new_tree commented-out-inclusion)" || exit 1
+/usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" <<'PY' || exit 1
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+target = "    - health_health_get\n"
+if target not in text:
+    raise SystemExit("fixture: %s does not contain %r" % (path, target))
+open(path, "w", encoding="utf-8").write(text.replace(target, "    # - health_health_get\n"))
+PY
+check "an inclusion commented out" 1 "$w" "health_health_get"
+
+# And the repository this suite ships in, which is the point of the whole exercise. With the copied
+# pair at the top of this file it is also the positive control on every refusal above: the real
+# config, unmodified, is read by the same reader and accepted.
 check "the real repository tree" 0 "$repo_root"
 
 # --- verdict --------------------------------------------------------------------------------------
