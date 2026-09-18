@@ -142,16 +142,60 @@ ITEM_LINE = re.compile(r"^-[ ]+(.*)$")
 SCALAR = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 LEVELS = (0, 2, 4)
 
-with open(config_path, "r", encoding="utf-8") as handle:
-    lines = handle.read().splitlines()
+# NOTHING IS TIDIED BEFORE IT IS JUDGED. A reader that strips first answers about a file nobody
+# wrote: a trailing no-break space belongs to the plain scalar as far as YAML is concerned, so an
+# item carrying one names a DIFFERENT operation — and stripping it turns that into a name the
+# document defines and the subtraction accepts. The same holds for the split: splitlines() ends a
+# line at a form feed, at U+001C–1E, U+0085 and at U+2028/2029 too, so each of those disappears
+# before any grammar can refuse it. So: decode strictly, split on "\n" alone, and refuse by code
+# point anything the grammar may not read.
+try:
+    with open(config_path, "rb") as handle:
+        text = handle.read().decode("utf-8")
+except (UnicodeDecodeError, OSError) as error:
+    unusable("%s could not be read as UTF-8 text (%s)" % (config_path, error))
+
+# A CRLF checkout of this file says exactly the same thing, so one "\r" immediately before the "\n"
+# is a line ending and is dropped here. A "\r" anywhere else is not: it stays in the line and is
+# refused below with the rest.
+lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+
+# The grammar reads printable ASCII and nothing else. Full-line comments are the one exception,
+# because the prose in this config uses an em dash and an ellipsis — but not even a comment may
+# carry a control character or a separator that would end a line somewhere else.
+PRINTABLE = (0x20, 0x7E)
+SEPARATORS = (0x2028, 0x2029)
 
 
-def is_blank(line):
-    return not line.strip() or line.lstrip().startswith("#")
+def is_comment(line):
+    return line.lstrip(" ").startswith("#")
 
 
 def unreadable(number, raw, why):
     unusable("%s:%d %s: %r" % (config_path, number, why, raw))
+
+
+def check_characters(number, line):
+    comment = is_comment(line)
+    if not comment and line.lstrip(" ").startswith("\t"):
+        unreadable(number, line, "is indented with a tab, which a space-counting reader cannot see")
+    for column, char in enumerate(line, 1):
+        point = ord(char)
+        printable = PRINTABLE[0] <= point <= PRINTABLE[1]
+        control = point < 0x20 or point == 0x7F or 0x80 <= point <= 0x9F
+        if control or point in SEPARATORS:
+            unreadable(
+                number,
+                line,
+                "holds U+%04X at column %d, which no line of this file may carry" % (point, column),
+            )
+        if not printable and not comment:
+            unreadable(
+                number,
+                line,
+                "holds U+%04X at column %d, where this reader accepts printable ASCII only"
+                % (point, column),
+            )
 
 
 included = None
@@ -162,32 +206,32 @@ child_keys = {}
 child_name = None
 child_shape = None
 
-for number, raw in enumerate(lines, 1):
-    line = raw.rstrip()
-    if is_blank(line):
+for number, line in enumerate(lines, 1):
+    check_characters(number, line)
+    if is_comment(line) or not line.strip(" "):
         continue
+    if line != line.rstrip(" "):
+        unreadable(number, line, "ends in a space, which no line of this file does")
     stripped = line.lstrip(" ")
-    if stripped != line.lstrip():
-        unreadable(number, raw, "is indented with a tab, which a space-counting reader cannot see")
     indent = len(line) - len(stripped)
     if indent not in LEVELS:
-        unreadable(number, raw, "is indented %d spaces, where this file uses 0, 2 and 4" % indent)
+        unreadable(number, line, "is indented %d spaces, where this file uses 0, 2 and 4" % indent)
 
     item = ITEM_LINE.match(stripped)
     key = None if item else KEY_LINE.match(stripped)
     if item is None and key is None:
-        unreadable(number, raw, "is neither a `key:` nor a `- item`")
+        unreadable(number, line, "is neither a `key:` nor a `- item`")
     value = item.group(1) if item else key.group(2)
     if value is not None and not SCALAR.match(value):
-        unreadable(number, raw, "carries a value that is not a plain scalar")
+        unreadable(number, line, "carries a value that is not a plain scalar")
 
     if indent == 0:
         if item:
-            unreadable(number, raw, "is a list item at the top level, where this file has only keys")
+            unreadable(number, line, "is a list item at the top level, where this file has only keys")
         name = key.group(1)
         if name in top_keys:
             unreadable(
-                number, raw, "repeats the key %r, first seen at line %d" % (name, top_keys[name])
+                number, line, "repeats the key %r, first seen at line %d" % (name, top_keys[name])
             )
         top_keys[name] = number
         top_name, top_shape = name, ("scalar" if value is not None else None)
@@ -195,27 +239,27 @@ for number, raw in enumerate(lines, 1):
         continue
 
     if top_name is None:
-        unreadable(number, raw, "is indented under no key at all")
+        unreadable(number, line, "is indented under no key at all")
     if top_shape == "scalar":
-        unreadable(number, raw, "is indented under `%s`, which already carries a value" % top_name)
+        unreadable(number, line, "is indented under `%s`, which already carries a value" % top_name)
 
     if indent == 2:
         if item:
             if top_shape == "map":
                 unreadable(
-                    number, raw, "is a list item under `%s`, which already holds keys" % top_name
+                    number, line, "is a list item under `%s`, which already holds keys" % top_name
                 )
             top_shape = "list"
             child_name, child_shape = None, None
             continue
         if top_shape == "list":
-            unreadable(number, raw, "is a key under `%s`, which already holds list items" % top_name)
+            unreadable(number, line, "is a key under `%s`, which already holds list items" % top_name)
         top_shape = "map"
         name = key.group(1)
         if name in child_keys:
             unreadable(
                 number,
-                raw,
+                line,
                 "repeats the key %r under `%s`, first seen at line %d"
                 % (name, top_name, child_keys[name]),
             )
@@ -223,7 +267,7 @@ for number, raw in enumerate(lines, 1):
         child_name, child_shape = name, ("scalar" if value is not None else None)
         if top_name == "filter" and name == "operations":
             if value is not None:
-                unreadable(number, raw, "gives filter.operations a value where a list belongs")
+                unreadable(number, line, "gives filter.operations a value where a list belongs")
             included = []
         continue
 
@@ -232,13 +276,13 @@ for number, raw in enumerate(lines, 1):
     if key:
         unreadable(
             number,
-            raw,
+            line,
             "is a key nested deeper than this file's shape allows, where only `- item` lines appear",
         )
     if child_name is None:
-        unreadable(number, raw, "is indented under no key of `%s`" % top_name)
+        unreadable(number, line, "is indented under no key of `%s`" % top_name)
     if child_shape == "scalar":
-        unreadable(number, raw, "is indented under `%s`, which already carries a value" % child_name)
+        unreadable(number, line, "is indented under `%s`, which already carries a value" % child_name)
     child_shape = "list"
     if top_name == "filter" and child_name == "operations":
         included.append(value)
