@@ -67,6 +67,67 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
     /// install the production one once, and a test can install a recorder instead.
     var sink: (any AnnotationSink)?
     private var hasFitted = false
+    /// The markers a tapped pin is resolved against: a pin is a list of uids, and what those uids
+    /// stand for is whatever the last read left in hand.
+    var markers: [PlaceMarker] = []
+    /// What the map is showing, reported once it has stopped moving.
+    var onRegionChange: ((PlaceBBox) -> Void)?
+    /// What a tap opened.
+    var onTap: ((PlaceTapAction) -> Void)?
+    /// The map itself, for the one action that moves it. Weak: the map owns its delegate.
+    private weak var mapView: MKMapView?
+
+    /// The map this coordinator speaks for, kept so Zoom-in has something to move.
+    func attach(to mapView: MKMapView) {
+        self.mapView = mapView
+    }
+
+    /// Brings the map down to what a sheet's pins actually cover.
+    ///
+    /// The annotations themselves, so the map frames their real extent with its own padding. The
+    /// initial fit's minimum span plays no part: that floor exists to stop one photograph filling
+    /// the world, and here the reader has asked to get closer.
+    func zoomIn(to members: [PlacePin]) {
+        guard let mapView else { return }
+        let targets = members.compactMap { annotations[$0.spec.key] }
+        guard !targets.isEmpty else { return }
+        mapView.showAnnotations(targets, animated: true)
+    }
+
+    /// What the map settled on, once it has stopped moving.
+    ///
+    /// On `regionDidChange` and not while the gesture runs: the grid under the map is rebuilt from
+    /// this, and rebuilding it per frame of a pan would be a list reshuffling under the finger.
+    func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+        onRegionChange?(PlacesPresentation.box(of: mapView.region))
+    }
+
+    /// Where a tap goes: one pin to its own rule, a cluster to the rule about members.
+    ///
+    /// Deselected first, because a selected annotation that is tapped again is not a selection
+    /// change and would open nothing — and the sheet this opens takes the screen anyway, so
+    /// nothing on the map is left looking chosen.
+    func mapView(_ mapView: MKMapView, didSelect annotation: any MKAnnotation) {
+        mapView.deselectAnnotation(annotation, animated: false)
+        if let place = annotation as? PlaceAnnotation {
+            guard let action = PlacesPresentation.tap(pin: place.pin, in: markers) else { return }
+            onTap?(action)
+        } else if let cluster = annotation as? MKClusterAnnotation {
+            // The member objects are the very annotations the map was given, so a member's pin is
+            // read off it rather than re-derived from a coordinate.
+            let members = cluster.memberAnnotations.compactMap { ($0 as? PlaceAnnotation)?.pin }
+            guard !members.isEmpty else { return }
+            onTap?(
+                .sheet(
+                    PlacesPresentation.clusterTap(
+                        members: members,
+                        in: markers,
+                        cameraDistance: mapView.camera.centerCoordinateDistance
+                    )
+                )
+            )
+        }
+    }
 
     /// What the map should be showing now, turned into the changes that get it there.
     func show(_ pins: [PlacePin], through sink: any AnnotationSink) {
@@ -151,9 +212,19 @@ final class MapViewAnnotationSink: AnnotationSink {
 struct PlacesMapView: UIViewRepresentable {
     let pins: [PlacePin]
     let region: MKCoordinateRegion?
+    /// What a tapped pin's uids are resolved against. Defaulted so a preview can show a map with
+    /// nothing to open.
+    var markers: [PlaceMarker] = []
+    /// What the map settled on, for the grid underneath it.
+    var onRegionChange: ((PlaceBBox) -> Void)?
+    /// What a tap opened, for the screen to present.
+    var onTap: ((PlaceTapAction) -> Void)?
+    /// The coordinator, when the screen needs to keep hold of it — Zoom-in is an action on the map
+    /// taken from a sheet the map itself does not present.
+    var control: PlacesMapCoordinator?
 
     func makeCoordinator() -> PlacesMapCoordinator {
-        PlacesMapCoordinator()
+        control ?? PlacesMapCoordinator()
     }
 
     func makeUIView(context: Context) -> MKMapView {
@@ -171,11 +242,20 @@ struct PlacesMapView: UIViewRepresentable {
             PlaceClusterView.self,
             forAnnotationViewWithReuseIdentifier: clusterReuseIdentifier
         )
+        // How close the map may be brought to what it shows, which is also what makes "can zooming
+        // still separate these?" a question with an answer (`PlacesPresentation`).
+        mapView.cameraZoomRange = MKMapView.CameraZoomRange(
+            minCenterCoordinateDistance: PlacesPresentation.minimumCameraDistance
+        )
         context.coordinator.sink = MapViewAnnotationSink(mapView: mapView)
+        context.coordinator.attach(to: mapView)
         return mapView
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
+        context.coordinator.markers = markers
+        context.coordinator.onRegionChange = onRegionChange
+        context.coordinator.onTap = onTap
         guard let sink = context.coordinator.sink else { return }
         context.coordinator.show(pins, through: sink)
         context.coordinator.fitOnce(region, on: mapView)
