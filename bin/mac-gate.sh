@@ -9,8 +9,9 @@
 # exit code unmasked.
 #
 # The ordered checks are: the gate's own classifier test, generate the project, lint, test, rebuild
-# every package with warnings as errors, check the dependency rule and the share-link rule, read
-# the SHIPPING bundles back, and count the tests that actually ran.
+# every package with warnings as errors, check the dependency rule, the share-link rule, the
+# refusal-sites rule and the openapi-coverage rule, read the SHIPPING bundles back, and count the
+# tests that actually ran.
 #
 # A change set of documentation and repository metadata only takes a FAST PATH. What the branch
 # changed against origin/main (merge-base, renames not followed, so a rename is judged by both of
@@ -48,7 +49,8 @@
 #   bin/mac-gate.sh --help            print this usage.
 #
 # What the quick mode SKIPS is the whole difference: the package rebuilds with warnings fatal, the
-# warnings canary, the pin check, the entitlement, dependency-rule and share-link greps, the
+# warnings canary, the pin check, the entitlement, dependency-rule, share-link, refusal-sites and
+# openapi-coverage rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
 # lane lock, the load gate and the private simulator. It prints one line of its own,
@@ -1971,6 +1973,25 @@ s_refusal() {
   return 1
 }
 
+s_apicover() {
+  # The generated client's filter is inclusion-only: an operation the config does not name is not
+  # generated, no build mentions it, and the first sign is a feature nobody can write. That is the
+  # same silence this repo already met from the other side (a nullable union dropped from a
+  # generated type), so the subtraction the config is derived from — every operationId in the
+  # vendored document minus a named exclusion set — is checked here rather than trusted. The
+  # arithmetic lives in a script of its own for the reason the other two rules' does: that script
+  # carries the exclusion set and its reasons, and the files it checks may not.
+  echo "--- openapi-coverage rule (every vendored operation generated or knowingly excluded) ---"
+  local coverage_rule="$GATE_TARGET/scripts/openapi-coverage-rule.sh"
+  if [ -x "$coverage_rule" ]; then
+    "$coverage_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "OPENAPI-COVERAGE FAIL: $coverage_rule is missing or not executable, so the generator's"
+  echo "                       filter was never checked and this step proves nothing"
+  return 1
+}
+
 s_testcount() {
   # Swift Testing does not emit XCTest's "Executed N tests" line (a correct Swift Testing bundle
   # reads 0 there), so the per-bundle counts come from the result bundle, which is authoritative
@@ -2171,6 +2192,7 @@ step warnaserr  s_warnings
 step deps       s_deps
 step refusal    s_refusal
 step sharelink  s_sharelink
+step apicover   s_apicover
 step testcount  s_testcount
 
 echo "MAC_GATE_REMOTE_SUMMARY:$summary | exit=$first_fail"

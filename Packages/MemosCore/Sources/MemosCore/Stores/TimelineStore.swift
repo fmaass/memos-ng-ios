@@ -1115,6 +1115,11 @@ public final class TimelineStore {
                 lastError = nil
                 await commit(memos.filter { $0.uid != uid }, under: authority)
                 return true
+            // The contract documents this one now. It arrived as `.undocumented(404)` before and
+            // is thrown exactly as it was: a memo that is already gone is a fact about the server,
+            // not a licence to take the row off screen without one.
+            case .notFound:
+                throw APIError.fromStatus(404)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):
@@ -1721,6 +1726,11 @@ public final class TimelineStore {
                 // one. The settle releases the claim and then writes whatever it was holding back.
                 await settle(uid, claim: claim, under: authority)
                 return true
+            // The contract documents this one now. It arrived as `.undocumented(404)` before and
+            // is thrown exactly as it was, so the tick is rolled back and the claim released by
+            // the catch below rather than left standing on a memo the server no longer has.
+            case .notFound:
+                throw APIError.fromStatus(404)
             // The strict linking refusal is declared on the patch too. A ticked checkbox names no
             // upload, so this is reported rather than recovered from — recovering would mean
             // re-uploading files this call never sent.
@@ -1816,6 +1826,11 @@ public final class TimelineStore {
                 lastError = nil
                 await apply(Memo(try ok.body.json, baseURL: baseURL), under: authority)
                 return .saved
+            // The contract documents this one now. It arrived as `.undocumented(404)` before and
+            // is thrown exactly as it was, so the sheet stays open with the reason in it rather
+            // than reporting a save for a memo that is no longer there.
+            case .notFound:
+                throw APIError.fromStatus(404)
             // Either a named upload the server cannot link, or an edit key already bound to a
             // DIFFERENT memo. Neither is recoverable here: the uploads this call named are spent,
             // and a key is minted per (memo, edit) so a key on another memo is not a state this
