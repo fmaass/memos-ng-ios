@@ -73,6 +73,8 @@ struct MediaLibraryView: View {
             library?.reports(to: session)
             await load()
         }
+        // The server is answering again, and this grid was read while it was not.
+        .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
     }
 
     /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a

@@ -38,6 +38,7 @@ struct PlacesView: View {
             places?.reports(to: session)
             await load()
         }
+        .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
     }
 
     @ViewBuilder
