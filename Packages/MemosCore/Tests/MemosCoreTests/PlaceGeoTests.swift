@@ -260,3 +260,127 @@ struct PlaceGeoTests {
         #expect(insets.bottom > 0)
     }
 }
+
+/// What the map currently shows, and which photos are in it.
+///
+/// These two have no counterpart in the SPA's spec: the web filters inline against its map
+/// library's own `bounds.contains` (`PlacesMap.vue:186`) and never states the rule, so the vectors
+/// below are stated here rather than ported. The pair is tested together on the antimeridian
+/// because the grid is only right if both sides of the wrap agree about it.
+@Suite("PlaceGeo visible region")
+struct PlaceVisibleBoxTests {
+    @Test("turns an ordinary region into its four sides")
+    func ordinaryRegion() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 47.2,
+            centerLongitude: 8.4,
+            latitudeDelta: 0.4,
+            longitudeDelta: 1
+        )
+
+        #expect(abs(box.south - 47.0) < 1e-9)
+        #expect(abs(box.north - 47.4) < 1e-9)
+        #expect(abs(box.west - 7.9) < 1e-9)
+        #expect(abs(box.east - 8.9) < 1e-9)
+    }
+
+    @Test("clamps a pole-crossing region to the poles")
+    func clampsToThePoles() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 89,
+            centerLongitude: 0,
+            latitudeDelta: 4,
+            longitudeDelta: 4
+        )
+
+        #expect(abs(box.north - 90) < 1e-9)
+        #expect(abs(box.south - 87) < 1e-9)
+    }
+
+    @Test("gives a whole-world region the whole range rather than one wrapped meridian")
+    func wholeWorld() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 0,
+            centerLongitude: 8.4,
+            latitudeDelta: 170,
+            longitudeDelta: 400
+        )
+
+        #expect(box.west == -180)
+        #expect(box.east == 180)
+    }
+
+    @Test("wraps a region across the antimeridian into west greater than east")
+    func wrapsAcrossTheAntimeridian() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 0,
+            centerLongitude: 179,
+            latitudeDelta: 4,
+            longitudeDelta: 4
+        )
+
+        #expect(abs(box.west - 177) < 1e-9)
+        #expect(abs(box.east - -179) < 1e-9)
+    }
+
+    @Test("holds the markers inside an ordinary box, edges included")
+    func holdsMarkersInsideAnOrdinaryBox() {
+        let box = PlaceBBox(west: 8, south: 47, east: 9, north: 48)
+        let inside = placeMarker(uid: "in", latitude: 47.5, longitude: 8.5)
+        let onTheEdge = placeMarker(uid: "edge", latitude: 48, longitude: 8)
+        let tooFarEast = placeMarker(uid: "east", latitude: 47.5, longitude: 9.5)
+        let tooFarNorth = placeMarker(uid: "north", latitude: 48.5, longitude: 8.5)
+
+        let held = PlaceGeo.markers([inside, onTheEdge, tooFarEast, tooFarNorth], within: box)
+
+        #expect(held.map(\.uid) == ["in", "edge"])
+    }
+
+    @Test("holds markers on both sides of a region that crosses the antimeridian")
+    func holdsBothSidesOfTheWrap() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 0,
+            centerLongitude: 179,
+            latitudeDelta: 4,
+            longitudeDelta: 4
+        )
+        let eastOfIt = placeMarker(uid: "east", latitude: 0, longitude: -179.5)
+        let westOfIt = placeMarker(uid: "west", latitude: 0, longitude: 178)
+        let behind = placeMarker(uid: "behind", latitude: 0, longitude: 176.9)
+
+        let held = PlaceGeo.markers([eastOfIt, westOfIt, behind], within: box)
+
+        #expect(held.map(\.uid) == ["east", "west"])
+    }
+
+    @Test("finds a marker at 180 in a box that ends at -180, one meridian under two names")
+    func oneMeridianUnderTwoNames() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 0,
+            centerLongitude: -181,
+            latitudeDelta: 4,
+            longitudeDelta: 2
+        )
+        let marker = placeMarker(uid: "at-180", latitude: 0, longitude: 180)
+
+        #expect(abs(box.east - -180) < 1e-9)
+        #expect(PlaceGeo.markers([marker], within: box).map(\.uid) == ["at-180"])
+    }
+
+    @Test("holds everything inside a whole-world region")
+    func wholeWorldHoldsEverything() {
+        let box = PlaceGeo.visibleBox(
+            centerLatitude: 0,
+            centerLongitude: 0,
+            latitudeDelta: 180,
+            longitudeDelta: 360
+        )
+        let markers = [
+            placeMarker(uid: "a", latitude: -89, longitude: -180),
+            placeMarker(uid: "b", latitude: 0, longitude: 0),
+            placeMarker(uid: "c", latitude: 89, longitude: 180),
+        ]
+
+        #expect(PlaceGeo.markers(markers, within: box).map(\.uid) == ["a", "b", "c"])
+    }
+}

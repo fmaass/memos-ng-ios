@@ -185,6 +185,68 @@ nonisolated public enum PlaceGeo {
         return PlaceBBox(west: west, south: south, east: east, north: north)
     }
 
+    /// One longitude folded into [-180, 180), so that 180 and -180 are one meridian rather than
+    /// two numbers a comparison can disagree about.
+    private static func wrapped(_ longitude: Double) -> Double {
+        let shifted = (longitude + 180).truncatingRemainder(dividingBy: 360)
+        return (shifted < 0 ? shifted + 360 : shifted) - 180
+    }
+
+    /// The box the map currently shows, from a region stated as plain degrees.
+    ///
+    /// Plain doubles rather than a region type, so this layer stays free of MapKit and the rule
+    /// can be stated in a unit test. Two cases are not the obvious arithmetic. Latitude is CLAMPED
+    /// to the poles, because a region centred near one runs past it and a marker cannot be at 91
+    /// degrees north to match. A longitude span of a full turn or more is the WHOLE range rather
+    /// than two endpoints wrapped onto one meridian — those endpoints would cross and the box
+    /// would then hold the sliver the map is not showing instead of the world it is.
+    ///
+    /// Everything else wraps into [-180, 180), so a region over the antimeridian comes out with
+    /// `west > east`. That is a real box here and `markers(_:within:)` reads it, but it is NOT the
+    /// shape the initial fit's span arithmetic takes: `bbox` assumes `west <= east` and goes on
+    /// assuming it, so a box from this function is never handed to it. `minBBoxSpan` is that fit's
+    /// floor and is deliberately not applied here: the region shown is whatever the person
+    /// panned to, not something to pad.
+    public static func visibleBox(
+        centerLatitude: Double,
+        centerLongitude: Double,
+        latitudeDelta: Double,
+        longitudeDelta: Double
+    ) -> PlaceBBox {
+        let halfLatitude = abs(latitudeDelta) / 2
+        let south = max(-90, centerLatitude - halfLatitude)
+        let north = min(90, centerLatitude + halfLatitude)
+
+        guard abs(longitudeDelta) < 360 else {
+            return PlaceBBox(west: -180, south: south, east: 180, north: north)
+        }
+        let halfLongitude = abs(longitudeDelta) / 2
+        return PlaceBBox(
+            west: wrapped(centerLongitude - halfLongitude),
+            south: south,
+            east: wrapped(centerLongitude + halfLongitude),
+            north: north
+        )
+    }
+
+    /// The markers inside a visible box, in input order — the grid orders them itself.
+    ///
+    /// Both latitude edges are inclusive: a pin exactly on the edge of what is shown is shown.
+    /// Longitude is compared only after the marker has been through the same wrap the box was, so
+    /// a marker recorded at 180 and a box edge written as -180 meet as one meridian. A box whose
+    /// west is greater than its east is the antimeridian case and holds the two arcs outside the
+    /// pair, not the one between them.
+    public static func markers(_ markers: [PlaceMarker], within box: PlaceBBox) -> [PlaceMarker] {
+        markers.filter { marker in
+            guard marker.latitude >= box.south, marker.latitude <= box.north else { return false }
+            let longitude = wrapped(marker.longitude)
+            if box.west <= box.east {
+                return longitude >= box.west && longitude <= box.east
+            }
+            return longitude >= box.west || longitude <= box.east
+        }
+    }
+
     /// What the initial fit must keep free, given the pane and the overlay drawn on top of it.
     ///
     /// An overlay on the map pane covers pixels a uniform inset will happily put a pin under: on

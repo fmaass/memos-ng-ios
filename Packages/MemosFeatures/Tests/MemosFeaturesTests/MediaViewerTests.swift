@@ -909,3 +909,79 @@ actor RecordingTransport: MediaTransport {
         throw URLError(.notConnectedToInternet)
     }
 }
+
+/// The cross-identity fence as the full-screen viewer meets it, rather than as the loader's own
+/// tests call it: a page asked for a photograph while one account was signed in, answered after the
+/// device has become somebody else, with a page for the SAME photo already on screen by then.
+///
+/// It belongs to `MediaImageLoaderTests` and not to a suite of its own for the reason that suite
+/// exists: the decoded store is process-wide, that suite installs one of its own per test against
+/// its own identity clock, and it is `.serialized`, so exactly one installed store is in force
+/// while a hosted page reaches it.
+extension MediaImageLoaderTests {
+    @Test("a page opened after an identity change keeps its picture when the old answer lands")
+    func aHostedPageIsNotRepaintedByThePreviousIdentitysAnswer() async throws {
+        let attachment = MediaViewerPageTests.image("hosted-rotation")
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+        let key = page.stillKey
+        // A hit would be answered without going near a transport, and nothing below would race.
+        #expect(
+            MediaImageLoader.cachedUIImage(for: key) == nil,
+            "something warmed this key — the fetch this case parks would never happen"
+        )
+
+        func host(_ transport: any MediaTransport) -> UIWindow {
+            let cache = URLCache(memoryCapacity: 4 * 1024 * 1024, diskCapacity: 0, directory: nil)
+            let window = UIWindow(
+                frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844))
+            )
+            window.rootViewController = UIHostingController(
+                rootView: MediaViewerPage(
+                    page: page,
+                    onZoomChange: { _ in },
+                    player: nil,
+                    play: {},
+                    cache: cache,
+                    transport: transport
+                )
+            )
+            window.makeKeyAndVisible()
+            window.layoutIfNeeded()
+            return window
+        }
+
+        // The photograph the reader opened before signing out, parked on the wire.
+        let previous = GatedTransport(payload: MediaFixture.png(.red))
+        let leaving = host(previous)
+        await previous.waitUntilStarted()
+
+        // The device becomes somebody else, and the same photograph is opened again. A uid is
+        // unique only within one server, which is why both pages name one key.
+        identity.rotate()
+        let arriving = host(ScriptedTransport(payload: MediaFixture.png(.blue)))
+
+        var standing: UIImage?
+        for _ in 0..<60 where standing == nil {
+            try await Task.sleep(for: .milliseconds(50))
+            standing = MediaImageLoader.cachedUIImage(for: key)
+        }
+        let painted = try #require(standing, "the page opened after the change never painted")
+
+        // Only now does the page that was left behind get its answer.
+        await previous.release()
+        var replaced = false
+        for _ in 0..<40 where !replaced {
+            try await Task.sleep(for: .milliseconds(50))
+            replaced = MediaImageLoader.cachedUIImage(for: key) !== painted
+        }
+        leaving.isHidden = true
+        arriving.isHidden = true
+        #expect(!replaced, "the previous identity's answer replaced the picture on screen")
+
+        // And the parked request really did carry the identity it started in — the stamp is what
+        // files its bytes where this identity will never name them.
+        let sent = try #require(await previous.requests.first)
+        let stamp = try #require(MediaFetchGeneration.generation(of: sent))
+        #expect(stamp != identity.generation, "the page's still was stamped when it landed")
+    }
+}
