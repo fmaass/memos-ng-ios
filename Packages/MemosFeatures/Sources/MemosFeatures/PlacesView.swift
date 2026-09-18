@@ -3,15 +3,29 @@ import SwiftUI
 
 /// The map of where the photographs were taken.
 ///
-/// The store is built here and dropped with the signed-in hierarchy, exactly as the library's is:
-/// the markers belong to whoever is signed in, and a screen that outlives a sign-out holding them
-/// is the leak `RootView`'s identity on the hierarchy exists to prevent.
+/// The screen is one line here because everything it holds lives in the view below, keyed on the
+/// subject signed in. A revalidation can come back as somebody ELSE while the signed-in hierarchy
+/// stands (`SessionStore.establish`), and nothing in that hierarchy is keyed on who it is — so
+/// this key is what drops the first person's store, markers, grid, sheet and viewer in one go,
+/// including whatever state the screen grows later. The next subject's view then loads on its own
+/// first appearance, and a read still in flight for the previous one lands in a store nothing
+/// shows and is refused against the handle it presented.
+struct PlacesView: View {
+    @Environment(SessionStore.self) private var session
+
+    var body: some View {
+        PlacesScreen()
+            .id(session.state.user?.subject)
+    }
+}
+
+/// The screen itself, for as long as one person is signed in.
 ///
 /// Nothing on this screen classifies a refusal or compares a generation of its own. The read is
 /// `PlacesStore.load(using:baseURL:)` and the four states are `PlacesStore.status` — asked through
 /// `PlacesPresentation`, so which state the reader is shown is a thing a test states rather than
 /// something only a rendered view knows.
-struct PlacesView: View {
+private struct PlacesScreen: View {
     @Environment(SessionStore.self) private var session
     @State private var places: PlacesStore?
     /// The map's delegate, held by the screen because Zoom-in is an action ON the map taken from a

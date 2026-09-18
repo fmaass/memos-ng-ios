@@ -75,6 +75,31 @@ struct PlacesActionTests {
         #expect(selection.startIndex == 2)
     }
 
+    /// A list the server handed back in no particular order: what the reader sees is the sort,
+    /// so a start index taken from the unsorted list opens a different photograph.
+    private let interleaved = [
+        marker(uid: "b", takenAt: "2026-02-02T00:00:00Z"),
+        marker(uid: "d", takenAt: "2026-02-04T00:00:00Z"),
+        marker(uid: "a", takenAt: "2026-02-01T00:00:00Z"),
+        marker(uid: "c", takenAt: "2026-02-03T00:00:00Z"),
+    ]
+
+    @Test("what the map opens is the order the ported rule states, and the slide it names")
+    func openAgreesWithThePortedOrder() throws {
+        // The rule is `PlaceOrder`'s, ported from the SPA with its vectors; the screen goes
+        // through the viewer's own selection function, which is what decides viewability and a
+        // missing uid. This case is the tie between the two: same order, same slide.
+        for list in [three, interleaved] {
+            for each in list {
+                let selection = try #require(PlacesPresentation.open(each.uid, in: list))
+                let target = PlaceOrder.viewerTarget(list, uid: each.uid)
+
+                #expect(selection.pages.map(\.id) == target.list.map(\.uid))
+                #expect(selection.startIndex == target.index)
+            }
+        }
+    }
+
     @Test("leaves a photo opened from the map undeletable")
     func leavesThePhotoUndeletable() throws {
         // A delete from the map would be a store mutation nothing here performs, so the

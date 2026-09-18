@@ -186,6 +186,11 @@ nonisolated enum PlacesPresentation {
     /// The list is ordered here and the photograph is carried by uid, so the viewer opens on the
     /// picture that was under the finger rather than on whatever occupied that position before the
     /// sort. Nil when the uid is not in the list, or when nothing in it can be rendered at all.
+    ///
+    /// Through the viewer's OWN selection function, so that what counts as viewable and what a
+    /// missing uid means are decided in one place for every screen that opens the viewer.
+    /// `PlaceOrder.viewerTarget` is the ported statement of the order this is held to — asserted
+    /// against this function in the tests rather than called from it.
     @MainActor
     static func open(_ uid: String, in list: [PlaceMarker]) -> MediaViewerSelection? {
         MediaViewerPresentation.viewer(

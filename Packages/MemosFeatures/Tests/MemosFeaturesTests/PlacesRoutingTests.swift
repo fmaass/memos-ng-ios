@@ -46,6 +46,14 @@ private func routedPin(_ marker: PlaceMarker, key: String) -> PlacePin {
     )
 }
 
+private func zurichMarker() -> PlaceMarker {
+    routedMarker(uid: "zurich", takenAt: "2026-01-01T00:00:00Z", latitude: 47.37, longitude: 8.54)
+}
+
+private func osloMarker() -> PlaceMarker {
+    routedMarker(uid: "oslo", takenAt: "2026-01-02T00:00:00Z", latitude: 59.91, longitude: 10.75)
+}
+
 /// What the coordinator handed out, in order.
 @MainActor
 private final class RoutedCalls {
@@ -75,6 +83,14 @@ private func hostedMap() -> (UIWindow, MKMapView) {
     return (window, mapView)
 }
 
+/// A region tight enough that the map keeps the centre it was given.
+private func routedRegion(latitude: Double, longitude: Double) -> MKCoordinateRegion {
+    MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+        span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
+    )
+}
+
 /// Lets the map get on with it until `until` is true, or until the budget runs out.
 @MainActor
 private func settle(_ window: UIWindow, until done: () -> Bool = { false }) {
@@ -94,18 +110,8 @@ private func settle(_ window: UIWindow, until done: () -> Bool = { false }) {
 @MainActor
 @Suite("What the map reports and where a tap on it goes")
 struct PlacesRoutingTests {
-    private let zurich = routedMarker(
-        uid: "zurich",
-        takenAt: "2026-01-01T00:00:00Z",
-        latitude: 47.37,
-        longitude: 8.54
-    )
-    private let oslo = routedMarker(
-        uid: "oslo",
-        takenAt: "2026-01-02T00:00:00Z",
-        latitude: 59.91,
-        longitude: 10.75
-    )
+    private let zurich = zurichMarker()
+    private let oslo = osloMarker()
 
     @Test("a settled map reports what it shows, and a later move replaces that report")
     func aMoveReplacesTheReport() throws {
@@ -143,9 +149,20 @@ struct PlacesRoutingTests {
         )
         window.isHidden = true
     }
+}
 
+/// The cases that put pins on a map, declared where the loader's own tests live.
+///
+/// A map on a screen builds a view per pin, and `PlacePinView` reads the process-wide loader
+/// before it so much as looks at its URL. Everything that touches that loader belongs in the one
+/// serialized suite that owns it — the reason `PlacesAnnotationTests` already declares its pin
+/// cases here — or these run beside its own cases and both sides read a store the other is
+/// replacing. The case above hosts a map with no pins on it and reaches no loader, so it stays
+/// with the rest of the routing rules.
+extension MediaImageLoaderTests {
     @Test("a tap on a pin opens its photograph, and a second tap opens it again")
     func aTapOnAPinOpensItsPhotograph() throws {
+        let zurich = zurichMarker()
         let (window, mapView) = hostedMap()
         let coordinator = PlacesMapCoordinator()
         let calls = RoutedCalls()
@@ -197,6 +214,12 @@ struct PlacesRoutingTests {
         #expect(
             members.count == cluster.memberAnnotations.count,
             "the members came back as something other than the annotations the map was given"
+        )
+        // Which pins, not how many: a cluster standing for a different set of coordinates would
+        // list the right number of photographs from the wrong places.
+        #expect(
+            members.map(\.pin.spec.key).sorted() == ["k0", "k1", "k2", "k3"],
+            "the cluster held pins other than the four the map was given"
         )
 
         mapView.selectAnnotation(cluster, animated: false)
@@ -274,5 +297,45 @@ struct PlacesRoutingTests {
             return !clusters.isEmpty
         }
         return clusters.first
+    }
+
+    @Test("a map that replaces another is given every pin, and its own opening view")
+    func aReplacementMapIsFilledAfresh() {
+        let zurich = zurichMarker()
+        let oslo = osloMarker()
+        let pins = [routedPin(zurich, key: "z"), routedPin(oslo, key: "o")]
+        let coordinator = PlacesMapCoordinator()
+
+        // The map the screen started with: every pin installed, and the opening view taken.
+        let (firstWindow, first) = hostedMap()
+        coordinator.attach(to: first)
+        coordinator.show(pins, through: MapViewAnnotationSink(mapView: first))
+        coordinator.fitOnce(routedRegion(latitude: 47.37, longitude: 8.54), on: first)
+        firstWindow.isHidden = true
+
+        // A failed reload took the map off the screen and Retry put one back: same coordinator,
+        // same pins, a map that holds nothing yet.
+        let (secondWindow, second) = hostedMap()
+        coordinator.attach(to: second)
+        coordinator.show(pins, through: MapViewAnnotationSink(mapView: second))
+        coordinator.fitOnce(routedRegion(latitude: 59.91, longitude: 10.75), on: second)
+
+        #expect(
+            second.annotations.compactMap { ($0 as? PlaceAnnotation)?.pin.spec.key }.sorted()
+                == ["o", "z"],
+            "the replacement map came up empty, the pins being recorded as already installed"
+        )
+        #expect(
+            abs(second.region.center.latitude - 59.91) < 0.05,
+            "the replacement map was never framed, the opening view being recorded as taken"
+        )
+
+        // The same map attached again is not a replacement: re-installing every pin would remove
+        // and re-add each one, which is the blink the diff exists to prevent.
+        let recorder = RecordingSink()
+        coordinator.attach(to: second)
+        coordinator.show(pins, through: recorder)
+        #expect(recorder.calls.isEmpty, "attaching the same map again repainted the whole map")
+        secondWindow.isHidden = true
     }
 }

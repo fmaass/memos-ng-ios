@@ -78,7 +78,20 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
     private weak var mapView: MKMapView?
 
     /// The map this coordinator speaks for, kept so Zoom-in has something to move.
+    ///
+    /// The coordinator outlives the map: the screen holds it so a sheet can move the map, while
+    /// the map itself is rebuilt whenever it leaves the hierarchy and comes back — a failed reload
+    /// replacing it with a notice, and Retry putting one back, is exactly that. What is recorded
+    /// below describes ONE map: which annotation objects are installed on it, and whether it has
+    /// had its opening view. A different map holds neither, so the record goes with the map it
+    /// described and the next pass adds every pin afresh and frames the new map once. The same map
+    /// attached again is not a change — re-installing there would remove and re-add every pin,
+    /// which is the blink the diff exists to prevent.
     func attach(to mapView: MKMapView) {
+        if mapView !== self.mapView {
+            annotations = [:]
+            hasFitted = false
+        }
         self.mapView = mapView
     }
 
