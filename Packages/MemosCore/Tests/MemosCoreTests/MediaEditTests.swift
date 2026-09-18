@@ -873,4 +873,168 @@ struct MediaEditTests {
         #expect(requests.count == 0)
         #expect(store.lastError != nil)
     }
+
+    /// The shape production actually meets on the offset ask, which the bare-token test above
+    /// cannot reach: an INSTALLED credential, so its 401 is minted by `BearerAuthMiddleware` as a
+    /// `CredentialRefusal` carrying the epoch the request presented, inside the generated client's
+    /// envelope — never a `MediaUploadError`.
+    ///
+    /// The expectation is READ OFF the two lanes that already work, in the same setup and with the
+    /// same credential, rather than constructed here: whatever `start` and `append` hand a caller
+    /// for a 401, the offset ask must hand it the same thing. Renamed a 409, the refusal reaches
+    /// no store, the epoch is lost, and the app carries on presenting a token the server is done
+    /// with.
+    @Test("an installed credential refused on the offset ask arrives as the refusal it is")
+    func anInstalledCredentialsOffsetRefusalKeepsItsEpoch() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let credential = PresentedCredential("memos_pat_a")
+        credential.install()
+
+        func failure(of client: any APIProtocol) async -> (any Error)? {
+            do {
+                _ = try await MediaUpload.upload(file, using: client)
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        let refusedStart = Stub.client(token: credential) { _, _, _ in Stub.empty(.unauthorized) }
+        let byStart = try #require(await failure(of: refusedStart), "the start was not refused")
+        let onStart = try #require(StoreFailure.refusal(byStart))
+
+        let refusedAppend = Stub.client(token: credential) { _, _, operation in
+            operation == startUploadOperation
+                ? Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+                : Stub.empty(.unauthorized)
+        }
+        let byAppend = try #require(await failure(of: refusedAppend), "the chunk was not refused")
+        let onAppend = try #require(StoreFailure.refusal(byAppend))
+
+        let heads = LockedValue<Int>(0)
+        let refusedAsk = Stub.client(token: credential) { _, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case uploadOffsetOperation:
+                heads.set(heads.get() + 1)
+                return Stub.empty(.unauthorized)
+            default:
+                return offsetGap()
+            }
+        }
+        let thrownByAsk = try #require(await failure(of: refusedAsk), "the ask was not refused")
+
+        #expect(heads.get() == 1, "control: the session really was asked where it stands")
+        #expect(onStart == onAppend, "control: the two lanes that work disagree with each other")
+        #expect(
+            StoreFailure.refusal(thrownByAsk) == onStart,
+            "the offset ask lost the refusal the start and append lanes keep: \(thrownByAsk)"
+        )
+    }
+
+    /// A session that opens by claiming more of the file than the file has.
+    ///
+    /// Taken at its word the loop never runs — the position is already past the end — and the
+    /// upload reports success over a file of which nothing was ever sent, which the memo patch
+    /// then names.
+    @Test("a start that claims more than the whole file is not taken at its word")
+    func aStartPositionBeyondTheFileAbandonsTheUpload() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let chunks = LockedValue<Int>(0)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(
+                    uploadOut(uid: "u1", chunkSize: 4, received: 999), status: .created)
+            case appendChunkOperation:
+                chunks.set(chunks.get() + 1)
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 4))
+            default:
+                return offsetGap()
+            }
+        }
+
+        await #expect(throws: MediaUploadError.stalled) {
+            try await MediaUpload.upload(file, using: client)
+        }
+        #expect(chunks.get() == 0, "control: nothing was sent from a position past the file")
+    }
+
+    /// The same number one step later: a chunk answered with more bytes than that chunk carried.
+    ///
+    /// Four went out and the session says it holds ninety-nine. Adopted, that ends the loop with
+    /// most of the file never sent and the upload called whole.
+    @Test("a chunk answered with more bytes than were sent abandons the upload")
+    func anAppendAnswerBeyondWhatWasSentAbandonsTheUpload() async throws {
+        let file = try stagedFile(bytes: 12)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case appendChunkOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 99))
+            default:
+                return offsetGap()
+            }
+        }
+
+        await #expect(throws: MediaUploadError.stalled) {
+            try await MediaUpload.upload(file, using: client)
+        }
+    }
+}
+
+/// The positions whose cost is not a failed upload but a dead process.
+///
+/// `Upload-Offset` and `bytes_received` are plain `integer` in the contract, with no minimum, and
+/// the loop feeds the position it adopts to `FileHandle.seek(toOffset:)` — a `UInt64`. A negative
+/// one TRAPS: the editor dies with the words somebody was in the middle of writing. Kept in their
+/// own suite because a trap is a crash rather than a failed expectation, so each is meant to be
+/// run on its own where the crash can be attributed.
+@MainActor
+@Suite("Upload positions that would take the app down")
+struct UploadPositionTrapTests {
+    @Test("a session answering the offset ask with a negative position is not resumed from")
+    func aNegativeSyncedOffsetAbandonsTheUpload() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
+            case uploadOffsetOperation:
+                return offsetAnswer(-1)
+            default:
+                return offsetGap()
+            }
+        }
+
+        await #expect(throws: MediaUploadError.stalled) {
+            try await MediaUpload.upload(file, using: client)
+        }
+    }
+
+    @Test("a start reporting a negative position is not resumed from")
+    func aNegativeStartPositionAbandonsTheUpload() async throws {
+        let file = try stagedFile(bytes: 10)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let client = Stub.client { _, _, operation in
+            operation == startUploadOperation
+                ? Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: -1), status: .created)
+                : offsetGap()
+        }
+
+        await #expect(throws: MediaUploadError.stalled) {
+            try await MediaUpload.upload(file, using: client)
+        }
+    }
 }

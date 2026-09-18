@@ -82,7 +82,7 @@ public enum MediaUpload {
         }
         defer { try? handle.close() }
 
-        var offset = Int64(started.bytesReceived)
+        var offset = try position(started.bytesReceived, atMost: size)
         var chunkSize = usableChunkSize(started.chunkSize)
         var resyncs = 0
         while offset < size {
@@ -96,9 +96,13 @@ public enum MediaUpload {
             ) {
             case .accepted(let answer):
                 // The SERVER's count is the position, never this loop's arithmetic: it is what a
-                // resume would read, and the one number that cannot disagree with what it holds.
-                guard Int64(answer.bytesReceived) > offset else { throw MediaUploadError.stalled }
-                offset = Int64(answer.bytesReceived)
+                // resume would read, and the one number that cannot disagree with what it holds —
+                // as far as the bytes this chunk actually carried, and no further.
+                let received = try position(
+                    answer.bytesReceived, atMost: offset + Int64(piece.count)
+                )
+                guard received > offset else { throw MediaUploadError.stalled }
+                offset = received
                 chunkSize = usableChunkSize(answer.chunkSize)
             case .offsetGap:
                 // The contract's own answer to a gap, and the outbox's: ask the session where it
@@ -115,35 +119,35 @@ public enum MediaUpload {
                 // instead, which is safe: no memo patch is sent, nothing is half-attached, and the
                 // retry the person makes carries the same edit key (`TimelineStore.edit`).
                 resyncs += 1
-                let synced: Int64
+                let reported: Int64
                 do {
-                    synced = try await self.offset(
+                    reported = try await self.offset(
                         of: started.uploadUid, using: client, within: deadline, under: authority
                     )
-                } catch let refusal as MediaUploadError where refusal.apiError != nil {
-                    // An answer the SERVER gave keeps its identity all the way to the store, and
-                    // this branch does not read it: classifying it here would re-decide, an actor
-                    // hop early, something `StoreFailure.reportable` decides at the effect. A
-                    // rejected credential is what that costs — renamed a conflict, it ends no
-                    // session, and the app carries on presenting a token the server is done with.
-                    throw refusal
-                } catch {
-                    // Everything left is this device's own trouble rather than the server's: a
-                    // session that did not answer inside the deadline, an answer with no number in
-                    // it. There is nothing to resume from either way, so the gap stands.
+                } catch let ours as MediaUploadError where ours.apiError == nil {
+                    // Flattened ONLY where the trouble is positively this device's own and named
+                    // by this type: the deadline elapsing, or a session that answered without
+                    // saying where it stands. There is nothing to resume from either way, so the
+                    // gap stands.
+                    //
+                    // Everything else travels on untouched, and that is the point of the shape:
+                    // an INSTALLED credential rejected by the server is minted where the
+                    // credential is attached, inside the generated client's envelope, so it is
+                    // not a `MediaUploadError` at all and never reaches this clause. Caught and
+                    // renamed, it would reach no store, the epoch of the credential that earned
+                    // it would be lost, and a verdict would be taken here about an instant that
+                    // has passed by the time the effect runs. An answer this client cannot parse
+                    // fails inside that same envelope and keeps its own sentence too — nothing
+                    // here reads any of them.
                     throw MediaUploadError.refused(.server(status: 409))
                 }
-                // Three ways this stops instead of carrying on. A server that reports the very
-                // offset it just refused is not converging; a run of gaps on a session nothing
-                // else is writing to means something is wrong that resending cannot fix; and an
-                // offset PAST the last byte this upload has put on the wire is a position no
-                // session of ours can have reached — resuming at it would skip the bytes in
-                // between, call the upload whole and patch the memo to an attachment missing its
-                // middle.
-                guard
-                    synced != offset, synced <= offset + Int64(piece.count),
-                    resyncs <= maximumResyncs
-                else {
+                // A position no session of ours can be at is refused by the shared bounds rule
+                // below; two ways are left to stop instead of carrying on. A server that reports
+                // the very offset it just refused is not converging, and a run of gaps on a
+                // session nothing else is writing to means something is wrong that resending
+                // cannot fix.
+                let synced = try position(reported, atMost: offset + Int64(piece.count))
+                guard synced != offset, resyncs <= maximumResyncs else {
                     throw MediaUploadError.stalled
                 }
                 offset = synced
@@ -166,6 +170,24 @@ public enum MediaUpload {
     /// and nothing else can append to it — so a run of them is a server disagreeing with itself,
     /// not a resumable upload. The outbox is the lane built for genuinely long-lived sessions.
     static let maximumResyncs = 3
+
+    /// A position the SERVER reported, taken only where this upload could actually be.
+    ///
+    /// Every one of these numbers arrives as a plain `integer` with no minimum in the contract, and
+    /// the one the loop adopts is fed to `FileHandle.seek(toOffset:)` — a `UInt64`. A negative one
+    /// is therefore not a failed upload but a dead process, taking the sheet and the words somebody
+    /// was writing with it. Past `ceiling` is the other half: resuming there would skip bytes
+    /// nobody ever sent, call the upload whole and patch the memo to an attachment with a hole in
+    /// the middle.
+    ///
+    /// `.stalled` because that is what happened — the answer arrived and cannot be resumed from —
+    /// and because it carries no `apiError`: nothing the server says about a number ends a session.
+    static func position(_ reported: some BinaryInteger, atMost ceiling: Int64) throws -> Int64 {
+        guard let position = Int64(exactly: reported), position >= 0, position <= ceiling else {
+            throw MediaUploadError.stalled
+        }
+        return position
+    }
 
     /// The size to read next. A server that names no size of its own — or an impossible one — must
     /// not turn into a loop that sends nothing: zero bytes would be refused for ever, and a
@@ -301,10 +323,11 @@ public enum MediaUpload {
         case .ok(let ok):
             guard let offset = ok.headers.uploadOffset else {
                 // A re-sync that cannot read the offset has nothing to resume from, and guessing
-                // one would resend into the very gap this call exists to close.
-                throw MediaUploadError.refused(
-                    .unexpected(description: "the upload session did not report its offset")
-                )
+                // one would resend into the very gap this call exists to close. Named as THIS
+                // device's trouble rather than as an answer the server gave: the server said
+                // nothing here, and only an error carrying no `apiError` can be flattened by the
+                // gap branch without that branch having to read an answer to tell them apart.
+                throw MediaUploadError.stalled
             }
             return Int64(offset)
         case .unprocessableContent:
