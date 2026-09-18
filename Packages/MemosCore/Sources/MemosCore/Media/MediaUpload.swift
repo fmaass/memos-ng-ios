@@ -120,12 +120,17 @@ public enum MediaUpload {
                     synced = try await self.offset(
                         of: started.uploadUid, using: client, within: deadline, under: authority
                     )
-                } catch let refusal as MediaUploadError where refusal.apiError == .unauthorized {
-                    // A rejected credential keeps its identity all the way to the store, or the
-                    // session it killed carries on as if a conflict had happened
-                    // (`StoreFailure.reportable`): the one answer this branch must not flatten.
+                } catch let refusal as MediaUploadError where refusal.apiError != nil {
+                    // An answer the SERVER gave keeps its identity all the way to the store, and
+                    // this branch does not read it: classifying it here would re-decide, an actor
+                    // hop early, something `StoreFailure.reportable` decides at the effect. A
+                    // rejected credential is what that costs — renamed a conflict, it ends no
+                    // session, and the app carries on presenting a token the server is done with.
                     throw refusal
                 } catch {
+                    // Everything left is this device's own trouble rather than the server's: a
+                    // session that did not answer inside the deadline, an answer with no number in
+                    // it. There is nothing to resume from either way, so the gap stands.
                     throw MediaUploadError.refused(.server(status: 409))
                 }
                 // Three ways this stops instead of carrying on. A server that reports the very

@@ -61,7 +61,9 @@ struct MemoGoneTests {
         // The claim, observed the only way a caller can: a second tap that is taken at all. Held
         // past a refusal, it would refuse every later toggle of this memo for the rest of the run.
         _ = await store.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
-        #expect(patches.count == 2, "the second tap sent nothing, so the claim outlived its request")
+        #expect(
+            patches.count == 2, "the second tap sent nothing, so the claim outlived its request"
+        )
     }
 
     @Test("an edit answered 404 is the server's no, and the words stay in the sheet")
