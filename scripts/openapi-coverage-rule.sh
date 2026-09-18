@@ -155,16 +155,30 @@ try:
 except (UnicodeDecodeError, OSError) as error:
     unusable("%s could not be read as UTF-8 text (%s)" % (config_path, error))
 
-# A CRLF checkout of this file says exactly the same thing, so one "\r" immediately before the "\n"
-# is a line ending and is dropped here. A "\r" anywhere else is not: it stays in the line and is
-# refused below with the rest.
-lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+# A CRLF checkout of this file says exactly the same thing, so one "\r" immediately BEFORE a "\n" is
+# a line ending and is dropped here. Nowhere else: what follows the last "\n" was ended by the file,
+# not by a newline, so a "\r" there stays in its line and is refused below with the rest.
+parts = text.split("\n")
+lines = [part[:-1] if part.endswith("\r") else part for part in parts[:-1]] + parts[-1:]
 
 # The grammar reads printable ASCII and nothing else. Full-line comments are the one exception,
-# because the prose in this config uses an em dash and an ellipsis — but not even a comment may
-# carry a control character or a separator that would end a line somewhere else.
+# because the prose in this config uses an em dash and an ellipsis — but the exception is bounded by
+# what YAML itself calls printable: a document holding a C0 or C1 control, a surrogate or one of the
+# two noncharacters is one the generator's own parser refuses to load, comment or not, and a rule
+# that reads further than the parser it guards is answering about a file that will never be built.
+# U+2028 and U+2029 are printable to YAML and refused here anyway: they end a line for some readers
+# and vanish for others, which is the whole class this reader exists to refuse.
 PRINTABLE = (0x20, 0x7E)
 SEPARATORS = (0x2028, 0x2029)
+
+
+def is_yaml_printable(point):
+    return (
+        0x20 <= point <= 0x7E
+        or 0xA0 <= point <= 0xD7FF
+        or 0xE000 <= point <= 0xFFFD
+        or 0x10000 <= point <= 0x10FFFF
+    ) and point not in SEPARATORS
 
 
 def is_comment(line):
@@ -181,15 +195,14 @@ def check_characters(number, line):
         unreadable(number, line, "is indented with a tab, which a space-counting reader cannot see")
     for column, char in enumerate(line, 1):
         point = ord(char)
-        printable = PRINTABLE[0] <= point <= PRINTABLE[1]
-        control = point < 0x20 or point == 0x7F or 0x80 <= point <= 0x9F
-        if control or point in SEPARATORS:
+        if not is_yaml_printable(point):
             unreadable(
                 number,
                 line,
-                "holds U+%04X at column %d, which no line of this file may carry" % (point, column),
+                "holds U+%04X at column %d, which no line of a YAML document may carry"
+                % (point, column),
             )
-        if not printable and not comment:
+        if not (PRINTABLE[0] <= point <= PRINTABLE[1]) and not comment:
             unreadable(
                 number,
                 line,

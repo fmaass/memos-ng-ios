@@ -350,6 +350,37 @@ w="$(new_tree lone-carriage-return)" || exit 1
 mutate_config "$w" 000D instead-of-newline || exit 1
 check "a lone carriage return as a line break" 2 "$w" "U+000D"
 
+# The comment exemption is for prose — an em dash, an ellipsis — and not a door. YAML's c-printable
+# excludes U+FFFE and U+FFFF wherever they appear, comments included, and a document holding one is
+# a document a real parser refuses to load at all; this reader cannot accept what the generator's
+# own parser would throw out.
+for point in FFFE FFFF; do
+  w="$(new_tree "noncharacter-$point")" || exit 1
+  /usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" "$point" <<'PY' || exit 1
+import sys
+
+path, code = sys.argv[1], int(sys.argv[2], 16)
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write("# " + chr(code) + "\n")
+PY
+  check "a comment holding U+$point" 2 "$w" "U+$point"
+done
+
+# The other half of the line-ending decision: a "\r" is a line ending only where a "\n" follows it,
+# and the end of the file is not a "\n". A terminal one is a character in the last line like any
+# other, and this file may not hold it.
+w="$(new_tree terminal-carriage-return)" || exit 1
+/usr/bin/python3 - "$w/$rel_dir/openapi-generator-config.yaml" <<'PY' || exit 1
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8", newline="").read()
+if not text.endswith("\n"):
+    raise SystemExit("fixture: %s does not end in a newline" % path)
+open(path, "w", encoding="utf-8", newline="").write(text[:-1] + chr(0x0D))
+PY
+check "a carriage return ending the last line" 2 "$w" "U+000D"
+
 # CRLF is the one line ending that is DECIDED rather than refused: a checkout with the other
 # convention is a file that still says exactly the same thing, so it is read, and the proof is that
 # the list it yields is the same length as the real one.
