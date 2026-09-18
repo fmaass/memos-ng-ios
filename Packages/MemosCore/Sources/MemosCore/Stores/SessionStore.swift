@@ -260,6 +260,11 @@ public final class SessionStore {
     /// The wait between the exchange's two attempts. Injected so a test can take it away: a
     /// suite that really slept would pay 1.5 s per retry case for nothing.
     private let sleeper: @Sendable (Duration) async throws -> Void
+    /// The notice's debounce wait, on a seam of its OWN. Two kinds of wait, two seams: the retry
+    /// ladder's record stays the ladder's, so a suite that asserts what the ladder scheduled is
+    /// not reading a notice wake, and nothing has to tell them apart by length — a test that did
+    /// that would break the day either constant moved.
+    private let noticeSleeper: @Sendable (Duration) async throws -> Void
     /// What time it is, injected for the reason the sleeper is: the notice's rule is about how
     /// long something has been true, and a suite that really waited for it would pay the delay per
     /// case. The test moves this by hand and releases the wake itself.
@@ -305,6 +310,9 @@ public final class SessionStore {
         sleeper: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },
+        noticeSleeper: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        },
         now: @escaping @Sendable () -> Date = Date.init,
         account: (any OutboxAccountPublishing)? = nil,
         identity: MediaIdentity = .shared,
@@ -326,6 +334,7 @@ public final class SessionStore {
         self.credentials = credentials
         self.makeClient = makeClient
         self.sleeper = sleeper
+        self.noticeSleeper = noticeSleeper
         self.now = now
         self.account = account
         self.identity = identity
@@ -1360,7 +1369,7 @@ public final class SessionStore {
                     noticeWakeArmedFor = nil
                 }
             }
-            try? await sleeper(remaining)
+            try? await noticeSleeper(remaining)
             guard !Task.isCancelled else { return }
             // The outage this was armed for, and the session it was armed for. Either can be over
             // by now, and a wake is not evidence about anything but the moment it was armed in.

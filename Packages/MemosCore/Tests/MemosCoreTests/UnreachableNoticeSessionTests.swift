@@ -119,6 +119,9 @@ struct UnreachableNoticeSessionTests {
             credentials: credentials(),
             makeClient: { _, token in Stub.client(token: token, handler: handler) },
             sleeper: { await sleeper.sleep($0) },
+            // Both seams park in the same recorder, so these witnesses read one ordered script of
+            // everything the session waited for, ladder waits and notice wakes alike.
+            noticeSleeper: { await sleeper.sleep($0) },
             now: { [clock] in clock.now },
             lastKnownUser: boundFile()
         )
