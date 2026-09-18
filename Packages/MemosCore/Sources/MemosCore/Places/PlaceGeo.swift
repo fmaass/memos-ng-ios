@@ -81,8 +81,30 @@ nonisolated public enum PlaceGeo {
     private static let minFitSpan: Double = 40
 
     public static func coordKey(_ latitude: Double, _ longitude: Double) -> String {
-        let format = "%.\(coordinateDecimals)f,%.\(coordinateDecimals)f"
-        return String(format: format, latitude, longitude)
+        "\(fixed(latitude)),\(fixed(longitude))"
+    }
+
+    /// One coordinate as the SPA's `toFixed` writes it.
+    ///
+    /// Not `String(format: "%.6f")`: printf rounds an exactly representable halfway value to the
+    /// EVEN digit and signs negative zero, where `toFixed` takes the halfway value up in
+    /// magnitude and leaves negative zero unsigned — so 0.0078125 would be written `0.007812`
+    /// here and `0.007813` in the browser, and the two clients would then split a pin the other
+    /// keeps whole. Decimal rounds in base ten, where a halfway value at six decimals is exactly
+    /// halfway rather than whatever the binary value nearest to it happens to be, and the sign is
+    /// decided by the same test the language spec makes: `< 0`, which negative zero fails and a
+    /// value that merely rounds to zero passes.
+    private static func fixed(_ value: Double) -> String {
+        var magnitude = Decimal(abs(value))
+        var carried = Decimal()
+        NSDecimalRound(&carried, &magnitude, coordinateDecimals, .plain)
+
+        var power: UInt64 = 1
+        for _ in 0..<coordinateDecimals { power *= 10 }
+        let rounded = NSDecimalNumber(decimal: carried * Decimal(power)).uint64Value
+        let fraction = String(rounded % power)
+        let padding = String(repeating: "0", count: coordinateDecimals - fraction.count)
+        return "\(value < 0 ? "-" : "")\(rounded / power).\(padding)\(fraction)"
     }
 
     /// Markers grouped by the coordinate they were taken at, groups in first-seen order and each

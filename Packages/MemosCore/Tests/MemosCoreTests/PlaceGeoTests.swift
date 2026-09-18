@@ -130,6 +130,20 @@ struct PlaceGeoTests {
         #expect(groups.map(\.key) == ["47.200001,8.400000", "47.200006,8.400000"])
     }
 
+    /// Parity vectors read from the browser's own `toFixed(6)`, which the SPA's spec does not
+    /// carry yet. They are the two places a printf conversion parts company with it: an exactly
+    /// representable halfway value, which printf rounds to even and `toFixed` takes up, and
+    /// negative zero, which printf signs and `toFixed` does not — while a merely tiny negative
+    /// keeps its sign in both. A key that differs by one digit splits a pin the browser keeps
+    /// whole, or joins two it keeps apart, which is the same defect read from either end.
+    @Test("rounds and signs a coordinate key exactly as the browser does")
+    func coordKeyMatchesToFixed() {
+        #expect(PlaceGeo.coordKey(0.0078125, -0.0078125) == "0.007813,-0.007813")
+        #expect(PlaceGeo.coordKey(-0.0, 0.0) == "0.000000,0.000000")
+        #expect(PlaceGeo.coordKey(-1e-9, 1e-9) == "-0.000000,0.000000")
+        #expect(PlaceGeo.coordKey(47.2000012, 8.4) == "47.200001,8.400000")
+    }
+
     // The overlay is drawn on top of the map pane, so the pixels it covers are pixels a fit will
     // happily put a pin in. On the web at 1440x900 that put 2 of 8 pins at y 826 behind a bar
     // occupying y 812-884, where nothing could click them.
