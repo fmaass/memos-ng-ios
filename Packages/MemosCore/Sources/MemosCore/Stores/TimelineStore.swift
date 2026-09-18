@@ -448,6 +448,11 @@ public final class TimelineStore {
                 return
             }
             serverUnreachable = false
+            // The other half of the sentence this store reports to the session. A page that
+            // arrived is evidence the server is reachable for the credential that asked — and it
+            // is handed over as a QUESTION, never as an answer: only a whoami confirms a session
+            // (`noteTransportSuccess`).
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
             // An anchored first page starts BELOW a ceiling, so everything written after that day
@@ -540,6 +545,7 @@ public final class TimelineStore {
                     return
                 }
                 serverUnreachable = false
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
                 // A cursor page can overlap the one before it when a memo moved; appending blindly
                 // would show the same memo twice and break SwiftUI's identity.
                 let known = Set(memos.map(\.uid))
@@ -647,6 +653,7 @@ public final class TimelineStore {
                     return nil
                 }
                 serverUnreachable = false
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
                 // The server says whether it was the last page, exactly as it does downwards.
                 // Read BEFORE the emptiness check, because an upward page that adds nothing new
                 // is still the server saying there is nothing above.

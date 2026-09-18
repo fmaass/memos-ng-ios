@@ -137,4 +137,13 @@ public protocol SessionReporting: AnyObject {
         _ failure: ServerReachability.Reason,
         issuedUnder generation: Int
     )
+
+    /// A request that DID reach the server, reported by the incarnation that issued it.
+    ///
+    /// The sibling of the failure, and deliberately not its mirror image. A failure is evidence
+    /// about the server and the session can act on it; a success is evidence about one request at
+    /// one instant, and the only thing that confirms a session is a whoami that answered. So this
+    /// asks for that check and decides nothing itself — which is also why every store may call it
+    /// on every page it applies without any of them being able to confirm a session between them.
+    func noteTransportSuccess(issuedUnder generation: Int)
 }

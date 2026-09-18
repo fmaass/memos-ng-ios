@@ -174,6 +174,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
             lastError = nil
+            // A page that arrived is the session's to act on, as a question and not an answer —
+            // the same report the failure funnel makes, from the side where it went right
+            // (`noteTransportSuccess`).
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
             // This IS a different list — a new lineage, whose cursor no page in flight shares.
             generation += 1
         } catch {
@@ -232,6 +236,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
                 return
             } catch {
                 guard lineage == self.lineage else {

@@ -224,6 +224,14 @@ public final class SessionStore {
     /// The retry waiting to run, if the session is unconfirmed and the app is in front of
     /// somebody.
     private var retryInFlight: Task<Void, Never>?
+    /// Which rung of the ladder the schedule has reached, so a check asked for from OUTSIDE the
+    /// schedule does not reset it.
+    ///
+    /// A store's success asks through the same slot the ladder uses, and it has to carry a rung
+    /// number with it. Passing zero would make every applied page restart the ladder at three
+    /// seconds — and the network that is flapping badly enough to produce those pages is exactly
+    /// the one whose retries should be spreading out, not bunching up.
+    private var ladderAttempt = 0
     /// Whether a SCENE has reported itself active. Retries only run then: a phone in a pocket
     /// asking every 45 seconds is a battery cost with nobody to read the answer, and a process the
     /// system woke to finish an upload has no scene at all — it must not start a ladder nobody
@@ -726,8 +734,14 @@ public final class SessionStore {
     /// The re-validation half of the lifecycle: the foreground trigger and the retry schedule both
     /// come through here, and both join whatever is already in flight rather than sending a second
     /// question.
-    private func revalidate(attempt: Int) async {
+    private func revalidate(attempt: Int, expecting generation: Int? = nil) async {
         await validating { [self] in
+            // This body runs inside a task of `validating`'s own, so the client and the credential
+            // it is about to read are whatever the session holds NOW — not what it held when the
+            // check was asked for. A caller that knows which incarnation earned its request says
+            // so, and the comparison happens HERE, with nothing awaited between it and the read,
+            // because that read is the instant it is about.
+            if let generation, generation != sessionGeneration { return }
             guard let client, let configuration, let credential, state.user != nil else { return }
             await validate(
                 client: client,
@@ -1055,6 +1069,9 @@ public final class SessionStore {
     /// Only in the foreground. Backgrounded, the schedule stops entirely — the phone in a pocket
     /// has nobody to show an answer to, and the return to the foreground is itself a trigger.
     private func scheduleRetry(attempt: Int, delay: Duration? = nil) {
+        // Recorded whatever the guards below decide: the rung is a property of the schedule this
+        // session has climbed to, not of whether there is a scene in front of it to climb further.
+        ladderAttempt = attempt
         retryInFlight?.cancel()
         retryInFlight = nil
         guard isForegrounded, awaitingConfirmation else { return }
@@ -2429,6 +2446,39 @@ public final class SessionStore {
         let host = configuration.baseURL.host() ?? configuration.baseURL.absoluteString
         setVerification(.unverified(SessionRestoreFailure(failure, host: host).message))
         scheduleRetry(attempt: 1)
+    }
+
+    /// A store reached the server, reported by the incarnation that issued the request.
+    ///
+    /// It asks for a check and it decides nothing, which is the whole of the asymmetry with its
+    /// sibling. A page that arrived says the server answered ONE request, under ONE credential, at
+    /// an instant that has already passed; the question this app has to answer is whether the
+    /// credential it is holding is still good, and the only thing that answers that is a whoami.
+    /// Confirming a session from a page instead would resurrect exactly the session a revoked
+    /// token should have ended, because the revoked token's list read can still be in the air.
+    ///
+    /// A confirmed session is a no-op — no counter, no request, no work — so the four stores may
+    /// call this on every page they apply.
+    public func noteTransportSuccess(issuedUnder generation: Int) {
+        guard generation == sessionGeneration else { return }
+        guard state.user != nil else { return }
+        guard verification != .verified else { return }
+        // The one thing it does. The generation crosses the hop WITH the task, because the
+        // session it is about can be over before the task gets its turn.
+        Task { [generation] in await probe(issuedUnder: generation) }
+    }
+
+    /// Asks the question that can confirm a session, on behalf of a request that got through.
+    ///
+    /// The comparison at the top is the same one the caller already made, and it is not
+    /// decoration: the caller made it in the instant the page landed, and this runs a hop later —
+    /// long enough for a sign-out, a wipe or another sign-in to have put a different session
+    /// behind the same store. It joins whatever check is already in flight rather than sending a
+    /// second one, and it carries the rung the ladder had reached rather than zero, so a success
+    /// seen at the capped wait does not drop the schedule back to three seconds.
+    private func probe(issuedUnder generation: Int) async {
+        guard generation == sessionGeneration else { return }
+        await revalidate(attempt: ladderAttempt, expecting: generation)
     }
 
     static func whoami(_ client: any APIProtocol) async throws -> User {

@@ -78,6 +78,9 @@ public final class PlacesStore {
             hasSettledOnce = true
             lastLoadFailed = false
             lastError = nil
+            // Markers that arrived are the session's to act on, as a question and not an answer
+            // (`noteTransportSuccess`).
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             await report(error, issuedUnder: handle)
         }
