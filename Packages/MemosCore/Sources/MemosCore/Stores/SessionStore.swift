@@ -90,6 +90,24 @@ public final class SessionStore {
     /// credential opens the app before the server answers. `.verified` is what a session that was
     /// never in doubt reads, so nothing that does not admit provisionally has to think about it.
     public private(set) var verification: SessionVerification = .verified
+    /// When this session stopped being confirmed — nil while it is.
+    ///
+    /// Written only by the one setter below, and only when it is nil, so it dates the OUTAGE
+    /// rather than the last thing that noticed it: a ladder that fails four times in a row is one
+    /// outage, and re-stamping it would keep the notice permanently `bannerDelay` away.
+    public private(set) var unverifiedSince: Date?
+    /// Whether the "can't reach the server" notice belongs on screen, as the store last decided it.
+    ///
+    /// It is a published answer rather than a question the view asks, because the question has a
+    /// clock in it: nothing redraws when a second passes. The value is only ever
+    /// `UnreachableNotice.shows(…)` taken at a moment the store can name — the instant a
+    /// verification was written, or the instant a wake armed for this outage came due.
+    public private(set) var showsUnreachableNotice = false
+    /// How long the app stays quiet about an unconfirmed session before it says anything.
+    ///
+    /// A healthy launch and a brief drop-out both pass through `.unverified` in less than this, and
+    /// a notice that appeared for either would be a flicker somebody has to read to dismiss.
+    public static let bannerDelay = Duration.seconds(2)
     public private(set) var lastError: String?
     /// The same failure as a VALUE, beside the sentence `lastError` carries.
     ///
@@ -242,6 +260,18 @@ public final class SessionStore {
     /// The wait between the exchange's two attempts. Injected so a test can take it away: a
     /// suite that really slept would pay 1.5 s per retry case for nothing.
     private let sleeper: @Sendable (Duration) async throws -> Void
+    /// What time it is, injected for the reason the sleeper is: the notice's rule is about how
+    /// long something has been true, and a suite that really waited for it would pay the delay per
+    /// case. The test moves this by hand and releases the wake itself.
+    private let now: @Sendable () -> Date
+    /// The wake that publishes the notice once the delay has run, or nil when none is waiting.
+    private var noticeWake: Task<Void, Never>?
+    /// Which outage the wakes belong to. Advanced when a session becomes confirmed — the outage is
+    /// over, and anything still asleep on its account has nothing left to say.
+    private var noticeWakeToken = 0
+    /// What the wake in the slot was armed for, so a second assignment inside the same outage of
+    /// the same session does not arm a duplicate beside it.
+    private var noticeWakeArmedFor: (generation: Int, token: Int)?
     /// Where the identity a launch may open on is kept. Nil in a suite that is not about it, for
     /// the reason `account` is nil there: a test must never write into the real container.
     private let lastKnownUser: (any LastKnownUserStoring)?
@@ -275,6 +305,7 @@ public final class SessionStore {
         sleeper: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },
+        now: @escaping @Sendable () -> Date = Date.init,
         account: (any OutboxAccountPublishing)? = nil,
         identity: MediaIdentity = .shared,
         lastKnownUser: (any LastKnownUserStoring)? = nil,
@@ -295,6 +326,7 @@ public final class SessionStore {
         self.credentials = credentials
         self.makeClient = makeClient
         self.sleeper = sleeper
+        self.now = now
         self.account = account
         self.identity = identity
         self.lastKnownUser = lastKnownUser
@@ -816,7 +848,7 @@ public final class SessionStore {
             )
             // Immediately after, with nothing awaited in between: `establish` leaves a session
             // that looks confirmed, and it is not — the server has not been asked yet.
-            verification = .verifying
+            setVerification(.verifying)
             // This credential came OUT of storage, so storage demonstrably holds it — the one
             // installation whose proof is the read itself rather than a write.
             persistenceProven = true
@@ -961,7 +993,7 @@ public final class SessionStore {
             park(failure)
             return
         }
-        verification = .unverified(failure.message)
+        setVerification(.unverified(failure.message))
         scheduleRetry(attempt: attempt + 1)
     }
 
@@ -1255,6 +1287,92 @@ public final class SessionStore {
         licenceRevocationFailed = false
     }
 
+    /// The one place `verification` is written.
+    ///
+    /// Everything the notice needs to know follows from a verification being ASSIGNED, so it is
+    /// decided here rather than at the six places that assign one: whoami's own failure, a
+    /// provisional admission, a store's report, a restored snapshot, a wipe and a confirmation
+    /// each become "the session is unconfirmed as of now" without any of them having to remember
+    /// to stamp a clock or to take a notice down. That is also what makes the offline launch raise
+    /// the notice with no store involved at all.
+    private func setVerification(_ value: SessionVerification) {
+        verification = value
+        guard value != .verified else {
+            // The outage is over: nothing dates it, nothing shows for it, and anything still
+            // asleep on its account belongs to a token this session has moved past.
+            unverifiedSince = nil
+            showsUnreachableNotice = false
+            noticeWake?.cancel()
+            noticeWake = nil
+            noticeWakeArmedFor = nil
+            noticeWakeToken += 1
+            return
+        }
+        // The rule is about the value ASSIGNED, not about leaving `.verified`: a ladder that fails
+        // four times running writes `.unverified` four times, and all four are the same outage. So
+        // the stamp is taken only where there is none.
+        if unverifiedSince == nil { unverifiedSince = now() }
+        reconcileNoticeWake()
+    }
+
+    /// Brings the notice, and the wake that would raise it, into line with what is true now.
+    ///
+    /// Called from the setter alone, synchronously with the assignment, so there is no instant at
+    /// which the state and the notice disagree about the same outage.
+    private func reconcileNoticeWake() {
+        if UnreachableNotice.shows(
+            verification, unverifiedSince: unverifiedSince, now: now(), after: Self.bannerDelay)
+        {
+            // The launch that took six seconds to fail: the delay is already behind us, and
+            // waiting another `bannerDelay` to say so would be a second silence nobody asked for.
+            showsUnreachableNotice = true
+            return
+        }
+        guard case .unverified = verification, let since = unverifiedSince else { return }
+        // A wake armed under an EARLIER generation does not count: `putBack` bumps the generation
+        // before it restores, so a snapshot restored over the same outage replaces a wake that can
+        // no longer publish with one that can, and keeps the stamp — it is the same outage.
+        if let armed = noticeWakeArmedFor,
+            armed.generation == sessionGeneration, armed.token == noticeWakeToken
+        {
+            return
+        }
+        let elapsed = now().timeIntervalSince(since)
+        armNoticeWake(after: .seconds(max(0, Self.bannerDelay.seconds - elapsed)))
+    }
+
+    /// Puts the notice on the clock for what is left of the delay.
+    private func armNoticeWake(after remaining: Duration) {
+        let token = noticeWakeToken
+        let generation = sessionGeneration
+        noticeWake?.cancel()
+        noticeWakeArmedFor = (generation: generation, token: token)
+        noticeWake = Task { @MainActor [self] in
+            // FIRST in the body, so it runs on every exit — the three early returns below
+            // included, a cancelled wake's among them — and it compares what it owns before
+            // clearing, the rule `validating` uses for the same hazard: only the wake that holds
+            // the slot may drop its handle, or a late one takes its replacement's with it.
+            defer {
+                if noticeWakeArmedFor?.generation == generation,
+                    noticeWakeArmedFor?.token == token
+                {
+                    noticeWake = nil
+                    noticeWakeArmedFor = nil
+                }
+            }
+            try? await sleeper(remaining)
+            guard !Task.isCancelled else { return }
+            // The outage this was armed for, and the session it was armed for. Either can be over
+            // by now, and a wake is not evidence about anything but the moment it was armed in.
+            guard token == noticeWakeToken, generation == sessionGeneration else { return }
+            // Asked of the PRESENT rather than asserted from the past: whatever was true when this
+            // was armed, what goes on screen is what is true now.
+            showsUnreachableNotice = UnreachableNotice.shows(
+                verification, unverifiedSince: unverifiedSince, now: now(),
+                after: Self.bannerDelay)
+        }
+    }
+
     /// The session is confirmed — and the outbox is told, exactly once per transition.
     ///
     /// The claim is made HERE, synchronously, rather than by whoever noticed the answer: a capture
@@ -1262,7 +1380,7 @@ public final class SessionStore {
     /// two paths into `.verified` firing it twice is two drains of the same queue.
     private func enterVerified() {
         let wasUnconfirmed = verification != .verified
-        verification = .verified
+        setVerification(.verified)
         retryInFlight?.cancel()
         retryInFlight = nil
         guard wasUnconfirmed, let onVerified else { return }
@@ -1489,7 +1607,7 @@ public final class SessionStore {
         client = snapshot.client
         credential = snapshot.credential
         configuration = snapshot.configuration
-        verification = snapshot.verification
+        setVerification(snapshot.verification)
         // Restoring the STATE is not restoring the lifecycle. The bump above is what stops a
         // pre-attempt answer becoming current again — and it is also what makes the check in
         // flight exit without doing anything, so a session put back as `.verifying` would sit
@@ -1552,7 +1670,7 @@ public final class SessionStore {
         credential = nil
         endIncarnation()
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
-        verification = .verified
+        setVerification(.verified)
         persistenceProven = false
         retryInFlight?.cancel()
         retryInFlight = nil
@@ -2300,7 +2418,7 @@ public final class SessionStore {
         }
         guard state.user != nil, verification == .verified, let configuration else { return }
         let host = configuration.baseURL.host() ?? configuration.baseURL.absoluteString
-        verification = .unverified(SessionRestoreFailure(failure, host: host).message)
+        setVerification(.unverified(SessionRestoreFailure(failure, host: host).message))
         scheduleRetry(attempt: 1)
     }
 

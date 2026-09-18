@@ -426,6 +426,31 @@ struct ComposeFailureTests {
                 == .rejection)
     }
 
+    /// The two statuses this server never emits itself: something in front of it answered, and the
+    /// memo's fate is unknown rather than refused. The sentence that follows from `sent: true` is
+    /// the one about an answer that never came back, which is the only honest thing to say when a
+    /// proxy gave up on a request that had already gone out.
+    @Test("a proxy's own answer is a transport failure, and carries what the caller knew")
+    func gatewayStatusesAreTransportFailures() {
+        #expect(ComposeFailure.classify(APIError.server(status: 502), sent: true)
+            == .transport(sent: true))
+        #expect(ComposeFailure.classify(APIError.server(status: 504), sent: true)
+            == .transport(sent: true))
+        #expect(ComposeFailure.classify(APIError.server(status: 502), sent: false)
+            == .transport(sent: false))
+        #expect(ComposeFailure.classify(APIError.server(status: 504), sent: false)
+            == .transport(sent: false))
+    }
+
+    /// The counterweight: a server that answers for itself keeps its own card, whatever the status
+    /// looks like. 503 is the one this server really does emit under load.
+    @Test("a status the server answered with is a rejection, and stays one")
+    func answeredStatusesStayRejections() {
+        #expect(ComposeFailure.classify(APIError.server(status: 503), sent: true) == .rejection)
+        #expect(ComposeFailure.classify(APIError.server(status: 500), sent: true) == .rejection)
+        #expect(ComposeFailure.classify(APIError.unauthorized, sent: true) == .authorization)
+    }
+
     @Test("the classification of an error is about the error, not about the message")
     func classification() {
         #expect(
