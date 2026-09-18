@@ -86,25 +86,52 @@ nonisolated public enum PlaceGeo {
 
     /// One coordinate as the SPA's `toFixed` writes it.
     ///
-    /// Not `String(format: "%.6f")`: printf rounds an exactly representable halfway value to the
-    /// EVEN digit and signs negative zero, where `toFixed` takes the halfway value up in
-    /// magnitude and leaves negative zero unsigned — so 0.0078125 would be written `0.007812`
-    /// here and `0.007813` in the browser, and the two clients would then split a pin the other
-    /// keeps whole. Decimal rounds in base ten, where a halfway value at six decimals is exactly
-    /// halfway rather than whatever the binary value nearest to it happens to be, and the sign is
-    /// decided by the same test the language spec makes: `< 0`, which negative zero fails and a
-    /// value that merely rounds to zero passes.
+    /// Neither printf nor `Decimal` can stand in for it, for the same underlying reason: each one
+    /// decides on a number that is not the one `toFixed` reads. `%.6f` rounds an exact halfway
+    /// value to the EVEN digit (0.0078125 becomes `0.007812`, where the browser says `0.007813`)
+    /// and signs negative zero. `Decimal(Double)` rounds correctly in base ten but only on an
+    /// APPROXIMATION of the double, and an ordinary seven-decimal coordinate ending in a 5 sits
+    /// within about 1e-16 of a halfway value — so a conversion error of that size flips it: the
+    /// double nearest 8.5417235 is just BELOW the halfway point and the browser writes
+    /// `8.541723`, while the decimal conversion of it lands just above and writes `8.541724`.
+    ///
+    /// So the digits are computed from the double's own bits, which are exact by definition: the
+    /// magnitude is `significand · 2^-shift` with an integer significand, the scaled numerator
+    /// `significand · 10^6` is exact in 128 bits (it is below 2^73), and the shift splits it into
+    /// the digits and the remainder that decides the rounding. A remainder of exactly half rounds
+    /// up, which is the rule the language spec states as "if there are two such n, pick the
+    /// larger n". The sign is decided by the same test that spec makes, `< 0`, which negative
+    /// zero fails and a value that merely rounds to zero passes. The tests pin both the exact
+    /// halfway values and the near-halfway ones, on both sides and both signs.
     private static func fixed(_ value: Double) -> String {
-        var magnitude = Decimal(abs(value))
-        var carried = Decimal()
-        NSDecimalRound(&carried, &magnitude, coordinateDecimals, .plain)
-
         var power: UInt64 = 1
         for _ in 0..<coordinateDecimals { power *= 10 }
-        let rounded = NSDecimalNumber(decimal: carried * Decimal(power)).uint64Value
-        let fraction = String(rounded % power)
+        let sign = value < 0 ? "-" : ""
+        let magnitude = abs(value)
+
+        // A coordinate is finite and inside the world. Nothing else can come off the wire — JSON
+        // has no literal for an infinity — and such a value is handed back as its own description
+        // rather than trapping the arithmetic below, which is sized for this domain. Two distinct
+        // doubles still keep distinct text, so no two of them can collapse onto one key.
+        guard magnitude.isFinite, magnitude <= 360 else { return "\(sign)\(magnitude)" }
+
+        let bits = magnitude.bitPattern
+        let rawExponent = Int((bits >> 52) & 0x7FF)
+        let rawSignificand = bits & 0x000F_FFFF_FFFF_FFFF
+        // The leading one is implicit in a normal number and absent from a subnormal one.
+        let significand = rawExponent == 0 ? rawSignificand : rawSignificand | (1 << 52)
+        let shift = 52 - (rawExponent == 0 ? -1022 : rawExponent - 1023)
+
+        let scaled = UInt128(significand) * UInt128(power)
+        let whole = scaled >> shift
+        // Beyond 128 places the remainder cannot reach half of the shifted unit, and asking for
+        // that unit would shift it away to nothing and round everything up.
+        let roundsUp = shift < 128 && scaled - (whole << shift) >= UInt128(1) << (shift - 1)
+        let units = UInt64(whole) + (roundsUp ? 1 : 0)
+
+        let fraction = String(units % power)
         let padding = String(repeating: "0", count: coordinateDecimals - fraction.count)
-        return "\(value < 0 ? "-" : "")\(rounded / power).\(padding)\(fraction)"
+        return "\(sign)\(units / power).\(padding)\(fraction)"
     }
 
     /// Markers grouped by the coordinate they were taken at, groups in first-seen order and each

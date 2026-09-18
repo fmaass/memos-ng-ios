@@ -144,6 +144,26 @@ struct PlaceGeoTests {
         #expect(PlaceGeo.coordKey(47.2000012, 8.4) == "47.200001,8.400000")
     }
 
+    /// Parity vectors read the same way, for coordinates that are NEAR a halfway value rather
+    /// than on one: an ordinary seven-decimal coordinate ending in a 5 lands a fraction of a
+    /// millionth above or below the tie, and which side it lands on is a property of the binary
+    /// number, not of the digits someone typed. `toFixed` reads that binary number, so anything
+    /// here that reads an approximation of it instead can round the wrong way. The first four sit
+    /// above their tie, the next four below it, and the last two are the same pair signed.
+    @Test("rounds a coordinate that is near a halfway value the way the browser does")
+    func coordKeyMatchesToFixedNearTies() {
+        #expect(PlaceGeo.coordKey(1.0000005, 0) == "1.000001,0.000000")
+        #expect(PlaceGeo.coordKey(0.0000015, 0) == "0.000002,0.000000")
+        #expect(PlaceGeo.coordKey(46.9479745, 0) == "46.947975,0.000000")
+        #expect(PlaceGeo.coordKey(179.9999995, 0) == "180.000000,0.000000")
+        #expect(PlaceGeo.coordKey(47.3769875, 0) == "47.376987,0.000000")
+        #expect(PlaceGeo.coordKey(8.0000015, 0) == "8.000001,0.000000")
+        #expect(PlaceGeo.coordKey(8.5417235, 0) == "8.541723,0.000000")
+        #expect(PlaceGeo.coordKey(100.0000005, 0) == "100.000000,0.000000")
+        #expect(PlaceGeo.coordKey(-46.9479745, 0) == "-46.947975,0.000000")
+        #expect(PlaceGeo.coordKey(-47.3769875, 0) == "-47.376987,0.000000")
+    }
+
     // The overlay is drawn on top of the map pane, so the pixels it covers are pixels a fit will
     // happily put a pin in. On the web at 1440x900 that put 2 of 8 pins at y 826 behind a bar
     // occupying y 812-884, where nothing could click them.
