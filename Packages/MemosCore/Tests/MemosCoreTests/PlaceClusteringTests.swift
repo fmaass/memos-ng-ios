@@ -123,4 +123,52 @@ struct PlaceClusteringTests {
         #expect(diff.added == [])
         #expect(diff.removed == [])
     }
+
+    // `pins(from:)` has no counterpart in the SPA's spec file: it composes the coordinate grouping
+    // and the display order, both of which are pinned by their own vectors there, into the shape
+    // the map draws. What is asserted here is the composition — which photo a pin wears, how many
+    // it says, and in what order it hands them on.
+
+    @Test("one pin per coordinate, wearing the newest photo taken there")
+    func oneGroupOnePin() {
+        let january = "2026-01-01T00:00:00Z"
+        let february = "2026-02-01T00:00:00Z"
+        let march = "2026-03-01T00:00:00Z"
+        let pins = PlaceClustering.pins(from: [
+            placeMarker(uid: "old", latitude: 47.2, longitude: 8.4, takenAt: january),
+            placeMarker(uid: "new", latitude: 47.2, longitude: 8.4, takenAt: march),
+            placeMarker(uid: "far", latitude: 12.5, longitude: 3.1, takenAt: february),
+        ])
+
+        #expect(pins.count == 2)
+        #expect(pins[0].key == PlaceGeo.coordKey(47.2, 8.4))
+        #expect(pins[0].latitude == 47.2)
+        #expect(pins[0].longitude == 8.4)
+        #expect(pins[0].count == 2)
+        // The lead is the group's NEWEST, not the first one the server happened to send.
+        #expect(pins[0].uid == "new")
+        #expect(pins[0].uids == ["new", "old"])
+        #expect(pins[1].uid == "far")
+        #expect(pins[1].count == 1)
+    }
+
+    @Test("the pins come back in the order the coordinates were first seen")
+    func keepsGroupingOrder() {
+        // Not sorted by count, by date or by key: the grouping's order is what the diff and the
+        // annotations are applied in, and re-ordering it would make two identical reads look
+        // like a set of moves.
+        let pins = PlaceClustering.pins(from: [
+            placeMarker(uid: "b", latitude: 9, longitude: 9, takenAt: "2026-01-01T00:00:00Z"),
+            placeMarker(uid: "a", latitude: 1, longitude: 1, takenAt: "2026-05-01T00:00:00Z"),
+            placeMarker(uid: "c", latitude: 1, longitude: 1, takenAt: "2026-06-01T00:00:00Z"),
+        ])
+
+        #expect(pins.map(\.key) == [PlaceGeo.coordKey(9, 9), PlaceGeo.coordKey(1, 1)])
+        #expect(pins.map(\.count) == [1, 2])
+    }
+
+    @Test("no markers is no pins, not one empty pin")
+    func nothingToDraw() {
+        #expect(PlaceClustering.pins(from: []).isEmpty)
+    }
 }

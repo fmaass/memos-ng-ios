@@ -68,6 +68,31 @@ nonisolated public enum PlaceClustering {
         left == right
     }
 
+    /// The pins a set of markers should be drawn as: one per coordinate, wearing its newest photo.
+    ///
+    /// A composition of two functions that are already tested on their own — the coordinate
+    /// grouping and the display order — and not a port of the SPA's `pinsFor`, which solves three
+    /// problems this map does not have (see above). The lead is the order's FIRST rather than the
+    /// group's first because the group is in the order the server returned, and a pin wearing the
+    /// oldest photo of a spot is a pin that never changes when a new one is taken there.
+    ///
+    /// `uids` is the whole of that order, so a tap hands the drawer the list the pin claims to be
+    /// showing rather than a set it would have to re-derive.
+    public static func pins(from markers: [PlaceMarker]) -> [PinSpec] {
+        PlaceGeo.groupByCoordinate(markers).compactMap { group in
+            let ordered = PlaceOrder.newestFirst(group.markers)
+            guard let lead = ordered.first else { return nil }
+            return PinSpec(
+                key: group.key,
+                latitude: group.latitude,
+                longitude: group.longitude,
+                count: ordered.count,
+                uid: lead.uid,
+                uids: ordered.map(\.uid)
+            )
+        }
+    }
+
     public static func sync(current: [String: PinSpec], desired: [PinSpec]) -> PinDiff {
         var added: [PinSpec] = []
         var updated: [PinSpec] = []

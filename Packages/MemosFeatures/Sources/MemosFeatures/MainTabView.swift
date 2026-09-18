@@ -1,7 +1,7 @@
 import MemosCore
 import SwiftUI
 
-/// The signed-in app's surfaces, as a value rather than as two literals inside a `TabView`.
+/// The signed-in app's surfaces, as a value rather than as literals inside a `TabView`.
 ///
 /// It exists so what the app's main navigation OFFERS is assertable: a tab whose title or glyph is
 /// written inline in a view body is a thing no test can read back, and this is the one list that
@@ -9,6 +9,7 @@ import SwiftUI
 public enum MainTab: String, CaseIterable, Identifiable, Sendable {
     case timeline
     case library
+    case places
 
     public var id: String { rawValue }
 
@@ -16,6 +17,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .timeline: "Timeline"
         case .library: "Library"
+        case .places: "Places"
         }
     }
 
@@ -24,6 +26,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .timeline: "list.bullet"
         case .library: "photo.on.rectangle.angled"
+        case .places: "map"
         }
     }
 }
@@ -32,7 +35,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
 ///
 /// A tab bar rather than a screen with a button to somewhere else: the library is a place people
 /// go back to, and a destination reached by pushing off the timeline is one that loses its scroll
-/// position every time. Both tabs keep their own navigation stack, which is what makes going back
+/// position every time. Each tab keeps its own navigation stack, which is what makes going back
 /// and forth between them cost nothing.
 struct MainTabView: View {
     @Environment(SessionStore.self) private var session
@@ -61,20 +64,14 @@ struct MainTabView: View {
     }
 
     private var tabs: some View {
+        // The bar IS `MainTab.allCases`: its content and its order are the enum's, so a case added
+        // without a screen is a compile error rather than a tab nobody can reach, and a test that
+        // reads the enum reads what a person touches.
         TabView(selection: $selection) {
-            Tab(
-                MainTab.timeline.title,
-                systemImage: MainTab.timeline.symbol,
-                value: MainTab.timeline
-            ) {
-                TimelineView()
-            }
-            Tab(
-                MainTab.library.title,
-                systemImage: MainTab.library.symbol,
-                value: MainTab.library
-            ) {
-                MediaLibraryView()
+            ForEach(MainTab.allCases) { tab in
+                Tab(tab.title, systemImage: tab.symbol, value: tab) {
+                    screen(for: tab)
+                }
             }
         }
         .environment(jump)
@@ -82,6 +79,15 @@ struct MainTabView: View {
         // Timeline is what reads that and pushes it, because it owns both the list and the stack.
         .onChange(of: jump.pending) { _, pending in
             selection = MemoJumpRouting.tab(showing: selection, whenJumping: pending)
+        }
+    }
+
+    @ViewBuilder
+    private func screen(for tab: MainTab) -> some View {
+        switch tab {
+        case .timeline: TimelineView()
+        case .library: MediaLibraryView()
+        case .places: PlacesView()
         }
     }
 }
