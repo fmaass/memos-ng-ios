@@ -44,8 +44,10 @@ categories, for different code in each bundle:
   modification date of a picked file it has just copied into its temporary directory; the
   extension reads the modification date of a shared file it has just staged there. Both, through
   the outbox code linked into each of them, also read the creation date of an outbox manifest,
-  which lives in the app group container — or, when the group is unreachable, in the reading
-  process's own Application Support directory.
+  which lives in the app group container. The app alone has a second location for that queue: it
+  falls back to its own Application Support directory when the group cannot be reached, which
+  `C617.1` covers as the app's own container. The extension has no fallback — it refuses to post
+  rather than write a capture nothing would drain.
 - `NSPrivacyAccessedAPICategoryUserDefaults`, reasons `CA92.1` and `1C8F.1` — `CA92.1` for the
   process's own defaults and `1C8F.1` for the app group's suite. The app keeps the appearance
   choice, the library's sort direction and the media fetch generation in its own defaults and the

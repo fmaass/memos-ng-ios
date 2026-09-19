@@ -67,10 +67,11 @@ keyed on the signed-in subject), `PlacesMapView.swift` (the `UIViewRepresentable
 production sources in the tree that import MapKit; the screen itself needs none of it.
 `PlacesPresentation.swift` is where the seam's decisions are DEFINED and nowhere else — the
 region-to-box conversion, which member lends a cluster its photograph, what a tap opens and how
-close the camera may come — and the map view reaches for them by name rather than deciding
-anything itself. MapKit does not leave this package, but it does not stop at its sources either:
-the Places tests import it too, because holding the seam to a real `MKMapView` is the point of
-them.
+close the camera may come — and the map view reaches for them by name rather than redefining any
+of them. What the map view does decide is its own lifecycle: when a replaced map has to start its
+annotations over, and that the first fit happens once. MapKit does not leave this package, but it
+does not stop at its sources either: the Places tests import it too, because holding the seam to
+a real `MKMapView` is the point of them.
 
 ## Concurrency
 

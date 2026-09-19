@@ -17,9 +17,14 @@
       * `.creationDateKey` — OutboxRepository reads it off an outbox manifest whose JSON could not
         be read (Packages/MemosOutbox/Sources/MemosOutbox/OutboxRepository.swift), so that the
         capture keeps a place in capture order. MemosOutbox is linked into this bundle as well as
-        into the app, so the read is declared by both. The file is the outbox's own, normally in
-        the app group container this extension is a member of and in the process's own Application
-        Support directory when the group is unreachable (Outbox.live); C617.1 covers both. The
+        into the app, so the read is declared by both. For THIS bundle the file is always in the
+        app group container the extension is a member of, and C617.1 covers that container. There
+        is no second location: ShareRootView.post() takes the queue root from
+        `OutboxRepository.appGroupRoot()` alone and, when the group cannot be reached, refuses the
+        post and says so instead of writing anywhere else
+        (Sources/MemosShare/ShareRootView.swift) — a capture outside the group is a capture the
+        app would never drain. The app's own Application Support fallback is `Outbox.live`, which
+        this executable does not call. The
         value never leaves the device: it is the `capturedAt` of a stand-in job CONSTRUCTED in
         memory with state `.held` and a binding that names the file rather than a server, so
         nothing drains it.
