@@ -480,4 +480,71 @@ struct TimelineRowFenceTests {
         // issued after the save brings it back.
         #expect(store.memos.map(\.uid) == ["a", "b"])
     }
+
+    /// The row is stamped when the server's answer is APPLIED, not when the save's task ends, and
+    /// the instant between the two is what tells those apart: `commit` has already put the row in
+    /// the list and is still writing the picture of it down, so a read issued before the save can
+    /// land there with the save unfinished.
+    @Test("a read that lands while the row is being written down does not put the old words back")
+    func aReadLandingWhileTheRowPersistsDoesNotRestoreTheOldText() async throws {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let persisting = LockedValue<Bool>(false)
+        let persistRelease = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case getMemoOperation:
+                entered.set(true)
+                try await hold(until: release)
+                return Stub.json(Stub.memo(uid: "a", content: "old"))
+            case patchMemoOperation:
+                return Stub.json(Stub.memo(uid: "a", content: "new"))
+            default:
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "old")]))
+            }
+        }
+        // The bytes-to-disk step is the one seam inside `commit` a test can stand in, and it is
+        // reached with the row already in the list. Only the picture carrying the saved words is
+        // held, so the read under test can still be awaited, and the wait is bounded: a store that
+        // lets that read through has to fail this case rather than hang it.
+        let snapshots = TimelineSnapshotWriter(
+            store: TimelineSnapshotStore(
+                root: FileManager.default.temporaryDirectory,
+                writeData: { data, _ in
+                    guard String(decoding: data, as: UTF8.self).contains("new") else { return }
+                    persisting.set(true)
+                    let deadline = Date().addingTimeInterval(2)
+                    while !persistRelease.get() && Date() < deadline {
+                        Thread.sleep(forTimeInterval: 0.001)
+                    }
+                }
+            ),
+            epoch: SessionEpoch()
+        )
+        let store = TimelineStore(
+            snapshots: snapshots,
+            snapshotIdentity: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "fabian"),
+            persists: true
+        )
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let reading = Task {
+            await store.refreshMemo(uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        let saving = Task {
+            await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while !persisting.get() {
+            await Task.yield()
+        }
+        release.set(true)
+        _ = await reading.value
+        persistRelease.set(true)
+        _ = await saving.value
+
+        #expect(store.memos.first?.content == "new")
+    }
 }
