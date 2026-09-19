@@ -1459,12 +1459,14 @@ public final class TimelineStore {
     /// a memo that exists is no longer here.
     private enum SingleMemoRead {
         case memo(Memo)
-        /// The server answered and its answer was not a memo — or the session this was read for
-        /// is over, which is the same nothing as far as the caller is concerned.
+        /// The server said there is no such memo — or the session this was read for is over,
+        /// which is the same nothing as far as the caller is concerned.
         case absent
-        /// The server never answered. Already reported to the session by the incarnation that
-        /// asked, exactly as a page read reports it.
-        case unreachable
+        /// The read failed and nothing in it says the memo is gone: the server never answered,
+        /// or it answered with something that is not an answer about this memo. A transport
+        /// failure has already been reported to the session by the incarnation that asked,
+        /// exactly as a page read reports it; anything the server did answer stays here.
+        case unreadable
     }
 
     /// `fetchMemo`'s body, keeping what the caller needs to say the right sentence.
@@ -1507,16 +1509,21 @@ public final class TimelineStore {
                 _ = await onUnauthorized(refusal)
                 return .absent
             }
+            // Gone is something only the server can say, and it says it with a 404. A 500, a 422,
+            // a body that would not decode are all failures of the READ: answering `absent` to
+            // any of them tells the reader a memo that exists is no longer there, which is the
+            // same false sentence a dropped request used to produce.
+            if let api = error as? APIError, api == .notFound { return .absent }
             // A server that never answered is the SESSION's to say, once, in its banner — the same
             // sentence every page read reports (`report`), under the generation that ISSUED this
             // request rather than whichever one is current when the failure lands. Swallowing it
             // here is what told a reader that a memo which exists is no longer there, while the
-            // one notice that could have explained it never heard of the outage.
+            // one notice that could have explained it never heard of the outage. An error the
+            // server DID answer with is not that notice's business and is not reported to it.
             if let failure = StoreFailure.transportFailure(error) {
                 session?.noteTransportFailure(failure, issuedUnder: handle.generation)
-                return .unreachable
             }
-            return .absent
+            return .unreadable
         }
     }
 
@@ -1527,9 +1534,11 @@ public final class TimelineStore {
         /// It could not be read, or it is not in the window even after anchoring — deleted while
         /// the jump was in flight, or filtered out of the list this screen is showing.
         case unavailable
-        /// The server never answered the read, so nothing here says the memo is gone. The session
-        /// has been told, and the caller owes the reader a sentence that does not bury it.
-        case unreachable
+        /// The read failed, and nothing in that failure says the memo is gone — the server never
+        /// answered, or what it answered was an error of its own. When it was the server that
+        /// could not be reached the session has been told; either way the caller owes the reader
+        /// a sentence that does not claim the memo is no longer there.
+        case unreadable
     }
 
     /// Takes this timeline to a memo, and does not come back until the LOADED WINDOW contains it.
@@ -1550,7 +1559,7 @@ public final class TimelineStore {
         switch await readMemo(uid: uid, using: handle, baseURL: baseURL) {
         case .memo(let read): memo = read
         case .absent: return .unavailable
-        case .unreachable: return .unreachable
+        case .unreadable: return .unreadable
         }
         // Already on screen: the read applied the server's copy into it, and nothing needs
         // moving.
