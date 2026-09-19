@@ -600,6 +600,16 @@ struct TimelineRowFenceTests {
 
         #expect(gets.count == 2)
         #expect(store.memos.first?.attachments.map(\.uid) == ["p", "q"])
+
+        // A debt is paid ONCE. The same save again leaves its claim the same way and finds nothing
+        // owed: no read was refused since, so a third GET would be the first debt paid twice.
+        await store.edit(
+            uid: "a", content: "new", attaching: [file],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+        await store.owedReadsSettled()
+
+        #expect(gets.count == 2)
     }
 
     /// The row is stamped when the server's answer is APPLIED, not when the save's task ends, and
