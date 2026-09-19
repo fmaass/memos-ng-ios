@@ -82,6 +82,21 @@ private func hostedMap() -> (UIWindow, MKMapView) {
     return (window, mapView)
 }
 
+/// The four corners of a box — the coordinates the outermost pins sit on, which is what the
+/// opening view has to leave room around.
+private func corners(of region: MKCoordinateRegion) -> [CLLocationCoordinate2D] {
+    let north = region.center.latitude + region.span.latitudeDelta / 2
+    let south = region.center.latitude - region.span.latitudeDelta / 2
+    let west = region.center.longitude - region.span.longitudeDelta / 2
+    let east = region.center.longitude + region.span.longitudeDelta / 2
+    return [
+        CLLocationCoordinate2D(latitude: north, longitude: west),
+        CLLocationCoordinate2D(latitude: north, longitude: east),
+        CLLocationCoordinate2D(latitude: south, longitude: west),
+        CLLocationCoordinate2D(latitude: south, longitude: east),
+    ]
+}
+
 /// A region tight enough that the map keeps the centre it was given.
 private func routedRegion(latitude: Double, longitude: Double) -> MKCoordinateRegion {
     MKCoordinateRegion(
@@ -286,5 +301,108 @@ extension MediaImageLoaderTests {
         coordinator.show(pins, through: recorder)
         #expect(recorder.calls.isEmpty, "attaching the same map again repainted the whole map")
         secondWindow.isHidden = true
+    }
+
+    /// The margin is written out here rather than asked of `PlacePinGeometry`, which is the thing
+    /// under test: on a roomy pane, half a square of air on every side, and above it the square
+    /// itself and its badge, because a pin is drawn wholly above the coordinate it marks.
+    @Test("the map opens with the outermost pins inside the margin their drawing needs")
+    func theOpeningViewLeavesAirAroundTheOutermostPins() {
+        let fixtures: [(String, MKCoordinateRegion)] = [
+            (
+                "wide and shallow, the horizontal axis binding",
+                MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: 47.37, longitude: 8.54),
+                    span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 2)
+                )
+            ),
+            (
+                "tall and narrow, the vertical axis binding",
+                MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: 47.37, longitude: 8.54),
+                    span: MKCoordinateSpan(latitudeDelta: 2, longitudeDelta: 0.1)
+                )
+            ),
+        ]
+        // The map may show MORE than it was asked for, to fill a pane of another shape, so what is
+        // asserted is that no corner lies OUTSIDE the inset frame — never that one sits on it. A
+        // point either way is the projection rounding.
+        let slack: CGFloat = 1
+
+        for (fixture, box) in fixtures {
+            let (window, mapView) = hostedMap()
+            let coordinator = PlacesMapCoordinator()
+            coordinator.fitOnce(box, on: mapView)
+            settle(window)
+
+            for corner in corners(of: box) {
+                let point = mapView.convert(corner, toPointTo: mapView)
+                #expect(point.x >= 52 - slack, "\(fixture): a pin is cut off on the left")
+                #expect(
+                    point.x <= mapView.bounds.width - 52 + slack,
+                    "\(fixture): a pin is cut off on the right"
+                )
+                #expect(point.y >= 84 - slack, "\(fixture): a pin is cut off at the top")
+                #expect(
+                    point.y <= mapView.bounds.height - 26 + slack,
+                    "\(fixture): a pin is cut off at the bottom"
+                )
+            }
+            window.isHidden = true
+        }
+    }
+
+    @Test("the opening view is taken once, whichever arrives second: the region or the pane")
+    func theOpeningViewWaitsForWhicheverArrivesSecond() {
+        // The map the screen builds has no size yet, so the region is normally the one that waits.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 500))
+        let coordinator = PlacesMapCoordinator()
+        let mapView = MKMapView(frame: .zero)
+        mapView.showsUserLocation = false
+        let container = PlacesMapContainer(mapView: mapView, coordinator: coordinator)
+        coordinator.attach(to: mapView)
+        coordinator.fitOnce(routedRegion(latitude: 47.37, longitude: 8.54), on: mapView)
+        #expect(!coordinator.hasFitted, "a pane with no size was framed, margin and all")
+
+        container.frame = window.bounds
+        window.addSubview(container)
+        window.isHidden = false
+        settle(window, until: { coordinator.hasFitted })
+        #expect(coordinator.hasFitted, "the pane was laid out and the map was never framed")
+        #expect(
+            abs(mapView.region.center.latitude - 47.37) < 0.5,
+            "the map was framed on something other than the region it was given"
+        )
+
+        // The reader pans away, and a rotation lays the pane out again: not a second opening view.
+        mapView.setCenter(CLLocationCoordinate2D(latitude: 10, longitude: 10), animated: false)
+        container.frame = CGRect(x: 0, y: 0, width: 500, height: 390)
+        settle(window)
+        #expect(
+            abs(mapView.region.center.latitude - 10) < 0.5,
+            "a later layout pulled the map back to its opening view"
+        )
+        window.isHidden = true
+
+        // The other order: a map put onto a screen that is already laid out knows its size before
+        // anybody tells it what to frame.
+        let laidOut = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 500))
+        let second = PlacesMapCoordinator()
+        let secondMap = MKMapView(frame: .zero)
+        secondMap.showsUserLocation = false
+        let secondContainer = PlacesMapContainer(mapView: secondMap, coordinator: second)
+        secondContainer.frame = laidOut.bounds
+        laidOut.addSubview(secondContainer)
+        laidOut.isHidden = false
+        settle(laidOut)
+        #expect(!second.hasFitted, "a map with nothing to frame yet took its opening view")
+
+        second.fitOnce(routedRegion(latitude: 59.91, longitude: 10.75), on: secondMap)
+        #expect(second.hasFitted, "the region reached a laid-out pane and nothing was framed")
+        #expect(
+            abs(secondMap.region.center.latitude - 59.91) < 0.5,
+            "the map was framed on something other than the region it was given"
+        )
+        laidOut.isHidden = true
     }
 }

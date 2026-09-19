@@ -72,7 +72,11 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
     /// Where every change goes. Held rather than passed on each call so the representable can
     /// install the production one once, and a test can install a recorder instead.
     var sink: (any AnnotationSink)?
-    private var hasFitted = false
+    /// Whether this map has had its opening view. Readable so a test can tell a fit that is still
+    /// waiting for its pane from one that has been taken.
+    private(set) var hasFitted = false
+    /// What the opening view will frame, once there is a pane to frame it in.
+    private var pendingRegion: MKCoordinateRegion?
     /// The markers a tapped pin is resolved against: a pin is a list of uids, and what those uids
     /// stand for is whatever the last read left in hand.
     var markers: [PlaceMarker] = []
@@ -96,6 +100,7 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         if mapView !== self.mapView {
             annotations = [:]
             hasFitted = false
+            pendingRegion = nil
         }
         self.mapView = mapView
     }
@@ -198,14 +203,69 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         }
     }
 
-    /// The opening view, applied exactly once.
+    /// The opening view, applied exactly once: what to frame, kept until there is a pane to frame
+    /// it in.
     ///
     /// Once, because every later fit would be the map yanking itself back from wherever the
-    /// reader had just panned it to.
+    /// reader had just panned it to. The map is built before anything has been measured, so the
+    /// region usually arrives against a pane of no size; a map put back onto a screen that is
+    /// already laid out gets its size first instead. Both are the same operation, and whichever
+    /// of the two comes second performs it.
     func fitOnce(_ region: MKCoordinateRegion?, on mapView: MKMapView) {
-        guard !hasFitted, let region else { return }
+        if let region { pendingRegion = region }
+        fitIfReady(on: mapView)
+    }
+
+    /// The pane has a size — the other half of the opening view's condition.
+    func paneDidLayout(_ mapView: MKMapView) {
+        fitIfReady(on: mapView)
+    }
+
+    /// The fit itself: the box in map points, with the pin's margin kept free around it, so the
+    /// outermost photographs are whole and have air rather than sitting on the frame. Never
+    /// animated — this is where the map opens, not somewhere it travels to.
+    private func fitIfReady(on mapView: MKMapView) {
+        guard !hasFitted, let region = pendingRegion else { return }
+        let pane = mapView.bounds.size
+        // A pane of no size cannot spare a margin, and MapKit would take the fit all the same.
+        guard pane.width > 0, pane.height > 0 else { return }
         hasFitted = true
-        mapView.setRegion(region, animated: false)
+        pendingRegion = nil
+        mapView.setVisibleMapRect(
+            PlacesPresentation.mapRect(of: region),
+            edgePadding: PlacePinGeometry.openingInsets(in: pane),
+            animated: false
+        )
+    }
+}
+
+/// What the map is handed to SwiftUI inside, and the only reason there is a container at all: the
+/// moment the pane has a size.
+///
+/// `layoutSubviews` is that moment, and a containing view is where it can be read — MapKit's own
+/// documentation asks not to be subclassed.
+final class PlacesMapContainer: UIView {
+    let mapView: MKMapView
+    /// The coordinator to tell, held strongly because the map holds it weakly as its delegate and
+    /// this view lives exactly as long as the map it contains.
+    private let coordinator: PlacesMapCoordinator
+
+    init(mapView: MKMapView, coordinator: PlacesMapCoordinator) {
+        self.mapView = mapView
+        self.coordinator = coordinator
+        super.init(frame: .zero)
+        addSubview(mapView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("PlacesMapContainer is built in code, never from a nib")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        mapView.frame = bounds
+        coordinator.paneDidLayout(mapView)
     }
 }
 
@@ -256,7 +316,7 @@ struct PlacesMapView: UIViewRepresentable {
         control ?? PlacesMapCoordinator()
     }
 
-    func makeUIView(context: Context) -> MKMapView {
+    func makeUIView(context: Context) -> PlacesMapContainer {
         let mapView = MKMapView(frame: .zero)
         mapView.delegate = context.coordinator
         // No location services and no usage key: this map shows where the photographs are, not
@@ -278,14 +338,14 @@ struct PlacesMapView: UIViewRepresentable {
         )
         context.coordinator.sink = MapViewAnnotationSink(mapView: mapView)
         context.coordinator.attach(to: mapView)
-        return mapView
+        return PlacesMapContainer(mapView: mapView, coordinator: context.coordinator)
     }
 
-    func updateUIView(_ mapView: MKMapView, context: Context) {
+    func updateUIView(_ container: PlacesMapContainer, context: Context) {
         context.coordinator.markers = markers
         context.coordinator.onTap = onTap
         guard let sink = context.coordinator.sink else { return }
         context.coordinator.show(pins, through: sink)
-        context.coordinator.fitOnce(region, on: mapView)
+        context.coordinator.fitOnce(region, on: container.mapView)
     }
 }

@@ -93,6 +93,44 @@ nonisolated enum PlacesPresentation {
         )
     }
 
+    /// How far north a map point reaches. Mercator has no pole, and MapKit stops short of the
+    /// asymptote: every latitude beyond this one projects onto this one, so a box is brought back
+    /// inside it rather than left to collapse against it.
+    private static let projectedLatitudeLimit: CLLocationDegrees = 85
+
+    /// The region as a rectangle on the map, for a fit that has margins to keep free.
+    ///
+    /// Margins are points and a region is degrees, and the two only meet in map points: the box's
+    /// geographic EDGES are projected, never its span treated as a distance. A box that runs past
+    /// the projection is slid back inside it rather than squashed, and its width is carried across
+    /// as a width — a lone pin beside the date line whose padding crosses it has an east edge west
+    /// of its west one, which normalising each edge on its own would read as a box around the
+    /// whole world.
+    static func mapRect(of region: MKCoordinateRegion) -> MKMapRect {
+        var north = region.center.latitude + region.span.latitudeDelta / 2
+        var south = region.center.latitude - region.span.latitudeDelta / 2
+        if north > projectedLatitudeLimit {
+            south -= north - projectedLatitudeLimit
+            north = projectedLatitudeLimit
+        }
+        if south < -projectedLatitudeLimit {
+            north += -projectedLatitudeLimit - south
+            south = -projectedLatitudeLimit
+        }
+        north = min(north, projectedLatitudeLimit)
+        south = max(south, -projectedLatitudeLimit)
+
+        let west = region.center.longitude - region.span.longitudeDelta / 2
+        let topLeft = MKMapPoint(CLLocationCoordinate2D(latitude: north, longitude: west))
+        let bottomLeft = MKMapPoint(CLLocationCoordinate2D(latitude: south, longitude: west))
+        return MKMapRect(
+            x: topLeft.x,
+            y: topLeft.y,
+            width: MKMapSize.world.width * (region.span.longitudeDelta / 360),
+            height: bottomLeft.y - topLeft.y
+        )
+    }
+
     /// What a lone pin's badge says.
     static func pinBadge(for spec: PinSpec) -> String? {
         PlaceClustering.badgeText(count: spec.count)

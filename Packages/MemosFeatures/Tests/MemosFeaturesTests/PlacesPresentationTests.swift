@@ -92,6 +92,65 @@ struct PlacesPresentationTests {
         #expect(PlacesPresentation.fitRegion(for: []) == nil)
     }
 
+    @Test("the box becomes a rectangle by projecting its edges, not by measuring its degrees")
+    func mapRectProjectsTheBoxesEdges() {
+        let rect = PlacesPresentation.mapRect(
+            of: MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 47.2, longitude: 8.3),
+                span: MKCoordinateSpan(latitudeDelta: 0.4, longitudeDelta: 0.6)
+            )
+        )
+        let northWest = MKMapPoint(CLLocationCoordinate2D(latitude: 47.4, longitude: 8.0))
+        let southWest = MKMapPoint(CLLocationCoordinate2D(latitude: 47.0, longitude: 8.0))
+        #expect(abs(rect.minX - northWest.x) < 1)
+        #expect(abs(rect.minY - northWest.y) < 1)
+        #expect(abs(rect.maxY - southWest.y) < 1)
+        #expect(abs(rect.width - MKMapSize.world.width * 0.6 / 360) < 1)
+        // A degree of latitude covers more of the map the further from the equator it is drawn, so
+        // a box at 47° is taller than the same span measured off a flat world.
+        #expect(
+            rect.height > MKMapSize.world.height * 0.4 / 360,
+            "the latitude span was treated as a distance on the map"
+        )
+    }
+
+    @Test("a lone pin beside the date line keeps its width, not the world's")
+    func mapRectOfABoxCrossingTheDateLine() {
+        let rect = PlacesPresentation.mapRect(
+            of: MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 47.2, longitude: 179.999),
+                span: MKCoordinateSpan(
+                    latitudeDelta: PlaceGeo.minBBoxSpan,
+                    longitudeDelta: PlaceGeo.minBBoxSpan
+                )
+            )
+        )
+        let west = MKMapPoint(CLLocationCoordinate2D(latitude: 47.2, longitude: 179.994))
+        #expect(abs(rect.minX - west.x) < 1)
+        #expect(
+            abs(rect.width - MKMapSize.world.width * PlaceGeo.minBBoxSpan / 360) < 1,
+            "the east edge was normalised on its own, turning one pin into the whole world"
+        )
+    }
+
+    @Test("a pin past the projection's edge still opens on a box with a height")
+    func mapRectOfABoxBeyondTheProjection() {
+        let rect = PlacesPresentation.mapRect(
+            of: MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 89.999, longitude: 8.3),
+                span: MKCoordinateSpan(
+                    latitudeDelta: PlaceGeo.minBBoxSpan,
+                    longitudeDelta: PlaceGeo.minBBoxSpan
+                )
+            )
+        )
+        // Mercator has no pole and MapKit's own points stop at 85°: the box is slid back inside
+        // that, not squashed onto its edge.
+        let top = MKMapPoint(CLLocationCoordinate2D(latitude: 85, longitude: 8.3))
+        #expect(abs(rect.minY - top.y) < 1, "the box was not brought back to the projection")
+        #expect(rect.height > 0, "a box past the projection collapsed to nothing")
+    }
+
     @Test("a screen that has not settled once is still waiting, not empty")
     func pendingIsNotEmpty() {
         let store = PlacesStore()

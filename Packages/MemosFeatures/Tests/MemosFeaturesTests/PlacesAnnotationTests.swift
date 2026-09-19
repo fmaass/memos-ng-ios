@@ -203,8 +203,10 @@ struct PlacesAnnotationTests {
             ),
             on: mapView
         )
-        #expect(abs(mapView.region.center.latitude - 47.2) < 0.05)
-        #expect(abs(mapView.region.center.longitude - 8.3) < 0.05)
+        // WHERE the map was framed is asserted on a map that is on a screen, where a coordinate
+        // can be converted to a point and the margin around the outermost pins can be measured.
+        // Here the opening view is only captured, as the thing a second fit must not move.
+        let opened = mapView.region
 
         // Once. A later fit is the map pulling itself back from wherever the reader had just
         // panned it to, so the second call must leave the map where it is.
@@ -215,7 +217,9 @@ struct PlacesAnnotationTests {
             ),
             on: mapView
         )
-        #expect(abs(mapView.region.center.latitude - 47.2) < 0.05)
+        #expect(mapView.region.center.latitude == opened.center.latitude)
+        #expect(mapView.region.center.longitude == opened.center.longitude)
+        #expect(mapView.region.span.latitudeDelta == opened.span.latitudeDelta)
 
         let picture = UIGraphicsImageRenderer(bounds: mapView.bounds).image { context in
             mapView.layer.render(in: context.cgContext)
@@ -780,5 +784,48 @@ extension MediaImageLoaderTests {
                 == PlacesPresentation.spokenLabel(photographs: 7, newest: newer.leadTakenAt),
             "a cluster counted the pins it swallowed instead of the photographs behind them"
         )
+    }
+}
+
+/// What the opening view has to keep free, from the pin's drawn geometry alone.
+@Suite("Places pin margin")
+struct PlacePinGeometryTests {
+    @Test("a roomy pane keeps the pin's drawing free on every side, plus its air")
+    func openingInsetsOnARoomyPane() {
+        let insets = PlacePinGeometry.openingInsets(in: CGSize(width: 390, height: 500))
+        // Half a square of air all round (26), and above the coordinate the square itself (52)
+        // and its badge (6) as well, because a pin is drawn entirely above the point it marks.
+        #expect(insets.top == 84)
+        #expect(insets.bottom == 26)
+        #expect(insets.left == 52)
+        #expect(insets.right == 52)
+    }
+
+    @Test("a pane with less to spare than the margin asks keeps both sides in proportion")
+    func openingInsetsShrinkInProportion() {
+        // 120 points high, of which 40 stay the map's own: 80 to spend against the 110 asked.
+        let insets = PlacePinGeometry.openingInsets(in: CGSize(width: 390, height: 120))
+        #expect(abs(insets.top - 84 * 80 / 110) < 1e-9)
+        #expect(abs(insets.bottom - 26 * 80 / 110) < 1e-9)
+        #expect(insets.top > insets.bottom, "the shrunk margin stopped telling up from down")
+        #expect(insets.left == 52, "a roomy axis lost its margin to a cramped one")
+        #expect(insets.right == 52)
+    }
+
+    @Test("a pane smaller than the map's own minimum spends nothing on the margin")
+    func openingInsetsOfAPaneUnderTheMinimum() {
+        let insets = PlacePinGeometry.openingInsets(in: CGSize(width: 390, height: 20))
+        #expect(insets.top == 0, "a pane too small for a margin was fitted inside out")
+        #expect(insets.bottom == 0)
+        #expect(insets.left == 52)
+    }
+
+    @Test("a pane of no size asks for no margin at all")
+    func openingInsetsOfNoPane() {
+        let insets = PlacePinGeometry.openingInsets(in: .zero)
+        #expect(insets.top == 0)
+        #expect(insets.bottom == 0)
+        #expect(insets.left == 0)
+        #expect(insets.right == 0)
     }
 }
