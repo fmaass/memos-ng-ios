@@ -132,8 +132,9 @@ extension ComposeFailure {
 ///
 /// It is read here rather than at each lane for the reason a refusal is: the decision about a
 /// status code is one decision, and a lane that re-derived it would be the same rule written twice
-/// — with the second copy free to drift. It is also the only file in the store layer allowed to
-/// name a refusal by its own name.
+/// — with the second copy free to drift. It sits beside `ComposeFailure` because both readings are
+/// of the same answer: what the person is told and what the row is left knowing must not be able to
+/// disagree about what the server did.
 enum MemoMutationEffect: Sendable {
     /// Nothing was sent, or the server refused the request in a way that leaves the memo as it was:
     /// a read already on its way knows that memo as well as this mutation does.
@@ -143,6 +144,13 @@ enum MemoMutationEffect: Sendable {
     case outcomeUnknown
 
     static func of(_ error: any Error) -> MemoMutationEffect {
+        // Asked through the store layer's one reading of the chain, because a credential the device
+        // installed does not meet this as an `APIError` at all: the middleware throws the typed
+        // value, which is neither an `APIError` nor a carrier of one, and a switch on status alone
+        // reads every refused mutation as an open question. It is a statement about what the server
+        // holds — it did not act on the request — so WHICH credential earned it does not enter into
+        // it; that question belongs to the session and is asked there.
+        if StoreFailure.refusal(error) != nil { return .changedNothing }
         switch ComposeFailure.apiError(in: error) {
         case .unauthorized, .forbidden, .notFound: .changedNothing
         case .server(let status) where (400..<500).contains(status): .changedNothing

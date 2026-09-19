@@ -8,6 +8,7 @@ import Testing
 @testable import MemosCore
 
 private let whoamiOperation = "whoami_api_auth_user_get"
+private let listMemosOperation = "list_memos_api_memos_get"
 private let patchMemoOperation = "patch_memo_api_memos__uid__patch"
 private let deleteMemoOperation = "delete_memo_api_memos__uid__delete"
 private let startUploadOperation = "start_upload_api_uploads_post"
@@ -457,6 +458,195 @@ struct TimelineMutationGateTests {
         #expect(!secondOutcome.isSaved, "and it was not reported as saved")
         // The control: the save that DID reach the wire is the one issued while A was current.
         #expect(!firstOutcome.isSaved, "A's own answer arrived after A had gone")
+    }
+
+    /// A server that refuses a credential has not touched the memo, so a read already on its way
+    /// carries that memo as truly as the save that was refused does.
+    ///
+    /// The refusal is earned through a client built on an INSTALLED credential, which is what the
+    /// app runs: the middleware answers that 401 with its own typed value rather than a status the
+    /// generated client would surface, and a suite that scripted the plain status instead would
+    /// pass while every save refused in the field held its row against the list behind it.
+    @Test("a save the server refused leaves a read already out free to settle the row")
+    func aRefusedSaveLeavesTheReadBehindItFree() async throws {
+        let store = TimelineStore()
+        let lists = Counter()
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let credential = PresentedCredential("memos_pat_a")
+        credential.install()
+        let client = Stub.client(token: credential) { _, _, operation in
+            switch operation {
+            case patchMemoOperation:
+                return Stub.empty(.unauthorized)
+            case listMemosOperation:
+                let index = lists.count
+                lists.increment()
+                if index == 0 {
+                    return Stub.json(Stub.page([Stub.memo(uid: "a", content: "A")]))
+                }
+                entered.set(true)
+                try await hold(until: release)
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "B")]))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let refreshing = Task {
+            await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        }
+        while !entered.get() {
+            await Task.yield()
+        }
+        let outcome = await store.edit(
+            uid: "a", content: "C", using: client.handle, baseURL: Stub.baseURL
+        )
+        release.set(true)
+        await refreshing.value
+
+        #expect(outcome.failure == .authorization, "control: the server refused these words")
+        #expect(
+            store.memos.first?.content == "B",
+            "a save the server refused held the row against a read that knows it as well"
+        )
+    }
+
+    /// A place in line is an unbounded wait, and a delete can finish inside it.
+    ///
+    /// The memo the queued save belongs to is gone from the server by the time its turn comes, so
+    /// the files it carries have nothing to be attached to and the patch behind them would be a
+    /// change to a memo this app itself asked to have removed. Row presence would be the wrong
+    /// question — a memo also leaves the list when it is archived — so what is asked is whether
+    /// the server confirmed the deletion.
+    @Test("a save queued behind a delete the server confirmed sends nothing")
+    func aQueuedSaveBehindAConfirmedDeleteSendsNothing() async throws {
+        let file = try stagedFile()
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let deletes = Counter()
+        let uploads = Counter()
+        let patches = Counter()
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case deleteMemoOperation:
+                deletes.increment()
+                try await hold(until: release)
+                return Stub.empty(.noContent)
+            case startUploadOperation:
+                uploads.increment()
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
+            case finalizeUploadOperation:
+                return Stub.empty(.ok)
+            case patchMemoOperation:
+                patches.increment()
+                return Stub.json(Stub.memo(uid: "a", content: "words"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let deleting = Task { await store.delete(uid: "a", using: client.handle) }
+        while deletes.count == 0 {
+            await Task.yield()
+        }
+        let saving = Task {
+            await store.edit(
+                uid: "a", content: "words", attaching: [file],
+                using: client.handle, baseURL: Stub.baseURL
+            )
+        }
+        await timeForARequestToArrive()
+        release.set(true)
+        let gone = await deleting.value
+        let outcome = await saving.value
+
+        #expect(gone, "control: the delete landed")
+        #expect(uploads.count == 0, "a file was posted for a memo the server had confirmed gone")
+        #expect(patches.count == 0, "a memo this app had already deleted was patched")
+        #expect(!outcome.isSaved, "a save that nothing can keep was reported as saved")
+    }
+
+    /// Visibility and the archive reach the server through one request, so they are one mutation
+    /// of one memo exactly as a save is: the second tap on a menu item whose first tap is still
+    /// out must not become a second PATCH.
+    @Test("two overlapping identical visibility changes are one request, answered to both")
+    func twoOverlappingVisibilityChangesAreOneRequest() async throws {
+        let store = TimelineStore()
+        let patches = Counter()
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            patches.increment()
+            try await hold(until: release)
+            return Stub.json(Stub.memo(uid: "a", content: "words"))
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let first = Task {
+            await store.setVisibility(
+                .private, uid: "a", using: client.handle, baseURL: Stub.baseURL
+            )
+        }
+        while patches.count == 0 {
+            await Task.yield()
+        }
+        let second = Task {
+            await store.setVisibility(
+                .private, uid: "a", using: client.handle, baseURL: Stub.baseURL
+            )
+        }
+        await timeForARequestToArrive()
+        release.set(true)
+        let firstChanged = await first.value
+        let secondChanged = await second.value
+
+        #expect(patches.count == 1, "one memo's visibility was sent to the server twice")
+        #expect(firstChanged, "control: the change landed")
+        #expect(secondChanged == firstChanged, "one request, two answers")
+    }
+
+    @Test("two overlapping identical archive changes are one request, answered to both")
+    func twoOverlappingArchiveChangesAreOneRequest() async throws {
+        let store = TimelineStore()
+        let patches = Counter()
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+            patches.increment()
+            try await hold(until: release)
+            return Stub.json(Stub.memo(uid: "a", content: "words"))
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let first = Task {
+            await store.setArchived(true, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while patches.count == 0 {
+            await Task.yield()
+        }
+        let second = Task {
+            await store.setArchived(true, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        await timeForARequestToArrive()
+        release.set(true)
+        let firstArchived = await first.value
+        let secondArchived = await second.value
+
+        #expect(patches.count == 1, "one memo was archived twice for one tap")
+        #expect(firstArchived, "control: the change landed")
+        #expect(secondArchived == firstArchived, "one request, two answers")
     }
 
     /// A REAL session over a scripted transport, signed in the way the app signs in — the store

@@ -236,6 +236,9 @@ public final class TimelineStore {
         // incoming identity's first read off.
         fences.removeAll()
         owedReads.removeAll()
+        // Which memos the server has confirmed gone is a fact about one account's memos, said by a
+        // server this device is no longer asking as that account.
+        confirmedDeletions.removeAll()
         // The reads already out to pay a debt are forgotten rather than cancelled, like every other
         // task that outlives the identity that started it: each carries the handle its debt was
         // recorded under, so it is refused where it lands and nothing it brings back reaches a list
@@ -957,6 +960,14 @@ public final class TimelineStore {
             mutationChangedNothing(claim, on: attempt.uid)
             return .failed(.authorization)
         }
+        // Beside that question and asked at the same instant: the memo these words belong to may
+        // have been taken away while they queued. The answer stands in for the 404 the server
+        // would give them, and it is reported rather than swallowed — a save nobody can keep is
+        // not a save that went through.
+        guard !serverConfirmedDeletion(of: attempt.uid) else {
+            mutationChangedNothing(claim, on: attempt.uid)
+            return .failed(.rejection)
+        }
 
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
@@ -1164,6 +1175,25 @@ public final class TimelineStore {
     /// fenced read of the same memo overwrites the entry, and writes the same incarnation it found
     /// there: an identity change empties the table.
     private var owedReads: [String: OwedRead] = [:]
+
+    /// The memos this store watched the server confirm the deletion of.
+    ///
+    /// Written where the 204 is read and asked wherever a queued lane resumes, because a place in
+    /// line is an unbounded wait and a delete can finish inside it. Row presence cannot answer the
+    /// question: a memo also leaves the loaded list when its archive state or the query it is
+    /// filtered by moves, and neither of those means the server stopped holding it. Only a delete
+    /// this store saw confirmed does.
+    private var confirmedDeletions: Set<String> = []
+
+    /// Whether a mutation about to send has been overtaken by a delete of the same memo that the
+    /// server already confirmed.
+    ///
+    /// The uploads are the reason it is asked before the first request rather than around it: files
+    /// posted for a memo that no longer exists are bytes nothing will ever attach, and the patch
+    /// behind them would be a change to a memo this app itself asked to have removed.
+    private func serverConfirmedDeletion(of uid: String) -> Bool {
+        confirmedDeletions.contains(uid)
+    }
 
     /// The reads in flight to pay a debt, each one clearing its own entry, in the idiom
     /// `refreshMemo` uses for its join slot and for the same reason.
@@ -1394,6 +1424,10 @@ public final class TimelineStore {
             mutationChangedNothing(claim, on: uid)
             return .failed(.authorization)
         }
+        guard !serverConfirmedDeletion(of: uid) else {
+            mutationChangedNothing(claim, on: uid)
+            return .failed(.rejection)
+        }
 
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
@@ -1490,6 +1524,10 @@ public final class TimelineStore {
                 // store keeps no note of the uid to recognise its answer by. Dropped BEFORE the
                 // stamp below, which is what would otherwise find the debt due and pay it.
                 owedReads[uid] = nil
+                // Written in the same breath as the stamp below, with nothing awaited between, so
+                // that the next lane to resume for this memo cannot ask before the answer that
+                // settled it has been written down.
+                confirmedDeletions.insert(uid)
                 // Stamped before the commit below and before anything suspends, for the reason
                 // `apply` stamps at its top: the memo is gone whether or not a row stood for it.
                 mutationApplied(claim, on: uid)
@@ -2374,6 +2412,10 @@ public final class TimelineStore {
         guard sessionStillCurrent(handle) else {
             mutationChangedNothing(claim, on: uid)
             return .failed(.authorization)
+        }
+        guard !serverConfirmedDeletion(of: uid) else {
+            mutationChangedNothing(claim, on: uid)
+            return .failed(.rejection)
         }
 
         // The client and the incarnation it belongs to arrive as ONE value and are carried
