@@ -1022,7 +1022,7 @@ struct MediaViewerChromeTests {
         let viewport = CGSize(width: 390, height: 844)
         let grid = try #require(
             PixelGrid.of(
-                MediaViewerPage(page: page, onZoomChange: { _ in }, player: nil, play: {})
+                MediaViewerPage(page: page, onHoldsChange: { _ in }, player: nil, play: {})
                     .background(.black),
                 size: viewport
             )
@@ -1097,7 +1097,7 @@ struct MediaViewerLoadingTests {
         let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
         window.rootViewController = UIHostingController(
             rootView: MediaViewerPage(
-                page: page, onZoomChange: { _ in }, player: nil, play: {}, cache: cache
+                page: page, onHoldsChange: { _ in }, player: nil, play: {}, cache: cache
             )
         )
         window.makeKeyAndVisible()
@@ -1134,7 +1134,7 @@ struct MediaViewerLoadingTests {
 
         // The defaults the memberwise initialiser applies — production passes neither.
         let unconfigured = MediaViewerPage(
-            page: page, onZoomChange: { _ in }, player: nil, play: {}
+            page: page, onHoldsChange: { _ in }, player: nil, play: {}
         )
         let media = try #require(
             unconfigured.transport as? MediaSession,
@@ -1171,7 +1171,7 @@ struct MediaViewerLoadingTests {
         window.rootViewController = UIHostingController(
             rootView: MediaViewerPage(
                 page: page,
-                onZoomChange: { _ in },
+                onHoldsChange: { _ in },
                 player: nil,
                 play: {},
                 cache: URLCache(memoryCapacity: 4 * 1024 * 1024, diskCapacity: 0, directory: nil),
@@ -1239,7 +1239,7 @@ extension MediaImageLoaderTests {
             window.rootViewController = UIHostingController(
                 rootView: MediaViewerPage(
                     page: page,
-                    onZoomChange: { _ in },
+                    onHoldsChange: { _ in },
                     player: nil,
                     play: {},
                     cache: cache,

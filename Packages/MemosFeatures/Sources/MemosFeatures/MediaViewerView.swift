@@ -13,6 +13,12 @@ import UIKit
 /// translating the same content would fight it. The close button is the deliberate,
 /// always-available way out, and the escape action gives VoiceOver the same door.
 ///
+/// The one thing the transition is asked to stand down for is a magnified picture: while a page
+/// holds dismissal, `.interactiveDismissDisabled` is on, so a pinch-out from a zoomed picture
+/// only zooms out instead of starting to close the viewer. It is the documented switch for a
+/// presentation's interactive dismissal and it costs one line; whether it reaches THIS
+/// transition's dismissal is answered on a device, because nothing that runs here can pinch.
+///
 /// A video is a PAGE of this pager, on the same swipe as the photo beside it. It used to be a
 /// second `fullScreenCover` presented OVER the pager, which meant that in a memo with several
 /// attachments the first video anybody played was where the swiping stopped: the pager was still
@@ -49,10 +55,14 @@ struct MediaViewerView: View {
     /// The pages this viewer has ADOPTED so far. Not what is rendered — `pages` is, and it
     /// reconciles this against the source on every evaluation.
     @State private var shown: [MediaPage]
-    /// Which page, if any, is magnified. Paging is off while one is: a sideways drag inside a
-    /// zoomed picture is a pan, and a page that turns halfway through examining a photo is the
-    /// single most annoying thing a viewer can do.
-    @State private var zoomedPage: String?
+    /// Which page, if any, is holding the pager still. Paging is off while one is: a sideways drag
+    /// inside a zoomed picture is a pan, and a page that turns halfway through examining a photo is
+    /// the single most annoying thing a viewer can do. Fingers on the glass are enough — the hold
+    /// does not wait for the scale to have changed.
+    @State private var pagerHeldBy: String?
+    /// Which page, if any, is holding the presentation's interactive dismissal. Narrower than the
+    /// pager's hold on purpose: at fitted size a pinch-in is how the viewer is closed.
+    @State private var dismissalHeldBy: String?
     /// Everything playback DOES: the policy's answer, the one `AVPlayer`, and the audio session
     /// the sound needs — none of which a view body can be asked about, so none of which is
     /// decided in one (`MediaViewerPlaybackCoordinator`).
@@ -105,6 +115,10 @@ struct MediaViewerView: View {
             Text(AttachmentDeleteFlow.explanation)
         }
         .fetchingFile(saving)
+        // The platform's own switch for a presentation's interactive dismissal, asked here so all
+        // five presentation sites get it without being touched. The close button and the escape
+        // action call `dismiss()` and are unaffected.
+        .interactiveDismissDisabled(dismissalHeldBy != nil)
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -144,11 +158,18 @@ struct MediaViewerView: View {
                 ForEach(pages) { page in
                     MediaViewerPage(
                         page: page,
-                        onZoomChange: { zoomed in
-                            if zoomed {
-                                zoomedPage = page.id
-                            } else if zoomedPage == page.id {
-                                zoomedPage = nil
+                        // Only the page that set a hold may clear it: the page being swiped away
+                        // from reports its release after the page arriving has taken its own.
+                        onHoldsChange: { holds in
+                            if holds.pager {
+                                pagerHeldBy = page.id
+                            } else if pagerHeldBy == page.id {
+                                pagerHeldBy = nil
+                            }
+                            if holds.dismissal {
+                                dismissalHeldBy = page.id
+                            } else if dismissalHeldBy == page.id {
+                                dismissalHeldBy = nil
                             }
                         },
                         // Handed to exactly one page: the one the single player belongs to. Every
@@ -165,7 +186,7 @@ struct MediaViewerView: View {
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentPage)
         .scrollIndicators(.hidden)
-        .scrollDisabled(zoomedPage != nil)
+        .scrollDisabled(pagerHeldBy != nil)
         .ignoresSafeArea()
     }
 
@@ -460,7 +481,9 @@ struct MediaViewerCloseButton: View {
 /// swipe that stops working.
 struct MediaViewerPage: View {
     let page: MediaPage
-    let onZoomChange: (Bool) -> Void
+    /// What this page denies the surfaces around it while it is being pinched or is magnified —
+    /// the pager above it and the presentation's interactive dismissal (`MediaZoom.holds`).
+    let onHoldsChange: (MediaZoom.Holds) -> Void
     /// The viewer's one player, handed over only while it belongs to THIS page. `nil` on every
     /// other page — including a video page that has not been asked to play — and the reason a
     /// page cannot create, duplicate or outlive a player.
@@ -488,7 +511,11 @@ struct MediaViewerPage: View {
     var transport: any MediaTransport = MediaSession.shared
 
     @State private var transform = MediaZoom.Transform.identity
-    @GestureState private var magnification: CGFloat = 1
+    /// The pinch under the fingers right now, or none. It carries where the pinch STARTED as well
+    /// as how far it has come, because the point the fingers landed on is the point that has to
+    /// stay still, and the gesture reports that point in the space it is attached to — the
+    /// viewport-sized frame below.
+    @GestureState private var pinch: MediaZoom.Pinch?
     @GestureState private var pan: CGSize = .zero
     /// What THIS page loaded, tagged with the key it was loaded for — the same arrangement the
     /// timeline tiles use, and for the same reason: `NSCache` may drop an entry under a view that
@@ -524,29 +551,31 @@ struct MediaViewerPage: View {
                 )
             }
         }
-        .onChange(of: transform.isZoomed, initial: false) { _, zoomed in
-            onZoomChange(zoomed)
+        // Reported from the LIVE state, not the committed one: a hold that only began at a
+        // gesture's end would arrive after the page it was meant to hold had already turned.
+        .onChange(of: MediaZoom.holds(transform, pinch: pinch), initial: false) { _, holds in
+            onHoldsChange(holds)
         }
     }
 
     @ViewBuilder
     private func picture(in viewport: CGSize) -> some View {
         let fitted = MediaZoom.fittedSize(aspectRatio: page.aspectRatio, in: viewport)
-        let scale = MediaZoom.clamped(scale: transform.scale * Double(magnification))
-        let offset = MediaZoom.clampedOffset(
-            CGSize(
-                width: transform.offset.width + pan.width,
-                height: transform.offset.height + pan.height
-            ),
-            scale: scale,
+        // Both gestures and the committed transform meet in ONE function, so what is drawn while
+        // fingers are down is the same arithmetic the commits are tested against; the view adds
+        // nothing of its own to its answer.
+        let drawn = MediaZoom.live(
+            transform,
+            pinch: pinch,
+            pannedBy: pan,
             fitted: fitted,
             viewport: viewport
         )
 
         still
             .frame(width: fitted.width, height: fitted.height)
-            .scaleEffect(CGFloat(scale))
-            .offset(offset)
+            .scaleEffect(CGFloat(drawn.scale))
+            .offset(drawn.offset)
             .frame(width: viewport.width, height: viewport.height)
             .contentShape(.rect)
             // The pan is only live while there is something to pan: at rest it would
@@ -693,17 +722,17 @@ struct MediaViewerPage: View {
 
     private func magnifyGesture(fitted: CGSize, viewport: CGSize) -> some Gesture {
         MagnifyGesture()
-            .updating($magnification) { value, state, _ in
-                state = value.magnification
+            .updating($pinch) { value, state, _ in
+                state = MediaZoom.Pinch(
+                    magnification: Double(value.magnification),
+                    anchor: value.startLocation
+                )
             }
             .onEnded { value in
                 transform = MediaZoom.settled(
                     transform,
                     magnifiedBy: Double(value.magnification),
-                    anchoredAt: CGPoint(
-                        x: viewport.width / 2 + transform.offset.width,
-                        y: viewport.height / 2 + transform.offset.height
-                    ),
+                    anchoredAt: value.startLocation,
                     fitted: fitted,
                     viewport: viewport
                 )
@@ -715,11 +744,14 @@ struct MediaViewerPage: View {
             .updating($pan) { value, state, _ in
                 state = value.translation
             }
+            // A pinch may still be under the fingers when the drag ends, and its arithmetic
+            // multiplies whatever this stores — which is why the pinch goes in with the
+            // translation rather than being ignored here.
             .onEnded { value in
                 transform = MediaZoom.panned(
                     transform,
                     by: value.translation,
-                    underPinch: nil,
+                    underPinch: pinch,
                     fitted: fitted,
                     viewport: viewport
                 )
