@@ -5,12 +5,30 @@
 
   Every entry below was audited against the code that ships in this bundle, not assumed:
 
-    NSPrivacyAccessedAPICategoryFileTimestamp — PickedMedia.imported() reads
-    `.contentModificationDateKey` off the copy it just made of a picked file
-    (Packages/MemosFeatures/Sources/MemosFeatures/PickedMedia.swift). The copy lives in this
-    app's own temporary directory, which is why the reason is C617.1 (timestamps of files inside
-    the app container) and NOT DDA9.1: the timestamp is sent to the server as an upload's
-    `last_modified`, and DDA9.1 forbids sending the value off-device.
+    NSPrivacyAccessedAPICategoryFileTimestamp — TWO keys are read by code that ships in this
+    bundle, and both are named here rather than only the first, because the category is a claim
+    about every file-timestamp API the executable can reach:
+
+      * `.contentModificationDateKey` — PickedMedia.imported() reads it off the copy it just made
+        of a picked file (Packages/MemosFeatures/Sources/MemosFeatures/PickedMedia.swift). The
+        copy lives in this app's own temporary directory, which is why the reason is C617.1
+        (timestamps of files inside the app container) and NOT DDA9.1: the timestamp is sent to
+        the server as an upload's `last_modified`, and DDA9.1 forbids sending the value
+        off-device.
+      * `.creationDateKey` — OutboxRepository reads it off an outbox manifest whose JSON could not
+        be read (Packages/MemosOutbox/Sources/MemosOutbox/OutboxRepository.swift), so that the
+        capture still takes a place in capture order instead of falling to the bottom. MemosOutbox
+        is linked into this bundle, so the read is this bundle's. The file is the outbox's own, in
+        the app group container, which C617.1 covers along with the app container — and this value
+        never leaves the device: it is the `capturedAt` of a job written `.held` with a binding
+        that names the file rather than a server, so no drain can take it for work and no request
+        carries it.
+
+    AVAsset's `.creationDate` (Packages/MemosOutbox/Sources/MemosOutbox/Capture/CaptureReader.swift)
+    is deliberately NOT in that list. The category is about a file's timestamps as the file system
+    keeps them; that call loads an AVMetadataItem out of the movie's own QuickTime metadata — the
+    same header the lines above it read `.quickTimeMetadataCreationDate` from — which is the
+    content of the file, not an attribute of it.
 
     NSPrivacyAccessedAPICategoryUserDefaults — four values have to survive a launch, and each one
     is written with the API that earns a reason here. Three live in THIS app's own defaults, which

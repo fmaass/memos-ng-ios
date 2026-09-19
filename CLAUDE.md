@@ -246,6 +246,7 @@ Writes to known pages resolve BY ID from here; name-search is discovery only.
 - Charter: page:3158
 - Documentation Backlog: none — work is tracked in windshift workspace `MEMNG`
 - Lessons Learned: page:3281
+- Feature — Places: page:3855
 - Session Reviews chapter: chapter:3155
 - Decisions chapter: chapter:3154 (ADR-0001: page:3157)
 - Register / Roadmap: none — implementation plans are pages in the book (page:3186, page:3274),
