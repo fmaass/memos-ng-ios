@@ -111,13 +111,21 @@ struct UnreachableNoticeSessionTests {
         )
     }
 
+    /// - Parameter presenting: where to leave the credential the session built its client from,
+    ///   for a witness that has to compare a refusal's epoch against the one the request carried
+    ///   rather than against a number the test made up. Defaulted, so every other witness here
+    ///   builds the session it always did.
     private func makeSession(
         sleeper: ParkingSleeper,
+        presenting: LockedValue<PresentedCredential?>? = nil,
         handler: @escaping StubTransport.Handler
     ) -> SessionStore {
         SessionStore(
             credentials: credentials(),
-            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            makeClient: { _, token in
+                presenting?.set(token)
+                return Stub.client(token: token, handler: handler)
+            },
             sleeper: { await sleeper.sleep($0) },
             // Both seams park in the same recorder, so these witnesses read one ordered script of
             // everything the session waited for, ladder waits and notice wakes alike.
@@ -462,6 +470,54 @@ struct UnreachableNoticeSessionTests {
             seconds >= 3 * 0.8 && seconds <= 3 * 1.2,
             "the retry carried the ladder's rung: next wait was \(seconds) s, not the first"
         )
+    }
+
+    // MARK: - a refusal is not an outage
+
+    /// A server that says no is a server that answered. The whole notice hangs on that line: a
+    /// list refused by a live server must end the session through the one rule that ends sessions,
+    /// and raise nothing that says the server could not be reached.
+    ///
+    /// Built on a real session and a real list, because the two halves being separated is exactly
+    /// the defect: the refusal is classified where the answer lands and acted on a hop later, so
+    /// only the epoch the REQUEST presented can decide it. The whoami keeps answering so the
+    /// session stays confirmed while its list is refused.
+    @Test("a list the server refuses ends the session and says nothing about reaching it")
+    func aRefusedListIsNotAnOutage() async throws {
+        let sleeper = ParkingSleeper()
+        defer { sleeper.releaseAll() }
+        let presented = LockedValue<PresentedCredential?>(nil)
+        let session = makeSession(sleeper: sleeper, presenting: presented) { _, _, operation in
+            guard operation == whoamiOperation else { return Stub.empty(.unauthorized) }
+            return Stub.json(Stub.user)
+        }
+
+        await session.restore()
+        #expect(session.verification == .verified, "the launch check answered, so the session is")
+
+        let seen = LockedValue<[CredentialRefusal]>([])
+        let timeline = TimelineStore(onUnauthorized: { [session] refusal in
+            seen.set(seen.get() + [refusal])
+            return await session.handle(refusal)
+        })
+        timeline.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        // Read from the credential the client was built with, and read BEFORE the request that
+        // will carry it: this is the generation the list presents, not whatever the session holds
+        // once its refusal has been acted on.
+        let epoch = try #require(presented.get()).presented().epoch
+
+        await timeline.refresh(using: handle, baseURL: Stub.baseURL)
+
+        #expect(session.showsUnreachableNotice == false, "a refusal was read as an outage")
+        #expect(session.unverifiedSince == nil, "a refusal dated an outage that never happened")
+        #expect(seen.get().count == 1, "the refusal did not reach the session's one rule")
+        #expect(
+            seen.get().first?.issuedUnder == epoch,
+            "the refusal arrived without the generation its request presented"
+        )
+        #expect(session.state.user == nil, "a refusal of the credential in hand left the session")
+        #expect(timeline.lastError != nil, "and the list said nothing about it")
     }
 
     /// The recorded waits that are the ladder's, in order.
