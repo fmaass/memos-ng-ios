@@ -77,7 +77,7 @@ extension ComposeFailure {
     /// meets are wrappers — `MediaUploadError.refused(.unauthorized)` is what an upload against an
     /// ended session throws — and a wrapper read as an opaque error is a session failure reported
     /// as the server refusing somebody's words.
-    static func apiError(in error: any Error) -> APIError? {
+    fileprivate static func apiError(in error: any Error) -> APIError? {
         var current: (any Error)? = error
         for _ in 0..<16 {
             guard let error = current else { return nil }

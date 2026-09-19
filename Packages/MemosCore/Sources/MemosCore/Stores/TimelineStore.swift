@@ -446,6 +446,9 @@ public final class TimelineStore {
             }
         }
         do {
+            // The instant this read leaves, taken immediately before it does. Every row it comes
+            // back with is judged against it, so a change made while it was in the air outranks it.
+            let issued = mutationSequence
             let page = try await Self.page(
                 client,
                 query: lineage.query,
@@ -485,7 +488,7 @@ public final class TimelineStore {
             admittedQuery = lineage.query
             // Last, and awaited: everything this list says about itself is already true when the
             // picture of it is taken.
-            await commit(admitted(page.memos), under: authority)
+            await commit(effective(admitted(page.memos), issuedAt: issued), under: authority)
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
             // any more would put an error over a list that loaded perfectly well — and, for a
@@ -539,6 +542,10 @@ public final class TimelineStore {
                 session: issued.session
             )
             do {
+                // Inside the loop, because a pass that asks again is a NEW read: it left later, and
+                // a mutation the dropped pass was held off by may be finished by the time it does.
+                // Named apart from the lineage this operation set out with, which is also `issued`.
+                let issuedAt = mutationSequence
                 let page = try await Self.page(
                     client,
                     query: lineage.query,
@@ -567,7 +574,11 @@ public final class TimelineStore {
                 // A cursor page can overlap the one before it when a memo moved; appending blindly
                 // would show the same memo twice and break SwiftUI's identity.
                 let known = Set(memos.map(\.uid))
-                let merged = memos + admitted(page.memos.filter { !known.contains($0.uid) })
+                // Everything reaching the fence here is a uid the list does NOT hold, so a held one
+                // has no row to keep and is dropped: a memo changed while this page was in the air
+                // is not appended at the version the page describes. The next read brings it.
+                let fresh = page.memos.filter { !known.contains($0.uid) }
+                let merged = memos + effective(admitted(fresh), issuedAt: issuedAt)
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
@@ -649,6 +660,9 @@ public final class TimelineStore {
             // pass advances the server's own cursor; eight known-only pages in a row is a
             // server that is not converging, not a household timeline.
             for _ in 0..<8 {
+                // Inside the loop, for the reason the downward one takes it there: each pass is a
+                // read of its own and is judged against the instant that read left.
+                let issued = mutationSequence
                 let page = try await Self.page(
                     client,
                     query: lineage.query,
@@ -678,7 +692,12 @@ public final class TimelineStore {
                 hasNewer = page.nextCursor != nil
                 newerCursor = page.nextCursor
                 let known = Set(memos.map(\.uid))
-                let fresh = admitted(page.memos.filter { !known.contains($0.uid) })
+                // As downwards: only uids the list does not hold reach the fence, so a held one has
+                // no row to keep and is left off the block rather than prepended at a stale state.
+                let fresh = effective(
+                    admitted(page.memos.filter { !known.contains($0.uid) }),
+                    issuedAt: issued
+                )
                 lastError = nil
                 if !fresh.isEmpty {
                     await commit(Array(fresh.reversed()) + memos, under: authority)
@@ -1554,6 +1573,47 @@ public final class TimelineStore {
         return memos.map { admitted($0) }
     }
 
+    /// The rows of a read that may still be published, judged against the instant the read LEFT.
+    ///
+    /// A memo whose row has moved since then keeps the row this store holds: the read was asked
+    /// before the change and cannot be the newer word about it, however current its answer looks.
+    /// With no row loaded there is nothing to keep — and nothing this store is entitled to put on
+    /// the list at a version it already knows to be behind — so the memo is dropped instead.
+    ///
+    /// Records the owed read wherever a loaded row is kept: the one read on its way to bring the
+    /// server's own version of that row was refused here, and the debt is what remembers it.
+    private func effective(_ page: [Memo], issuedAt issued: Int) -> [Memo] {
+        page.compactMap { memo in
+            guard fenced(memo.uid, issuedAt: issued) else { return memo }
+            guard let loaded = memos.first(where: { $0.uid == memo.uid }) else { return nil }
+            owedReads.insert(memo.uid)
+            return loaded
+        }
+    }
+
+    /// The one row a reconciling read may apply, judged against the instant the read LEFT.
+    ///
+    /// Held rows keep what the loaded row says about the MEMO — its content, its visibility, which
+    /// attachments it has — because a read older than the change speaks about none of it. What the
+    /// read is still the only word on is how far each of those attachments has got: a transcode is
+    /// the server's business alone and no mutation of the memo makes a statement about it. So the
+    /// membership is the row's and each member is taken from the read's copy of that same uid.
+    ///
+    /// Nil when no row is loaded: there is nothing to carry the read's word into, and `apply`
+    /// discards a memo the list does not hold anyway.
+    ///
+    /// Records the owed read for the same reason the page overload does.
+    private func effective(_ merged: Memo, reconciledAt issued: Int) -> Memo? {
+        guard fenced(merged.uid, issuedAt: issued) else { return merged }
+        guard let loaded = memos.first(where: { $0.uid == merged.uid }) else { return nil }
+        owedReads.insert(merged.uid)
+        var held = loaded
+        held.attachments = loaded.attachments.map { attachment in
+            merged.attachments.first { $0.uid == attachment.uid } ?? attachment
+        }
+        return held
+    }
+
     /// Re-reads ONE memo from the server and applies it to the loaded list.
     ///
     /// The live media channel is what ends the waiting now, so this is no longer a poll. It is the
@@ -1637,20 +1697,31 @@ public final class TimelineStore {
         // refused or is superseded takes what it kept with it (MEMNG-197).
         let readID = openReconcileRead()
         defer { closeReconcileRead(readID) }
+        // The mutation instant, alongside the two above it and read the same way: before the
+        // request, so what comes back is judged against when it was asked rather than when it
+        // landed.
+        let issued = mutationSequence
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return false }
                 let read = Memo(try ok.body.json, baseURL: baseURL)
-                await apply(
-                    reconciled(
-                        read,
-                        issuedWith: appliedWhenIssued,
-                        replaying: reconcileReads[readID] ?? [:]
-                    ),
-                    under: authority
-                )
+                // A memo changed since this read was asked keeps the row this store holds, with
+                // only the attachment states the read carries — that part of the answer is about
+                // nothing a mutation of the memo touched. The read HAPPENED either way, so the
+                // caller is told so and does not ask again on the strength of a refusal it caused.
+                guard
+                    let row = effective(
+                        reconciled(
+                            read,
+                            issuedWith: appliedWhenIssued,
+                            replaying: reconcileReads[readID] ?? [:]
+                        ),
+                        reconciledAt: issued
+                    )
+                else { return true }
+                await apply(row, under: authority)
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -1767,12 +1838,22 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        // Read before the request, as every other read of this store reads it.
+        let issued = mutationSequence
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return .absent }
                 let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
+                // Changed since this read was asked: the loaded row is the newer word, so it is
+                // what the caller opens the memo with, and nothing is applied over it. No
+                // per-attachment rule here — this lane merges nothing, it hands a memo over.
+                let loaded = memos.first { $0.uid == memo.uid }
+                if fenced(memo.uid, issuedAt: issued), let loaded {
+                    owedReads.insert(memo.uid)
+                    return .memo(loaded)
+                }
                 await apply(memo, under: authority)
                 // AGAIN, after the apply: it awaits its way to the disk, and the memo below is
                 // one account's own — handing it to a caller that has become somebody else is an

@@ -387,7 +387,13 @@ struct TimelineRowFenceTests {
         let client = Stub.client { _, _, operation in
             switch operation {
             case patchMemoOperation:
-                return Stub.empty(.conflict)
+                // The refusal as the contract writes it, body and all. An empty 409 is an answer
+                // this client cannot READ, which says nothing about what became of the memo — a
+                // different case from the one this test is about.
+                return Stub.json(
+                    #"{"detail":{"code":"edit_key_conflict","memo_uid":"b","message":"bound"}}"#,
+                    status: .conflict
+                )
             case listMemosOperation:
                 let index = lists.count
                 lists.increment()
