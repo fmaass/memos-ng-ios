@@ -146,10 +146,10 @@ struct HeatmapStoreTests {
         #expect(!store.isLoading)
     }
 
-    /// The banner owns what an unreachable server says, and a sentence the server's own answer left
-    /// behind is not about a request that never reached it: left standing, the card explains this
-    /// failure with the last one's words — and the sheet reads that sentence as a section that has
-    /// something to say.
+    /// The banner owns what an unreachable server says, and what the server's own answer left
+    /// behind is not about a request that never reached it. The sheet reads this only as a flag:
+    /// left standing, a section that never loaded is drawn as though the server had answered
+    /// with nothing, rather than as the placeholders a read that never arrived has always shown.
     @Test("a load that never reached the server takes the last answer's sentence down")
     func transportFailureClearsTheAnsweredSentence() async {
         let calls = Counter()
@@ -172,9 +172,10 @@ struct HeatmapStoreTests {
         #expect(!store.isLoading, "the transport arm stopped falling through to the spinner")
     }
 
-    /// The witness against the cheaper rule that passes the case above. Clearing the sentence when
-    /// a load BEGINS blanks an answer the server really gave while the next request is still in the
-    /// air, so the card goes quiet about a 500 that nothing has replaced yet.
+    /// The witness against the cheaper rule that passes the case above. Clearing the flag when a
+    /// load BEGINS drops an answer the server really gave before anything has replaced it: while
+    /// the request is still out, a section that never loaded stops carrying its failure on the
+    /// strength of a read that has not come back.
     @Test("the answered sentence stands until the request that never arrived has failed")
     func theAnsweredSentenceStandsWhileTheNextLoadIsOut() async {
         let entered = LockedValue<Bool>(false)

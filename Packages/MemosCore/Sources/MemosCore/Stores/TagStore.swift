@@ -98,9 +98,12 @@ public final class TagStore {
             if !sessionStillCurrent(handle) {
                 MemosLog.api.info("a failure for a session that has ended is not reported")
             } else if let failure = StoreFailure.transportFailure(error) {
-                // And a sentence an earlier answer left must not stand in for this one: the banner
-                // owns what an unreachable server says, and a stale "the server returned 500" under
-                // it would be the row explaining this failure with the last one's words.
+                // And what an earlier answer left behind must not stand in for this one. Nothing
+                // draws this sentence: the sheet reads it only as a flag, so a section that never
+                // loaded and has a server error behind it is drawn as though the server had
+                // answered with nothing — under a banner saying it cannot be reached. Cleared, it
+                // is drawn as placeholders again, exactly as a first read failing here has always
+                // drawn it; a section that HAS loaded is unaffected either way.
                 lastError = nil
                 session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             } else if let refusal = StoreFailure.refusal(error) {
