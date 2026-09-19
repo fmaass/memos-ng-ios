@@ -3,8 +3,9 @@
 # The quick mode's own check: `bin/mac-gate.sh --quick` is an ITERATION loop, never a verdict.
 #
 # Two things make that true, and neither is visible in a build log. The first is the line it
-# prints: `MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` is deliberately not the full gate's
-# `mac-gate SUMMARY: … | exit=<rc>`, so a quick run can never be pasted into a merge as evidence.
+# prints: `MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` is deliberately not the full
+# gate's `mac-gate SUMMARY: … | exit=<rc>`, so a quick run can never be pasted into a merge as
+# evidence.
 # The second is what it refuses: a scope flag without --quick, two scopes at once, a bundle the
 # gate does not build, --quick beside --classify-only. Both are checked here, against throwaway
 # repositories and PATH stubs for ssh and rsync — no build host, no network, no Mac.
@@ -191,6 +192,8 @@ git -C "$w" commit --quiet -am "a source change, so this is not a docs-only chan
 
 new_case pass
 cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
+::: lint :::
+MAC_GATE_STEP lint 0
 ::: generate :::
 MAC_GATE_STEP generate 0
 ::: build :::
@@ -198,16 +201,16 @@ MAC_GATE_STEP build 0
 ::: tests :::
 test counts for the quick scope: MemosCoreTests=214
 MAC_GATE_STEP tests 0
-MAC_GATE_QUICK_REMOTE: build=0 tests=0
+MAC_GATE_QUICK_REMOTE: lint=0 build=0 tests=0
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR" --quick
 
 if [ "$RC" -eq 0 ]; then ok "a passing quick run exits 0"
 else bad "a passing quick run exits 0 (got $RC)"; printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: build=0 tests=0 \| exit=0$')"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=0 tests=0 \| exit=0$')"
 if [ "$n" -eq 1 ]; then quick_line_seen=1; ok "it prints exactly one MAC_GATE_QUICK line"
-else bad "expected exactly one 'MAC_GATE_QUICK: build=0 tests=0 | exit=0' line, found $n"
+else bad "expected exactly one 'MAC_GATE_QUICK: lint=0 build=0 tests=0 | exit=0' line, found $n"
      printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 
 n="$(count_lines "$OUT" "$SUMMARY_RE")"
@@ -254,6 +257,70 @@ if [ -s "$CASE_DIR/remote-script.txt" ]; then
   fi
 else
   bad "the quick run sent no remote script"
+fi
+
+# --- part 2b: what the quick sequence actually DOES ---------------------------------------------------
+# Lint runs first there, and a lint error stops the run: no generate, no build, no tests. No grep can
+# establish that. The ssh stub above saves the remote script and prints a scripted transcript without
+# ever running it, and s_format is in that script anyway for the full path — so a whole-file grep and
+# a fed lint= line would both still pass after someone took lint out of the quick block, and neither
+# can tell a lint that stops the run from one that only remembers its rc. So the sequence is cut out
+# of the saved script and RUN, with its four steps replaced by stubs that say they were called.
+quick_seq="$CASE_DIR/quick-sequence.sh"
+awk 'index($0, "quick_tests_rc=\"-\"") { f = 1 }
+     f { print }
+     f && index($0, "exit \"$quick_exit\"") { exit }' \
+  "$CASE_DIR/remote-script.txt" > "$quick_seq" 2>/dev/null
+
+# The extraction's own control: two anchors that stopped matching, or a step that left the sequence,
+# would otherwise make every case below pass by running nothing. Each step is looked for as a whole
+# line and nothing else, because the sequence's own comments name the steps too — a control a
+# comment can satisfy is not a control.
+seq_names_all=1
+for needle in s_format s_quick_generate s_quick_build s_quick_tests; do
+  grep -Eq "^[[:space:]]*$needle[[:space:]]*$" "$quick_seq" || seq_names_all=0
+done
+if [ -s "$quick_seq" ] && [ "$seq_names_all" -eq 1 ]; then
+  ok "the quick sequence was cut out of the remote script and names all four of its steps (control)"
+else
+  bad "the quick sequence extracted from the remote script is empty or does not name all four steps"
+  sed 's/^/     | /' "$quick_seq" 2>/dev/null
+fi
+
+# One run of the extracted sequence. The stubs announce themselves on stdout, so the ORDER they were
+# called in is read back from the same stream the sequence's own lines come out of.
+run_quick_sequence() { # $1 = the rc the lint stub returns; sets SEQ_OUT, SEQ_RC, SEQ_CALLS
+  SEQ_OUT="$(QUICK_SEQ_LINT_RC="$1" bash -c '
+    set -uo pipefail
+    quick_scope=""
+    s_format()         { echo "CALL:format";   return "$QUICK_SEQ_LINT_RC"; }
+    s_quick_generate() { echo "CALL:generate"; return 0; }
+    s_quick_build()    { echo "CALL:build";    return 0; }
+    s_quick_tests()    { echo "CALL:tests";    return 0; }
+    . "$1"
+  ' _ "$quick_seq" 2>&1)"
+  SEQ_RC=$?
+  SEQ_CALLS="$(printf '%s\n' "$SEQ_OUT" | sed -n 's/^CALL://p' | tr '\n' ' ')"
+  SEQ_CALLS="${SEQ_CALLS% }"
+}
+
+if [ -s "$quick_seq" ]; then
+  run_quick_sequence 1
+  if [ "$SEQ_CALLS" = "format" ] && [ "$SEQ_RC" -eq 1 ] \
+     && printf '%s\n' "$SEQ_OUT" | grep -q '^MAC_GATE_QUICK_REMOTE: lint=1 build=- tests=-$'; then
+    ok "a failed lint stops the quick sequence: only lint ran, it reports lint=1 build=- tests=- and exits 1"
+  else
+    bad "a failed lint did not stop the quick sequence (steps: ${SEQ_CALLS:-none}, exit $SEQ_RC)"
+    printf '%s\n' "$SEQ_OUT" | sed 's/^/     | /'
+  fi
+
+  run_quick_sequence 0
+  if [ "$SEQ_CALLS" = "format generate build tests" ] && [ "$SEQ_RC" -eq 0 ]; then
+    ok "a clean lint is followed by generate, build and tests, in that order"
+  else
+    bad "a clean lint was not followed by generate, build and tests (steps: ${SEQ_CALLS:-none}, exit $SEQ_RC)"
+    printf '%s\n' "$SEQ_OUT" | sed 's/^/     | /'
+  fi
 fi
 
 # --- the pinning rule -------------------------------------------------------------------------------
@@ -353,25 +420,51 @@ fi
 # --- part 3: a quick run whose build fails ----------------------------------------------------------
 new_case buildfail
 cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
+::: lint :::
+MAC_GATE_STEP lint 0
 ::: generate :::
 MAC_GATE_STEP generate 0
 ::: build :::
 error: cannot find 'nope' in scope
 MAC_GATE_STEP build 65
 ::: tests skipped (the build failed) :::
-MAC_GATE_QUICK_REMOTE: build=65 tests=-
+MAC_GATE_QUICK_REMOTE: lint=0 build=65 tests=-
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=65 run_gate "$w" "$CASE_DIR" --quick
 
 if [ "$RC" -eq 65 ]; then ok "a failing build exits with the build's own code"
 else bad "a failing build should exit 65, got $RC"; printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: build=65 tests=- \| exit=65$')"
-if [ "$n" -eq 1 ]; then ok "a failing build reports build=65 tests=- | exit=65"
-else bad "expected 'MAC_GATE_QUICK: build=65 tests=- | exit=65', found $n such line(s)"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=65 tests=- \| exit=65$')"
+if [ "$n" -eq 1 ]; then ok "a failing build reports lint=0 build=65 tests=- | exit=65"
+else bad "expected 'MAC_GATE_QUICK: lint=0 build=65 tests=- | exit=65', found $n such line(s)"
      printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 n="$(count_lines "$OUT" "$SUMMARY_RE")"
 [ "$n" -eq 0 ] && ok "a failing quick run still prints no verdict line" \
   || bad "a failing quick run printed $n verdict-shaped line(s)"
+
+# --- part 3b: a quick run whose lint fails ------------------------------------------------------------
+# The other half of the stop, read from the outside: the local half repeats the lint rc the build host
+# reported, says nothing was built or tested, and exits with the lint's own code.
+new_case lintfail
+cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
+::: lint :::
+Sources/App.swift:1:1: error: [Indentation] unexpected indentation
+MAC_GATE_STEP lint 1
+::: generate, build and tests skipped (the lint failed) :::
+MAC_GATE_QUICK_REMOTE: lint=1 build=- tests=-
+REMOTE_EOF
+STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=1 run_gate "$w" "$CASE_DIR" --quick
+
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=1 build=- tests=- \| exit=1$')"
+if [ "$RC" -eq 1 ] && [ "$n" -eq 1 ]; then
+  ok "a failing lint reports lint=1 build=- tests=- | exit=1"
+else
+  bad "expected exit 1 and one 'lint=1 build=- tests=- | exit=1' line, got exit $RC and $n line(s)"
+  printf '%s\n' "$OUT" | sed 's/^/     | /'
+fi
+n="$(count_lines "$OUT" "$SUMMARY_RE")"
+[ "$n" -eq 0 ] && ok "a lint-failed quick run still prints no verdict line" \
+  || bad "a lint-failed quick run printed $n verdict-shaped line(s)"
 
 # --- part 4: a remote that stopped before it said anything ------------------------------------------
 # The lock this run held was reaped while it was starting (exit 4). Nothing was built, so there is
@@ -381,21 +474,22 @@ cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
 remote: the gate lock of this run was taken over while it was starting
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=4 run_gate "$w" "$CASE_DIR" --quick
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: build=- tests=- \| exit=4$')"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=- build=- tests=- \| exit=4$')"
 if [ "$RC" -eq 4 ] && [ "$n" -eq 1 ]; then
-  ok "a remote that reported no step reads build=- tests=- | exit=4"
+  ok "a remote that reported no step reads lint=- build=- tests=- | exit=4"
 else
-  bad "expected exit 4 and one 'build=- tests=- | exit=4' line, got exit $RC and $n line(s)"
+  bad "expected exit 4 and one 'lint=- build=- tests=- | exit=4' line, got exit $RC and $n line(s)"
   printf '%s\n' "$OUT" | sed 's/^/     | /'
 fi
 
 # --- part 5: --bundle carries a scope to the build host ---------------------------------------------
 new_case scope
 cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
+MAC_GATE_STEP lint 0
 MAC_GATE_STEP generate 0
 MAC_GATE_STEP build 0
 MAC_GATE_STEP tests 0
-MAC_GATE_QUICK_REMOTE: build=0 tests=0
+MAC_GATE_QUICK_REMOTE: lint=0 build=0 tests=0
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR" --quick --bundle MemosCoreTests
 if [ "$RC" -eq 0 ] && grep -q "GATE_QUICK_BUNDLE='MemosCoreTests'" "$CASE_DIR/remote-script.txt" 2>/dev/null \
@@ -416,10 +510,11 @@ git -C "$d" commit --quiet -am "docs only"
 
 new_case docs
 cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
+MAC_GATE_STEP lint 0
 MAC_GATE_STEP generate 0
 MAC_GATE_STEP build 0
 MAC_GATE_STEP tests 0
-MAC_GATE_QUICK_REMOTE: build=0 tests=0
+MAC_GATE_QUICK_REMOTE: lint=0 build=0 tests=0
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$d" "$CASE_DIR" --quick
 if [ "$RC" -eq 0 ] && [ -s "$CASE_DIR/remote-script.txt" ] \
