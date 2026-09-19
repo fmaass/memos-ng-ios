@@ -36,8 +36,9 @@
 # Usage:
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh --quick [--bundle <name> | --only-testing <id>]
-#                                     the ITERATION loop, never a verdict: compile for testing on
-#                                     this branch's warm lane and run the named scope on it.
+#                                     the ITERATION loop, never a verdict: lint, then compile for
+#                                     testing on this branch's warm lane and run the named scope on
+#                                     it. A lint error stops the run before anything is built.
 #                                     --bundle names one of the gate's test bundles;
 #                                     --only-testing takes an xcodebuild identifier
 #                                     (Bundle, Bundle/Suite or Bundle/Suite/test). Neither means
@@ -53,9 +54,11 @@
 # openapi-coverage rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
-# lane lock, the load gate and the private simulator. It prints one line of its own,
-# MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's summary
-# line — a quick run can never be read, or pasted, as a verdict. The verdict is the full gate.
+# lane lock, the load gate and the private simulator — and the lint, which costs seconds and is a
+# merge verdict either way. It prints one line of its own,
+# MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's
+# summary line — a quick run can never be read, or pasted, as a verdict. The verdict is the full
+# gate.
 # It reuses the lane's DerivedData, which is why it is quick and why it takes the same lock: the
 # tree it compiles into is the tree a full run of this branch would rsync --delete.
 #
@@ -480,7 +483,7 @@ die_locked() {
   # A quick run that never got the lock built nothing, so it reports nothing built — but it still
   # reports, on its own line, because that line is what the caller reads.
   [ "${QUICK:-0}" -eq 0 ] \
-    || printf 'MAC_GATE_QUICK: build=- tests=- | exit=3\n' | tee -a "$log"
+    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- | exit=3\n' | tee -a "$log"
   exit 3
 }
 
@@ -528,13 +531,14 @@ summary_and_exit() {
 # one thing in this repo that means "this change may merge", and a run that skipped the pins, the
 # warnings rebuilds and the shipping-bundle read-back must not be able to produce it — not by
 # accident, and not by a copy-paste out of a terminal. So the quick mode says what it did (the
-# build and the tests it ran) under a name of its own, and never reaches summary_and_exit.
+# lint, the build and the tests it ran) under a name of its own, and never reaches summary_and_exit.
 # A dash means "never got that far": the build host was never asked, or it stopped before saying.
+QUICK_LINT_RC="-"
 QUICK_BUILD_RC="-"
 QUICK_TESTS_RC="-"
 quick_summary_and_exit() {
   say "run log     : $log"
-  say "MAC_GATE_QUICK: build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
+  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
 }
@@ -2050,10 +2054,11 @@ PY
 # --- the quick mode's own sequence ----------------------------------------------------------------
 # Everything above this line is the preamble both modes share: the lock check, the work
 # directories, the disk sweep, this run's private device and its accessibility keys. From here the
-# two part company. The quick sequence generates the project (which is also what puts the tracked
-# Package.resolved where SwiftPM reads it), compiles the test bundles, and runs the scope it was
-# given on the device — nothing else. It ends by exiting, so the full gate's steps below are never
-# reached and MAC_GATE_REMOTE_SUMMARY, the line a verdict is read from, is never printed.
+# two part company. The quick sequence lints, generates the project (which is also what puts the
+# tracked Package.resolved where SwiftPM reads it), compiles the test bundles, and runs the scope it
+# was given on the device — nothing else, and each step only if the one before it passed. It ends by
+# exiting, so the full gate's steps below are never reached and MAC_GATE_REMOTE_SUMMARY, the line a
+# verdict is read from, is never printed.
 if [ "${GATE_QUICK:-0}" -eq 1 ]; then
   QUICK_XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG-quick.xcresult"
   # One scope, already validated on the controller: --only-testing is passed through verbatim,
@@ -2158,27 +2163,40 @@ QUICKCOUNT_PY
   }
 
   quick_tests_rc="-"
-  echo "::: generate :::"
-  s_quick_generate
-  quick_build_rc=$?
-  echo "MAC_GATE_STEP generate $quick_build_rc"
-  if [ "$quick_build_rc" -eq 0 ]; then
-    echo "::: build :::"
-    s_quick_build
+  quick_build_rc="-"
+  # Lint before anything is generated or compiled: it is the same s_format the full gate runs, it
+  # reads nothing a build produces, and a run that stops here costs seconds instead of the minutes
+  # a build would spend before failing the merge verdict for a reason already known.
+  echo "::: lint :::"
+  s_format
+  quick_lint_rc=$?
+  echo "MAC_GATE_STEP lint $quick_lint_rc"
+  quick_exit="$quick_lint_rc"
+  if [ "$quick_lint_rc" -eq 0 ]; then
+    echo "::: generate :::"
+    s_quick_generate
     quick_build_rc=$?
-    echo "MAC_GATE_STEP build $quick_build_rc"
-  fi
-  if [ "$quick_build_rc" -eq 0 ]; then
-    echo "::: tests${quick_scope:+ ($quick_scope)} :::"
-    s_quick_tests
-    quick_tests_rc=$?
-    echo "MAC_GATE_STEP tests $quick_tests_rc"
-    quick_exit="$quick_tests_rc"
+    echo "MAC_GATE_STEP generate $quick_build_rc"
+    if [ "$quick_build_rc" -eq 0 ]; then
+      echo "::: build :::"
+      s_quick_build
+      quick_build_rc=$?
+      echo "MAC_GATE_STEP build $quick_build_rc"
+    fi
+    if [ "$quick_build_rc" -eq 0 ]; then
+      echo "::: tests${quick_scope:+ ($quick_scope)} :::"
+      s_quick_tests
+      quick_tests_rc=$?
+      echo "MAC_GATE_STEP tests $quick_tests_rc"
+      quick_exit="$quick_tests_rc"
+    else
+      echo "::: tests skipped (the build failed) :::"
+      quick_exit="$quick_build_rc"
+    fi
   else
-    echo "::: tests skipped (the build failed) :::"
-    quick_exit="$quick_build_rc"
+    echo "::: generate, build and tests skipped (the lint failed) :::"
   fi
-  echo "MAC_GATE_QUICK_REMOTE: build=$quick_build_rc tests=$quick_tests_rc"
+  echo "MAC_GATE_QUICK_REMOTE: lint=$quick_lint_rc build=$quick_build_rc tests=$quick_tests_rc"
   exit "$quick_exit"
 fi
 
@@ -2202,9 +2220,9 @@ REMOTE_EOF
 remote_rc="${PIPESTATUS[1]}"
 record remote "$remote_rc"
 
-# The quick mode's two numbers come from the line the build host printed, read back out of the log
+# The quick mode's three numbers come from the line the build host printed, read back out of the log
 # the stream above was tee'd into. Anything that is not a run of digits is not a number this
-# script will repeat: a remote that stopped before it said anything leaves both as "-", which is
+# script will repeat: a remote that stopped before it said anything leaves them all as "-", which is
 # the honest answer and cannot be misread as a zero.
 if [ "$QUICK" -eq 1 ]; then
   quick_remote_line="$(sed -n 's/^MAC_GATE_QUICK_REMOTE: //p' "$log" | tail -1)"
@@ -2216,6 +2234,7 @@ if [ "$QUICK" -eq 1 ]; then
       *) printf '%s' "$value" ;;
     esac
   }
+  QUICK_LINT_RC="$(quick_field lint)"
   QUICK_BUILD_RC="$(quick_field build)"
   QUICK_TESTS_RC="$(quick_field tests)"
 fi
