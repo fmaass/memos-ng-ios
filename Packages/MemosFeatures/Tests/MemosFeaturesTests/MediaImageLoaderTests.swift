@@ -65,6 +65,32 @@ actor RefusingTransport: MediaTransport {
     }
 }
 
+/// A transport that refuses the first request and answers every one after it: the connection that
+/// dropped and came back. Counting calls says a second request was made; answering the second one
+/// with real bytes is what lets a case assert the picture the retry was for actually arrives.
+actor RecoveringTransport: MediaTransport {
+    private(set) var calls = 0
+    private let payload: Data
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
+        calls += 1
+        guard calls > 1 else { throw URLError(.notConnectedToInternet) }
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://memos.example.invalid/")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/png"]
+        )!
+        return (payload, response)
+    }
+}
+
 /// A transport that stops in the middle, so a test can act while a fetch is on the wire. The two
 /// gates are the whole point: `waitUntilStarted` says the request has begun, `release` lets it
 /// finish, and between them the test can change who the device is signed in as.

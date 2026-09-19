@@ -15,6 +15,11 @@ protocol AnnotationSink: AnyObject {
     /// One annotation whose pin changed in place — the object MapKit already holds, not a
     /// replacement for it.
     func refresh(_ annotation: PlaceAnnotation)
+    /// Whether the view standing for this annotation is still owed its photograph.
+    ///
+    /// Asked of the sink because an annotation does not know its view: a pin whose fetch came back
+    /// with nothing is, in everything the coordinator can see, the pin beside it.
+    func isAwaitingPhotograph(_ annotation: PlaceAnnotation) -> Bool
 }
 
 /// One pin on the map, as the object MapKit keeps.
@@ -36,14 +41,15 @@ nonisolated final class PlaceAnnotation: NSObject, MKAnnotation {
 
     /// The same object and the same place, standing for the same photographs — but read again.
     ///
-    /// The server signs a thumbnail URL afresh on every read, so an annotation kept across a
-    /// refresh is holding a signature that will lapse while the one that replaces it is thrown
+    /// A read can bring the thumbnail URL back signed afresh, so an annotation kept across a
+    /// refresh may be holding a signature that will lapse while the one that replaces it is thrown
     /// away. Separate from `update(to:)` because writing `coordinate` is a KVO notification to the
     /// map, and a pin that did not move must not send one.
     ///
-    /// Answers whether that URL is a different one, because a pin whose fetch came back with
-    /// nothing has no other occasion to ask again: its spec is unchanged, so no bucket of the diff
-    /// holds it, and a fresh signature is the only thing that says the picture is worth asking for.
+    /// Answers whether that URL is a different one. A signature the pin has not seen is worth a
+    /// repaint, because the picture the old one could not authorise may be had under this one —
+    /// but the same URL can come back just as well, so this answer is a reason to repaint and
+    /// never the only one (`show(_:through:)`).
     func adopt(_ pin: PlacePin) -> Bool {
         let previousURL = self.pin.leadThumbnailURL
         self.pin = pin
@@ -161,16 +167,24 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         apply(diff, from: wanted, through: sink)
 
         // What the diff cannot see: a pin in no bucket is the same place with the same
-        // photographs, and its thumbnail URL is nonetheless a new one. The annotation takes it,
-        // and the one whose URL actually changed is repainted — that repaint is the only occasion
-        // a pin whose fetch came back with nothing ever gets to ask again. It costs a pin that has
-        // its photograph nothing: the picture is cached under the uid, which did not change, so
-        // the repaint reads it straight back and paints the same picture without a request.
+        // photographs, read again. Its thumbnail URL may be signed afresh or come back exactly as
+        // it was — this side cannot tell which the read will bring — so the annotation takes the
+        // new pin either way, and the repaint is decided on two grounds. A URL the pin has not
+        // seen is one. The other is the view: a pin showing nothing with no request out is a
+        // thumbnail fetch that came back with nothing and cached nothing, and this pass is the
+        // only occasion it ever gets to ask again.
+        //
+        // Neither ground touches a pin that HAS its photograph, and a repaint would not cost it
+        // anything anyway: the picture is cached under the uid, which did not change, so
+        // `show(photoFor:at:badge:)` reads it straight back without a request. One with a request
+        // still out is not repainted, and would refuse a second ask if it were.
         var touched = Set(diff.added.map(\.key))
         touched.formUnion(diff.updated.map(\.key))
         for (key, pin) in wanted where !touched.contains(key) {
             guard let annotation = annotations[key] else { continue }
-            if annotation.adopt(pin) { sink.refresh(annotation) }
+            let signatureChanged = annotation.adopt(pin)
+            let stillOwed = pin.leadThumbnailURL != nil && sink.isAwaitingPhotograph(annotation)
+            if signatureChanged || stillOwed { sink.refresh(annotation) }
         }
     }
 
@@ -228,6 +242,12 @@ final class MapViewAnnotationSink: AnnotationSink {
         // Nil when the pin is off screen or swallowed by a cluster: there is no view to repaint,
         // and the one MapKit builds when it comes back reads the annotation as it stands.
         (mapView?.view(for: annotation) as? PlaceAnnotationView)?.configure()
+    }
+
+    func isAwaitingPhotograph(_ annotation: PlaceAnnotation) -> Bool {
+        // Nil for the same reasons as above, and the answer is no: a pin with no view is owed
+        // nothing, and the view MapKit builds for it asks for its photograph itself.
+        (mapView?.view(for: annotation) as? PlaceAnnotationView)?.isAwaitingPhotograph ?? false
     }
 }
 

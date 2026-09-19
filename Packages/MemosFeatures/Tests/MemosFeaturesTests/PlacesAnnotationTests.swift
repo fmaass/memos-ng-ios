@@ -66,6 +66,10 @@ final class RecordingSink: AnnotationSink {
         refreshed.append(annotation)
         calls.append(.refresh(annotation.pin.spec.key))
     }
+
+    /// No views behind this sink, so nothing it holds is waiting for a picture — which leaves the
+    /// cases that use it recording exactly what the diff decided, and nothing else.
+    func isAwaitingPhotograph(_ annotation: PlaceAnnotation) -> Bool { false }
 }
 
 @MainActor
@@ -253,6 +257,11 @@ final class PinViewSink: AnnotationSink {
     func refresh(_ annotation: PlaceAnnotation) {
         refreshed.append(annotation.pin.spec.key)
         views[annotation.pin.spec.key]?.configure()
+    }
+
+    /// The real view's own answer, as the production sink asks it of the view MapKit holds.
+    func isAwaitingPhotograph(_ annotation: PlaceAnnotation) -> Bool {
+        views[annotation.pin.spec.key]?.isAwaitingPhotograph ?? false
     }
 }
 
@@ -467,6 +476,106 @@ extension MediaImageLoaderTests {
             #expect(
                 sink.views["loaded"]?.shownImage === painted,
                 "the pin dropped the picture it was showing and blinked"
+            )
+        }
+    }
+
+    /// The same grey square, in the case it usually comes from: the connection dropped and the
+    /// read a minute later brought the URL back unchanged — a signed URL can be minted identically
+    /// for a while, so a new signature is a hint that the picture is worth asking for and never a
+    /// condition. Nothing about the pin changed at all here; only what its view is showing can say
+    /// the photograph is still owed.
+    @Test("a pin whose photograph never arrived is asked again even for the same URL")
+    func aPinThatFetchedNothingIsAskedAgainForTheSameURL() async {
+        let transport = RecoveringTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let coordinator = PlacesMapCoordinator()
+            let sink = PinViewSink()
+            let uid = "place-same-url"
+            let pin = placePin(key: "same", uid: uid, thumbnail: MediaFixture.signed(uid: uid))
+
+            coordinator.show([pin], through: sink)
+            await sink.views["same"]?.loading?.value
+            #expect(sink.views["same"]?.shownImage == nil, "the first fetch was supposed to fail")
+
+            // The recovery read: identical specs, the identical URL.
+            coordinator.show([pin], through: sink)
+            await sink.views["same"]?.loading?.value
+            let askedAfterReload = await transport.calls
+
+            #expect(askedAfterReload == 2, "the grey square was never asked about again")
+            #expect(
+                sink.views["same"]?.shownImage != nil,
+                "the photograph was there for the asking and the pin stayed grey"
+            )
+        }
+    }
+
+    /// The other half of the same URL coming back: a pin that HAS its photograph is not asked
+    /// about at all. The map does not repaint it, so there is no request to answer and no moment
+    /// where the picture it is showing is taken away.
+    @Test("a pin already showing its photograph is left alone when the same URL comes back")
+    func aLoadedPinIsUntouchedByTheSameURL() async {
+        let transport = ScriptedTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let coordinator = PlacesMapCoordinator()
+            let sink = PinViewSink()
+            let uid = "place-held"
+            let pin = placePin(key: "held", uid: uid, thumbnail: MediaFixture.signed(uid: uid))
+
+            coordinator.show([pin], through: sink)
+            await sink.views["held"]?.loading?.value
+            let painted = sink.views["held"]?.shownImage
+            #expect(painted != nil, "the pin was supposed to be holding a photograph")
+
+            coordinator.show([pin], through: sink)
+            await sink.views["held"]?.loading?.value
+            let askedInAll = await transport.calls
+
+            #expect(askedInAll == 1, "a photograph in hand was fetched a second time")
+            #expect(
+                sink.views["held"]?.shownImage === painted,
+                "the pin dropped the picture it was showing and blinked"
+            )
+            #expect(sink.refreshed.isEmpty, "a pin holding its photograph was repainted")
+        }
+    }
+
+    /// A map pass lands whenever the screen is re-evaluated, and one can arrive while the pin's
+    /// first request is still unanswered. Such a pin is showing nothing but is owed nothing: the
+    /// answer is on its way, and asking again — for the same URL or for a freshly signed one —
+    /// would put the same bytes on the wire twice and blank the pin in the meantime.
+    @Test("a pin with a request already out is not asked a second time")
+    func aPinWithAFetchInFlightIsNotAskedAgain() async {
+        let transport = GatedTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let coordinator = PlacesMapCoordinator()
+            let sink = PinViewSink()
+            let uid = "place-in-flight"
+            let first = MediaFixture.signed(uid: uid, sig: "one")
+            let second = MediaFixture.signed(uid: uid, sig: "two")
+
+            coordinator.show([placePin(key: "flight", uid: uid, thumbnail: first)], through: sink)
+            await transport.waitUntilStarted()
+
+            // A read bringing the URL back unchanged, while the request is still out.
+            coordinator.show([placePin(key: "flight", uid: uid, thumbnail: first)], through: sink)
+            #expect(sink.refreshed.isEmpty, "a pin whose request was still out was repainted")
+
+            // And one bringing a freshly signed URL, still while it is out.
+            coordinator.show([placePin(key: "flight", uid: uid, thumbnail: second)], through: sink)
+
+            await transport.release()
+            await sink.views["flight"]?.loading?.value
+            let askedInAll = await transport.requests.count
+
+            #expect(
+                askedInAll == 1,
+                "a second request went out for a photograph already on the wire"
+            )
+            #expect(
+                sink.views["flight"]?.shownImage != nil,
+                "the answer already on its way was never painted"
             )
         }
     }
