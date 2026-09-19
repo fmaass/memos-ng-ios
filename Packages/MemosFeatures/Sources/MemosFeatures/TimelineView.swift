@@ -340,6 +340,12 @@ public struct TimelineView: View {
                 // Switching tabs and then doing nothing reads as the app losing the tap. Say what
                 // happened instead: the memo is gone, or it is not in the list this screen shows.
                 jumpNotice = "That memo is no longer here."
+            case .unreadable:
+                // The read failed — dropped on the way, or refused by the server with an error of
+                // its own — so nothing here knows whether the memo is still there, and saying it
+                // is gone would be a guess, and the wrong one. When it was the server that could
+                // not be reached, the banner above this says so, once.
+                jumpNotice = "That memo couldn't be opened just now."
             }
         }
     }
