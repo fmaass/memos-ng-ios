@@ -27,6 +27,7 @@ Platform facts below were researched on 2026-08-23.
 | Testing | **Swift Testing**; XCTest only for UI and performance tests | Default for new test targets since Xcode 16 |
 | Formatting | **`swift format`** from the toolchain; the gate runs `swift format lint --strict --recursive .` | No SwiftLint |
 | Rendering | **MarkdownUI** (GFM, task lists) — the only third-party dependency | Verified against this toolchain before adoption; see "Markdown parity" |
+| Maps | **MapKit**, and only inside `MemosFeatures` — an `MKMapView` behind a representable, with MapKit's own clustering | The map is a screen, not a domain rule. `MemosCore`'s Places functions decide in plain degrees and import no MapKit, so what a tap opens is testable without one. What the basemap costs, and why no tile pipeline of this app's own ships: see "The basemap" |
 | Gate | **`bin/mac-gate.sh`** | A Swift phase cannot be built on the Linux dev machine, so the Mac build host is the only build authority. See `CLAUDE.md` |
 
 ## Module boundaries
@@ -43,6 +44,34 @@ App target (composition only)
 - **`MemosFeatures`** — screens: `TimelineView`, `MemoDetailView`, `SignInView`.
 
 **Nothing imports Features.** Enforced by the manifests, checked mechanically by the gate.
+
+**Places is the worked example of where that line falls.** Everything a tap decides is a pure
+function of a value, so a test can hold what the screen presents without running a map:
+`Packages/MemosCore/Sources/MemosCore/Places/` carries the domain model and its wire conversion
+(`PlaceMarker.swift`, `PlaceMarker+Wire.swift`), the geometry — coordinate keys, grouping,
+bounding box, the visible box and the antimeridian cases it brings (`PlaceGeo.swift`), the pin
+specification and the add/repaint/drop diff a map is driven by (`PlaceClustering.swift`), the
+displayed order and the slide a tapped photograph opens (`PlaceOrder.swift`), which of the four
+states a read is in (`PlacesStatus.swift`), and the adapter that turns a marker into the
+attachment the existing viewer already opens on (`PlaceAttachment.swift`). None of those files
+imports MapKit; `PlaceGeo` states its sides as plain doubles for exactly that reason.
+`Stores/PlacesStore.swift` is the one read: `GET /api/map/markers` takes no parameters, so it asks
+one question, refuses a second ask while the first is out, and judges the answer against the
+session handle that ISSUED the request.
+
+`Packages/MemosFeatures/Sources/MemosFeatures/` holds the drawing: `PlacesView.swift` (the screen,
+keyed on the signed-in subject), `PlacesMapView.swift` (the `UIViewRepresentable` around
+`MKMapView`, its delegate, and the annotation objects the map keeps), `PlacePinView.swift` (the
+`MKAnnotationView` a pin and a cluster share, UIKit all the way down) and
+`PlacesPresentation.swift`, the seam between the two layers. The last three are also the only
+production sources in the tree that import MapKit; the screen itself needs none of it.
+`PlacesPresentation.swift` is where the seam's decisions are DEFINED and nowhere else — the
+region-to-box conversion, which member lends a cluster its photograph, what a tap opens and how
+close the camera may come — and the map view reaches for them by name rather than redefining any
+of them. What the map view does decide is its own lifecycle: when a replaced map has to start its
+annotations over, and that the first fit happens once. MapKit does not leave this package, but it
+does not stop at its sources either: the Places tests import it too, because holding the seam to
+a real `MKMapView` is the point of them.
 
 ## Concurrency
 
@@ -157,6 +186,15 @@ editing, widgets, App Intents, watchOS, macOS and iPad layout.
 
 Custom URL-scheme auth callbacks were on that list and are not any more. On an internal-only-DNS
 estate the custom scheme is the sign-in lane, permanently — see **Sign-in** above.
+
+The Places **playback timeline** is not shipped, and the list above would not say so on its own,
+because the code for it is in the tree:
+`Packages/MemosCore/Sources/MemosCore/Places/PlaceTimeline.swift` holds the month histogram, the
+playhead reducer and the playhead's effect on the marker set, with
+`PlaceTimelineTests` asserting all of it. Nothing draws it — no other Swift file names
+`PlaceTimeline`, `PlaceHistogram`, `PlaceBucket`, `PlaybackSpeed` or `TimelineMode` — so the
+shipped map is a map without a scrubber. Tested pure rules waiting for a screen, not a feature
+somebody removed the last call to.
 
 ## Known deviations of the built skeleton from this draft
 

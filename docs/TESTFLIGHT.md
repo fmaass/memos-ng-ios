@@ -33,15 +33,34 @@ the answers on the website and the answers inside the bundle say the same thing.
 | Export compliance | `ITSAppUsesNonExemptEncryption = false`, already in both bundles |
 | Data collected | none |
 | Tracking | none, and no tracking domains |
-| Required-reason API declared | file timestamps, reason `C617.1`, in both bundles |
+| Required-reason APIs declared | file timestamps (`C617.1`) and user defaults (`CA92.1`, `1C8F.1`), in both bundles |
 
 The privacy manifests are `Support/MemosNG/PrivacyInfo.xcprivacy` and
-`Support/MemosShare/PrivacyInfo.xcprivacy`. Each declares one required-reason API category —
-`NSPrivacyAccessedAPICategoryFileTimestamp` with reason `C617.1` — because both the picker path and
-the share path read the modification date of a file they have just copied into their own container.
-Nothing else in the app touches a required-reason API: there is no `UserDefaults` anywhere, nothing
-reads volume capacity, nothing asks for system uptime, and nothing enumerates keyboards. The gate
-reads both shipping bundles back and fails if either manifest is missing or says something else.
+`Support/MemosShare/PrivacyInfo.xcprivacy`. They declare the same two required-reason API
+categories, for different code in each bundle:
+
+- `NSPrivacyAccessedAPICategoryFileTimestamp`, reason `C617.1` — a timestamp read off a file in a
+  container the reason covers: the bundle's own, or the app group's. The app reads the
+  modification date of a picked file it has just copied into its temporary directory; the
+  extension reads the modification date of a shared file it has just staged there. Both, through
+  the outbox code linked into each of them, also read the creation date of an outbox manifest,
+  which lives in the app group container. The app alone has a second location for that queue: it
+  falls back to its own Application Support directory when the group cannot be reached, which
+  `C617.1` covers as the app's own container. The extension has no fallback — it refuses to post
+  rather than write a capture nothing would drain.
+- `NSPrivacyAccessedAPICategoryUserDefaults`, reasons `CA92.1` and `1C8F.1` — `CA92.1` for the
+  process's own defaults and `1C8F.1` for the app group's suite. The app keeps the appearance
+  choice, the library's sort direction and the media fetch generation in its own defaults and the
+  outbox's mobile-data choice in the group's; the extension carries only that last one, because
+  the outbox is linked into it as well. Each manifest's own comment names the file behind every
+  reason.
+
+Nothing else in either bundle touches a required-reason API: nothing reads volume capacity,
+nothing asks for system uptime, and nothing enumerates keyboards. The gate reads both shipping
+bundles back and fails if a manifest is missing, does not parse, claims tracking, lists a tracking
+domain or a collected data type, or declares file-timestamp reasons other than exactly `C617.1`.
+It prints the declared category names but does not hold the user-defaults entry to a value, so the
+answers on the website come off the manifests themselves, not off the gate's log.
 
 ---
 
