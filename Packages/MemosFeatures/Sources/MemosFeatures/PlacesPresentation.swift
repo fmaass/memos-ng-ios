@@ -15,6 +15,33 @@ nonisolated struct PlacePin: Equatable, Sendable, Identifiable {
     var id: String { spec.key }
 }
 
+/// What a tap on a pin or a cluster opens below the map: the photographs behind it, in the order
+/// they are listed, and whether zooming in could still do anything about them.
+nonisolated struct PlaceSheet: Equatable, Identifiable {
+    var markers: [PlaceMarker]
+    /// Offered only when the map could still separate what was tapped — see
+    /// `PlacesPresentation.minimumCameraDistance`.
+    var canZoomIn: Bool
+    /// The pins the sheet stands for, kept so Zoom-in can frame their actual extent. Nothing is
+    /// re-derived from a coordinate: these are the very objects the map handed over.
+    var members: [PlacePin]
+
+    /// The set of pins, which is what makes one sheet a different sheet from another. Tapping the
+    /// same pin again reopens the same one, which is the behaviour `sheet(item:)` should have.
+    var id: String { members.map(\.id).joined(separator: "|") }
+}
+
+/// What a tap on the map turns into. Two outcomes and no third: a pin holding one photograph opens
+/// it, and anything holding more opens the list.
+///
+/// Not `Equatable`: `MediaViewerSelection` is declared under this package's main-actor default
+/// isolation, so its conformance is main-actor-isolated and a nonisolated enum cannot carry it.
+/// Nothing needs it — a case is read by pattern, and what it carries is compared field by field.
+nonisolated enum PlaceTapAction {
+    case viewer(MediaViewerSelection)
+    case sheet(PlaceSheet)
+}
+
 /// What the Places screen says when it has no map to show: the three parts a
 /// `ContentUnavailableView` is made of, carried as a value so a test can read it back.
 nonisolated struct PlacesNotice: Equatable, Sendable {
@@ -85,6 +112,132 @@ nonisolated enum PlacesPresentation {
             left.leadTakenAt != right.leadTakenAt
                 ? left.leadTakenAt < right.leadTakenAt
                 : left.spec.uid > right.spec.uid
+        }
+    }
+
+    // MARK: - what a tap opens, and what the grid holds
+
+    /// How close the map may be brought to what it shows, in metres, and therefore when zooming
+    /// has nothing left to do.
+    ///
+    /// A hundred metres is chosen so that a phone can still take two pins about ten metres apart
+    /// and put daylight between them: at that distance ten metres is roughly a marker's own width
+    /// across a phone screen, which is the point at which two pins stop being one. Going closer
+    /// buys nothing: the map has no more detail to give and the pins are already apart, so the
+    /// floor is also what makes "can zooming still help?" a question with an answer.
+    static let minimumCameraDistance: CLLocationDistance = 100
+
+    /// What a tap on one pin opens.
+    ///
+    /// Nil when the pin stands for photographs the current read no longer has — the markers were
+    /// replaced under it — because opening a viewer on nothing is worse than a tap that does
+    /// nothing. A pin of several photographs never offers Zoom-in: they share ONE coordinate, and
+    /// no camera distance can put them in different places.
+    ///
+    /// Main-actor, because building a viewer selection is: `MediaViewerPresentation` lives under
+    /// this package's main-actor default isolation. A tap arrives there anyway, since
+    /// `MKMapViewDelegate` is main-actor, so nothing is hopped — and the enum itself stays
+    /// nonisolated for the rules that decide without a viewer.
+    @MainActor
+    static func tap(pin: PlacePin, in markers: [PlaceMarker]) -> PlaceTapAction? {
+        let resolved = resolve(pin.spec.uids, in: markers)
+        guard let only = resolved.first else { return nil }
+        if resolved.count == 1 {
+            guard let selection = open(only.uid, in: resolved) else { return nil }
+            return .viewer(selection)
+        }
+        return .sheet(
+            PlaceSheet(
+                markers: PlaceOrder.newestFirst(resolved),
+                canZoomIn: false,
+                members: [pin]
+            )
+        )
+    }
+
+    /// What a tap on a cluster opens: every photograph of every member pin, in ONE order.
+    ///
+    /// One order across the combined list rather than per member, because the reader tapped a
+    /// place and not a set of pins. Member blocks would put an older photograph above a newer
+    /// one
+    /// for a reason nothing on screen explains. The leads alone would list two pictures where the
+    /// badge just said seven.
+    ///
+    /// Zoom-in is offered while zooming can still separate the members, which is a fact about the
+    /// camera rather than about how far apart they are in degrees: two pins 0.0045 degrees apart
+    /// are 500 m and plainly worth zooming to, and any degree threshold would have hidden the
+    /// action exactly there. At the floor the sheet still opens and still lists everything; only
+    /// the action that could no longer do anything is left off.
+    static func clusterTap(
+        members: [PlacePin],
+        in markers: [PlaceMarker],
+        cameraDistance: CLLocationDistance
+    ) -> PlaceSheet {
+        let resolved = resolve(members.flatMap(\.spec.uids), in: markers)
+        return PlaceSheet(
+            markers: PlaceOrder.newestFirst(resolved),
+            canZoomIn: cameraDistance > 1.1 * minimumCameraDistance,
+            members: members
+        )
+    }
+
+    /// The viewer for one photograph of a list, opened on it in the order the list is shown in.
+    ///
+    /// The list is ordered here and the photograph is carried by uid, so the viewer opens on the
+    /// picture that was under the finger rather than on whatever occupied that position before the
+    /// sort. Nil when the uid is not in the list, or when nothing in it can be rendered at all.
+    ///
+    /// Through the viewer's OWN selection function, so that what counts as viewable and what a
+    /// missing uid means are decided in one place for every screen that opens the viewer.
+    /// `PlaceOrder.viewerTarget` is the ported statement of the order this is held to — asserted
+    /// against this function in the tests rather than called from it.
+    @MainActor
+    static func open(_ uid: String, in list: [PlaceMarker]) -> MediaViewerSelection? {
+        MediaViewerPresentation.viewer(
+            for: PlaceOrder.newestFirst(list).map(MemoAttachment.init),
+            startingAt: uid
+        )
+    }
+
+    /// What the grid under the map holds: the markers the visible region contains, newest first.
+    static func grid(_ markers: [PlaceMarker], in box: PlaceBBox) -> [PlaceMarker] {
+        PlaceOrder.newestFirst(PlaceGeo.markers(markers, within: box))
+    }
+
+    /// What the grid holds while the map has not yet said what it shows.
+    ///
+    /// A map that has never settled has reported no region, and no region is not an empty one:
+    /// filtering by it would leave the grid blank under a map full of pins for as long as the
+    /// reader left the screen alone. Until the first report the grid is the whole read, in the
+    /// same order every later report leaves it in.
+    static func visibleGrid(_ markers: [PlaceMarker], in box: PlaceBBox?) -> [PlaceMarker] {
+        guard let box else { return PlaceOrder.newestFirst(markers) }
+        return grid(markers, in: box)
+    }
+
+    /// The visible region as a box the pure layer can read. The only place MapKit's geometry is
+    /// converted, which is what keeps `PlaceGeo` free of it.
+    static func box(of region: MKCoordinateRegion) -> PlaceBBox {
+        PlaceGeo.visibleBox(
+            centerLatitude: region.center.latitude,
+            centerLongitude: region.center.longitude,
+            latitudeDelta: region.span.latitudeDelta,
+            longitudeDelta: region.span.longitudeDelta
+        )
+    }
+
+    /// The markers a set of pins stands for, in the pins' own order and without duplicates.
+    ///
+    /// Resolved by uid against the markers in hand. A pin whose photographs are gone contributes
+    /// nothing, and nothing is re-derived from a coordinate: a pin IS its list of uids.
+    private static func resolve(_ uids: [String], in markers: [PlaceMarker]) -> [PlaceMarker] {
+        var byUID: [String: PlaceMarker] = [:]
+        byUID.reserveCapacity(markers.count)
+        for marker in markers { byUID[marker.uid] = marker }
+        var seen = Set<String>()
+        return uids.compactMap { uid in
+            guard seen.insert(uid).inserted else { return nil }
+            return byUID[uid]
         }
     }
 

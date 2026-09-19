@@ -64,6 +64,10 @@ struct PlacesStoreTests {
             pin?.thumbnailURL?.absoluteString == "\(storedAddress)/api/attachments/x/thumb",
             "a tier path was not resolved against the server it came from"
         )
+        #expect(
+            pin?.downloadURL?.absoluteString == "\(storedAddress)/api/attachments/a/download",
+            "the original was not carried, so the viewer opened from the map loses Share and Save"
+        )
         #expect(pin?.takenAt == Date(timeIntervalSince1970: 1_789_726_272))
         #expect(store.status == .ready)
         #expect(store.hasSettledOnce)
@@ -318,8 +322,10 @@ struct PlacesStoreTests {
                 return Stub.client(
                     token: presented,
                     afterRefusal: {
-                        // The window itself: the middleware has compared the epoch and thrown, and
-                        // the store has not resumed.
+                        // The window itself: the middleware has stamped the presented generation
+                        // onto the refusal and thrown it, and the store has not resumed. Whether
+                        // that generation is still the current one is nobody's question yet — the
+                        // effect asks it, hops later.
                         guard refusing.get() else { return }
                         presented.replace(with: successorToken)
                     }

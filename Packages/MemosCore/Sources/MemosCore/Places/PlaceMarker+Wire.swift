@@ -17,6 +17,10 @@ extension PlaceMarker {
     /// The four tier URLs arrive as paths and are resolved against the server this answer came
     /// from, exactly as the library resolves its rows'. A string that forms no URL leaves THAT tier
     /// nil rather than dropping the marker: a pin with no thumbnail is still a place somebody was.
+    ///
+    /// The original is resolved the same way and is required on the wire too, but it is not a
+    /// fifth tier: it is served behind authentication, and it is carried because the viewer a pin
+    /// opens offers Share and Save only to a photo that has one.
     public init(from generated: Components.Schemas.MapMarker, baseURL: URL) {
         self.init(
             uid: generated.uid,
@@ -32,6 +36,7 @@ extension PlaceMarker {
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
             posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL,
+            downloadURL: URL(string: generated.downloadUrl, relativeTo: baseURL)?.absoluteURL,
             blurhash: generated.blurhash
         )
     }

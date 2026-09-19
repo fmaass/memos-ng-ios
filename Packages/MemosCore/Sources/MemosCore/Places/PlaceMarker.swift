@@ -27,6 +27,11 @@ nonisolated public struct PlaceMarker: Sendable, Equatable, Identifiable {
     public var previewURL: URL?
     public var webURL: URL?
     public var posterURL: URL?
+    /// The file as it was uploaded. Not a fifth signed tier: it is served behind authentication,
+    /// so it is not a link that can be handed out — and it is carried here because the viewer's
+    /// Share and Save are the actions that need it, and it hides both without one
+    /// (`MediaTileMenu.swift`).
+    public var downloadURL: URL?
     public var blurhash: String?
 
     public var id: String { uid }
@@ -45,6 +50,7 @@ nonisolated public struct PlaceMarker: Sendable, Equatable, Identifiable {
         previewURL: URL? = nil,
         webURL: URL? = nil,
         posterURL: URL? = nil,
+        downloadURL: URL? = nil,
         blurhash: String? = nil
     ) {
         self.uid = uid
@@ -60,6 +66,7 @@ nonisolated public struct PlaceMarker: Sendable, Equatable, Identifiable {
         self.previewURL = previewURL
         self.webURL = webURL
         self.posterURL = posterURL
+        self.downloadURL = downloadURL
         self.blurhash = blurhash
     }
 }

@@ -56,9 +56,10 @@ public final class PlacesStore {
 
     public func load(using handle: SessionHandle, baseURL: URL) async {
         // The client and the incarnation it belongs to arrive as ONE value and are carried through
-        // the request and every apply point below. Nothing here re-samples the session: re-sampling
-        // is what let a request rejected as one session's reissue itself under the next one's
-        // number, with the first one's client still in hand.
+        // the request and every apply point below. Nothing here re-samples the session, and that is
+        // what makes an answer impossible to apply under a number it did not present: what comes
+        // back is judged against the generation this request went out under, whatever the session
+        // has become meanwhile.
         let client = handle.client
         // The guard is this store's own state, never a disabled button: a second ask while the
         // first is out is REFUSED rather than joined, because there is one question and the answer
@@ -142,8 +143,9 @@ public final class PlacesStore {
 
     /// Every located file, as the map's own model.
     ///
-    /// Static and parameterless past the client, because that is what the endpoint is: the whole
-    /// set, oldest first, with nothing to ask it for.
+    /// Static, and the ENDPOINT takes no parameters — the whole set, oldest first, with nothing
+    /// to ask it for. What this function takes is what the request is made with: the client, and
+    /// the base URL the returned rows' relative links are resolved against.
     static func markers(_ client: any APIProtocol, baseURL: URL) async throws -> [PlaceMarker] {
         switch try await client.listMarkersApiMapMarkersGet(.init()) {
         case .ok(let ok):
