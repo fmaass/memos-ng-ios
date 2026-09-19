@@ -286,6 +286,120 @@ struct TimelineRefreshTests {
         #expect(fetched == nil)
         #expect(store.lastError == nil, "a jump that failed painted an error on the timeline")
     }
+
+    // MARK: - a read the server never answered is not a memo that is gone
+
+    private nonisolated static let whoamiOperation = "whoami_api_auth_user_get"
+
+    /// A REAL session over a scripted transport, signed in the way the app signs in.
+    ///
+    /// Real, because what the jump has to reach is the session's own notice, and a stand-in for
+    /// the session would prove only that the test agrees with itself. The sleeper throws instead
+    /// of waiting: the retry ladder a failure starts would otherwise re-verify the session
+    /// underneath the witness.
+    private func signedIn(handler: @escaping StubTransport.Handler) async -> SessionStore {
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            sleeper: { _ in throw CancellationError() }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        return session
+    }
+
+    /// A photograph's "Show Memo" over a network that dropped the read. The memo is there; the
+    /// request never arrived — so the reader must not be told it is gone, and the one place this
+    /// app says the server cannot be reached has to hear about it.
+    @Test("a memo read that never reached the server is unreadable, and the session is told")
+    func jumpReportsAReadThatNeverReachedTheServer() async throws {
+        let session = await signedIn { _, _, operation in
+            switch operation {
+            case Self.whoamiOperation:
+                return Stub.json(Stub.user)
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "loaded")]))
+            default:
+                throw URLError(.timedOut)
+            }
+        }
+        let store = TimelineStore()
+        store.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await store.refresh(using: handle, baseURL: Stub.baseURL)
+        #expect(session.verification == .verified, "control: the list read did reach the server")
+
+        let outcome = await store.jump(
+            to: "far-away", calendar: Self.utcDays, using: handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .unreadable, "a dropped read was reported as a memo that is gone")
+        guard case .unverified = session.verification else {
+            Issue.record("the session was never told: verification is \(session.verification)")
+            return
+        }
+        #expect(session.state.user != nil, "the session stands: this is not a refusal")
+    }
+
+    /// The other half of the sentence: the server ANSWERED, and what it said was that there is no
+    /// such memo. That one really is gone, and it says nothing about reaching the server.
+    @Test("a memo the server says it does not have is unavailable, and the session hears nothing")
+    func jumpToAMemoTheServerDoesNotHave() async throws {
+        let session = await signedIn { _, _, operation in
+            switch operation {
+            case Self.whoamiOperation:
+                return Stub.json(Stub.user)
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "loaded")]))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = TimelineStore()
+        store.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await store.refresh(using: handle, baseURL: Stub.baseURL)
+
+        let outcome = await store.jump(
+            to: "gone", calendar: Self.utcDays, using: handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .unavailable)
+        #expect(
+            session.verification == .verified,
+            "a 404 is the server answering, and says nothing about reaching it"
+        )
+    }
+
+    /// The third answer the server can give: an error of its own. The memo may well still be
+    /// there, so this is not "no longer here" either — and the server plainly WAS reached, so the
+    /// one surface that says it cannot be must hear nothing about it.
+    @Test("a memo the server fails to read is unreadable, and the session hears nothing")
+    func jumpToAMemoTheServerFailsToRead() async throws {
+        let session = await signedIn { _, _, operation in
+            switch operation {
+            case Self.whoamiOperation:
+                return Stub.json(Stub.user)
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Stub.memo(uid: "loaded")]))
+            default:
+                return Stub.empty(.internalServerError)
+            }
+        }
+        let store = TimelineStore()
+        store.reports(to: session)
+        let handle = try #require(session.activeHandle)
+        await store.refresh(using: handle, baseURL: Stub.baseURL)
+
+        let outcome = await store.jump(
+            to: "broken", calendar: Self.utcDays, using: handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .unreadable, "a 500 was reported as a memo that is gone")
+        #expect(
+            session.verification == .verified,
+            "a 500 is the server answering, and says nothing about reaching it"
+        )
+    }
 }
 
 /// The three-way projection, on the model, where the view, the re-read and the live channel

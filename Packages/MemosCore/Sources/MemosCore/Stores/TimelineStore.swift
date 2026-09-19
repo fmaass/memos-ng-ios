@@ -1447,6 +1447,34 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Memo? {
+        guard case .memo(let memo) = await readMemo(uid: uid, using: handle, baseURL: baseURL)
+        else { return nil }
+        return memo
+    }
+
+    /// How one read of a single memo ended.
+    ///
+    /// The distinction a `Memo?` cannot carry: a request the server never ANSWERED is not the
+    /// server saying the memo is gone, and a caller that cannot tell them apart tells the reader
+    /// a memo that exists is no longer here.
+    private enum SingleMemoRead {
+        case memo(Memo)
+        /// The server said there is no such memo — or the session this was read for is over,
+        /// which is the same nothing as far as the caller is concerned.
+        case absent
+        /// The read failed and nothing in it says the memo is gone: the server never answered,
+        /// or it answered with something that is not an answer about this memo. A transport
+        /// failure has already been reported to the session by the incarnation that asked,
+        /// exactly as a page read reports it; anything the server did answer stays here.
+        case unreadable
+    }
+
+    /// `fetchMemo`'s body, keeping what the caller needs to say the right sentence.
+    private func readMemo(
+        uid: String,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> SingleMemoRead {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1459,14 +1487,14 @@ public final class TimelineStore {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
-                guard sessionStillCurrent(handle) else { return nil }
+                guard sessionStillCurrent(handle) else { return .absent }
                 let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
                 await apply(memo, under: authority)
                 // AGAIN, after the apply: it awaits its way to the disk, and the memo below is
                 // one account's own — handing it to a caller that has become somebody else is an
                 // effect exactly as much as writing it would be.
-                guard sessionStillCurrent(handle) else { return nil }
-                return memo
+                guard sessionStillCurrent(handle) else { return .absent }
+                return .memo(memo)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
             case .undocumented(let statusCode, _):
@@ -1474,11 +1502,28 @@ public final class TimelineStore {
             }
         } catch {
             // A memo that cannot be read is a navigation that does not happen, which the caller can
-            // see from the nil. A refusal still ends the session wherever it happens — as long as it
-            // is THIS session the refusal was about.
-            guard sessionStillCurrent(handle) else { return nil }
-            if let refusal = StoreFailure.refusal(error) { _ = await onUnauthorized(refusal) }
-            return nil
+            // see from the answer. A refusal still ends the session wherever it happens — as long
+            // as it is THIS session the refusal was about.
+            guard sessionStillCurrent(handle) else { return .absent }
+            if let refusal = StoreFailure.refusal(error) {
+                _ = await onUnauthorized(refusal)
+                return .absent
+            }
+            // Gone is something only the server can say, and it says it with a 404. A 500, a 422,
+            // a body that would not decode are all failures of the READ: answering `absent` to
+            // any of them tells the reader a memo that exists is no longer there, which is the
+            // same false sentence a dropped request used to produce.
+            if let api = error as? APIError, api == .notFound { return .absent }
+            // A server that never answered is the SESSION's to say, once, in its banner — the same
+            // sentence every page read reports (`report`), under the generation that ISSUED this
+            // request rather than whichever one is current when the failure lands. Swallowing it
+            // here is what told a reader that a memo which exists is no longer there, while the
+            // one notice that could have explained it never heard of the outage. An error the
+            // server DID answer with is not that notice's business and is not reported to it.
+            if let failure = StoreFailure.transportFailure(error) {
+                session?.noteTransportFailure(failure, issuedUnder: handle.generation)
+            }
+            return .unreadable
         }
     }
 
@@ -1489,6 +1534,11 @@ public final class TimelineStore {
         /// It could not be read, or it is not in the window even after anchoring — deleted while
         /// the jump was in flight, or filtered out of the list this screen is showing.
         case unavailable
+        /// The read failed, and nothing in that failure says the memo is gone — the server never
+        /// answered, or what it answered was an error of its own. When it was the server that
+        /// could not be reached the session has been told; either way the caller owes the reader
+        /// a sentence that does not claim the memo is no longer there.
+        case unreadable
     }
 
     /// Takes this timeline to a memo, and does not come back until the LOADED WINDOW contains it.
@@ -1505,10 +1555,13 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> MemoJumpOutcome {
-        guard let memo = await fetchMemo(uid: uid, using: handle, baseURL: baseURL) else {
-            return .unavailable
+        let memo: Memo
+        switch await readMemo(uid: uid, using: handle, baseURL: baseURL) {
+        case .memo(let read): memo = read
+        case .absent: return .unavailable
+        case .unreadable: return .unreadable
         }
-        // Already on screen: `fetchMemo` applied the server's copy into it, and nothing needs
+        // Already on screen: the read applied the server's copy into it, and nothing needs
         // moving.
         if memos.contains(where: { $0.uid == uid }) { return .ready(memo) }
         guard let anchor = MemoQueryAnchor.day(of: memo.createdAt, in: calendar) else {
