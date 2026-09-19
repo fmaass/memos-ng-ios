@@ -78,6 +78,37 @@ public enum MediaZoom {
         )
     }
 
+    /// A pinch still under the fingers: how far it has carried the picture, and the point of the
+    /// screen it is being carried around.
+    ///
+    /// The anchor is in the viewport's own coordinates, top-left origin, exactly as a gesture
+    /// reports a location. Turning it into a vector from the centre is arithmetic, so it happens
+    /// where arithmetic is tested rather than in a view body.
+    public struct Pinch: Equatable, Sendable {
+        public var magnification: Double
+        public var anchor: CGPoint
+
+        public init(magnification: Double, anchor: CGPoint) {
+            self.magnification = magnification
+            self.anchor = anchor
+        }
+    }
+
+    /// What a picture takes away from the surfaces around it while it is being pinched.
+    ///
+    /// Two answers, not one, because they are held for different reasons: a horizontal finger
+    /// inside a pinch is never a page turn, while a pinch-in on a picture that is already whole
+    /// is exactly how the viewer is closed.
+    public struct Holds: Equatable, Sendable {
+        public var pager: Bool
+        public var dismissal: Bool
+
+        public init(pager: Bool, dismissal: Bool) {
+            self.pager = pager
+            self.dismissal = dismissal
+        }
+    }
+
     /// A committed transform: what the picture keeps when the fingers leave.
     public struct Transform: Equatable, Sendable {
         public var scale: Double
@@ -93,20 +124,56 @@ public enum MediaZoom {
         public var isZoomed: Bool { MediaZoom.isZoomed(scale) }
     }
 
-    /// The transform a pinch leaves behind. The offset is re-clamped against the NEW scale,
-    /// because zooming back out shrinks the room a pan was allowed to use — without this, a
-    /// picture pinched out after being panned stays stuck off-centre.
-    public static func settled(
+    /// The scale being drawn right now: the committed one carried by whatever pinch is in flight.
+    private static func liveScale(_ transform: Transform, pinch: Pinch?) -> Double {
+        clamped(scale: transform.scale * (pinch?.magnification ?? 1))
+    }
+
+    /// How much a pinch is magnifying by once the range has had its say. At either end of the
+    /// range this is 1 however hard the fingers pull — which is what stops a picture already at
+    /// the limit from sliding sideways under a pinch that cannot zoom it any further.
+    private static func effectiveRatio(_ transform: Transform, pinch: Pinch?) -> Double {
+        guard pinch != nil, transform.scale.isFinite, transform.scale > 0 else { return 1 }
+        return liveScale(transform, pinch: pinch) / transform.scale
+    }
+
+    /// The frame under the fingers right now: the committed transform with whatever pinch and
+    /// whatever drag are still in flight folded into it.
+    ///
+    /// One function rather than two handlers composing by accident. The pinch goes first and the
+    /// drag's translation is added after it in screen points, with a single clamp at the end
+    /// against the scale actually being drawn — so a drag moves the picture by the distance the
+    /// finger travelled however far the pinch has taken the scale.
+    public static func live(
         _ transform: Transform,
-        magnifiedBy magnification: Double,
+        pinch: Pinch?,
+        pannedBy translation: CGSize,
         fitted: CGSize,
         viewport: CGSize
     ) -> Transform {
-        let scale = clamped(scale: transform.scale * magnification)
+        let scale = liveScale(transform, pinch: pinch)
+        var offset = transform.offset
+        if let pinch {
+            // The picture is drawn scaled about its own centre, so keeping the point under the
+            // fingers still is a matter of moving that centre away from the anchor by the same
+            // ratio the picture grew by: a - m * (a - o), all measured from the screen's centre.
+            let ratio = effectiveRatio(transform, pinch: pinch)
+            let anchor = CGSize(
+                width: pinch.anchor.x - viewport.width / 2,
+                height: pinch.anchor.y - viewport.height / 2
+            )
+            offset = CGSize(
+                width: anchor.width - ratio * (anchor.width - offset.width),
+                height: anchor.height - ratio * (anchor.height - offset.height)
+            )
+        }
         return Transform(
             scale: scale,
             offset: clampedOffset(
-                transform.offset,
+                CGSize(
+                    width: offset.width + translation.width,
+                    height: offset.height + translation.height
+                ),
                 scale: scale,
                 fitted: fitted,
                 viewport: viewport
@@ -114,24 +181,65 @@ public enum MediaZoom {
         )
     }
 
-    /// The transform a pan leaves behind.
-    public static func panned(
+    /// The transform a pinch leaves behind. The offset is re-clamped against the NEW scale,
+    /// because zooming back out shrinks the room a pan was allowed to use — without this, a
+    /// picture pinched out after being panned stays stuck off-centre.
+    ///
+    /// The same arithmetic as the live frame, asked for the moment the fingers leave, so what was
+    /// drawn under them and what is kept cannot disagree.
+    public static func settled(
         _ transform: Transform,
-        by translation: CGSize,
+        magnifiedBy magnification: Double,
+        anchoredAt anchor: CGPoint,
         fitted: CGSize,
         viewport: CGSize
     ) -> Transform {
-        Transform(
+        live(
+            transform,
+            pinch: Pinch(magnification: magnification, anchor: anchor),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+    }
+
+    /// The transform a pan leaves behind.
+    ///
+    /// A pinch may still be under the fingers when the drag ends, and its arithmetic will
+    /// multiply whatever offset is stored here. What is stored is therefore the translation that
+    /// survives that multiplication unchanged, so the picture does not jump at the commit.
+    public static func panned(
+        _ transform: Transform,
+        by translation: CGSize,
+        underPinch pinch: Pinch?,
+        fitted: CGSize,
+        viewport: CGSize
+    ) -> Transform {
+        let ratio = effectiveRatio(transform, pinch: pinch)
+        return Transform(
             scale: transform.scale,
             offset: clampedOffset(
                 CGSize(
-                    width: transform.offset.width + translation.width,
-                    height: transform.offset.height + translation.height
+                    width: transform.offset.width + translation.width / ratio,
+                    height: transform.offset.height + translation.height / ratio
                 ),
                 scale: transform.scale,
                 fitted: fitted,
                 viewport: viewport
             )
+        )
+    }
+
+    /// What the surfaces around a picture are denied while it is pinched.
+    ///
+    /// The pager is held by the mere presence of fingers, because a page must not turn under a
+    /// pinch that has not changed the scale yet. Dismissal is held only by a scale that is
+    /// actually zoomed — committed or live — because a pinch-in on a whole picture is the
+    /// platform's own way of closing the viewer, and taking that away would be a regression.
+    public static func holds(_ transform: Transform, pinch: Pinch?) -> Holds {
+        Holds(
+            pager: transform.isZoomed || pinch != nil,
+            dismissal: transform.isZoomed || isZoomed(liveScale(transform, pinch: pinch))
         )
     }
 

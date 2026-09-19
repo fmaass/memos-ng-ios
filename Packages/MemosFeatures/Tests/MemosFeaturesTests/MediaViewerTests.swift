@@ -259,6 +259,22 @@ struct MediaViewerSelectionTests {
 struct MediaZoomTests {
     private let viewport = CGSize(width: 390, height: 844)
 
+    /// The picture's own centre on screen — the viewport's centre carried by whatever offset the
+    /// picture already has. A pinch anchored there is the one that leaves the offset alone, so it
+    /// is what a case about something other than the anchor asks for.
+    private func pictureCentre(of transform: MediaZoom.Transform) -> CGPoint {
+        CGPoint(
+            x: viewport.width / 2 + transform.offset.width,
+            y: viewport.height / 2 + transform.offset.height
+        )
+    }
+
+    /// An anchor given as a vector from the viewport's centre, which is how every case below
+    /// reasons about one: right and down are positive, as on screen.
+    private func anchor(x: Double, y: Double) -> CGPoint {
+        CGPoint(x: viewport.width / 2 + x, y: viewport.height / 2 + y)
+    }
+
     @Test("a pinch may propose anything; what reaches the picture stays in range")
     func scaleIsClamped() {
         #expect(MediaZoom.clamped(scale: 0.2) == MediaZoom.minimumScale)
@@ -354,12 +370,19 @@ struct MediaZoomTests {
         let panned = MediaZoom.panned(
             MediaZoom.Transform(scale: 3, offset: .zero),
             by: CGSize(width: 200, height: 100),
+            underPinch: nil,
             fitted: fitted,
             viewport: viewport
         )
         #expect(panned.offset.width > 0)
 
-        let out = MediaZoom.settled(panned, magnifiedBy: 0.1, fitted: fitted, viewport: viewport)
+        let out = MediaZoom.settled(
+            panned,
+            magnifiedBy: 0.1,
+            anchoredAt: pictureCentre(of: panned),
+            fitted: fitted,
+            viewport: viewport
+        )
         #expect(out.scale == MediaZoom.minimumScale)
         #expect(out.offset == .zero)
         #expect(!out.isZoomed)
@@ -371,12 +394,14 @@ struct MediaZoomTests {
         let first = MediaZoom.panned(
             MediaZoom.Transform(scale: 2, offset: .zero),
             by: CGSize(width: 50, height: 10),
+            underPinch: nil,
             fitted: fitted,
             viewport: viewport
         )
         let second = MediaZoom.panned(
             first,
             by: CGSize(width: 50, height: 10),
+            underPinch: nil,
             fitted: fitted,
             viewport: viewport
         )
@@ -399,6 +424,7 @@ struct MediaZoomTests {
         let atTheEdge = MediaZoom.panned(
             MediaZoom.Transform(scale: 2, offset: .zero),
             by: CGSize(width: 4000, height: 0),
+            underPinch: nil,
             fitted: fittedPortrait,
             viewport: portrait
         )
@@ -432,6 +458,7 @@ struct MediaZoomTests {
         let nudged = MediaZoom.panned(
             carried,
             by: CGSize(width: -30, height: 0),
+            underPinch: nil,
             fitted: fittedLandscape,
             viewport: landscape
         )
@@ -447,6 +474,280 @@ struct MediaZoomTests {
         let back = MediaZoom.doubleTapped(out)
         #expect(back.scale == MediaZoom.doubleTapScale)
         #expect(back.isZoomed)
+    }
+
+    /// Anchored on the picture's own centre there is nothing for the anchoring to do, panned or
+    /// not — the arithmetic has to leave the offset exactly where it found it.
+    @Test("a pinch centred on the picture leaves the offset alone")
+    func pinchAtThePictureCentre() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+
+        let unpanned = MediaZoom.Transform(scale: 2, offset: .zero)
+        let stillCentred = MediaZoom.settled(
+            unpanned,
+            magnifiedBy: 1.5,
+            anchoredAt: pictureCentre(of: unpanned),
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(stillCentred.scale - 3) < 0.001)
+        #expect(stillCentred.offset == .zero)
+
+        let moved = MediaZoom.Transform(scale: 2, offset: CGSize(width: 40, height: -20))
+        let carried = MediaZoom.settled(
+            moved,
+            magnifiedBy: 1.5,
+            anchoredAt: pictureCentre(of: moved),
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(carried.offset.width - 40) < 0.001)
+        #expect(abs(carried.offset.height + 20) < 0.001)
+    }
+
+    /// What the whole thing is for: the point under the fingers stays under them, which means the
+    /// offset travels AWAY from the anchor — pinch in the upper right and the picture's centre
+    /// goes left and down.
+    @Test("a pinch in the upper right pushes the offset away from it")
+    func pinchInACornerMovesTheOffsetAway() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.settled(
+            MediaZoom.Transform(scale: 2, offset: .zero),
+            magnifiedBy: 1.5,
+            anchoredAt: anchor(x: 100, y: -50),
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 3) < 0.001)
+        // a - m*a at m = 1.5: half the anchor vector, the other way about.
+        #expect(abs(out.offset.width + 50) < 0.001)
+        #expect(abs(out.offset.height - 25) < 0.001)
+    }
+
+    /// The committed offset is an input of the same formula, not a special case bolted beside it.
+    @Test("a pinch in a corner of a panned picture carries the old offset through")
+    func pinchInACornerOfAPannedPicture() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.settled(
+            MediaZoom.Transform(scale: 2, offset: CGSize(width: 40, height: -20)),
+            magnifiedBy: 1.5,
+            anchoredAt: anchor(x: 100, y: -50),
+            fitted: fitted,
+            viewport: viewport
+        )
+        // a - m*(a - o), and inside the limits at scale 3, so nothing is trimmed here.
+        #expect(abs(out.offset.width - 10) < 0.001)
+        #expect(abs(out.offset.height + 5) < 0.001)
+    }
+
+    /// Anchoring does not get to push a picture off the screen: the target meets the same limits a
+    /// drag does, and only on the axis that ran out of room.
+    @Test("an anchored target beyond the edge is trimmed on that axis alone")
+    func anchoredTargetBeyondTheEdge() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let room = MediaZoom.panLimit(scale: 6, fitted: fitted, viewport: viewport)
+        #expect(room.width > 900, "the fixture proves nothing if it starts out of bounds")
+
+        let out = MediaZoom.settled(
+            MediaZoom.Transform(scale: 6, offset: CGSize(width: 900, height: 100)),
+            magnifiedBy: 0.5,
+            anchoredAt: anchor(x: 195, y: 0),
+            fitted: fitted,
+            viewport: viewport
+        )
+        let limit = MediaZoom.panLimit(scale: 3, fitted: fitted, viewport: viewport)
+        #expect(abs(out.scale - 3) < 0.001)
+        // 547.5 asked for on the wide axis, the limit granted.
+        #expect(abs(out.offset.width - limit.width) < 0.001)
+        // Well inside its own limit, so untouched.
+        #expect(abs(out.offset.height - 50) < 0.001)
+    }
+
+    /// At the top of the range a further pinch has no effective ratio left, so there is nothing for
+    /// the anchor to act on. The anchor is deliberately off the picture's centre and the offset
+    /// well inside the limits: any movement here would show rather than be trimmed away.
+    @Test("a pinch past the scale limit moves nothing")
+    func pinchPastTheScaleLimit() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let atTheLimit = MediaZoom.Transform(
+            scale: MediaZoom.maximumScale,
+            offset: CGSize(width: 40, height: -20)
+        )
+        let out = MediaZoom.settled(
+            atTheLimit,
+            magnifiedBy: 2,
+            anchoredAt: anchor(x: 100, y: 50),
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(out.scale == MediaZoom.maximumScale)
+        #expect(abs(out.offset.width - 40) < 0.001)
+        #expect(abs(out.offset.height + 20) < 0.001)
+    }
+
+    /// Coming back out needs no special case: at fitted size the pan limit is zero on both axes,
+    /// so the clamp that stops a drag at the edge is what puts the picture back in the middle.
+    @Test("pinching back to fitted size recentres whatever the anchor was")
+    func backToFittedRecentres() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.settled(
+            MediaZoom.Transform(scale: 3, offset: CGSize(width: 200, height: 100)),
+            magnifiedBy: 0.2,
+            anchoredAt: anchor(x: 100, y: -50),
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(out.scale == MediaZoom.minimumScale)
+        #expect(out.offset == MediaZoom.Transform.identity.offset)
+        #expect(!out.isZoomed)
+    }
+
+    /// A magnified panorama still has no room to move vertically, however the fingers land: the
+    /// anchor's vertical share has to end up trimmed to nothing rather than lifting the picture
+    /// off its own edges.
+    @Test("an axis the magnified picture does not overflow stays centred")
+    func nonOverflowingAxisStaysCentred() {
+        let panorama = MediaZoom.fittedSize(aspectRatio: 8, in: viewport)
+        let limit = MediaZoom.panLimit(scale: 3, fitted: panorama, viewport: viewport)
+        #expect(limit.height == 0, "the fixture proves nothing if it can move vertically")
+
+        let out = MediaZoom.settled(
+            MediaZoom.Transform(scale: 2, offset: .zero),
+            magnifiedBy: 1.5,
+            anchoredAt: anchor(x: 100, y: -50),
+            fitted: panorama,
+            viewport: viewport
+        )
+        #expect(out.offset.height == 0)
+    }
+
+    /// The pinch and the drag are separate recognisers and nothing says which of them ends first.
+    /// Either order has to leave the picture exactly where the fingers had it, and both orders
+    /// have to end on the same committed transform — all of it inside the limits here, so a clamp
+    /// cannot be what makes the numbers agree.
+    @Test("either gesture may end first and the picture does not jump")
+    func eitherGestureMayEndFirst() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let committed = MediaZoom.Transform(scale: 2, offset: .zero)
+        let pinch = MediaZoom.Pinch(magnification: 1.5, anchor: anchor(x: 100, y: 0))
+        let drag = CGSize(width: 20, height: 0)
+
+        let underTheFingers = MediaZoom.live(
+            committed,
+            pinch: pinch,
+            pannedBy: drag,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(underTheFingers.scale - 3) < 0.001)
+        #expect(abs(underTheFingers.offset.width + 30) < 0.001)
+
+        // The drag ends first, and what it stores is rebased so the pinch redraws the same frame.
+        let afterTheDrag = MediaZoom.panned(
+            committed,
+            by: drag,
+            underPinch: pinch,
+            fitted: fitted,
+            viewport: viewport
+        )
+        let acrossTheDragsEnd = MediaZoom.live(
+            afterTheDrag,
+            pinch: pinch,
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(acrossTheDragsEnd.offset.width + 30) < 0.001)
+        let dragFirst = MediaZoom.settled(
+            afterTheDrag,
+            magnifiedBy: pinch.magnification,
+            anchoredAt: pinch.anchor,
+            fitted: fitted,
+            viewport: viewport
+        )
+
+        // The pinch ends first, and the drag is still in screen points, so it adds the same 20.
+        let afterThePinch = MediaZoom.settled(
+            committed,
+            magnifiedBy: pinch.magnification,
+            anchoredAt: pinch.anchor,
+            fitted: fitted,
+            viewport: viewport
+        )
+        let acrossThePinchsEnd = MediaZoom.live(
+            afterThePinch,
+            pinch: nil,
+            pannedBy: drag,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(acrossThePinchsEnd.offset.width + 30) < 0.001)
+        let pinchFirst = MediaZoom.panned(
+            afterThePinch,
+            by: drag,
+            underPinch: nil,
+            fitted: fitted,
+            viewport: viewport
+        )
+
+        #expect(abs(dragFirst.scale - 3) < 0.001)
+        #expect(abs(dragFirst.offset.width + 30) < 0.001)
+        #expect(abs(pinchFirst.scale - dragFirst.scale) < 0.001)
+        #expect(abs(pinchFirst.offset.width - dragFirst.offset.width) < 0.001)
+        #expect(abs(pinchFirst.offset.height - dragFirst.offset.height) < 0.001)
+    }
+
+    @Test("a picture at rest holds nothing back")
+    func nothingHeldAtRest() {
+        let holds = MediaZoom.holds(.identity, pinch: nil)
+        #expect(!holds.pager)
+        #expect(!holds.dismissal)
+    }
+
+    /// Two fingers on a picture are never a page turn, even before they have changed the scale at
+    /// all — which is why the pager is answered from the pinch and not from the transform.
+    @Test("fingers on the picture hold the pager")
+    func fingersHoldThePager() {
+        let held = MediaZoom.holds(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 0.5, anchor: anchor(x: 0, y: 0))
+        )
+        #expect(held.pager)
+    }
+
+    /// The narrower answer, deliberately: a picture that is already whole is closed by pinching
+    /// in, and that has to keep working.
+    @Test("a pinch in at fitted size does not hold dismissal")
+    func fittedPinchInDoesNotHoldDismissal() {
+        let held = MediaZoom.holds(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 0.5, anchor: anchor(x: 0, y: 0))
+        )
+        #expect(!held.dismissal)
+    }
+
+    /// The committed transform only changes when the fingers leave, so a pinch that has already
+    /// taken the picture past fitted size has to be answered from the LIVE scale — otherwise the
+    /// viewer starts closing underneath a zoom-in.
+    @Test("a live scale past the tolerance holds dismissal")
+    func liveScaleHoldsDismissal() {
+        let held = MediaZoom.holds(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.5, anchor: anchor(x: 100, y: -50))
+        )
+        #expect(held.dismissal)
+    }
+
+    /// And the other side of it: a zoomed picture pinched back down to fitted size keeps both
+    /// holds while the fingers are still on it, because what it is committed to is still zoomed.
+    @Test("a committed zoom holds both until the fingers leave")
+    func committedZoomHoldsBoth() {
+        let held = MediaZoom.holds(
+            MediaZoom.Transform(scale: 2, offset: .zero),
+            pinch: MediaZoom.Pinch(magnification: 0.3, anchor: anchor(x: 0, y: 0))
+        )
+        #expect(held.pager)
+        #expect(held.dismissal)
     }
 }
 

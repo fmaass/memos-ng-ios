@@ -700,6 +700,10 @@ struct MediaViewerPage: View {
                 transform = MediaZoom.settled(
                     transform,
                     magnifiedBy: Double(value.magnification),
+                    anchoredAt: CGPoint(
+                        x: viewport.width / 2 + transform.offset.width,
+                        y: viewport.height / 2 + transform.offset.height
+                    ),
                     fitted: fitted,
                     viewport: viewport
                 )
@@ -715,6 +719,7 @@ struct MediaViewerPage: View {
                 transform = MediaZoom.panned(
                     transform,
                     by: value.translation,
+                    underPinch: nil,
                     fitted: fitted,
                     viewport: viewport
                 )
