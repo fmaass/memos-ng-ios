@@ -7,6 +7,7 @@ import Testing
 
 @testable import MemosCore
 
+private let whoamiOperation = "whoami_api_auth_user_get"
 private let patchMemoOperation = "patch_memo_api_memos__uid__patch"
 private let deleteMemoOperation = "delete_memo_api_memos__uid__delete"
 private let startUploadOperation = "start_upload_api_uploads_post"
@@ -388,5 +389,85 @@ struct TimelineMutationGateTests {
         #expect(patches.count == 1, "the joined save patched the memo a second time")
         #expect(firstOutcome == secondOutcome, "one request, two answers")
         #expect(firstOutcome.isSaved, "control: the save landed")
+    }
+
+    /// A place in line is an unbounded wait, and an account can end inside it.
+    ///
+    /// What the waiting save carries — words and a photograph — belongs to whoever typed it, and
+    /// the client it would send them with is the one it captured. So the question is asked again
+    /// where the wait ENDS, against the handle that issued it: the upload is this lane's first
+    /// request, and a check made after it would already have posted the file.
+    @Test("a save whose session ended while it waited its turn sends nothing")
+    func aQueuedSaveWhoseSessionEndedSendsNothing() async throws {
+        let file = try stagedFile()
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let patched = LockedValue<[String]>([])
+        let uploads = Counter()
+        let release = LockedValue<Bool>(false)
+        let session = await signedIn { _, body, operation in
+            switch operation {
+            case whoamiOperation:
+                return Stub.json(Stub.user)
+            case startUploadOperation:
+                uploads.increment()
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
+            case finalizeUploadOperation:
+                return Stub.empty(.ok)
+            case patchMemoOperation:
+                let content = (try await Stub.body(body))["content"] as? String ?? ""
+                patched.set(patched.get() + [content])
+                if content == "first" { try await hold(until: release) }
+                return Stub.json(Stub.memo(uid: "a", content: content))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+        let store = TimelineStore()
+        store.reports(to: session)
+        let underA = try #require(session.activeHandle)
+        await store.refresh(using: underA, baseURL: Stub.baseURL)
+
+        let first = Task {
+            await store.edit(uid: "a", content: "first", using: underA, baseURL: Stub.baseURL)
+        }
+        while patched.get().isEmpty {
+            await Task.yield()
+        }
+        let second = Task {
+            await store.edit(
+                uid: "a", content: "second", attaching: [file],
+                using: underA, baseURL: Stub.baseURL
+            )
+        }
+        await timeForARequestToArrive()
+
+        // B signs in while the second save is still behind the first. A's handle is a generation
+        // nobody is in, and the queue is what hands the second save its turn under it.
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        release.set(true)
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+
+        #expect(uploads.count == 0, "a photograph was posted for an account that had gone")
+        #expect(patched.get() == ["first"], "a save queued under an account that had gone was sent")
+        #expect(!secondOutcome.isSaved, "and it was not reported as saved")
+        // The control: the save that DID reach the wire is the one issued while A was current.
+        #expect(!firstOutcome.isSaved, "A's own answer arrived after A had gone")
+    }
+
+    /// A REAL session over a scripted transport, signed in the way the app signs in — the store
+    /// answers `sessionStillCurrent` from it, and only a real sign-in moves the generation.
+    private func signedIn(handler: @escaping StubTransport.Handler) async -> SessionStore {
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            sleeper: { _ in throw CancellationError() }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        return session
     }
 }

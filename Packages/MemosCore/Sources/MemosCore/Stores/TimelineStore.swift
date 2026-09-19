@@ -224,6 +224,11 @@ public final class TimelineStore {
         showingSnapshot = false
         admittedQuery = nil
         optimistic.removeAll()
+        // The line goes with the claims for the same reason: it orders one account's changes to one
+        // account's rows, and what is still in it was asked for by somebody who is no longer here.
+        // The tasks standing in it keep running under the handles they captured and refuse
+        // themselves on arrival; their places are not the incoming identity's to wait behind.
+        mutations.removeAll()
         snapshotDirty = false
         nextCursor = nil
         newerCursor = nil
@@ -321,8 +326,14 @@ public final class TimelineStore {
     /// LAST, after the apply or the rollback it belongs to has been awaited to the end: a claim
     /// released before that is a claim a second tap can take while the first one is still landing,
     /// and the first one's settle would then retire the second's.
-    private func settle(_ uid: String, claim: Int, under authority: Int) async {
+    ///
+    /// A lane whose place in line is worth no more than its optimistic claim hands that place in
+    /// too, and the two go together with nothing awaited between them: the write below may be held
+    /// for as long as the disk pleases, and a tap that is allowed to change the row again must not
+    /// be made to wait behind somebody else's picture of it.
+    private func settle(_ uid: String, claim: Int, gate: Int? = nil, under authority: Int) async {
         release(uid, claim: claim)
+        if let gate { finishMutation(gate, on: uid) }
         guard optimistic.isEmpty, snapshotDirty else { return }
         await persist(under: authority)
     }
@@ -881,7 +892,7 @@ public final class TimelineStore {
         // The place in line is taken here, before the key is minted and before a single byte goes
         // up: a save that joins the one ahead of it must present neither a second key nor a second
         // copy of the same photograph.
-        return await claimMutation(.edit(attempt), on: uid) { [self] in
+        return await claimMutation(.edit(attempt), on: uid) { [self] _ in
             await performEdit(attempt, attaching: files, using: handle, baseURL: baseURL)
         }.value
     }
@@ -893,6 +904,12 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        // Before the first request and AFTER whatever this memo's line made it wait for: a place
+        // in line is an unbounded wait, and the session that ISSUED a mutation is the one it is
+        // judged against. A save queued under an account that has gone since must put nothing on
+        // the wire under the next one's name — the uploads below are a send like any other.
+        guard sessionStillCurrent(handle) else { return .failed(.authorization) }
+
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1069,10 +1086,14 @@ public final class TimelineStore {
     /// Everything the gated work needs is read INSIDE it rather than here: a picture of the list
     /// taken at the moment of the tap would be a generation out of date by the time its turn came,
     /// and the mutation's own write would be dropped as stale (`issuedAuthority`).
+    ///
+    /// The work is handed its own claim so that a lane which knows its place in line is over before
+    /// its task is can say so itself — the task-end release below stays for every lane, and is a
+    /// no-op for a claim already gone.
     private func claimMutation(
         _ identity: MemoMutationIdentity,
         on uid: String,
-        perform work: @escaping @MainActor @Sendable () async -> ComposeOutcome
+        perform work: @escaping @MainActor @Sendable (Int) async -> ComposeOutcome
     ) -> Task<ComposeOutcome, Never> {
         var queue = mutations[uid] ?? []
         if let tail = queue.last, tail.identity == identity { return tail.task }
@@ -1082,7 +1103,7 @@ public final class TimelineStore {
         let task = Task { [self] in
             // Whatever stands ahead of it goes first; that one's answer is its own caller's.
             _ = await predecessor?.value
-            let outcome = await work()
+            let outcome = await work(claim)
             finishMutation(claim, on: uid)
             return outcome
         }
@@ -1096,8 +1117,15 @@ public final class TimelineStore {
     /// Inside the task that owns it rather than in the caller that started it, for the reason
     /// `deleteAttachment` clears its own slot there — and by claim rather than by position, so an
     /// invocation can only ever take its own place out of the line.
+    ///
+    /// MEMBERSHIP first: a lane may give its place up before its task ends, and an identity change
+    /// empties the line under every task still running. The claim counter is never reset, so a
+    /// number from a line that has gone matches nothing here — asking whether this claim is still
+    /// in the line is what keeps a departed mutation from retiring a living one's place.
     private func finishMutation(_ claim: Int, on uid: String) {
-        guard var queue = mutations[uid] else { return }
+        guard var queue = mutations[uid], queue.contains(where: { $0.claim == claim }) else {
+            return
+        }
         queue.removeAll { $0.claim == claim }
         mutations[uid] = queue.isEmpty ? nil : queue
     }
@@ -1150,7 +1178,7 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        await claimMutation(.pinned(pinned), on: uid) { [self] in
+        await claimMutation(.pinned(pinned), on: uid) { [self] _ in
             await performPin(pinned, uid: uid, using: handle, baseURL: baseURL)
         }.value.isSaved
     }
@@ -1162,6 +1190,10 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        // Before the first request and AFTER whatever this memo's line made it wait for, for the
+        // reason `performEdit` asks before its uploads.
+        guard sessionStillCurrent(handle) else { return .failed(.authorization) }
+
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1215,13 +1247,17 @@ public final class TimelineStore {
         // question — "is it gone?" — has one true answer, and a second DELETE for a memo the first
         // has already removed comes back 404 and reads as a fact about a memo this app deleted
         // itself.
-        await claimMutation(.delete, on: uid) { [self] in
+        await claimMutation(.delete, on: uid) { [self] _ in
             await performDelete(uid: uid, using: handle)
         }.value.isSaved
     }
 
     /// The delete itself, once every earlier mutation of this memo has finished.
     private func performDelete(uid: String, using handle: SessionHandle) async -> ComposeOutcome {
+        // Before the first request and AFTER whatever this memo's line made it wait for, for the
+        // reason `performEdit` asks before its uploads.
+        guard sessionStillCurrent(handle) else { return .failed(.authorization) }
+
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1868,9 +1904,12 @@ public final class TimelineStore {
         // toggle per memo, and the second tap is simply not taken (a store serializes its own
         // mutations).
         //
-        // The claim is held until this invocation has finished LANDING — the apply and the picture
-        // of the list it commits are both awaits, and a tap taken inside them would be a second
-        // request on a memo whose first answer is still being written down.
+        // The claim is held until this invocation's change has LANDED on the row — the apply is an
+        // await, and a tap taken inside it would be a second request on a memo whose first answer
+        // is still being written down. It ends there and not later: a place in line orders the
+        // requests that go out and the row each answer is applied to, and both are over once the
+        // apply has returned. The picture of the list written afterwards is nobody's turn to wait
+        // for — it is this store catching up with a row the person can already see and tick again.
         //
         // The refusal reaches every OTHER unfinished mutation of this memo for the same reason it
         // has always reached another tap: the tick is a whole content patch derived from the row as
@@ -1892,9 +1931,9 @@ public final class TimelineStore {
         memos[position].content = toggled
         // Its place in line is taken all the same: the tick that went out first is the one a save
         // submitted after it must be sent after.
-        return await claimMutation(.task(index: index), on: uid) { [self] in
+        return await claimMutation(.task(index: index), on: uid) { [self] gate in
             await performToggle(
-                toggled, restoring: original, in: uid, claim: claim,
+                toggled, restoring: original, in: uid, claim: claim, gate: gate,
                 using: handle, baseURL: baseURL
             )
         }.value.isSaved
@@ -1906,6 +1945,7 @@ public final class TimelineStore {
         restoring original: Memo,
         in uid: String,
         claim: Int,
+        gate: Int,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
@@ -1923,19 +1963,21 @@ public final class TimelineStore {
             )
             switch response {
             case .ok(let ok):
-                // The session may have ended while the patch was out. The claim goes either way —
-                // the request it was held for is over — but it goes AFTER the work it guards, and
-                // never over another owner's (`release`).
+                // The session may have ended while the patch was out. Both claims go either way —
+                // the request they were held for is over — but they go AFTER the work they guard,
+                // together, and never over another owner's (`release`, `finishMutation`).
                 guard sessionStillCurrent(handle) else {
                     release(uid, claim: claim)
+                    finishMutation(gate, on: uid)
                     return .failed(.authorization)
                 }
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 await apply(Memo(try ok.body.json, baseURL: baseURL), under: authority)
                 // LAST: the apply above is awaited, and a tap taken inside it would overlap this
-                // one. The settle releases the claim and then writes whatever it was holding back.
-                await settle(uid, claim: claim, under: authority)
+                // one. The settle gives up both claims and then writes whatever they were holding
+                // back.
+                await settle(uid, claim: claim, gate: gate, under: authority)
                 return .saved
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
             // is thrown exactly as it was, so the tick is rolled back and the claim released by
@@ -1970,10 +2012,11 @@ public final class TimelineStore {
             // only what the server has confirmed gone is left out of it.
             // The rollback is a WRITE, and a write for a session that has ended belongs to
             // nobody: the row it would put back is the previous account's, and the list it would
-            // put it into is the next one's. The claim is given up either way, and only ever the
-            // one this invocation made.
+            // put it into is the next one's. Both claims are given up either way, and only ever
+            // the ones this invocation made.
             guard sessionStillCurrent(handle) else {
                 release(uid, claim: claim)
+                finishMutation(gate, on: uid)
                 return .failed(.authorization)
             }
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
@@ -1982,7 +2025,7 @@ public final class TimelineStore {
                 await commit(restored, under: authority)
             }
             // After the rollback has landed, for the reason the success path settles last.
-            await settle(uid, claim: claim, under: authority)
+            await settle(uid, claim: claim, gate: gate, under: authority)
             await report(error, issuedUnder: handle)
             return .failed(ComposeFailure.classify(error, sent: true))
         }
@@ -1995,7 +2038,7 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        await claimMutation(identity, on: uid) { [self] in
+        await claimMutation(identity, on: uid) { [self] _ in
             await patchOutcome(uid: uid, body, using: handle, baseURL: baseURL)
         }.value.isSaved
     }
@@ -2016,6 +2059,10 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        // Before the first request and AFTER whatever this memo's line made it wait for, for the
+        // reason `performEdit` asks before its uploads.
+        guard sessionStillCurrent(handle) else { return .failed(.authorization) }
+
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
