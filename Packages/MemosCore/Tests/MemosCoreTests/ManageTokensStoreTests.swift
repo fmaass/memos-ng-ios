@@ -739,10 +739,10 @@ private final class ReentrantPresenter: NativeLoginPresenter {
 /// asks a different question entirely — the interesting one is what happens while the first
 /// request is still out there, which is exactly the window a double tap lands in.
 private actor RequestGate {
-    /// EVERY held request, not the latest one. A gate that kept a single continuation turned the
-    /// exact bug these tests are about into a hang: with two requests in the air the second
-    /// overwrote the first's continuation, the first was never resumed, and the suite stopped
-    /// instead of failing. A test that hangs when the behaviour breaks reports nothing.
+    /// EVERY held request, not the latest one. A gate keeping a single continuation would hang on
+    /// the exact bug these tests are about: with two requests in the air the second replaces the
+    /// first's continuation, so the first is never resumed and the suite stops instead of failing.
+    /// A test that hangs when the behaviour breaks reports nothing.
     private var waiting: [CheckedContinuation<Void, Never>] = []
     private var arrival: CheckedContinuation<Void, Never>?
     private var arrivals = 0
@@ -1064,6 +1064,67 @@ extension ManageTokensStoreTests {
         #expect(!created)
         #expect(store.minted == nil, "a plaintext was shown for an identity that is gone")
         #expect(!store.mintedSecretLost, "the loss was announced to an identity that is gone")
+    }
+
+    /// The plaintext of a token minted BEFORE the identity went is on screen, with its Copy action
+    /// live, at the one instant this store cannot rely on its own teardown: the session withdraws
+    /// its handle synchronously and the sheet goes away afterwards. What the screen can see is
+    /// therefore judged when it reads, against the identity the secret was minted under.
+    @Test("a plaintext already on screen stops being readable the instant the app identity goes")
+    func aShownSecretIsUnreadableOnceTheIdentityWent() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[]")
+            case createOperation:
+                .created(Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_brand_new"))
+            default: .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+        await store.create(name: "Laptop")
+
+        #expect(store.minted?.secret == "memos_pat_brand_new", "there was no plaintext to fence")
+
+        await session.signOutWithoutRevoking()
+        #expect(session.activeHandle == nil, "the identity was still there to be judged against")
+
+        #expect(store.minted == nil, "a plaintext outlived the identity it was minted under")
+
+        await store.refresh()
+        #expect(!store.mintedSecretLost, "a loss was announced to whoever signs in next")
+    }
+
+    /// The same start, and the case the notice exists for: the identity holds, the grant runs out,
+    /// and the person reading the sheet is the one who asked for the token. A panel that quietly
+    /// vanished would leave them believing they still hold the only copy of its text.
+    @Test("a grant running out under the same identity takes the plaintext and says so")
+    func aLapsedGrantAnnouncesTheLostSecret() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let clock = LockedValue(managementNow)
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session, now: { clock.get() }) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[]")
+            case createOperation:
+                .created(Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_brand_new"))
+            default: .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+        await store.create(name: "Laptop")
+
+        #expect(store.minted?.secret == "memos_pat_brand_new", "there was no plaintext to lose")
+
+        clock.set(managementNow.addingTimeInterval(601))
+        await store.refresh()
+
+        #expect(store.minted == nil, "a plaintext survived the grant it was shown under")
+        #expect(store.mintedSecretLost, "a plaintext went away without the screen saying so")
+        #expect(store.state == .locked(.expired))
     }
 
     /// A failure answers through a different continuation than a success, and every one of them

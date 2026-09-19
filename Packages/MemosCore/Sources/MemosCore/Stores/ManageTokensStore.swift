@@ -64,7 +64,17 @@ public final class ManageTokensStore {
     public private(set) var state: ManageTokensState = .locked(.never)
     /// The token created in THIS management session, with the one look anybody gets at its
     /// plaintext. `nil` once it has been dismissed or lost.
-    public private(set) var minted: MintedToken?
+    ///
+    /// Fenced on the identity the secret was minted under, and judged HERE, as the screen reads:
+    /// the session withdraws its handle synchronously and this sheet is torn down afterwards, so
+    /// between those two instants a panel showing somebody's full-access token — with its Copy
+    /// action live — belongs to an account nobody is signed in to. Everything the screen can see of
+    /// a plaintext comes through this one read, so there is one answer to it.
+    public var minted: MintedToken? { appIdentityHolds ? heldMinted : nil }
+    /// The only copy of the plaintext there will ever be. Held for as long as the panel showing it
+    /// can be read, and dropped from memory at the next touch of the store under an identity that
+    /// has gone — at the latest by the screen's own teardown.
+    private var heldMinted: MintedToken?
     /// A plaintext that went away without being dismissed — the app was backgrounded, the grant
     /// ran out, the screen was left. The token still exists and can still be revoked from the
     /// list; its text cannot come back, and the screen says so rather than quietly showing one
@@ -297,7 +307,7 @@ public final class ManageTokensStore {
                 endWork(work)
                 return false
             }
-            minted = created
+            heldMinted = created
             mintedSecretLost = false
             notice = nil
         } catch {
@@ -358,7 +368,9 @@ public final class ManageTokensStore {
     /// A screen that never bought anything is left alone: moving it to "that session ended" would
     /// be the app announcing the end of something that never began.
     public func forget() {
-        let hadSomething = grant.current != nil || minted != nil
+        // The held plaintext, not what the screen could still see of it: a session that bought a
+        // token ended here whether or not the identity it was bought under is still around.
+        let hadSomething = grant.current != nil || heldMinted != nil
         generation += 1
         // The operation in flight belonged to the session this ends. Its gate is handed back HERE
         // rather than when it lands: a screen coming back from the background could otherwise
@@ -379,7 +391,7 @@ public final class ManageTokensStore {
 
     /// The plaintext has been read and put away on purpose. Not a loss, so nothing says it was.
     public func dismissMinted() {
-        minted = nil
+        heldMinted = nil
         mintedSecretLost = false
     }
 
@@ -474,9 +486,13 @@ public final class ManageTokensStore {
 
     private func dropGrant() {
         grant.forget()
-        if minted != nil {
-            minted = nil
-            mintedSecretLost = true
+        if heldMinted != nil {
+            heldMinted = nil
+            // The notice is scoped to the identity that bought the session, exactly as the create
+            // path's is: a secret the screen stopped showing because that identity went was not
+            // lost to anybody left to read this screen, and telling whoever signs in next that a
+            // token was minted is a sentence about the last person's account.
+            if appIdentityHolds { mintedSecretLost = true }
         }
     }
 

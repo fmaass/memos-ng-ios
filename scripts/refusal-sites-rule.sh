@@ -104,8 +104,11 @@ pattern='\.unauthorized|(^|[^0-9A-Za-z_])401([^0-9A-Za-z_]|$)|0x191|0o621'
 # The last two are the step-up management lane, whose credential is a short-lived grant and never the
 # device's token: a refusal there ends that screen's session by lapsing the grant and reaches nothing
 # SessionStore owns, so it is outside the typed device-credential value by design rather than by
-# omission. Their controls are the lapse itself and the grant's own liveness, so a file that stopped
-# ending the management session on a refusal stops being allow-listed for one.
+# omission. The two controls pinned for them are DECLARATION greps — the grant's `isLive(` and the
+# store's `lapse()` — so what they prove is that those declarations are still in their file, not that
+# the refusal arm still calls them. The connection is held by behaviour instead: the
+# `ManageTokensStoreTests` test `aRefusedGrantAsksAgain` fails if a 401 on a management route stops
+# lapsing the grant.
 allow_list=(
   "Packages/MemosAPI/Sources/MemosAPI/APIError.swift"
   "Packages/MemosAPI/Sources/MemosAPI/CredentialRefusal.swift"

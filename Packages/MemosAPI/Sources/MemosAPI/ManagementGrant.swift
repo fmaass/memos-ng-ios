@@ -11,14 +11,17 @@ import Foundation
 /// So it is deliberately NOT a `PresentedCredential`. That one is the session's token — written to
 /// the Keychain, restored at launch, presented by every client in the process. This one is written
 /// nowhere. It is not in the Keychain, not in `UserDefaults`, not in the app group, not in a file.
-/// It dies when the screen holding it goes away, when the app is backgrounded, when its deadline
-/// passes and when the process ends, and the only way to have one again is another sign-on. A grant
-/// that survived any of those would be a long-lived management capability sitting on a phone, which
-/// is precisely the thing this design exists to avoid.
+/// It dies when the screen holding it goes away, when the app is backgrounded and when the process
+/// ends, and the only way to have one again is another sign-on. A grant that survived any of those
+/// would be a long-lived management capability sitting on a phone, which is precisely the thing
+/// this design exists to avoid.
 ///
 /// The deadline is the SERVER's, carried in the mint response rather than guessed here, because the
 /// server's is the only one that decides anything. Holding it lets the screen say "that management
-/// session has ended" instead of collecting a 401 for something it could already know.
+/// session has ended" instead of collecting a 401 for something it could already know. It is judged
+/// where a piece of work BEGINS and nowhere else — nothing in here retires the grant as the clock
+/// passes it — so a request already in the air when the deadline goes by is the server's to refuse,
+/// and that refusal ends the management session exactly as the check would have.
 ///
 /// A locked class rather than an actor, for the reason `PresentedCredential` is one: the middleware
 /// reads it on every request from whatever executor the transport is running on, and an actor would
