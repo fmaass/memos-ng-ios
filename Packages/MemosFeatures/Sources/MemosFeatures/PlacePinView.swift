@@ -15,10 +15,20 @@ class PlaceAnnotationView: MKAnnotationView {
     private let badge = UILabel()
     /// Which image this view last ASKED for. The one thing a late answer is judged against.
     private var requested: MediaImageKey?
-    /// Which image this view has a request out for right now, if any — cleared by the task that
-    /// made it, and by reuse. A map pass arrives whenever the screen is re-evaluated, so the same
-    /// photograph can be asked for again while the first request is still unanswered.
-    private var inFlight: MediaImageKey?
+    /// One request this view made: which photograph it is for, and which of this view's requests
+    /// it is. The number is what lets the request that ENDS say whether it is still the one out —
+    /// the same photograph can be asked for twice by one view, so the key alone cannot.
+    private struct Request {
+        let key: MediaImageKey
+        let serial: Int
+    }
+
+    /// The request this view has out right now, if any — cleared by the task that made it, and by
+    /// reuse. A map pass arrives whenever the screen is re-evaluated, so the same photograph can
+    /// be asked for again while the first request is still unanswered.
+    private var inFlight: Request?
+    /// How many requests this view has made, which numbers each one.
+    private var requestsMade = 0
     /// Exposed so a test can await the fetch this view started rather than sleep for it.
     private(set) var loading: Task<Void, Never>?
 
@@ -88,7 +98,7 @@ class PlaceAnnotationView: MKAnnotationView {
         // A request for this very photograph is already out, and the answer on its way is this
         // call's answer too. Returning here is what keeps a repeated ask off the wire — and what
         // keeps the line below from blanking a pin that is merely waiting.
-        if inFlight == key { return }
+        if inFlight?.key == key { return }
 
         // Before the cache is read, and the same one rule the tile applies: a lapsed signature
         // takes the decoded picture with it, or the pin paints a frame this URL can no longer
@@ -107,12 +117,15 @@ class PlaceAnnotationView: MKAnnotationView {
         // Read BEFORE the await and compared after it: an answer about the account that was
         // signed in when this started must not be painted for the one signed in now.
         let generation = MediaImageLoader.store.generation
-        inFlight = key
+        requestsMade += 1
+        let request = Request(key: key, serial: requestsMade)
+        inFlight = request
         loading = Task { [weak self] in
-            // Whichever way this task leaves, the request it stands for is over. Only if it is
-            // still the one out: a view handed another pin meanwhile has a newer request to
-            // answer for, and this one must not clear it.
-            defer { if self?.inFlight == key { self?.inFlight = nil } }
+            // Whichever way this task leaves, the request it stands for is over — and only THIS
+            // request. A view recycled and handed the same pin again cancels this one and makes
+            // another for the same photograph; when the cancelled one ends it must not report the
+            // live one finished, or the next map pass sees a pin owed a picture and asks twice.
+            defer { if self?.inFlight?.serial == request.serial { self?.inFlight = nil } }
             // The task starts a turn later than the generation was read, and the loader would
             // sample the clock itself: asking it now for a URL the previous account signed files
             // those bytes under THIS account's number, where the refusal below no longer reaches

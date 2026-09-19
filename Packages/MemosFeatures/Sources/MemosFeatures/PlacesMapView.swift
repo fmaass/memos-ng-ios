@@ -43,17 +43,11 @@ nonisolated final class PlaceAnnotation: NSObject, MKAnnotation {
     ///
     /// A read can bring the thumbnail URL back signed afresh, so an annotation kept across a
     /// refresh may be holding a signature that will lapse while the one that replaces it is thrown
-    /// away. Separate from `update(to:)` because writing `coordinate` is a KVO notification to the
-    /// map, and a pin that did not move must not send one.
-    ///
-    /// Answers whether that URL is a different one. A signature the pin has not seen is worth a
-    /// repaint, because the picture the old one could not authorise may be had under this one —
-    /// but the same URL can come back just as well, so this answer is a reason to repaint and
-    /// never the only one (`show(_:through:)`).
-    func adopt(_ pin: PlacePin) -> Bool {
-        let previousURL = self.pin.leadThumbnailURL
+    /// away. Taking the new pin costs nothing and is what any later request will ask with.
+    /// Separate from `update(to:)` because writing `coordinate` is a KVO notification to the map,
+    /// and a pin that did not move must not send one.
+    func adopt(_ pin: PlacePin) {
         self.pin = pin
-        return pin.leadThumbnailURL != previousURL
     }
 
     /// The same object, now standing for a different set of photographs.
@@ -167,24 +161,28 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         apply(diff, from: wanted, through: sink)
 
         // What the diff cannot see: a pin in no bucket is the same place with the same
-        // photographs, read again. Its thumbnail URL may be signed afresh or come back exactly as
-        // it was — this side cannot tell which the read will bring — so the annotation takes the
-        // new pin either way, and the repaint is decided on two grounds. A URL the pin has not
-        // seen is one. The other is the view: a pin showing nothing with no request out is a
-        // thumbnail fetch that came back with nothing and cached nothing, and this pass is the
-        // only occasion it ever gets to ask again.
+        // photographs, read again. Every one of them takes the new pin, whether its thumbnail URL
+        // came back signed afresh or exactly as it was — which of the two the read brings is not
+        // something this side can tell, and nothing here depends on the answer.
         //
-        // Neither ground touches a pin that HAS its photograph, and a repaint would not cost it
-        // anything anyway: the picture is cached under the uid, which did not change, so
-        // `show(photoFor:at:badge:)` reads it straight back without a request. One with a request
-        // still out is not repainted, and would refuse a second ask if it were.
+        // One of them is repainted: the pin whose view is showing nothing with no request out.
+        // That is what a thumbnail fetch that came back with nothing leaves behind — it caches
+        // nothing, so the view is the only record of it — and this pass is the only occasion it
+        // ever gets to ask again, now with the URL the annotation has just taken.
+        //
+        // A pin that HAS its photograph is left alone, and that is the point of asking rather than
+        // repainting the lot: the picture it is showing can outlive the decoded entry behind it,
+        // and a repaint would then find nothing cached, blank the pin and go back to the network.
+        // A pin with a request out is left alone too — its answer is already coming.
         var touched = Set(diff.added.map(\.key))
         touched.formUnion(diff.updated.map(\.key))
         for (key, pin) in wanted where !touched.contains(key) {
             guard let annotation = annotations[key] else { continue }
-            let signatureChanged = annotation.adopt(pin)
-            let stillOwed = pin.leadThumbnailURL != nil && sink.isAwaitingPhotograph(annotation)
-            if signatureChanged || stillOwed { sink.refresh(annotation) }
+            annotation.adopt(pin)
+            guard pin.leadThumbnailURL != nil, sink.isAwaitingPhotograph(annotation) else {
+                continue
+            }
+            sink.refresh(annotation)
         }
     }
 
