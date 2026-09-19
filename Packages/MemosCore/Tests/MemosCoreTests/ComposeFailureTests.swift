@@ -432,14 +432,18 @@ struct ComposeFailureTests {
     /// proxy gave up on a request that had already gone out.
     @Test("a proxy's own answer is a transport failure, and carries what the caller knew")
     func gatewayStatusesAreTransportFailures() {
-        #expect(ComposeFailure.classify(APIError.server(status: 502), sent: true)
-            == .transport(sent: true))
-        #expect(ComposeFailure.classify(APIError.server(status: 504), sent: true)
-            == .transport(sent: true))
-        #expect(ComposeFailure.classify(APIError.server(status: 502), sent: false)
-            == .transport(sent: false))
-        #expect(ComposeFailure.classify(APIError.server(status: 504), sent: false)
-            == .transport(sent: false))
+        #expect(
+            ComposeFailure.classify(APIError.server(status: 502), sent: true)
+                == .transport(sent: true))
+        #expect(
+            ComposeFailure.classify(APIError.server(status: 504), sent: true)
+                == .transport(sent: true))
+        #expect(
+            ComposeFailure.classify(APIError.server(status: 502), sent: false)
+                == .transport(sent: false))
+        #expect(
+            ComposeFailure.classify(APIError.server(status: 504), sent: false)
+                == .transport(sent: false))
     }
 
     /// The counterweight: a server that answers for itself keeps its own card, whatever the status

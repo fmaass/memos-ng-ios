@@ -88,8 +88,11 @@ public enum ServerReachability: Sendable, Equatable {
             // files it one level down. A satisfied path hint is deliberately not read at all — it
             // says where the routing table stood, not what the socket did, and a dropped tunnel
             // leaves it satisfied.
-            rest.contains { streamErrorCode(of: $0) == networkIsDown } ? .localNetworkDenied
-                : .offline
+            if rest.contains(where: { streamErrorCode(of: $0) == networkIsDown }) {
+                .localNetworkDenied
+            } else {
+                .offline
+            }
         default: .other("\(urlError.domain) \(urlError.code)")
         }
     }

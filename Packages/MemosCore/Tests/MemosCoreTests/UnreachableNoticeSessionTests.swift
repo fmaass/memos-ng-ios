@@ -456,8 +456,8 @@ struct UnreachableNoticeSessionTests {
         }
         // The tap's own check failed, and what it schedules is the FIRST rung, 3 s before jitter —
         // not the 30 s the ladder had climbed to.
-        let seconds = Double(next.components.seconds)
-            + Double(next.components.attoseconds) / 1e18
+        let parts = next.components
+        let seconds = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
         #expect(
             seconds >= 3 * 0.8 && seconds <= 3 * 1.2,
             "the retry carried the ladder's rung: next wait was \(seconds) s, not the first"

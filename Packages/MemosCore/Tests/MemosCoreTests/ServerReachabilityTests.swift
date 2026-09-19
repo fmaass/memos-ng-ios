@@ -139,7 +139,8 @@ struct ServerReachabilityTests {
     @Test("the transport fork hands on exactly what the classifier decided")
     func transportForkPassesTheReasonThrough() {
         #expect(StoreFailure.transportFailure(wrapped(URLError(.timedOut))) == .timedOut)
-        #expect(StoreFailure.transportFailure(APIError.server(status: 502)) == .gateway(status: 502))
+        #expect(
+            StoreFailure.transportFailure(APIError.server(status: 502)) == .gateway(status: 502))
         #expect(StoreFailure.transportFailure(APIError.server(status: 503)) == nil)
     }
 }
