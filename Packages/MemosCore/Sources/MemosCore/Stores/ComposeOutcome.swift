@@ -77,7 +77,7 @@ extension ComposeFailure {
     /// meets are wrappers — `MediaUploadError.refused(.unauthorized)` is what an upload against an
     /// ended session throws — and a wrapper read as an opaque error is a session failure reported
     /// as the server refusing somebody's words.
-    private static func apiError(in error: any Error) -> APIError? {
+    static func apiError(in error: any Error) -> APIError? {
         var current: (any Error)? = error
         for _ in 0..<16 {
             guard let error = current else { return nil }
@@ -126,4 +126,27 @@ extension ComposeFailure {
         NSFileWriteOutOfSpaceError, NSFileWriteNoPermissionError, NSFileWriteVolumeReadOnlyError,
         NSFileWriteUnknownError,
     ]
+}
+
+/// What a failed mutation says about the memo the server holds.
+///
+/// It is read here rather than at each lane for the reason a refusal is: the decision about a
+/// status code is one decision, and a lane that re-derived it would be the same rule written twice
+/// — with the second copy free to drift. It is also the only file in the store layer allowed to
+/// name a refusal by its own name.
+enum MemoMutationEffect: Sendable {
+    /// Nothing was sent, or the server refused the request in a way that leaves the memo as it was:
+    /// a read already on its way knows that memo as well as this mutation does.
+    case changedNothing
+    /// The request left and no answer vouches for what became of it, so only a read issued after
+    /// this moment can say what the memo is.
+    case outcomeUnknown
+
+    static func of(_ error: any Error) -> MemoMutationEffect {
+        switch ComposeFailure.apiError(in: error) {
+        case .unauthorized, .forbidden, .notFound: .changedNothing
+        case .server(let status) where (400..<500).contains(status): .changedNothing
+        default: .outcomeUnknown
+        }
+    }
 }
