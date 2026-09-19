@@ -295,6 +295,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         // A server that never answered goes to the session and nowhere else — the same rule, and
         // the same reason, as `TimelineStore.report`.
         if let failure = StoreFailure.transportFailure(error) {
+            // And a sentence an earlier answer left must not stand in for this one: the banner owns
+            // what an unreachable server says, and a stale "the server returned 500" under it would
+            // be the grid explaining this failure with the last one's words.
+            lastError = nil
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
