@@ -65,6 +65,94 @@ actor RefusingTransport: MediaTransport {
     }
 }
 
+/// A transport that refuses the first request and answers every one after it: the connection that
+/// dropped and came back. Counting calls says a second request was made; answering the second one
+/// with real bytes is what lets a case assert the picture the retry was for actually arrives.
+actor RecoveringTransport: MediaTransport {
+    private(set) var calls = 0
+    private let payload: Data
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
+        calls += 1
+        guard calls > 1 else { throw URLError(.notConnectedToInternet) }
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://memos.example.invalid/")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/png"]
+        )!
+        return (payload, response)
+    }
+}
+
+/// A transport that holds EVERY request until the case lets that one through, by the order it
+/// arrived. `GatedTransport` below releases them all at once, which cannot express two requests
+/// from the same view ending in the wrong order — the case that matters when one of them was
+/// cancelled and the other is still out.
+actor HeldTransport: MediaTransport {
+    private let payload: Data
+    private(set) var calls = 0
+    private var holding: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var released: Set<Int> = []
+    private var refused: Set<Int> = []
+    private var freeForAll = false
+    private var startWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+
+    /// Returns once at least `count` requests have reached the transport.
+    func waitUntilStarted(_ count: Int) async {
+        if calls >= count { return }
+        await withCheckedContinuation { startWaiters.append((count, $0)) }
+    }
+
+    /// Lets the `ordinal`-th request through, refusing it or answering it; the rest stay held.
+    func release(_ ordinal: Int, refusing: Bool = false) {
+        if refusing { refused.insert(ordinal) }
+        released.insert(ordinal)
+        holding.removeValue(forKey: ordinal)?.resume()
+    }
+
+    /// Lets everything through, so a case never ends leaving a request suspended for good.
+    func releaseAll() {
+        freeForAll = true
+        let waiting = holding
+        holding = [:]
+        for (_, continuation) in waiting { continuation.resume() }
+    }
+
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
+        calls += 1
+        let ordinal = calls
+        let ready = startWaiters.filter { $0.count <= calls }
+        startWaiters.removeAll { $0.count <= calls }
+        for waiter in ready { waiter.continuation.resume() }
+
+        if !freeForAll, !released.contains(ordinal) {
+            await withCheckedContinuation { holding[ordinal] = $0 }
+        }
+        if refused.contains(ordinal) { throw URLError(.notConnectedToInternet) }
+
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://memos.example.invalid/")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/png"]
+        )!
+        return (payload, response)
+    }
+}
+
 /// A transport that stops in the middle, so a test can act while a fetch is on the wire. The two
 /// gates are the whole point: `waitUntilStarted` says the request has begun, `release` lets it
 /// finish, and between them the test can change who the device is signed in as.

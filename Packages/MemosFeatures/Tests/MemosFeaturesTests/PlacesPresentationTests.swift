@@ -150,4 +150,26 @@ struct PlacesPresentationTests {
         #expect(failed?.message == "the server said no")
         #expect(PlacesPresentation.notice(for: .error, error: nil)?.message.isEmpty == false)
     }
+
+    /// The card has no cause to name when the store left none. A read that never reached the
+    /// server is said once, by the session's banner, and this card underneath it would be saying
+    /// it twice; a refusal that did not end the session was the server answering, so the same
+    /// sentence would be false. Either way the card describes the LOAD and stops there.
+    @Test("with no sentence of its own the card says what failed and invents no cause")
+    func theErrorCardNamesNoCause() throws {
+        let card = try #require(PlacesPresentation.notice(for: .error, error: nil))
+
+        #expect(!card.message.isEmpty, "a card with nothing in it is not a notice")
+        for claim in ["reach", "server", "connection", "offline", "network"] {
+            #expect(
+                card.message.range(of: claim, options: .caseInsensitive) == nil,
+                "the card said \"\(card.message)\" where the store deliberately said nothing"
+            )
+        }
+        #expect(
+            PlacesPresentation.notice(for: .error, error: "the server returned 500")?.message
+                == "the server returned 500",
+            "a sentence the store did supply was replaced by the fallback"
+        )
+    }
 }

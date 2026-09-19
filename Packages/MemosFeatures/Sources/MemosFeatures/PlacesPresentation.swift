@@ -270,7 +270,10 @@ nonisolated enum PlacesPresentation {
             PlacesNotice(
                 title: "Places could not be loaded",
                 symbol: "exclamationmark.triangle",
-                message: error ?? "The server could not be reached."
+                // Without a sentence of its own this card has no cause to name: a read that never
+                // reached the server is the session banner's to say, once, and a refusal that did
+                // not end the session was the server answering. So it describes the load.
+                message: error ?? "The last attempt did not finish."
             )
         }
     }
