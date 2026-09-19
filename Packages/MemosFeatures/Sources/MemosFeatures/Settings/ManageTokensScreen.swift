@@ -49,7 +49,9 @@ struct ManageTokensScreen: View {
     let reread: () -> Void
     let create: (String) -> Void
     let revoke: (Int) -> Void
-    let copySecret: (String) -> Void
+    /// Carries no plaintext of its own: what is copied is read where the copying happens, from the
+    /// store, so a secret the screen drew can never be what a press hands over.
+    let copySecret: () -> Void
     let dismissSecret: () -> Void
 
     var body: some View {
@@ -188,7 +190,7 @@ struct ManageTokensScreen: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             HStack(spacing: DesignTokens.Space.roomy) {
-                Button(ManageTokensPresentation.copyTitle) { copySecret(minted.secret) }
+                Button(ManageTokensPresentation.copyTitle, action: copySecret)
                     .accessibilityLabel(ManageTokensPresentation.copyLabel)
                 Button(ManageTokensPresentation.doneTitle, action: dismissSecret)
                     .accessibilityLabel(ManageTokensPresentation.doneLabel)

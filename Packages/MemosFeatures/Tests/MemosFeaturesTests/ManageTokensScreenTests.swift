@@ -35,7 +35,7 @@ struct ManageTokensScreenTests {
         reread: @escaping () -> Void = {},
         create: @escaping (String) -> Void = { _ in },
         revoke: @escaping (Int) -> Void = { _ in },
-        copySecret: @escaping (String) -> Void = { _ in },
+        copySecret: @escaping () -> Void = {},
         dismissSecret: @escaping () -> Void = {}
     ) -> ManageTokensScreen {
         let held = draft ?? Held("")
@@ -308,9 +308,11 @@ struct ManageTokensScreenTests {
         #expect(says(ManageTokensPresentation.copyLabel, labels))
     }
 
-    @Test("copying hands over the token text itself")
-    func copyingSendsTheSecret() {
-        let copied = Held<String?>(nil)
+    /// The control hands over no text: what is copied is read where the copying happens, so all the
+    /// screen owes is exactly one ask per press.
+    @Test("copying asks once, and hands over no text of its own")
+    func copyingAsksForTheSecret() {
+        let asked = Held(0)
         let minted = MintedToken(
             token: token(id: 9, name: "Laptop"),
             secret: "memos_pat_brand_new"
@@ -318,11 +320,11 @@ struct ManageTokensScreenTests {
 
         let pressed = PressProbe.withElement(
             labelled: ManageTokensPresentation.copyLabel,
-            in: screen(state: .listed([]), minted: minted, copySecret: { copied.value = $0 })
+            in: screen(state: .listed([]), minted: minted, copySecret: { asked.value += 1 })
         ) { $0?.accessibilityActivate() ?? false }
 
         #expect(pressed, "the copy control did not accept an activation")
-        #expect(copied.value == "memos_pat_brand_new")
+        #expect(asked.value == 1)
     }
 
     /// A text that went away without being read is said out loud: the token still works and can

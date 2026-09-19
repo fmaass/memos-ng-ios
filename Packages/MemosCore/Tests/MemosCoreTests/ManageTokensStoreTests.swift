@@ -1097,6 +1097,35 @@ extension ManageTokensStoreTests {
         #expect(!store.mintedSecretLost, "a loss was announced to whoever signs in next")
     }
 
+    /// The same fence from the other end. A notice raised while the identity still held was a true
+    /// sentence at the instant it was written; it stops being one when that identity goes, and
+    /// nothing comes along afterwards to take it back. So the notice is judged where it is read,
+    /// not where it was assigned.
+    @Test("a loss announced under an identity stops being readable the instant that identity goes")
+    func anAnnouncedLossIsUnreadableOnceTheIdentityWent() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[]")
+            case createOperation:
+                .created(Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_brand_new"))
+            default: .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+        await store.create(name: "Laptop")
+
+        store.forget()
+        #expect(store.mintedSecretLost, "there was no announced loss to fence")
+
+        await session.signOutWithoutRevoking()
+        #expect(session.activeHandle == nil, "the identity was still there to be judged against")
+
+        #expect(!store.mintedSecretLost, "a loss outlived the identity it was announced to")
+    }
+
     /// The same start, and the case the notice exists for: the identity holds, the grant runs out,
     /// and the person reading the sheet is the one who asked for the token. A panel that quietly
     /// vanished would leave them believing they still hold the only copy of its text.

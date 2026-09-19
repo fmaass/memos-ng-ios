@@ -79,7 +79,14 @@ public final class ManageTokensStore {
     /// ran out, the screen was left. The token still exists and can still be revoked from the
     /// list; its text cannot come back, and the screen says so rather than quietly showing one
     /// fewer panel.
-    public private(set) var mintedSecretLost = false
+    ///
+    /// Judged HERE too, for the same reason the plaintext is: a notice raised while the identity
+    /// still held was true at the instant it was written, and nothing comes along afterwards to
+    /// take it back — so a sheet still up when the sign-out lands would tell whoever signs in next
+    /// that a token was minted on an account they are not holding.
+    public var mintedSecretLost: Bool { appIdentityHolds && heldSecretLost }
+    /// Whether a loss was announced at all. Who it is announced to is the read above.
+    private var heldSecretLost = false
     /// A call is on the wire. The controls go quiet rather than disappearing.
     public private(set) var isBusy = false
     /// What went wrong with the last list, create or revoke, when it was not the grant ending.
@@ -303,12 +310,12 @@ public final class ManageTokensStore {
                 // that, the notice has nobody to reach: the screen it would appear on belongs to
                 // whoever signs in next, and telling them about a token on an account they are not
                 // holding is not a recovery, it is a leak of the last person's account activity.
-                if appIdentityHolds { mintedSecretLost = true }
+                if appIdentityHolds { heldSecretLost = true }
                 endWork(work)
                 return false
             }
             heldMinted = created
-            mintedSecretLost = false
+            heldSecretLost = false
             notice = nil
         } catch {
             guard isCurrent(work) else {
@@ -392,7 +399,7 @@ public final class ManageTokensStore {
     /// The plaintext has been read and put away on purpose. Not a loss, so nothing says it was.
     public func dismissMinted() {
         heldMinted = nil
-        mintedSecretLost = false
+        heldSecretLost = false
     }
 
     // MARK: - the rules the calls above share
@@ -492,7 +499,7 @@ public final class ManageTokensStore {
             // path's is: a secret the screen stopped showing because that identity went was not
             // lost to anybody left to read this screen, and telling whoever signs in next that a
             // token was minted is a sentence about the last person's account.
-            if appIdentityHolds { mintedSecretLost = true }
+            if appIdentityHolds { heldSecretLost = true }
         }
     }
 

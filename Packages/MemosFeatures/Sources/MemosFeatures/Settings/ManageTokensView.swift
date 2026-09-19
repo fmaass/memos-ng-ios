@@ -53,7 +53,7 @@ struct ManageTokensView: View {
                 reread: { Task { await store.refresh() } },
                 create: { name in Task { await create(name) } },
                 revoke: { id in Task { await store.revoke(id) } },
-                copySecret: { ManageTokensClipboard.copy($0) },
+                copySecret: { ManageTokensClipboard.copy(current: { store.minted?.secret }) },
                 dismissSecret: { store.dismissMinted() }
             )
             .toolbar {

@@ -18,13 +18,20 @@ enum ManageTokensClipboard {
 
     /// Hands one secret to the pasteboard write it is given — the system's in the app, a test's in
     /// a test, which is the only place what is written can be read back at all.
+    ///
+    /// The secret is read HERE, at the press, rather than handed in by whoever drew the button. The
+    /// panel is still on screen with this action live at the instant the identity that minted the
+    /// token goes, and a string captured while the panel was being drawn would be written anyway —
+    /// drawing again does not reach a closure an activation already carries. A read that answers
+    /// nothing leaves the clipboard untouched.
     static func copy(
-        _ secret: String,
+        current: () -> String?,
         now: Date = .now,
         write: ([[String: Any]], [UIPasteboard.OptionsKey: Any]) -> Void = {
             UIPasteboard.general.setItems($0, options: $1)
         }
     ) {
+        guard let secret = current() else { return }
         write(
             [[UTType.utf8PlainText.identifier: secret]],
             [.expirationDate: now.addingTimeInterval(lifetime)]

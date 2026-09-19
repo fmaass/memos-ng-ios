@@ -20,7 +20,9 @@ struct ManageTokensClipboardTests {
     func copyCarriesAnExpiry() throws {
         var written: ([[String: Any]], [UIPasteboard.OptionsKey: Any])?
 
-        ManageTokensClipboard.copy("memos_pat_brand_new", now: now) { written = ($0, $1) }
+        ManageTokensClipboard.copy(current: { "memos_pat_brand_new" }, now: now) {
+            written = ($0, $1)
+        }
 
         let (items, options) = try #require(written)
         #expect(items.count == 1)
@@ -39,8 +41,20 @@ struct ManageTokensClipboardTests {
     func copyIsNotLocalOnly() {
         var options: [UIPasteboard.OptionsKey: Any]?
 
-        ManageTokensClipboard.copy("memos_pat_brand_new", now: now) { options = $1 }
+        ManageTokensClipboard.copy(current: { "memos_pat_brand_new" }, now: now) { options = $1 }
 
         #expect(!(options?.keys.contains(UIPasteboard.OptionsKey.localOnly) ?? true))
+    }
+
+    /// The panel is still on screen, with this action live, at the instant the identity that minted
+    /// the token goes — and what the press reads is what decides. A read that answers nothing must
+    /// leave the clipboard as it was rather than writing a string from before.
+    @Test("a secret that can no longer be read is not written at all")
+    func nothingIsWrittenWhenTheSecretCannotBeRead() {
+        var writes = 0
+
+        ManageTokensClipboard.copy(current: { nil }, now: now) { _, _ in writes += 1 }
+
+        #expect(writes == 0, "a token nobody may read any more was put on the clipboard")
     }
 }
