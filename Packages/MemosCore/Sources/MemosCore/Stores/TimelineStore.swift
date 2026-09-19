@@ -874,6 +874,25 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        let attempt = MemoEditAttempt(
+            uid: uid, content: content, createdAt: createdAt,
+            files: files.map(\.editIdentity)
+        )
+        // The place in line is taken here, before the key is minted and before a single byte goes
+        // up: a save that joins the one ahead of it must present neither a second key nor a second
+        // copy of the same photograph.
+        return await claimMutation(.edit(attempt), on: uid) { [self] in
+            await performEdit(attempt, attaching: files, using: handle, baseURL: baseURL)
+        }.value
+    }
+
+    /// The save itself, once every earlier mutation of this memo has finished.
+    private func performEdit(
+        _ attempt: MemoEditAttempt,
+        attaching files: [StagedSource],
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> ComposeOutcome {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -882,12 +901,7 @@ public final class TimelineStore {
         // No authority is taken here: this method issues no request that changes the LIST. The
         // uploads write nothing down, and the patch below is issued inside `patch`, which takes
         // its own at the moment it sends.
-        let key = editKey(
-            for: MemoEditAttempt(
-                uid: uid, content: content, createdAt: createdAt,
-                files: files.map(\.editIdentity)
-            )
-        )
+        let key = editKey(for: attempt)
         var uploadUIDs: [String]?
         if !files.isEmpty {
             do {
@@ -910,9 +924,10 @@ public final class TimelineStore {
             return .failed(.authorization)
         }
         let outcome = await patchOutcome(
-            uid: uid,
+            uid: attempt.uid,
             .init(
-                content: content, createdAt: createdAt, editKey: key, uploadUids: uploadUIDs
+                content: attempt.content, createdAt: attempt.createdAt, editKey: key,
+                uploadUids: uploadUIDs
             ),
             using: handle,
             baseURL: baseURL
@@ -1007,6 +1022,86 @@ public final class TimelineStore {
         lastEdit = saved && slot.inFlight == 0 ? nil : slot
     }
 
+    /// What tells one unfinished mutation of a memo from another.
+    ///
+    /// Equal identities are the same mutation submitted twice — a double tap on Save, a retried
+    /// save, two sheets open on one memo. An edit is identified by everything its request would
+    /// carry, exactly as `editKey(for:)` identifies it; every other mutation by the operation and
+    /// the state it asks for, which is all there is to tell two of them apart.
+    private enum MemoMutationIdentity: Equatable {
+        case edit(MemoEditAttempt)
+        case delete
+        case visibility(MemoVisibility)
+        case archived(Bool)
+        case pinned(Bool)
+        case task(index: Int)
+    }
+
+    /// One unfinished mutation: what it is, and the work everything behind it waits for.
+    private struct MemoMutation {
+        var claim: Int
+        var identity: MemoMutationIdentity
+        var task: Task<ComposeOutcome, Never>
+    }
+
+    /// The unfinished mutations of each memo, in arrival order: the one on the wire first, then
+    /// everything queued behind it.
+    ///
+    /// A screen is never the guard. The compose sheet, the detail view and the share extension all
+    /// reach the same memo through this store, and a request already on the wire cannot be recalled
+    /// by a view that has closed — so the order two saves of one memo reach the server is this
+    /// store's to decide, and nobody else's.
+    private var mutations: [String: [MemoMutation]] = [:]
+
+    private var mutationClaim = 0
+
+    /// Takes this memo's place in line and hands back the work to await.
+    ///
+    /// Synchronous to its last line, so two taps arriving in one turn of the main actor cannot both
+    /// find the queue as it was.
+    ///
+    /// The arrival is compared with the LAST unfinished mutation rather than with the one on the
+    /// wire: two identical saves submitted while a DIFFERENT one is held are still one save, and
+    /// must reach the server once. The tail and not "any unfinished one", because the same words
+    /// saved again after something else is no repeat — it is the person putting them back, and
+    /// joining it to the earlier one would leave what came between standing.
+    ///
+    /// Everything the gated work needs is read INSIDE it rather than here: a picture of the list
+    /// taken at the moment of the tap would be a generation out of date by the time its turn came,
+    /// and the mutation's own write would be dropped as stale (`issuedAuthority`).
+    private func claimMutation(
+        _ identity: MemoMutationIdentity,
+        on uid: String,
+        perform work: @escaping @MainActor @Sendable () async -> ComposeOutcome
+    ) -> Task<ComposeOutcome, Never> {
+        var queue = mutations[uid] ?? []
+        if let tail = queue.last, tail.identity == identity { return tail.task }
+        mutationClaim += 1
+        let claim = mutationClaim
+        let predecessor = queue.last?.task
+        let task = Task { [self] in
+            // Whatever stands ahead of it goes first; that one's answer is its own caller's.
+            _ = await predecessor?.value
+            let outcome = await work()
+            finishMutation(claim, on: uid)
+            return outcome
+        }
+        queue.append(MemoMutation(claim: claim, identity: identity, task: task))
+        mutations[uid] = queue
+        return task
+    }
+
+    /// This mutation is over, and the next one may go.
+    ///
+    /// Inside the task that owns it rather than in the caller that started it, for the reason
+    /// `deleteAttachment` clears its own slot there — and by claim rather than by position, so an
+    /// invocation can only ever take its own place out of the line.
+    private func finishMutation(_ claim: Int, on uid: String) {
+        guard var queue = mutations[uid] else { return }
+        queue.removeAll { $0.claim == claim }
+        mutations[uid] = queue.isEmpty ? nil : queue
+    }
+
     /// Changes who can see a memo.
     @discardableResult
     public func setVisibility(
@@ -1016,7 +1111,8 @@ public final class TimelineStore {
         baseURL: URL
     ) async -> Bool {
         await patch(
-            uid: uid, .init(visibility: visibility.generated), using: handle, baseURL: baseURL
+            uid: uid, .init(visibility: visibility.generated), as: .visibility(visibility),
+            using: handle, baseURL: baseURL
         )
     }
 
@@ -1039,7 +1135,10 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        await patch(uid: uid, .init(archived: archived), using: handle, baseURL: baseURL)
+        await patch(
+            uid: uid, .init(archived: archived), as: .archived(archived),
+            using: handle, baseURL: baseURL
+        )
     }
 
     /// Pins or unpins through the server's own routes rather than by patching the flag: pinning
@@ -1051,6 +1150,18 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
+        await claimMutation(.pinned(pinned), on: uid) { [self] in
+            await performPin(pinned, uid: uid, using: handle, baseURL: baseURL)
+        }.value.isSaved
+    }
+
+    /// The pin itself, once every earlier mutation of this memo has finished.
+    private func performPin(
+        _ pinned: Bool,
+        uid: String,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> ComposeOutcome {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1083,16 +1194,16 @@ public final class TimelineStore {
             // whose re-place branch bumps the generation, so a page in flight measured against
             // the old order drops on arrival instead of merging around the moved memo (review
             // round: `placed` called here directly bypassed exactly that fence).
-            guard sessionStillCurrent(handle) else { return false }
+            guard sessionStillCurrent(handle) else { return .failed(.authorization) }
             let updated = Memo(json, baseURL: baseURL)
             // Before the apply, which awaits: a line cleared afterwards would be cleared for
             // whatever session the answer came back into.
             lastError = nil
             await apply(updated, under: authority)
-            return true
+            return .saved
         } catch {
             await report(error, issuedUnder: handle)
-            return false
+            return .failed(ComposeFailure.classify(error, sent: true))
         }
     }
 
@@ -1100,6 +1211,17 @@ public final class TimelineStore {
     /// failed and left the row on screen is recoverable, one that vanished optimistically is not.
     @discardableResult
     public func delete(uid: String, using handle: SessionHandle) async -> Bool {
+        // Two calls for one memo JOIN, exactly as two calls for one attachment do: the caller's
+        // question — "is it gone?" — has one true answer, and a second DELETE for a memo the first
+        // has already removed comes back 404 and reads as a fact about a memo this app deleted
+        // itself.
+        await claimMutation(.delete, on: uid) { [self] in
+            await performDelete(uid: uid, using: handle)
+        }.value.isSaved
+    }
+
+    /// The delete itself, once every earlier mutation of this memo has finished.
+    private func performDelete(uid: String, using handle: SessionHandle) async -> ComposeOutcome {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
@@ -1114,14 +1236,14 @@ public final class TimelineStore {
             )
             switch response {
             case .noContent:
-                guard sessionStillCurrent(handle) else { return false }
+                guard sessionStillCurrent(handle) else { return .failed(.authorization) }
                 // The memo is gone from the server as well, so any page still in flight — read
                 // while the memo was still there, and cursor pages overlap — would put it back on
                 // screen. It belongs to the list that still had this row; this one does not.
                 timelineGeneration += 1
                 lastError = nil
                 await commit(memos.filter { $0.uid != uid }, under: authority)
-                return true
+                return .saved
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
             // is thrown exactly as it was: a memo that is already gone is a fact about the server,
             // not a licence to take the row off screen without one.
@@ -1134,7 +1256,7 @@ public final class TimelineStore {
             }
         } catch {
             await report(error, issuedUnder: handle)
-            return false
+            return .failed(ComposeFailure.classify(error, sent: true))
         }
     }
 
@@ -1739,10 +1861,6 @@ public final class TimelineStore {
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
-        let client = handle.client
-        // The authority any picture this operation takes is stamped with, read ONCE here —
-        // see `issuedAuthority()`.
-        let authority = issuedAuthority()
         // Refused, not joined, and the difference is the point: the second tap's INTENT depends on
         // what the first one turns out to have done. A join would send one request and report its
         // answer to both, which is a lie to whichever tap wanted the other state; a queue would send
@@ -1753,7 +1871,13 @@ public final class TimelineStore {
         // The claim is held until this invocation has finished LANDING — the apply and the picture
         // of the list it commits are both awaits, and a tap taken inside them would be a second
         // request on a memo whose first answer is still being written down.
-        guard optimistic[uid] == nil else { return false }
+        //
+        // The refusal reaches every OTHER unfinished mutation of this memo for the same reason it
+        // has always reached another tap: the tick is a whole content patch derived from the row as
+        // it stands, and a save queued ahead of it is about to rewrite exactly that. Waiting its
+        // turn would send words the person never typed; so the tap is not taken, and the box goes
+        // back where it was.
+        guard optimistic[uid] == nil, mutations[uid] == nil else { return false }
         guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
         let original = memos[position]
         let toggled = MemosCore.toggleTask(original.content, at: index)
@@ -1766,6 +1890,33 @@ public final class TimelineStore {
         let claim = optimisticClaim
         optimistic[uid] = claim
         memos[position].content = toggled
+        // Its place in line is taken all the same: the tick that went out first is the one a save
+        // submitted after it must be sent after.
+        return await claimMutation(.task(index: index), on: uid) { [self] in
+            await performToggle(
+                toggled, restoring: original, in: uid, claim: claim,
+                using: handle, baseURL: baseURL
+            )
+        }.value.isSaved
+    }
+
+    /// The patch a tick asks for, and the rollback when the server refuses it.
+    private func performToggle(
+        _ toggled: String,
+        restoring original: Memo,
+        in uid: String,
+        claim: Int,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> ComposeOutcome {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
+        // The authority any picture this operation takes is stamped with, read ONCE here —
+        // see `issuedAuthority()`.
+        let authority = issuedAuthority()
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(.init(content: toggled)))
@@ -1777,7 +1928,7 @@ public final class TimelineStore {
                 // never over another owner's (`release`).
                 guard sessionStillCurrent(handle) else {
                     release(uid, claim: claim)
-                    return false
+                    return .failed(.authorization)
                 }
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
@@ -1785,7 +1936,7 @@ public final class TimelineStore {
                 // LAST: the apply above is awaited, and a tap taken inside it would overlap this
                 // one. The settle releases the claim and then writes whatever it was holding back.
                 await settle(uid, claim: claim, under: authority)
-                return true
+                return .saved
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
             // is thrown exactly as it was, so the tick is rolled back and the claim released by
             // the catch below rather than left standing on a memo the server no longer has.
@@ -1823,7 +1974,7 @@ public final class TimelineStore {
             // one this invocation made.
             guard sessionStillCurrent(handle) else {
                 release(uid, claim: claim)
-                return false
+                return .failed(.authorization)
             }
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
                 var restored = memos
@@ -1833,17 +1984,20 @@ public final class TimelineStore {
             // After the rollback has landed, for the reason the success path settles last.
             await settle(uid, claim: claim, under: authority)
             await report(error, issuedUnder: handle)
-            return false
+            return .failed(ComposeFailure.classify(error, sent: true))
         }
     }
 
     private func patch(
         uid: String,
         _ body: Components.Schemas.MemoPatch,
+        as identity: MemoMutationIdentity,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        await patchOutcome(uid: uid, body, using: handle, baseURL: baseURL).isSaved
+        await claimMutation(identity, on: uid) { [self] in
+            await patchOutcome(uid: uid, body, using: handle, baseURL: baseURL)
+        }.value.isSaved
     }
 
     /// The same request, with the reason it failed kept rather than flattened to false.
