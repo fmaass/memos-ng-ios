@@ -247,4 +247,84 @@ struct UnreachableRecoveryTests {
             return
         }
     }
+
+    /// The same replacement with no gap in it at all: the session is put back under a fresh
+    /// incarnation in the very turn the success was reported in, before the check it asked for has
+    /// had one.
+    ///
+    /// A second sign-in over one already running is refused, and the refusal restores the session
+    /// it interrupted — the same client, the same credential, the same person — under a NEW
+    /// number. So every guard downstream of the report still passes on what it reads: only the
+    /// number says the session that earned the success is over. That number is the whole of the
+    /// fence here, and without it the outgoing session's page puts a question on the incoming
+    /// one's wire.
+    ///
+    /// Nothing between the report and the replacement leaves the main actor — the presenter
+    /// refuses without ever suspending — so the queued check cannot have run before the premise
+    /// is asserted below; the order is the language's, not the scheduler's. The only waiting is
+    /// after the crossing, and a wait too short to see a question could only hide one: the same
+    /// wait, with the fence taken out, sees it.
+    @Test("a success whose session is replaced before its check runs asks the successor nothing")
+    func aSuccessReplacedInTheSameTurnAsksNothing() async {
+        defer {
+            ladder.releaseAll()
+            notice.releaseAll()
+        }
+        let whoamis = Counter()
+        let session = makeSession(
+            handler: handler(whoami: {
+                whoamis.increment()
+                // Only the sign-in's own question is answered. Anything asked after it fails the
+                // way an unreachable server fails, so a question that should not have been asked
+                // at all is countable and settles nothing behind the count.
+                guard whoamis.count > 1 else { return Stub.json(Stub.user) }
+                throw URLError(.timedOut)
+            })
+        )
+        await session.signIn(serverAddress: recoveryAddress, token: recoveryToken)
+        let earned = session.activeHandle!.generation
+        session.noteTransportFailure(.offline, issuedUnder: earned)
+        guard case .unverified = session.verification else {
+            Issue.record("expected .unverified, got \(session.verification)")
+            return
+        }
+        let beforeTheSuccess = whoamis.count
+
+        // One turn of the main actor, and no suspension inside it: the report queues the check,
+        // and the refused attempt ends the incarnation it was queued for before it can run.
+        session.noteTransportSuccess(issuedUnder: earned)
+        await session.signInNatively(
+            serverAddress: recoveryAddress,
+            deviceName: "iPhone",
+            presenter: StubPresenter(behaviour: .failure(.alreadySigningIn))
+        )
+
+        // The premise, read before anything queued has had its turn: the crossing happened, and
+        // everything the check would go on to read came through it alive.
+        guard let live = session.activeHandle else {
+            Issue.record("the restored session holds no client, so nothing could be asked of it")
+            return
+        }
+        guard live.generation != earned else {
+            Issue.record("no replacement to cross: still generation \(earned)")
+            return
+        }
+        guard whoamis.count == beforeTheSuccess else {
+            Issue.record("the check ran before the replacement: \(whoamis.count) asks")
+            return
+        }
+        #expect(session.state.user != nil, "and the restored session still has a person in it")
+
+        await settle(until: { whoamis.count > beforeTheSuccess })
+
+        #expect(
+            whoamis.count == beforeTheSuccess,
+            "the replaced session's check asked on the incarnation that stood in its place"
+        )
+        #expect(session.activeHandle?.generation == live.generation, "and left it where it was")
+        guard case .unverified = session.verification else {
+            Issue.record("expected .unverified, got \(session.verification)")
+            return
+        }
+    }
 }
