@@ -2,14 +2,63 @@ import MapKit
 import MemosCore
 import UIKit
 
+/// The geometry a pin and a cluster are drawn with, and what the opening view owes it.
+///
+/// Written once because the margin follows the drawing: the square stands wholly ABOVE the
+/// coordinate it marks and its badge overhangs the top, so a coordinate on the pane's edge is a
+/// pin half off the screen — and a photograph of another size would be cut differently.
+nonisolated enum PlacePinGeometry {
+    /// The side of the square photograph a pin wears.
+    static let side: CGFloat = 52
+    /// How far the count badge reaches above the square's top edge.
+    static let badgeOverhang: CGFloat = 6
+    /// The air left around the outermost pins, so the map does not open with a pin touching its
+    /// frame.
+    static let breathingSpace: CGFloat = side / 2
+    /// How much of an axis the fit leaves to the map itself whatever the pins cost, so a pane too
+    /// small for the margin shows a smaller margin rather than nothing.
+    static let minimumFreeExtent: CGFloat = 40
+
+    /// What the opening fit keeps free on each side of a pane of this size, in points.
+    static func openingInsets(in pane: CGSize) -> UIEdgeInsets {
+        // Above the coordinate: the whole square and the badge, then the air. Below it: air alone.
+        let (top, bottom) = shrunk(
+            side + badgeOverhang + breathingSpace,
+            breathingSpace,
+            toFit: pane.height
+        )
+        // Centred on the coordinate: half a square on each side, then the air.
+        let (left, right) = shrunk(
+            side / 2 + breathingSpace,
+            side / 2 + breathingSpace,
+            toFit: pane.width
+        )
+        return UIEdgeInsets(top: top, left: left, bottom: bottom, right: right)
+    }
+
+    /// Two insets brought within what one axis can spend, in proportion so neither side loses the
+    /// margin the other keeps. A pane under `minimumFreeExtent` can spend nothing: insets that met
+    /// in the middle would leave the fit inverted, with no rect left to show.
+    private static func shrunk(
+        _ near: CGFloat,
+        _ far: CGFloat,
+        toFit extent: CGFloat
+    ) -> (CGFloat, CGFloat) {
+        let budget = max(0, extent - minimumFreeExtent)
+        let asked = near + far
+        guard asked > budget else { return (near, far) }
+        let scale = budget / asked
+        return (near * scale, far * scale)
+    }
+}
+
 /// What a pin and a cluster have in common: one photograph, one count, and the rule for painting
 /// a picture that arrives after the view has been handed somebody else's.
 ///
 /// UIKit all the way down. A SwiftUI view hosted inside an annotation view brings a whole hosting
 /// controller per pin onto a surface that recycles its views by the dozen.
 class PlaceAnnotationView: MKAnnotationView {
-    /// The side of the square photograph a pin wears.
-    private static let side: CGFloat = 52
+    private static let side = PlacePinGeometry.side
 
     private let photo = UIImageView()
     private let badge = UILabel()
@@ -46,7 +95,12 @@ class PlaceAnnotationView: MKAnnotationView {
         photo.layer.borderColor = UIColor.systemBackground.cgColor
         addSubview(photo)
 
-        badge.frame = CGRect(x: Self.side - 26, y: -6, width: 26, height: 18)
+        badge.frame = CGRect(
+            x: Self.side - 26,
+            y: -PlacePinGeometry.badgeOverhang,
+            width: 26,
+            height: 18
+        )
         badge.textAlignment = .center
         badge.font = .systemFont(ofSize: 11, weight: .semibold)
         badge.textColor = .white
@@ -137,6 +191,11 @@ class PlaceAnnotationView: MKAnnotationView {
             // And the fence a recycled view needs on top of it: this view may already be standing
             // for a different pin, and the photograph it asked for is no longer the one to paint.
             guard requested == key else { return }
+            // The same photograph can be out twice — a view handed the same pin again cancels the
+            // first request and makes another — and then the key says nothing about which of them
+            // this is. Only the request still out may paint: the one it replaced can answer with
+            // nothing, and its nothing would take down the picture already on screen.
+            guard inFlight?.serial == request.serial else { return }
             photo.image = image
         }
     }
@@ -155,6 +214,10 @@ final class PlacePinView: PlaceAnnotationView {
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         clusteringIdentifier = Self.clusterGroup
+        // A view built around its annotation configures twice, here and through the property the
+        // superclass set. Both are kept: a view built empty is painted only by the property, and
+        // the repeat costs nothing — a request for the same photograph is already out and `show`
+        // returns on it.
         configure()
     }
 
@@ -166,6 +229,12 @@ final class PlacePinView: PlaceAnnotationView {
     override func configure() {
         clusteringIdentifier = Self.clusterGroup
         guard let place = annotation as? PlaceAnnotation else { return }
+        // Where the view learns what it stands for is the one place it can say it: MapKit's own
+        // label is "Map pin", which is true of every pin on the screen.
+        accessibilityLabel = PlacesPresentation.spokenLabel(
+            photographs: place.pin.spec.count,
+            newest: place.pin.leadTakenAt
+        )
         show(
             photoFor: place.pin.spec.uid,
             at: place.pin.leadThumbnailURL,
@@ -183,6 +252,7 @@ final class PlaceClusterView: PlaceAnnotationView {
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         // Deliberately no clustering identifier: a cluster of clusters is not a thing.
+        // Configured here as well as through the property, for the reason `PlacePinView` gives.
         configure()
     }
 
@@ -195,6 +265,12 @@ final class PlaceClusterView: PlaceAnnotationView {
         guard let cluster = annotation as? MKClusterAnnotation else { return }
         let members = cluster.memberAnnotations.compactMap { ($0 as? PlaceAnnotation)?.pin }
         guard let lead = PlacesPresentation.clusterLead(of: members) else { return }
+        // The photographs behind the cluster, which is what its badge counts too — MapKit's own
+        // label is the "+n more" it would have drawn, about pins rather than pictures.
+        accessibilityLabel = PlacesPresentation.spokenLabel(
+            photographs: PlacesPresentation.clusterPhotographs(in: members),
+            newest: lead.leadTakenAt
+        )
         show(
             photoFor: lead.spec.uid,
             at: lead.leadThumbnailURL,
