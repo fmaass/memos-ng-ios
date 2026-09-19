@@ -236,6 +236,11 @@ public final class TimelineStore {
         // incoming identity's first read off.
         fences.removeAll()
         owedReads.removeAll()
+        // The reads already out to pay a debt are forgotten rather than cancelled, like every other
+        // task that outlives the identity that started it: each carries the handle its debt was
+        // recorded under, so it is refused where it lands and nothing it brings back reaches a list
+        // that belongs to somebody else. What is dropped here is only this store's wait on them.
+        owedPayments.removeAll()
         snapshotDirty = false
         nextCursor = nil
         newerCursor = nil
@@ -488,7 +493,12 @@ public final class TimelineStore {
             admittedQuery = lineage.query
             // Last, and awaited: everything this list says about itself is already true when the
             // picture of it is taken.
-            await commit(effective(admitted(page.memos), issuedAt: issued), under: authority)
+            await commit(
+                effective(
+                    admitted(page.memos), issuedAt: issued, using: handle, baseURL: baseURL
+                ),
+                under: authority
+            )
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
             // any more would put an error over a list that loaded perfectly well — and, for a
@@ -578,7 +588,11 @@ public final class TimelineStore {
                 // has no row to keep and is dropped: a memo changed while this page was in the air
                 // is not appended at the version the page describes. The next read brings it.
                 let fresh = page.memos.filter { !known.contains($0.uid) }
-                let merged = memos + effective(admitted(fresh), issuedAt: issuedAt)
+                let merged =
+                    memos
+                    + effective(
+                        admitted(fresh), issuedAt: issuedAt, using: handle, baseURL: baseURL
+                    )
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
@@ -696,7 +710,9 @@ public final class TimelineStore {
                 // no row to keep and is left off the block rather than prepended at a stale state.
                 let fresh = effective(
                     admitted(page.memos.filter { !known.contains($0.uid) }),
-                    issuedAt: issued
+                    issuedAt: issued,
+                    using: handle,
+                    baseURL: baseURL
                 )
                 lastError = nil
                 if !fresh.isEmpty {
@@ -1130,12 +1146,65 @@ public final class TimelineStore {
 
     private var fences: [String: MemoFence] = [:]
 
+    /// What a fenced read left behind, which is everything the read that pays for it needs.
+    ///
+    /// The handle and the base URL are the FENCED read's own, captured where the refusal happened
+    /// and never re-sampled from the session: the payment stands in for that read, so it belongs to
+    /// the same incarnation and is refused wherever that read would have been refused.
+    private struct OwedRead {
+        let handle: SessionHandle
+        let baseURL: URL
+    }
+
     /// The memos whose loaded row was kept against a read that had been issued before it.
     ///
     /// That read was the one thing on its way to bring the server's own version of the row, and it
     /// was refused; the debt is recorded where the refusal happens, and only where a row actually
-    /// stands — a memo with no row cannot be repaired by a read that may not insert one.
-    private var owedReads: Set<String> = []
+    /// stands — a memo with no row cannot be repaired by a read that may not insert one. A second
+    /// fenced read of the same memo overwrites the entry, and writes the same incarnation it found
+    /// there: an identity change empties the table.
+    private var owedReads: [String: OwedRead] = [:]
+
+    /// The reads in flight to pay a debt, each one clearing its own entry, in the idiom
+    /// `refreshMemo` uses for its join slot and for the same reason.
+    private var owedPayments: [Int: Task<Void, Never>] = [:]
+
+    private var owedPaymentTicket = 0
+
+    /// Waits for every read this store issued to pay a debt.
+    ///
+    /// Two samples of a request count cannot show that no further payment is still to come, so the
+    /// store offers the instant at which there is none, in the idiom of `MemoSearch.settled()`. A
+    /// payment that leaves a debt of its own is waited for too. No mutation awaits this: a save is
+    /// finished when the save is finished, and must not wait on a read it did not need.
+    func owedReadsSettled() async {
+        while let payment = owedPayments.values.first {
+            await payment.value
+        }
+    }
+
+    /// Pays this memo's owed read, once per debt, as soon as no mutation owns the row.
+    ///
+    /// The debt leaves the table BEFORE the paying task exists, so a second arrival in the same
+    /// stretch finds nothing to pay: the claim is taken synchronously, ahead of every hop. A paying
+    /// read that is itself fenced records a fresh debt through the ordinary path and is paid when
+    /// THAT claim leaves.
+    private func payOwedRead(for uid: String) {
+        guard fences[uid]?.claims.isEmpty ?? true, let owed = owedReads.removeValue(forKey: uid)
+        else { return }
+        owedPaymentTicket += 1
+        let ticket = owedPaymentTicket
+        owedPayments[ticket] = Task { [self] in
+            // A read already running for this memo left before the debt fell due and would be
+            // fenced all over again, so it is waited out rather than joined — and waiting it out is
+            // what leaves the join slot to the paying read. Two reads of one memo overlapping undo
+            // each other's replay (see `refreshMemo`); paying a debt must not be what does that.
+            let slot = ReconcileSlot(uid: uid, generation: owed.handle.generation)
+            if let running = reconcileJoins[slot] { _ = await running.value }
+            await refreshMemo(uid: uid, using: owed.handle, baseURL: owed.baseURL)
+            owedPayments[ticket] = nil
+        }
+    }
 
     private func nextMutationSequence() -> Int {
         mutationSequence += 1
@@ -1190,6 +1259,9 @@ public final class TimelineStore {
         stamp(&fence)
         fence.claims[claim] = nil
         fences[uid] = fence.claims.isEmpty && fence.applied == 0 ? nil : fence
+        // The one door every exit leaves through, so this is the one place that sees the moment a
+        // memo may have no mutation on it any more — which is the moment a read owed on it is due.
+        payOwedRead(for: uid)
     }
 
     /// Takes this memo's place in line and hands back the work to await.
@@ -1414,6 +1486,10 @@ public final class TimelineStore {
                     mutationOutcomeUnknown(claim, on: uid)
                     return .failed(.authorization)
                 }
+                // A memo that is gone owes nothing: there is no row for a read to repair, and this
+                // store keeps no note of the uid to recognise its answer by. Dropped BEFORE the
+                // stamp below, which is what would otherwise find the debt due and pay it.
+                owedReads[uid] = nil
                 // Stamped before the commit below and before anything suspends, for the reason
                 // `apply` stamps at its top: the memo is gone whether or not a row stood for it.
                 mutationApplied(claim, on: uid)
@@ -1582,11 +1658,18 @@ public final class TimelineStore {
     ///
     /// Records the owed read wherever a loaded row is kept: the one read on its way to bring the
     /// server's own version of that row was refused here, and the debt is what remembers it.
-    private func effective(_ page: [Memo], issuedAt issued: Int) -> [Memo] {
+    private func effective(
+        _ page: [Memo],
+        issuedAt issued: Int,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) -> [Memo] {
         page.compactMap { memo in
             guard fenced(memo.uid, issuedAt: issued) else { return memo }
             guard let loaded = memos.first(where: { $0.uid == memo.uid }) else { return nil }
-            owedReads.insert(memo.uid)
+            owedReads[memo.uid] = OwedRead(handle: handle, baseURL: baseURL)
+            // A row held by a mutation that has already applied has nothing left to wait for.
+            payOwedRead(for: memo.uid)
             return loaded
         }
     }
@@ -1603,10 +1686,16 @@ public final class TimelineStore {
     /// discards a memo the list does not hold anyway.
     ///
     /// Records the owed read for the same reason the page overload does.
-    private func effective(_ merged: Memo, reconciledAt issued: Int) -> Memo? {
+    private func effective(
+        _ merged: Memo,
+        reconciledAt issued: Int,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) -> Memo? {
         guard fenced(merged.uid, issuedAt: issued) else { return merged }
         guard let loaded = memos.first(where: { $0.uid == merged.uid }) else { return nil }
-        owedReads.insert(merged.uid)
+        owedReads[merged.uid] = OwedRead(handle: handle, baseURL: baseURL)
+        payOwedRead(for: merged.uid)
         var held = loaded
         held.attachments = loaded.attachments.map { attachment in
             merged.attachments.first { $0.uid == attachment.uid } ?? attachment
@@ -1718,7 +1807,9 @@ public final class TimelineStore {
                             issuedWith: appliedWhenIssued,
                             replaying: reconcileReads[readID] ?? [:]
                         ),
-                        reconciledAt: issued
+                        reconciledAt: issued,
+                        using: handle,
+                        baseURL: baseURL
                     )
                 else { return true }
                 await apply(row, under: authority)
@@ -1851,7 +1942,8 @@ public final class TimelineStore {
                 // per-attachment rule here — this lane merges nothing, it hands a memo over.
                 let loaded = memos.first { $0.uid == memo.uid }
                 if fenced(memo.uid, issuedAt: issued), let loaded {
-                    owedReads.insert(memo.uid)
+                    owedReads[memo.uid] = OwedRead(handle: handle, baseURL: baseURL)
+                    payOwedRead(for: memo.uid)
                     return .memo(loaded)
                 }
                 await apply(memo, under: authority)
