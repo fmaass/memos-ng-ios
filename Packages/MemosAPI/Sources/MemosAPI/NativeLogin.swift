@@ -38,7 +38,8 @@ public enum NativeLogin {
     public enum Purpose: String, Sendable, Equatable, CaseIterable {
         /// Trade the handoff code for a device token. The default, and named nowhere on the wire.
         case login
-        /// Trade it for a short-lived management grant instead (MEMNG-138 option 2).
+        /// Trade it for a short-lived management grant instead: a step-up credential that buys the
+        /// token list for one screen and expires on its own, rather than a second device token.
         case manage
     }
 

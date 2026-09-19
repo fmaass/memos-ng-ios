@@ -101,6 +101,11 @@ pattern='\.unauthorized|(^|[^0-9A-Za-z_])401([^0-9A-Za-z_]|$)|0x191|0o621'
 # token — §2.5(e)'s `return .revokeFailed(.unauthorized)`, which is a return VALUE and not a
 # classification (the raced sign-out has to name the failure it reports); ComposeOutcome is on it
 # because its `case .unauthorized:` arm IS a classification and its home is the compose lane.
+# The last two are the step-up management lane, whose credential is a short-lived grant and never the
+# device's token: a refusal there ends that screen's session by lapsing the grant and reaches nothing
+# SessionStore owns, so it is outside the typed device-credential value by design rather than by
+# omission. Their controls are the lapse itself and the grant's own liveness, so a file that stopped
+# ending the management session on a refusal stops being allow-listed for one.
 allow_list=(
   "Packages/MemosAPI/Sources/MemosAPI/APIError.swift"
   "Packages/MemosAPI/Sources/MemosAPI/CredentialRefusal.swift"
@@ -112,6 +117,8 @@ allow_list=(
   "Packages/MemosCore/Sources/MemosCore/Live/MediaEventClient.swift"
   "Packages/MemosOutbox/Sources/MemosOutbox/OutboxRefusal.swift"
   "Packages/MemosOutbox/Sources/MemosOutbox/MemoCompletion.swift"
+  "Packages/MemosAPI/Sources/MemosAPI/ManagementGrant.swift"
+  "Packages/MemosCore/Sources/MemosCore/Stores/ManageTokensStore.swift"
 )
 
 # -a so a file git thinks is binary still answers with file:line: a hit is a failure whatever the
@@ -172,6 +179,8 @@ control_for() {
     *"/MediaEventClient.swift") printf '%s' 'CredentialRefusal(' ;;
     *"/OutboxRefusal.swift") printf '%s' 'public struct OutboxRefusal' ;;
     *"/MemoCompletion.swift") printf '%s' 'OutboxRefusal(' ;;
+    *"/ManagementGrant.swift") printf '%s' 'public func isLive(' ;;
+    *"/ManageTokensStore.swift") printf '%s' 'private func lapse()' ;;
     *) printf '%s' '' ;;
   esac
 }
