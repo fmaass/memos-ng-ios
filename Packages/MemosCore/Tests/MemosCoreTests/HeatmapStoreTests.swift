@@ -145,4 +145,96 @@ struct HeatmapStoreTests {
         #expect(store.lastError == nil)
         #expect(!store.isLoading)
     }
+
+    /// The banner owns what an unreachable server says, and what the server's own answer left
+    /// behind is not about a request that never reached it. The sheet reads this only as a flag:
+    /// left standing, a section that never loaded is drawn as though the server had answered
+    /// with nothing, rather than as the placeholders a read that never arrived has always shown.
+    @Test("a load that never reached the server takes the last answer's sentence down")
+    func transportFailureClearsTheAnsweredSentence() async {
+        let calls = Counter()
+        let client = Stub.client { _, _, _ in
+            calls.increment()
+            guard calls.count > 1 else { return Stub.empty(.internalServerError) }
+            throw URLError(.notConnectedToInternet)
+        }
+        let store = HeatmapStore()
+        let session = ReportingSink(for: client.handle)
+        store.reports(to: session)
+
+        await store.load(using: client.handle)
+        #expect(store.lastError != nil, "the premise: the server's own answer wrote a sentence")
+
+        await store.load(using: client.handle)
+
+        #expect(store.lastError == nil, "a server that never answered kept the 500's words")
+        #expect(session.transportFailures == [.offline], "the session was never told")
+        #expect(!store.isLoading, "the transport arm stopped falling through to the spinner")
+    }
+
+    /// The witness against the cheaper rule that passes the case above. Clearing the flag when a
+    /// load BEGINS drops an answer the server really gave before anything has replaced it: while
+    /// the request is still out, a section that never loaded stops carrying its failure on the
+    /// strength of a read that has not come back.
+    @Test("the answered sentence stands until the request that never arrived has failed")
+    func theAnsweredSentenceStandsWhileTheNextLoadIsOut() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let calls = Counter()
+        let client = Stub.client { _, _, _ in
+            calls.increment()
+            guard calls.count > 1 else { return Stub.empty(.internalServerError) }
+            entered.set(true)
+            try await Self.hold(until: release)
+            throw URLError(.notConnectedToInternet)
+        }
+        let store = HeatmapStore()
+        let session = ReportingSink(for: client.handle)
+        store.reports(to: session)
+
+        await store.load(using: client.handle)
+        #expect(store.lastError != nil, "the premise: the server's own answer wrote a sentence")
+
+        let inFlight = Task { await store.load(using: client.handle) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        #expect(
+            store.lastError != nil,
+            "the answer's sentence went when a request left rather than when one failed"
+        )
+
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a server that never answered kept the 500's words")
+        #expect(
+            session.transportFailures == [.offline],
+            "control: the held request really did fail at the transport"
+        )
+    }
+}
+
+/// The session as the reporting stores see it, held still so a test can read back what it was told.
+///
+/// The protocol rather than a whole `SessionStore` (`SessionReporting`): what is asserted here is
+/// that the failure reached the sink at all, and a session brings a sign-in, a credential and a
+/// verification state that say nothing about that.
+private final class ReportingSink: SessionReporting {
+    let activeHandle: SessionHandle?
+    nonisolated let sessionIncarnation = SessionEpoch()
+    private(set) var transportFailures: [ServerReachability.Reason] = []
+
+    init(for handle: SessionHandle) { activeHandle = handle }
+
+    func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool { true }
+
+    func noteTransportFailure(
+        _ failure: ServerReachability.Reason,
+        issuedUnder generation: Int
+    ) {
+        transportFailures.append(failure)
+    }
+
+    func noteTransportSuccess(issuedUnder generation: Int) {}
 }
