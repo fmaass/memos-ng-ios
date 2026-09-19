@@ -76,8 +76,6 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
     /// The markers a tapped pin is resolved against: a pin is a list of uids, and what those uids
     /// stand for is whatever the last read left in hand.
     var markers: [PlaceMarker] = []
-    /// What the map is showing, reported once it has stopped moving.
-    var onRegionChange: ((PlaceBBox) -> Void)?
     /// What a tap opened.
     var onTap: ((PlaceTapAction) -> Void)?
     /// The map itself, for the one action that moves it. Weak: the map owns its delegate.
@@ -112,14 +110,6 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         let targets = members.compactMap { annotations[$0.spec.key] }
         guard !targets.isEmpty else { return }
         mapView.showAnnotations(targets, animated: true)
-    }
-
-    /// What the map settled on, once it has stopped moving.
-    ///
-    /// On `regionDidChange` and not while the gesture runs: the grid under the map is rebuilt from
-    /// this, and rebuilding it per frame of a pan would be a list reshuffling under the finger.
-    func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-        onRegionChange?(PlacesPresentation.box(of: mapView.region))
     }
 
     /// Where a tap goes: one pin to its own rule, a cluster to the rule about members.
@@ -256,8 +246,6 @@ struct PlacesMapView: UIViewRepresentable {
     /// What a tapped pin's uids are resolved against. Defaulted so a preview can show a map with
     /// nothing to open.
     var markers: [PlaceMarker] = []
-    /// What the map settled on, for the grid underneath it.
-    var onRegionChange: ((PlaceBBox) -> Void)?
     /// What a tap opened, for the screen to present.
     var onTap: ((PlaceTapAction) -> Void)?
     /// The coordinator, when the screen needs to keep hold of it — Zoom-in is an action on the map
@@ -295,7 +283,6 @@ struct PlacesMapView: UIViewRepresentable {
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
         context.coordinator.markers = markers
-        context.coordinator.onRegionChange = onRegionChange
         context.coordinator.onTap = onTap
         guard let sink = context.coordinator.sink else { return }
         context.coordinator.show(pins, through: sink)

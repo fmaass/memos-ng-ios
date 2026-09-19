@@ -57,7 +57,6 @@ private func osloMarker() -> PlaceMarker {
 /// What the coordinator handed out, in order.
 @MainActor
 private final class RoutedCalls {
-    var boxes: [PlaceBBox] = []
     var actions: [PlaceTapAction] = []
 }
 
@@ -98,56 +97,6 @@ private func settle(_ window: UIWindow, until done: () -> Bool = { false }) {
         window.layoutIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         if done() { return }
-    }
-}
-
-/// What a map that has settled reports, and where a tap on it goes.
-///
-/// These cases go through a live `MKMapView`: the region report is the map's own delegate call
-/// after a move, and a cluster is an object only MapKit makes — a test that built an
-/// `MKClusterAnnotation` itself would be asserting about its own object rather than about the one
-/// the screen is handed.
-@MainActor
-@Suite("What the map reports and where a tap on it goes")
-struct PlacesRoutingTests {
-    private let zurich = zurichMarker()
-    private let oslo = osloMarker()
-
-    @Test("a settled map reports what it shows, and a later move replaces that report")
-    func aMoveReplacesTheReport() throws {
-        let (window, mapView) = hostedMap()
-        let coordinator = PlacesMapCoordinator()
-        let calls = RoutedCalls()
-        coordinator.onRegionChange = { calls.boxes.append($0) }
-        mapView.delegate = coordinator
-        let markers = [zurich, oslo]
-
-        mapView.setRegion(
-            MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: 47.37, longitude: 8.54),
-                span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
-            ),
-            animated: false
-        )
-        settle(window) { !calls.boxes.isEmpty }
-        let first = try #require(calls.boxes.last, "a settled map reported nothing")
-        #expect(PlacesPresentation.grid(markers, in: first).map(\.uid) == ["zurich"])
-
-        let seen = calls.boxes.count
-        mapView.setRegion(
-            MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: 59.91, longitude: 10.75),
-                span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
-            ),
-            animated: false
-        )
-        settle(window) { calls.boxes.count > seen }
-        let second = try #require(calls.boxes.last)
-        #expect(
-            PlacesPresentation.grid(markers, in: second).map(\.uid) == ["oslo"],
-            "the grid still holds what the map was showing before it was moved"
-        )
-        window.isHidden = true
     }
 }
 

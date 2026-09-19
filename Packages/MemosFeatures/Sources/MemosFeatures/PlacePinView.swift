@@ -137,6 +137,11 @@ class PlaceAnnotationView: MKAnnotationView {
             // And the fence a recycled view needs on top of it: this view may already be standing
             // for a different pin, and the photograph it asked for is no longer the one to paint.
             guard requested == key else { return }
+            // The same photograph can be out twice — a view handed the same pin again cancels the
+            // first request and makes another — and then the key says nothing about which of them
+            // this is. Only the request still out may paint: the one it replaced can answer with
+            // nothing, and its nothing would take down the picture already on screen.
+            guard inFlight?.serial == request.serial else { return }
             photo.image = image
         }
     }
@@ -155,6 +160,10 @@ final class PlacePinView: PlaceAnnotationView {
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         clusteringIdentifier = Self.clusterGroup
+        // A view built around its annotation configures twice, here and through the property the
+        // superclass set. Both are kept: a view built empty is painted only by the property, and
+        // the repeat costs nothing — a request for the same photograph is already out and `show`
+        // returns on it.
         configure()
     }
 
@@ -166,6 +175,12 @@ final class PlacePinView: PlaceAnnotationView {
     override func configure() {
         clusteringIdentifier = Self.clusterGroup
         guard let place = annotation as? PlaceAnnotation else { return }
+        // Where the view learns what it stands for is the one place it can say it: MapKit's own
+        // label is "Map pin", which is true of every pin on the screen.
+        accessibilityLabel = PlacesPresentation.spokenLabel(
+            photographs: place.pin.spec.count,
+            newest: place.pin.leadTakenAt
+        )
         show(
             photoFor: place.pin.spec.uid,
             at: place.pin.leadThumbnailURL,
@@ -183,6 +198,7 @@ final class PlaceClusterView: PlaceAnnotationView {
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         // Deliberately no clustering identifier: a cluster of clusters is not a thing.
+        // Configured here as well as through the property, for the reason `PlacePinView` gives.
         configure()
     }
 
@@ -195,6 +211,12 @@ final class PlaceClusterView: PlaceAnnotationView {
         guard let cluster = annotation as? MKClusterAnnotation else { return }
         let members = cluster.memberAnnotations.compactMap { ($0 as? PlaceAnnotation)?.pin }
         guard let lead = PlacesPresentation.clusterLead(of: members) else { return }
+        // The photographs behind the cluster, which is what its badge counts too — MapKit's own
+        // label is the "+n more" it would have drawn, about pins rather than pictures.
+        accessibilityLabel = PlacesPresentation.spokenLabel(
+            photographs: PlacesPresentation.clusterPhotographs(in: members),
+            newest: lead.leadTakenAt
+        )
         show(
             photoFor: lead.spec.uid,
             at: lead.leadThumbnailURL,

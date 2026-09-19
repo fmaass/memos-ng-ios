@@ -239,10 +239,8 @@ final class PinViewSink: AnnotationSink {
 
     func add(_ annotations: [PlaceAnnotation]) {
         for annotation in annotations {
-            // Built empty and then given its annotation, because that asks for the photograph
-            // exactly once: a view built AROUND its annotation configures twice, once through the
-            // property and once in the initialiser, and a count of requests could not tell that
-            // apart from a retry.
+            // Built empty and then given its annotation, the way the production sink meets the
+            // view MapKit hands it: the view exists first and learns what it stands for after.
             let view = PlacePinView(annotation: nil, reuseIdentifier: "place")
             view.annotation = annotation
             views[annotation.pin.spec.key] = view
@@ -657,8 +655,9 @@ extension MediaImageLoaderTests {
             )
 
             // And the next map pass, which is where forgetting it would cost something. What the
-            // pass decided is read synchronously; the request count is read once the view's task
-            // has finished, so a request it started has certainly reached the transport.
+            // pass decided is read synchronously; the count is read once the request still out has
+            // ended, so the third request a forgotten marker would have caused would have reached
+            // the transport by then — and the count says there is no third.
             coordinator.show([pin], through: sink)
             #expect(sink.refreshed.isEmpty, "the pass repainted a pin whose request was still out")
 
@@ -667,5 +666,119 @@ extension MediaImageLoaderTests {
             let askedInAll = await transport.calls
             #expect(askedInAll == 2, "a duplicate request went out for a photograph on the wire")
         }
+    }
+
+    /// The same two requests, ending in the same wrong order, and what the LAST fence must decide.
+    /// Both of them are for the same photograph, so the key the view asked for says nothing: when
+    /// the replaced request ends with nothing to show, `requested == key` still holds, and painting
+    /// its empty answer takes down the picture the request still out has already put up.
+    @Test("a photograph on screen survives the request it replaced ending with nothing")
+    func aPaintedPhotographSurvivesTheReplacedRequestEnding() async {
+        let transport = HeldTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let uid = "place-repainted"
+            let view = PlacePinView(
+                annotation: PlaceAnnotation(
+                    pin: placePin(
+                        key: "repainted",
+                        uid: uid,
+                        thumbnail: MediaFixture.signed(uid: uid)
+                    )
+                ),
+                reuseIdentifier: "place"
+            )
+            await transport.waitUntilStarted(1)
+            let replaced = view.loading
+
+            // Recycled and handed the same pin again: the first request is cancelled and a second
+            // goes out for the very same photograph.
+            let held = view.annotation
+            view.prepareForReuse()
+            view.annotation = held
+            await transport.waitUntilStarted(2)
+
+            // The request still out answers, and the pin wears its photograph.
+            await transport.release(2)
+            await view.loading?.value
+            let painted = view.shownImage
+            #expect(painted != nil, "the request still out never painted what it fetched")
+
+            // And only then the cancelled one ends, with nothing.
+            await transport.release(1, refusing: true)
+            await replaced?.value
+
+            #expect(
+                view.shownImage === painted,
+                "the replaced request's empty answer blanked the pin that was showing its photo"
+            )
+        }
+    }
+
+    /// A view built AROUND its annotation learns what it stands for twice: once in the initialiser
+    /// and once through the property that initialiser sets. Both calls are kept, because the second
+    /// ask never reaches the wire — a request for the same photograph is already out, and `show`
+    /// returns on it. This case is what says so, and it holds whether or not the fences change.
+    @Test("a view built around its annotation asks for its photograph once")
+    func aViewBuiltAroundItsAnnotationAsksOnce() async {
+        let transport = GatedTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let uid = "place-built"
+            let view = PlacePinView(
+                annotation: PlaceAnnotation(
+                    pin: placePin(key: "built", uid: uid, thumbnail: MediaFixture.signed(uid: uid))
+                ),
+                reuseIdentifier: "place"
+            )
+            await transport.waitUntilStarted()
+            await transport.release()
+            await view.loading?.value
+            let askedInAll = await transport.requests.count
+
+            #expect(
+                askedInAll == 1,
+                "a freshly built view put the same photograph on the wire twice"
+            )
+        }
+    }
+
+    /// What the two views say to VoiceOver, asserted where each one learns what it stands for. The
+    /// sentence itself is pinned in the presentation suite; what a VIEW has to get right is which
+    /// numbers go into it — a cluster speaks the photographs its badge counts, never how many pins
+    /// it swallowed, and the date it names is the one whose picture it wears.
+    @Test("a pin and a cluster each say how many photographs stand behind them")
+    func annotationViewsSpeakWhatTheyStandFor() {
+        let lone = placePin(key: "lone", takenAt: "2026-09-12T10:00:00Z")
+        let loneView = PlacePinView(
+            annotation: PlaceAnnotation(pin: lone), reuseIdentifier: "place"
+        )
+        #expect(
+            loneView.accessibilityLabel
+                == PlacesPresentation.spokenLabel(photographs: 1, newest: lone.leadTakenAt)
+        )
+
+        let group = placePin(key: "group", count: 3, takenAt: "2026-09-12T10:00:00Z")
+        let groupView = PlacePinView(
+            annotation: PlaceAnnotation(pin: group), reuseIdentifier: "place"
+        )
+        #expect(
+            groupView.accessibilityLabel
+                == PlacesPresentation.spokenLabel(photographs: 3, newest: group.leadTakenAt),
+            "a pin holding several photographs says something other than a cluster of that size"
+        )
+
+        // Two member pins, of three photographs and four, taken on different days.
+        let older = placePin(key: "older", count: 3, takenAt: "2026-09-10T10:00:00Z")
+        let newer = placePin(key: "newer", count: 4, takenAt: "2026-09-12T10:00:00Z")
+        let clusterView = PlaceClusterView(
+            annotation: MKClusterAnnotation(memberAnnotations: [
+                PlaceAnnotation(pin: older), PlaceAnnotation(pin: newer),
+            ]),
+            reuseIdentifier: "cluster"
+        )
+        #expect(
+            clusterView.accessibilityLabel
+                == PlacesPresentation.spokenLabel(photographs: 7, newest: newer.leadTakenAt),
+            "a cluster counted the pins it swallowed instead of the photographs behind them"
+        )
     }
 }

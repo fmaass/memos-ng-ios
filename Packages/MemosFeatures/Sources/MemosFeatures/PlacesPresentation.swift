@@ -102,7 +102,36 @@ nonisolated enum PlacesPresentation {
     /// member pins of three and four photos read seven — a reader counts pictures, and "2" would
     /// be an answer to a question nobody asked.
     static func clusterBadge(for members: [PlacePin]) -> String? {
-        PlaceClustering.badgeText(count: members.reduce(0) { $0 + $1.spec.count })
+        PlaceClustering.badgeText(count: clusterPhotographs(in: members))
+    }
+
+    /// What a pin or a cluster says to somebody who cannot see it: how many photographs stand
+    /// behind it and when the newest of them was taken. One sentence for both, because a lone pin
+    /// holding three photographs and a cluster of three are the same statement to a reader.
+    ///
+    /// The date is laid out by a format style rather than written out here, so it follows the
+    /// reader's own locale; the parameters exist so a test can say which locale it is asserting.
+    static func spokenLabel(
+        photographs count: Int,
+        newest date: Date,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String {
+        let day = date.formatted(
+            Date.FormatStyle(
+                date: .abbreviated,
+                time: .omitted,
+                locale: locale,
+                calendar: locale.calendar,
+                timeZone: timeZone
+            )
+        )
+        return count == 1 ? "Photo, \(day)" : "\(count) photos, newest \(day)"
+    }
+
+    /// The photographs behind a cluster, which is what its badge counts and what it says aloud.
+    static func clusterPhotographs(in members: [PlacePin]) -> Int {
+        members.reduce(0) { $0 + $1.spec.count }
     }
 
     /// Which member lends a cluster its photograph: the newest lead photo, and on a tie the
@@ -115,7 +144,7 @@ nonisolated enum PlacesPresentation {
         }
     }
 
-    // MARK: - what a tap opens, and what the grid holds
+    // MARK: - what a tap opens
 
     /// How close the map may be brought to what it shows, in metres, and therefore when zooming
     /// has nothing left to do.
@@ -196,33 +225,6 @@ nonisolated enum PlacesPresentation {
         MediaViewerPresentation.viewer(
             for: PlaceOrder.newestFirst(list).map(MemoAttachment.init),
             startingAt: uid
-        )
-    }
-
-    /// What the grid under the map holds: the markers the visible region contains, newest first.
-    static func grid(_ markers: [PlaceMarker], in box: PlaceBBox) -> [PlaceMarker] {
-        PlaceOrder.newestFirst(PlaceGeo.markers(markers, within: box))
-    }
-
-    /// What the grid holds while the map has not yet said what it shows.
-    ///
-    /// A map that has never settled has reported no region, and no region is not an empty one:
-    /// filtering by it would leave the grid blank under a map full of pins for as long as the
-    /// reader left the screen alone. Until the first report the grid is the whole read, in the
-    /// same order every later report leaves it in.
-    static func visibleGrid(_ markers: [PlaceMarker], in box: PlaceBBox?) -> [PlaceMarker] {
-        guard let box else { return PlaceOrder.newestFirst(markers) }
-        return grid(markers, in: box)
-    }
-
-    /// The visible region as a box the pure layer can read. The only place MapKit's geometry is
-    /// converted, which is what keeps `PlaceGeo` free of it.
-    static func box(of region: MKCoordinateRegion) -> PlaceBBox {
-        PlaceGeo.visibleBox(
-            centerLatitude: region.center.latitude,
-            centerLongitude: region.center.longitude,
-            latitudeDelta: region.span.latitudeDelta,
-            longitudeDelta: region.span.longitudeDelta
         )
     }
 

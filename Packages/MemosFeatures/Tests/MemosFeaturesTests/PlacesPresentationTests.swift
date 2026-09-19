@@ -121,6 +121,27 @@ struct PlacesPresentationTests {
         #expect(PlacesPresentation.pinBadge(for: group) == "3")
     }
 
+    /// The one sentence a pin and a cluster both speak, asserted against a pinned locale and time
+    /// zone: the date is laid out by the reader's locale, so a case that did not pin them would be
+    /// asserting the machine it ran on.
+    @Test("what a pin or a cluster says aloud: its photographs, and when the newest was taken")
+    func spokenLabelNamesPhotographsAndTheNewestDate() {
+        let taken = ISO8601DateFormatter().date(from: "2026-09-12T10:00:00Z")!
+        let locale = Locale(identifier: "en_GB")
+        let zone = TimeZone(identifier: "UTC")!
+
+        #expect(
+            PlacesPresentation.spokenLabel(
+                photographs: 1, newest: taken, locale: locale, timeZone: zone
+            ) == "Photo, 12 Sep 2026"
+        )
+        #expect(
+            PlacesPresentation.spokenLabel(
+                photographs: 14, newest: taken, locale: locale, timeZone: zone
+            ) == "14 photos, newest 12 Sep 2026"
+        )
+    }
+
     @Test("a cluster wears the newest lead photograph of its members")
     func clusterLeadIsTheNewest() {
         let lead = PlacesPresentation.clusterLead(of: [
