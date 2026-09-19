@@ -18,17 +18,18 @@
       * `.creationDateKey` — OutboxRepository reads it off an outbox manifest whose JSON could not
         be read (Packages/MemosOutbox/Sources/MemosOutbox/OutboxRepository.swift), so that the
         capture still takes a place in capture order instead of falling to the bottom. MemosOutbox
-        is linked into this bundle, so the read is this bundle's. The file is the outbox's own, in
-        the app group container, which C617.1 covers along with the app container — and this value
-        never leaves the device: it is the `capturedAt` of a job written `.held` with a binding
-        that names the file rather than a server, so no drain can take it for work and no request
-        carries it.
+        is linked into this bundle, so the read is this bundle's. The file is the outbox's own,
+        normally in the app group container and in this app's own Application Support directory
+        when the group is unreachable (Outbox.live); C617.1 covers both. The value never leaves
+        the device: it is the `capturedAt` of a stand-in job CONSTRUCTED in memory with state
+        `.held` and a binding that names the file rather than a server, so no drain can take it
+        for work and no request carries it.
 
     AVAsset's `.creationDate` (Packages/MemosOutbox/Sources/MemosOutbox/Capture/CaptureReader.swift)
     is deliberately NOT in that list. The category is about a file's timestamps as the file system
-    keeps them; that call loads an AVMetadataItem out of the movie's own QuickTime metadata — the
-    same header the lines above it read `.quickTimeMetadataCreationDate` from — which is the
-    content of the file, not an attribute of it.
+    keeps them; that call loads an AVMetadataItem carrying the movie header's own creation date —
+    a separate source from the keyed QuickTime creation-date metadata the lines above it prefer,
+    and like it a piece of the file's CONTENT rather than an attribute of it.
 
     NSPrivacyAccessedAPICategoryUserDefaults — four values have to survive a launch, and each one
     is written with the API that earns a reason here. Three live in THIS app's own defaults, which
@@ -40,11 +41,17 @@
     it (Packages/MemosOutbox/Sources/MemosOutbox/UploadPreferences.swift) — that is 1C8F.1, and the
     fallback it degrades to when the group is unreachable is this app's own defaults, CA92.1 again.
     Nothing reads a value another app or the system wrote, and nothing writes one another app
-    could read. Three of the four never leave the device; the fetch generation does, stamped onto
-    this app's own media requests as `X-Memos-Fetch-Generation`
+    could read. Two of the four never leave the device: the appearance choice and the outbox's
+    mobile-data choice. The other two reach the one server this app talks to, and nowhere else,
+    each as a parameter of this app's own request. The fetch generation is stamped onto its media
+    requests as `X-Memos-Fetch-Generation`
     (Packages/MemosFeatures/Sources/MemosFeatures/Design/MediaImageLoader.swift) so that bytes
     still in flight across a sign-out cannot be filed under the next identity — a cache-scoping
-    counter, sent to the one server this app talks to and to nowhere else.
+    counter. The library's sort direction is carried into the store that lists the library
+    (Packages/MemosFeatures/Sources/MemosFeatures/MediaLibraryView.swift) and sent as that list
+    request's `order`, ascending or descending
+    (Packages/MemosCore/Sources/MemosCore/Stores/MediaLibraryStore.swift) — which way to sort a
+    page the server was going to return anyway.
 
   Audited and deliberately NOT declared:
     - Disk space: nothing reads a volume-capacity resource key. OutboxRepository reads

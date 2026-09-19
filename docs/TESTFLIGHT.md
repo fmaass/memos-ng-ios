@@ -39,11 +39,13 @@ The privacy manifests are `Support/MemosNG/PrivacyInfo.xcprivacy` and
 `Support/MemosShare/PrivacyInfo.xcprivacy`. They declare the same two required-reason API
 categories, for different code in each bundle:
 
-- `NSPrivacyAccessedAPICategoryFileTimestamp`, reason `C617.1` — a timestamp read off a file in
-  the bundle's own container. The app reads the modification date of a picked file it has just
-  copied into its temporary directory and the creation date of an outbox capture; the extension
-  reads the modification date of a shared file it has just staged and, through the same outbox
-  code, that creation date too.
+- `NSPrivacyAccessedAPICategoryFileTimestamp`, reason `C617.1` — a timestamp read off a file in a
+  container the reason covers: the bundle's own, or the app group's. The app reads the
+  modification date of a picked file it has just copied into its temporary directory; the
+  extension reads the modification date of a shared file it has just staged there. Both, through
+  the outbox code linked into each of them, also read the creation date of an outbox manifest,
+  which lives in the app group container — or, when the group is unreachable, in the reading
+  process's own Application Support directory.
 - `NSPrivacyAccessedAPICategoryUserDefaults`, reasons `CA92.1` and `1C8F.1` — `CA92.1` for the
   process's own defaults and `1C8F.1` for the app group's suite. The app keeps the appearance
   choice, the library's sort direction and the media fetch generation in its own defaults and the

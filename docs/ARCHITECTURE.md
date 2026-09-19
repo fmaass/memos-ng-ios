@@ -59,13 +59,18 @@ imports MapKit; `PlaceGeo` states its sides as plain doubles for exactly that re
 one question, refuses a second ask while the first is out, and judges the answer against the
 session handle that ISSUED the request.
 
-`Packages/MemosFeatures/Sources/MemosFeatures/` holds the drawing and the only MapKit in the tree:
-`PlacesView.swift` (the screen, keyed on the signed-in subject), `PlacesMapView.swift` (the
-`UIViewRepresentable` around `MKMapView`, its delegate, and the annotation objects the map keeps),
-`PlacePinView.swift` (the `MKAnnotationView` a pin and a cluster share, UIKit all the way down)
-and `PlacesPresentation.swift`, which is the seam between the two: it converts a region to a box
-and back, picks which member lends a cluster its photograph, and answers what a tap opens — the
-one file that names both `MKCoordinateRegion` and the pure rules.
+`Packages/MemosFeatures/Sources/MemosFeatures/` holds the drawing: `PlacesView.swift` (the screen,
+keyed on the signed-in subject), `PlacesMapView.swift` (the `UIViewRepresentable` around
+`MKMapView`, its delegate, and the annotation objects the map keeps), `PlacePinView.swift` (the
+`MKAnnotationView` a pin and a cluster share, UIKit all the way down) and
+`PlacesPresentation.swift`, the seam between the two layers. The last three are also the only
+production sources in the tree that import MapKit; the screen itself needs none of it.
+`PlacesPresentation.swift` is where the seam's decisions are DEFINED and nowhere else — the
+region-to-box conversion, which member lends a cluster its photograph, what a tap opens and how
+close the camera may come — and the map view reaches for them by name rather than deciding
+anything itself. MapKit does not leave this package, but it does not stop at its sources either:
+the Places tests import it too, because holding the seam to a real `MKMapView` is the point of
+them.
 
 ## Concurrency
 
@@ -185,7 +190,7 @@ The Places **playback timeline** is not shipped, and the list above would not sa
 because the code for it is in the tree:
 `Packages/MemosCore/Sources/MemosCore/Places/PlaceTimeline.swift` holds the month histogram, the
 playhead reducer and the playhead's effect on the marker set, with
-`PlaceTimelineTests` asserting all of it. Nothing draws it — no file outside that pair names
+`PlaceTimelineTests` asserting all of it. Nothing draws it — no other Swift file names
 `PlaceTimeline`, `PlaceHistogram`, `PlaceBucket`, `PlaybackSpeed` or `TimelineMode` — so the
 shipped map is a map without a scrubber. Tested pure rules waiting for a screen, not a feature
 somebody removed the last call to.

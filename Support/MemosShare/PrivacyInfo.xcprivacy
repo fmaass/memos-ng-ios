@@ -17,16 +17,18 @@
       * `.creationDateKey` — OutboxRepository reads it off an outbox manifest whose JSON could not
         be read (Packages/MemosOutbox/Sources/MemosOutbox/OutboxRepository.swift), so that the
         capture keeps a place in capture order. MemosOutbox is linked into this bundle as well as
-        into the app, so the read is declared by both. The file is the outbox's own, in the app
-        group container this extension is a member of, which C617.1 covers along with the bundle's
-        own container — and the value never leaves the device: it is the `capturedAt` of a job
-        written `.held` with a binding that names the file rather than a server, so nothing drains
-        it.
+        into the app, so the read is declared by both. The file is the outbox's own, normally in
+        the app group container this extension is a member of and in the process's own Application
+        Support directory when the group is unreachable (Outbox.live); C617.1 covers both. The
+        value never leaves the device: it is the `capturedAt` of a stand-in job CONSTRUCTED in
+        memory with state `.held` and a binding that names the file rather than a server, so
+        nothing drains it.
 
     AVAsset's `.creationDate` (Packages/MemosOutbox/Sources/MemosOutbox/Capture/CaptureReader.swift)
     is deliberately NOT in that list, for the reason the app's manifest gives: it loads an
-    AVMetadataItem out of the movie's own QuickTime metadata, which is the content of the file
-    rather than a timestamp the file system keeps.
+    AVMetadataItem carrying the movie header's own creation date — a separate source from the
+    keyed QuickTime creation-date metadata that file prefers, and like it a piece of the file's
+    CONTENT rather than a timestamp the file system keeps.
 
     NSPrivacyAccessedAPICategoryUserDefaults — declared for what this bundle CARRIES rather than
     for what it calls. The extension asks for no preference of its own, but MemosOutbox is linked
