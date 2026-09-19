@@ -54,12 +54,14 @@ that classification and stops, without needing a build host.
 Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-gate.sh --quick
 [--bundle <name>|--only-testing <id>]` runs the selftests, the release-version check, the
 classification, the same lane lock and load gate, then rsyncs and — on the lane's private
-simulator, reusing its DerivedData — generates, compiles for testing and runs the named bundle or
-suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the pins and
-the entitlement, dependency-rule and share-link greps and the generated-surface rule; it prints
-its own
-`MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only the full
-gate writes `mac-gate SUMMARY`.
+simulator, reusing its DerivedData — lints, generates, compiles for testing and runs the named
+bundle or suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the
+pins and the entitlement, dependency-rule and share-link greps and the generated-surface rule. The
+lint is the same `swift format lint --strict --recursive .` the full gate runs, it comes first, and
+a lint error stops the run there: generate, build and tests are not invoked and the exit is the
+lint's own code. It prints its own
+`MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only
+the full gate writes `mac-gate SUMMARY`.
 
 Each branch has its own lane on the build host — `~/build/memos-ng-ios/gate/<branch>` for the
 mirror and `~/build/memos-ng-ios/work/<branch>` for its DerivedData — and runs of one branch are

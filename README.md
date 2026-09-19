@@ -52,10 +52,11 @@ classification without needing a build host, and the gate's own test suites unde
 run on every gate — the classifier's, the quick mode's, and the one that judges the warnings
 canary.
 
-While iterating, `bin/mac-gate.sh --quick [--bundle <name>|--only-testing <id>]` compiles for
-testing on the same lane and runs the named bundle or suite there, reusing its DerivedData and
-skipping the package rebuilds, the canary, the pins and the rule greps. It prints a line of its
-own — `MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` — and is never a verdict: only a full
+While iterating, `bin/mac-gate.sh --quick [--bundle <name>|--only-testing <id>]` lints, then
+compiles for testing on the same lane and runs the named bundle or suite there, reusing its
+DerivedData and skipping the package rebuilds, the canary, the pins and the rule greps. A lint
+error stops it before anything is generated or built. It prints a line of its own —
+`MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` — and is never a verdict: only a full
 run writes `mac-gate SUMMARY`.
 
 The gate directory on the build host is a mirror, never a checkout. Git is the only medium between
