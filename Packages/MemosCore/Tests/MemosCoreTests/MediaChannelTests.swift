@@ -61,7 +61,7 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         return Loaded(store: store, client: client, gets: gets)
     }
 
@@ -74,7 +74,7 @@ struct MediaChannelTests {
         await MediaChannel.consume(
             channel(items),
             into: fixture.store,
-            using: fixture.client,
+            using: fixture.client.handle,
             baseURL: Stub.baseURL,
             identity: identity
         )
@@ -103,6 +103,76 @@ struct MediaChannelTests {
     private nonisolated static var readyEvent: MediaEvent { SSEFixture.liveEvents[2] }
     /// The same attachment, mid-transcode.
     private nonisolated static var processingEvent: MediaEvent { SSEFixture.liveEvents[1] }
+
+    // MARK: - more than one list, and an account switch between them
+
+    /// The envelope is judged once per LIST, not once per event.
+    ///
+    /// Applying to the first list awaits — it waits for the picture of that list to reach the
+    /// disk — and an account switch inside that await makes this event somebody else's news. An
+    /// attachment uid means nothing across accounts, so a list that has not seen the event yet
+    /// must not see it at all.
+    @Test("an account switch while the first list applies stops the event before the second")
+    func anIdentityRotationBetweenListsStopsTheEvent() async {
+        let clock = MediaFetchGeneration(defaults: nil)
+        let identity = MediaIdentity(clock: clock)
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "media-channel-identity")
+            .appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                return Stub.json(Stub.page([Self.memo("pending")]))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let writes = Counter()
+        let writer = TimelineSnapshotWriter(
+            store: TimelineSnapshotStore(
+                root: root,
+                writeData: { data, url in
+                    writes.increment()
+                    // The load's own picture goes through untouched. The next one is the event's,
+                    // and the account switches while it is being written.
+                    if writes.count > 1 { clock.rotate() }
+                    try data.write(to: url, options: .atomic)
+                }
+            ),
+            epoch: SessionEpoch()
+        )
+        let first = TimelineStore(
+            snapshots: writer,
+            snapshotIdentity: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "fabian"),
+            persists: true
+        )
+        let second = TimelineStore()
+        await first.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await second.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(
+            second.memos.first?.attachments.first?.readiness == .waiting,
+            "control: the second list starts where the first one does"
+        )
+
+        await MediaChannel.consume(
+            channel([.event(envelope(Self.readyEvent))]),
+            into: first,
+            alongside: { [second] },
+            using: client.handle,
+            baseURL: Stub.baseURL,
+            identity: identity
+        )
+
+        #expect(
+            first.memos.first?.attachments.first?.readiness == .ready,
+            "control: the list the event reached first did apply it"
+        )
+        #expect(
+            second.memos.first?.attachments.first?.readiness == .waiting,
+            "an event applied to a list after the account it belonged to had changed"
+        )
+    }
 
     // MARK: - the whole point
 
@@ -376,14 +446,14 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.first?.attachments.first?.readiness == .waiting)
 
         // No `.open` in the stream: every read this test counts is the event's own.
         await MediaChannel.consume(
             channel([.event(envelope(Self.readyEvent))]),
             into: store,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL,
             identity: MediaIdentity(),
             now: { now }
@@ -416,12 +486,12 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         await MediaChannel.consume(
             channel([.event(envelope(Self.readyEvent))]),
             into: store,
-            using: client,
+            using: client.handle,
             baseURL: Stub.baseURL,
             identity: MediaIdentity(),
             now: { now }
@@ -583,7 +653,7 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let fixture = Loaded(store: store, client: client, gets: gets)
 
         await consume(
@@ -633,10 +703,10 @@ struct MediaChannelTests {
             }
         }
         let store = TimelineStore()
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(MediaChannel.uidsToReconcile(in: store.memos) == [Self.uid])
 
-        await MediaChannel.reconcile(store, using: client, baseURL: Stub.baseURL)
+        await MediaChannel.reconcile(store, using: client.handle, baseURL: Stub.baseURL)
 
         // ONE request: the settled memo is not re-read, and the waiting one is read exactly once —
         // this is a single pass, not the loop it replaced.
@@ -646,7 +716,7 @@ struct MediaChannelTests {
 
         // And starting the channel again now costs nothing at all: nothing is waiting.
         #expect(MediaChannel.uidsToReconcile(in: store.memos).isEmpty)
-        await MediaChannel.reconcile(store, using: client, baseURL: Stub.baseURL)
+        await MediaChannel.reconcile(store, using: client.handle, baseURL: Stub.baseURL)
         #expect(gets.count == 1, "a second start re-read a timeline with nothing waiting")
     }
 

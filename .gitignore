@@ -29,3 +29,7 @@ MemosShare.entitlements
 *.p8
 *.p12
 *.mobileprovision
+
+# Local working copies; the durable record is BookStack.
+docs/plans/
+docs/session-reviews/

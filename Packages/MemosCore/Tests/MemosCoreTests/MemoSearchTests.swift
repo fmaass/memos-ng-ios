@@ -22,7 +22,7 @@ struct MemoSearchTests {
         handler: @escaping StubTransport.Handler
     ) -> MemoSearch {
         MemoSearch(
-            client: Stub.client(handler: handler),
+            handle: Stub.client(handler: handler).handle,
             baseURL: Stub.baseURL,
             coalescing: coalescing
         )
@@ -105,10 +105,10 @@ struct MemoSearchTests {
         let paths = LockedValue<[String]>([])
         let gate = DebounceGate()
         let search = MemoSearch(
-            client: Stub.client { request, _, _ in
+            handle: Stub.client { request, _, _ in
                 paths.set(paths.get() + [request.path ?? ""])
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL,
             coalescing: .milliseconds(300),
             sleep: { await gate.sleep($0) }
@@ -143,10 +143,10 @@ struct MemoSearchTests {
         let zeroPaths = LockedValue<[String]>([])
         let zeroGate = DebounceGate()
         let zero = MemoSearch(
-            client: Stub.client { request, _, _ in
+            handle: Stub.client { request, _, _ in
                 zeroPaths.set(zeroPaths.get() + [request.path ?? ""])
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            },
+            }.handle,
             baseURL: Stub.baseURL,
             coalescing: .zero,
             sleep: { await zeroGate.sleep($0) }
@@ -343,6 +343,39 @@ struct MemoSearchTests {
         await search.settled()
         #expect(paths.get().count == 1)
     }
+
+    /// B7. An offline search that renders "No memos matched" tells somebody the memo they are
+    /// looking for does not exist, and explains it with a hint about whole words. It is the same
+    /// class of lie as an empty timeline on a launch with no network — and it is worse, because a
+    /// person acts on it.
+    @Test("a search that never reached the server says so, and shows no stale rows")
+    func aTransportFailureIsNotNoMatches() async {
+        let answering = LockedValue<Bool>(true)
+        let search = MemoSearch(
+            handle: Stub.client { _, _, _ in
+                guard answering.get() else { throw URLError(.notConnectedToInternet) }
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }.handle,
+            baseURL: Stub.baseURL,
+            coalescing: .milliseconds(1)
+        )
+        search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
+        await search.settled()
+        #expect(search.outcome == .matched, "the premise: it had rows a moment ago")
+
+        answering.set(false)
+        search.run(MemoQuery(tags: ["curated2"]), showing: "#curated2")
+        await search.settled()
+
+        #expect(search.outcome == .unavailable, "an offline search is not an empty answer")
+        #expect(search.outcome != .noMatches)
+        #expect(search.results.memos.isEmpty, "the previous question's rows are not this answer")
+        #expect(search.results.lastError == nil, "the banner owns the sentence, not this list")
+        #expect(
+            SearchResultsEmptyState.outcome(for: search.outcome, rows: 0) == .unavailable,
+            "and the results screen draws that, not the no-matches hint"
+        )
+    }
 }
 
 /// A clock the debounce is driven against, so a test can keep a task parked in the pause while it
@@ -366,4 +399,5 @@ private actor DebounceGate {
         parked = []
         for waiter in waiters { waiter.resume() }
     }
+
 }

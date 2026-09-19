@@ -69,7 +69,7 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a", "b"]))
         }
         let store = MediaLibraryStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.items.map(\.uid) == ["a", "b"])
         let path = paths.get().first ?? ""
@@ -88,9 +88,9 @@ struct MediaLibraryStoreTests {
             return Self.page([])
         }
         let store = MediaLibraryStore(pageSize: 2, filter: .images)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         store.setFilter(.videos)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(paths.get().count == 2)
         #expect(paths.get()[0].contains("type=image"), "Images did not filter")
@@ -109,10 +109,10 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a", "b"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.hasMore, "a page with X-Next-Cursor is not the last one")
 
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.items.map(\.uid) == ["a", "b", "c"], "the page did not append")
         #expect(
             paths.get().contains { $0.contains("cursor=page-2") },
@@ -129,11 +129,11 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a"]))
         }
         let store = MediaLibraryStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(!store.hasMore)
         #expect(requests.count == 1, "control: the first page really was fetched")
 
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
         #expect(requests.count == 1, "a next page was fetched past the end of the list")
         #expect(store.items.map(\.uid) == ["a"])
     }
@@ -150,8 +150,8 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a", "b"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.items.map(\.uid) == ["a", "b", "c"], "the overlapping row was merged twice")
     }
@@ -165,7 +165,7 @@ struct MediaLibraryStoreTests {
             ])
         }
         let images = MediaLibraryStore(pageSize: 10, filter: .images)
-        await images.refresh(using: imagesClient, baseURL: Stub.baseURL)
+        await images.refresh(using: imagesClient.handle, baseURL: Stub.baseURL)
         #expect(images.items.map(\.uid) == ["photo"], "a video was shown under Images")
 
         let videosClient = Stub.client { _, _, _ in
@@ -175,7 +175,7 @@ struct MediaLibraryStoreTests {
             ])
         }
         let videos = MediaLibraryStore(pageSize: 10, filter: .videos)
-        await videos.refresh(using: videosClient, baseURL: Stub.baseURL)
+        await videos.refresh(using: videosClient.handle, baseURL: Stub.baseURL)
         #expect(videos.items.map(\.uid) == ["clip"], "an image was shown under Videos")
     }
 
@@ -189,7 +189,7 @@ struct MediaLibraryStoreTests {
             ])
         }
         let store = MediaLibraryStore(pageSize: 10)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.items.map(\.uid) == ["photo", "clip", "paper"])
         #expect(store.items.map(\.mediaKind) == [.image, .video, .other])
@@ -203,14 +203,14 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.items.map(\.uid) == ["a"])
 
         store.setFilter(.videos)
         #expect(store.items.isEmpty, "the old tab's files stayed on screen under the new one")
         #expect(store.hasMore, "a tab nobody has read yet cannot be at its end")
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let last = paths.get().last ?? ""
         #expect(last.contains("type=video"))
         #expect(!last.contains("cursor="), "the old tab's cursor was carried into the new one")
@@ -239,14 +239,14 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         // Resumes at the moment the next page ENTERS the transport, not a moment a clock guessed
         // at — so the supersede below provably happens with that request in flight.
         await entered.wait()
         store.setFilter(.videos)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         release.signal()
         await inFlight.value
 
@@ -270,7 +270,7 @@ struct MediaLibraryStoreTests {
             Self.page(Self.uids(["a", "b", "c", "d"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 4)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.shouldLoadMore(after: 3, lookahead: 2), "the last tile did not trigger")
         #expect(store.shouldLoadMore(after: 2, lookahead: 2), "the lookahead did not trigger")
@@ -278,7 +278,7 @@ struct MediaLibraryStoreTests {
 
         let ended = MediaLibraryStore(pageSize: 4)
         let lastPage = Stub.client { _, _, _ in Self.page(Self.uids(["a"])) }
-        await ended.refresh(using: lastPage, baseURL: Stub.baseURL)
+        await ended.refresh(using: lastPage.handle, baseURL: Stub.baseURL)
         #expect(!ended.shouldLoadMore(after: 0), "a list at its end asked for more")
     }
 
@@ -286,8 +286,14 @@ struct MediaLibraryStoreTests {
     func unauthorizedIsHandled() async {
         let handled = LockedValue<Bool>(false)
         let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
-        let store = MediaLibraryStore(pageSize: 2, onUnauthorized: { handled.set(true) })
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        let store = MediaLibraryStore(
+            pageSize: 2,
+            onUnauthorized: { _ in
+                handled.set(true)
+                return .endedSession
+            }
+        )
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(handled.get(), "a 401 did not reach the session")
         #expect(store.items.isEmpty)
@@ -300,7 +306,7 @@ struct MediaLibraryStoreTests {
             Self.page([Self.item(uid: "a", mime: "video/mp4")])
         }
         let store = MediaLibraryStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         let row = try #require(store.items.first)
         let poster = "https://memos.example.invalid/api/attachments/a/poster"
@@ -322,7 +328,7 @@ struct MediaLibraryStoreTests {
             ])
         }
         let store = MediaLibraryStore(pageSize: 10)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.items.map(\.memoUID) == ["memo-7", nil])
     }
@@ -337,11 +343,11 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a"]))
         }
         let newest = MediaLibraryStore(pageSize: 2)
-        await newest.refresh(using: client, baseURL: Stub.baseURL)
+        await newest.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(paths.get().last?.contains("order=desc") == true, "newest-first did not say so")
 
         let oldest = MediaLibraryStore(pageSize: 2, order: .oldestFirst)
-        await oldest.refresh(using: client, baseURL: Stub.baseURL)
+        await oldest.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(
             paths.get().last?.contains("order=asc") == true,
             "Oldest First did not reach the server"
@@ -360,14 +366,14 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.items.map(\.uid) == ["a"])
 
         store.setOrder(.oldestFirst)
         #expect(store.items.isEmpty, "the old direction's rows stayed on screen under the new one")
         #expect(store.hasMore, "a direction nobody has read yet cannot be at its end")
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let last = paths.get().last ?? ""
         #expect(last.contains("order=asc"))
         // The cursor is a position inside ONE ordering; carried across a reversal it pages the
@@ -397,12 +403,12 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         await entered.wait()
         store.setOrder(.oldestFirst)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         release.signal()
         await inFlight.value
 
@@ -431,15 +437,15 @@ struct MediaLibraryStoreTests {
             return Self.page(Self.uids(["a", "b"]), nextCursor: "page-2")
         }
         let store = MediaLibraryStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(requests.count == 1)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         await entered.wait()
         // This is the swipe that lands while the fetch it triggered is still out. The trigger has
         // to say no, or one flick through the end of a loaded run fires a request per page.
         #expect(!store.shouldLoadMore(after: 1, lookahead: 1), "the trigger fired during a load")
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
         #expect(requests.count == 2, "a second request went out while one was in flight")
 
         release.signal()

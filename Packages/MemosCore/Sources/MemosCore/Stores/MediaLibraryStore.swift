@@ -57,19 +57,27 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Read as well as written: the viewer measures its own near-end lookahead in pages of this
     /// size, so a store built with a different one moves the trigger with it.
     public let pageSize: Int
-    private let onUnauthorized: @MainActor @Sendable () async -> Void
+    private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
+    /// Where a failure that never reached the server goes instead of `lastError`, and the seam
+    /// this store reads the session's incarnation from — its twin's, for its twin's reason
+    /// (`TimelineStore`).
+    private var session: (any SessionReporting)?
 
     public init(
         pageSize: Int = 60,
         filter: MediaLibraryFilter = .all,
         order: MediaLibraryOrder = .newestFirst,
-        onUnauthorized: @escaping @MainActor @Sendable () async -> Void = {}
+        onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
+            { _ in .superseded }
     ) {
         self.pageSize = pageSize
         self.filter = filter
         self.order = order
         self.onUnauthorized = onUnauthorized
     }
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
 
     /// Switches tab.
     ///
@@ -127,7 +135,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// flight is exactly what somebody changing tabs is waiting for the end of.
     private var loadingLineage: Lineage?
 
-    public func refresh(using client: any APIProtocol, baseURL: URL) async {
+    public func refresh(using handle: SessionHandle, baseURL: URL) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         let lineage = self.lineage
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
@@ -153,21 +166,30 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("GET /api/attachments answered for a list that has moved on")
                 return
             }
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("a page answered for a session that has ended is not applied")
+                return
+            }
             items = Self.merged([], with: page.items, filter: lineage.filter)
             nextCursor = page.nextCursor
             hasMore = page.nextCursor != nil
             lastError = nil
+            // A page that arrived is the session's to act on, as a question and not an answer —
+            // the same report the failure funnel makes, from the side where it went right
+            // (`noteTransportSuccess`).
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
             // This IS a different list — a new lineage, whose cursor no page in flight shares.
             generation += 1
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
-            // any more would put an error over a list that loaded perfectly well — and, on a 401,
+            // any more would put an error over a list that loaded perfectly well — and, for a
+            // refusal,
             // end the session on the word of a request that has been superseded.
             guard lineage == self.lineage else {
                 MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
                 return
             }
-            await report(error)
+            await report(error, issuedUnder: handle)
         }
     }
 
@@ -177,7 +199,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// The second read has to happen here: the next page is asked for when the last tile appears,
     /// and a tile already on screen does not appear a second time, so a reader sitting at the end
     /// of the grid would wait for a page this store had decided to throw away.
-    public func loadMore(using client: any APIProtocol, baseURL: URL) async {
+    public func loadMore(using handle: SessionHandle, baseURL: URL) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         guard !isLoadingMore, !isLoading, hasMore, nextCursor != nil else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -196,19 +223,28 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 )
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/attachments answered for a list that has moved on")
+                    // Never reissued with a client whose session is over — see the same guard in
+                    // `TimelineStore.loadMore`.
+                    guard sessionStillCurrent(handle) else { return }
                     continue
+                }
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("a page answered for a session that has ended is not merged")
+                    return
                 }
                 items = Self.merged(items, with: page.items, filter: lineage.filter)
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
                 return
             } catch {
                 guard lineage == self.lineage else {
                     MemosLog.api.info("GET /api/attachments failed for a list that has moved on")
+                    guard sessionStillCurrent(handle) else { return }
                     continue
                 }
-                await report(error)
+                await report(error, issuedUnder: handle)
                 return
             }
         }
@@ -249,13 +285,40 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Says what went wrong — unless what went wrong was this app cancelling its own request.
     /// Same rule, same helper, as `TimelineStore.report`: a supersede cancels the transport before
     /// it moves the lineage, so the fence above cannot tell that `-999` from a real failure.
-    private func report(_ error: any Error) async {
+    private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
+        // Fenced for the reason `TimelineStore.report` is: a stale refusal reaching `onUnauthorized`
+        // ends the session running now, and a stale sentence lands on a grid that never asked.
+        guard sessionStillCurrent(handle) else {
+            MemosLog.api.info("a failure for a session that has ended is not reported")
+            return
+        }
+        // A server that never answered goes to the session and nowhere else — the same rule, and
+        // the same reason, as `TimelineStore.report`.
+        if let failure = StoreFailure.transportFailure(error) {
+            session?.noteTransportFailure(failure, issuedUnder: handle.generation)
+            return
+        }
+        // The SESSION owns the verdict; this store owns only what it says about it — the same
+        // rule, and the same reason, as `TimelineStore.report`.
+        if let refusal = StoreFailure.refusal(error) {
+            if await onUnauthorized(refusal) == .endedSession {
+                lastError = refusal.errorDescription
+            }
+            return
+        }
         guard let apiError = StoreFailure.reportable(error) else {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
         lastError = apiError.errorDescription
-        if apiError == .unauthorized { await onUnauthorized() }
+    }
+
+    /// Whether the session that ISSUED an operation is still the one this device is running — the
+    /// same guard, for the same reason, as `TimelineStore.sessionStillCurrent`.
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
     }
 
     /// One page of the library.

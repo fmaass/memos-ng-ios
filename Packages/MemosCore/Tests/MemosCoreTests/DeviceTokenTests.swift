@@ -385,6 +385,41 @@ struct DeviceTokenTests {
         #expect(seen.get().last?.authorization == "Bearer memos_pat_next")
     }
 
+    /// The same rule, one await later — the gap the audit found. `performRenewal` fences every
+    /// effect it has on `owns(generation)`, and the storage write it does BEFORE that guard is an
+    /// await of its own. A sign-in completing inside it owns the session, and the warning the
+    /// failed write produced ("Renewed, but the new credential could not be saved…") was being
+    /// written anyway — a sentence about a rotation the account reading it never asked for.
+    @Test("a renewal whose storage failed after the session changed says nothing to the successor")
+    func renewalStorageWarningIsNotWrittenToASuccessor() async {
+        let box = LockedValue<SessionStore?>(nil)
+        let seen = LockedValue<[SeenRequest]>([])
+        let credentials = SupersedingCredentials {
+            guard let store = await box.get() else { return }
+            await store.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
+        }
+        let store = await signedIn(credentials: credentials, seen: seen) { operation in
+            switch operation {
+            case whoamiOperation: .json(Stub.user)
+            case tokenRenewOperation: .json(Stub.exchange(token: "memos_pat_next"))
+            default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
+            }
+        }
+        box.set(store)
+        // Only the SUCCESSOR's write interrupts and throws; the sign-in above wrote normally.
+        credentials.arm()
+
+        let outcome = await store.renewDeviceToken()
+
+        #expect(outcome == .failed, "the renewal lost its session, whatever storage did")
+        #expect(store.state.user != nil, "the premise: the sign-in inside the write owns this")
+        #expect(
+            store.lastError == nil,
+            "a renewal that lost its session put its storage warning on the successor's screen"
+        )
+        #expect(store.deviceTokenNotice == nil, "and nothing on the successor's row either")
+    }
+
     /// A renewal is a mint, and a mint that lands after the session ended must not be written
     /// anywhere: the credential slot belongs to whoever is signed in NOW, and the successor's
     /// predecessor was destroyed for a session that no longer exists.
@@ -658,7 +693,7 @@ struct DeviceTokenTests {
         }
 
         await #expect(throws: OriginalMediaError.superseded) {
-            try await store.downloadOriginal(
+            try await store.download(
                 MemoAttachment(
                     uid: "a1",
                     mime: "image/jpeg",
@@ -673,8 +708,8 @@ struct DeviceTokenTests {
     }
 
     /// The outbox reaches the server with its own requests, not through the generated client, so
-    /// the middleware's fence never sees them. It does not need to: the credential is read from
-    /// the vault once per drain and never written into a queued job, so the rotation a renewal
+    /// the middleware's fence never sees them. It does not need to: the credential is granted by
+    /// the session once per drain and never written into a queued job, so the rotation a renewal
     /// commits is simply what the next attempt picks up. Driven through the REAL renewal here,
     /// because that is the write whose effect is being claimed.
     @Test("a queued outbox attempt after a renewal presents the successor")
@@ -688,7 +723,9 @@ struct DeviceTokenTests {
             default: .json(Stub.nativeToken(name: "Fabian's iPhone"))
             }
         }
-        let outbox = DeviceOutboxCredentials(credentials: vault, owner: { "fabian" })
+        let outbox = DeviceOutboxCredentials(epoch: { store.epoch.current }) {
+            await MainActor.run { store.credentialGrant() }
+        }
         let before = await outbox.currentCredentials()
         #expect(before?.token == "memos_pat_first", "the premise: it was holding the old one")
 
@@ -697,6 +734,10 @@ struct DeviceTokenTests {
 
         let after = await outbox.currentCredentials()
         #expect(after?.token == "memos_pat_next")
+        // And a grant taken BEFORE the rotation stops standing at the drain's next synchronous
+        // check: it names a token the server destroyed in the same statement that minted this one.
+        let granted = try #require(before)
+        #expect(!outbox.isCurrent(granted))
     }
 
     /// The live channel is the other one. It builds its own request per CONNECTION and reads the
@@ -705,16 +746,22 @@ struct DeviceTokenTests {
     /// credential once would present the same token twice and this would not move.
     @Test("an SSE reconnect after a rotation presents the successor")
     func sseReconnectPresentsTheSuccessor() async throws {
-        let vault = InMemoryCredentials()
-        try vault.set("memos_pat_first", for: SessionStore.tokenAccount)
-        try vault.set("https://memos.example.invalid", for: SessionStore.serverAccount)
-        // The write a renewal commits, made directly so this test is about the LANE rather than
-        // about the renewal (which `outboxDrainPresentsTheSuccessor` drives for real).
-        let transport = RotatingSSETransport {
-            try? vault.set("memos_pat_next", for: SessionStore.tokenAccount)
-        }
+        // The swap a renewal commits, made against the SESSION rather than the vault, because the
+        // session is where this lane now reads its credential (F1). Made directly so this test is
+        // about the LANE rather than about the renewal (which `outboxDrainPresentsTheSuccessor`
+        // drives for real).
+        let presenting = LockedValue<String>("memos_pat_first")
+        let server = URL(string: "https://memos.example.invalid")!
+        let transport = RotatingSSETransport { presenting.set("memos_pat_next") }
         let client = MediaEventClient.device(
-            credentials: vault,
+            grant: {
+                CredentialGrant(
+                    subject: "fabian",
+                    serverBaseURL: server,
+                    token: presenting.get(),
+                    epoch: 0
+                )
+            },
             identity: MediaIdentity(),
             transport: transport,
             sleeper: RecordingSleeper(budget: 2)
@@ -800,7 +847,9 @@ private struct RotatingDownloads: MediaDownloadTransport {
     let status: Int
     let rotate: @Sendable () async -> Void
 
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
         await rotate()
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try Data("original".utf8).write(to: url)
@@ -818,18 +867,67 @@ private struct RotatingDownloads: MediaDownloadTransport {
 /// FIRST one, so what the reconnect presents is the question being asked.
 private actor RotatingSSETransport: SSEConnecting {
     private(set) var authorizations: [String?] = []
+    /// What the production authority answered at each connect.
+    private(set) var verdicts: [Bool] = []
     private let rotate: @Sendable () -> Void
 
     init(rotate: @escaping @Sendable () -> Void) {
         self.rotate = rotate
     }
 
-    func connect(_ request: URLRequest) async throws -> SSEConnection {
-        authorizations.append(request.value(forHTTPHeaderField: "Authorization"))
+    func connect(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> SSEConnection
+    {
+        // The double records the PRODUCTION authority's verdict; it does not implement the policy.
+        verdicts.append(authority.holds())
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        authorizations.append(
+            authority.presenting(request).value(forHTTPHeaderField: "Authorization")
+        )
         if authorizations.count == 1 { rotate() }
         return SSEConnection(
             statusCode: 200,
             body: AsyncThrowingStream { $0.finish() }
         )
+    }
+}
+
+/// A credential store whose single-item write, once armed, lets a sign-in complete inside it and
+/// THEN refuses — the renewal's own failure shape, with the session changing underneath it.
+///
+/// `setAll` is left to the protocol default so that the sign-in landing inside this write stores
+/// normally: what is under test is the sentence the renewal writes afterwards, not the sign-in.
+final class SupersedingCredentials: CredentialStore, @unchecked Sendable {
+    struct Refused: Error {}
+
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+    private var armed = false
+    private let duringWrite: @Sendable () async -> Void
+
+    init(duringWrite: @escaping @Sendable () async -> Void) {
+        self.duringWrite = duringWrite
+    }
+
+    func arm() { lock.withLock { armed = true } }
+
+    func set(_ value: String, for account: String) async throws {
+        let fire: Bool = lock.withLock {
+            guard armed else { return false }
+            armed = false
+            return true
+        }
+        guard fire else {
+            lock.withLock { storage[account] = value }
+            return
+        }
+        await duringWrite()
+        throw Refused()
+    }
+
+    func string(for account: String) async throws -> String? { lock.withLock { storage[account] } }
+
+    func remove(_ account: String) async throws {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
     }
 }

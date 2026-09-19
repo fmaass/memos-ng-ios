@@ -51,8 +51,13 @@ struct ArchiveTests {
             return Stub.json(Stub.memo(uid: "a", archivedAt: "2026-08-27T10:00:00Z"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        let archived = await store.setArchived(true, uid: "a", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let archived = await store.setArchived(
+            true,
+            uid: "a",
+            using: client.handle,
+            baseURL: Stub.baseURL
+        )
 
         #expect(archived)
         #expect(sent.get()["archived"] as? Bool == true)
@@ -77,11 +82,11 @@ struct ArchiveTests {
             return Stub.json(Stub.memo(uid: "a"))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["a"])
 
         let restored = await store.setArchived(
-            false, uid: "a", using: client, baseURL: Stub.baseURL
+            false, uid: "a", using: client.handle, baseURL: Stub.baseURL
         )
 
         #expect(restored)
@@ -98,8 +103,8 @@ struct ArchiveTests {
                 : Stub.json(Stub.memoList(["a"], nextCursor: nil))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.setArchived(true, uid: "a", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.setArchived(true, uid: "a", using: client.handle, baseURL: Stub.baseURL)
 
         #expect(store.memos.map(\.uid) == ["a"])
         #expect(store.memos[0].isArchived)
@@ -114,8 +119,13 @@ struct ArchiveTests {
                 : Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        let archived = await store.setArchived(true, uid: "a", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let archived = await store.setArchived(
+            true,
+            uid: "a",
+            using: client.handle,
+            baseURL: Stub.baseURL
+        )
 
         #expect(!archived)
         // The row is still there and still says it is not archived: nothing moved before the
@@ -128,15 +138,18 @@ struct ArchiveTests {
     @Test("a 401 on an archive ends the session")
     func unauthorizedArchiveEndsTheSession() async {
         let ended = Counter()
-        let store = TimelineStore(onUnauthorized: { ended.increment() })
+        let store = TimelineStore(onUnauthorized: { _ in
+            ended.increment()
+            return .endedSession
+        })
         let client = Stub.client { _, _, operation in
             operation == patchMemoOperation
                 ? Stub.empty(.unauthorized)
                 : Stub.json(Stub.memoList(["a"], nextCursor: nil))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.setArchived(true, uid: "a", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.setArchived(true, uid: "a", using: client.handle, baseURL: Stub.baseURL)
 
         #expect(ended.count == 1)
     }
@@ -150,8 +163,8 @@ struct ArchiveTests {
                 : Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
         }
 
-        await store.refresh(using: client, baseURL: Stub.baseURL)
-        await store.refreshMemo(uid: "a", using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.refreshMemo(uid: "a", using: client.handle, baseURL: Stub.baseURL)
 
         // The reconciling read is the only thing that can notice an archive made in the web app,
         // and it reaches the same conclusion the app's own archive does.

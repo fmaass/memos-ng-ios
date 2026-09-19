@@ -197,7 +197,7 @@ struct ComposePickerPresentationTests {
     /// whatever that factor is, it is the same for all of them.
     @Test("the photos pill is on the sheet, and there is one of it")
     func onePhotosPillOnTheSheet() {
-        let labels = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in true })
+        let labels = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in .saved })
 
         // The positive control: if the probe cannot see the row's other pill, everything said
         // about this one would be said about a screen the probe never saw.
@@ -206,5 +206,13 @@ struct ComposePickerPresentationTests {
 
         let pickers = labels.filter { $0 == "Add photos or videos" }.count
         #expect(pickers == dates, "photos pills: \(pickers), date pills: \(dates) — \(labels)")
+    }
+
+    @Test("the picker's menu keeps its declared order, library above camera")
+    func photoChoicesKeepTheirDeclaredOrder() {
+        // The popup cannot be opened under `xcodebuild test`, so what is held is the value the
+        // menu is given. The system default is priority order, which turns an upward-opening
+        // menu upside down — see `ComposeMetaRow.photoChoicesOrder` for the screen this bit.
+        #expect(ComposeMetaRow.photoChoicesOrder == .fixed)
     }
 }

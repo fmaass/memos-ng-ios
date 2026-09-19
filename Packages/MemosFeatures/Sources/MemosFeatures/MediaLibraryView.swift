@@ -15,16 +15,9 @@ import SwiftUI
 /// not become.
 struct MediaLibraryView: View {
     @Environment(SessionStore.self) private var session
-    /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
-    /// no router, and a missing environment value must be a missing action, not a crash.
-    @Environment(MemoJump.self) private var jump: MemoJump?
     @State private var library: MediaLibraryStore?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
-    /// How wide the rows are solved for — the scroll's own width, less the padding. Measured
-    /// rather than assumed, so a rotation or a split view re-packs the library rather than
-    /// running it off the edge.
-    @State private var contentWidth: CGFloat = 0
     /// The download a tile's menu starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
     /// What the zoom transition matches the viewer to: the tile it grew out of.
@@ -54,7 +47,7 @@ struct MediaLibraryView: View {
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
             // on one view is how one of them silently stops appearing, and this screen now has
             // both a cover and a sheet.
-            .savingOriginal(saving)
+            .fetchingFile(saving)
         }
         // Outside the stack, for the reason the timeline's cover is: two presentations on one view
         // is how one of them silently stops appearing.
@@ -70,13 +63,18 @@ struct MediaLibraryView: View {
             if library == nil {
                 library = MediaLibraryStore(
                     order: preferences.order,
-                    onUnauthorized: { [session] in
-                        await session.handle(.unauthorized)
+                    onUnauthorized: { [session] refusal in
+                        await session.handle(refusal)
                     }
                 )
             }
+            // A failure that never reached the server belongs to the session's one banner, not to
+            // an error card over this grid (`SessionReporting`).
+            library?.reports(to: session)
             await load()
         }
+        // The server is answering again, and this grid was read while it was not.
+        .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
     }
 
     /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a
@@ -98,20 +96,16 @@ struct MediaLibraryView: View {
 
     @ViewBuilder
     private func content(_ library: MediaLibraryStore) -> some View {
-        ScrollView {
-            LazyVStack(spacing: DesignTokens.Space.tight) {
-                if let error = library.lastError {
-                    NoticeCard(text: error, tone: .error)
-                        .padding(.horizontal, DesignTokens.Space.roomy)
-                }
-                gallery(library)
-                // The next page is on its way; this is what says so at the bottom of the scroll.
-                if library.isLoadingMore {
-                    ProgressView().padding(DesignTokens.Space.roomy)
-                }
-            }
-            .padding(.vertical, DesignTokens.Space.tight)
-        }
+        LibraryGrid(
+            items: library.items,
+            errorText: library.lastError,
+            loadingMore: library.isLoadingMore,
+            zoom: mediaZoom,
+            wantsMore: { library.shouldLoadMore(after: $0) },
+            open: { open($0) },
+            fetch: { file, rendition in await fetch(file, rendition) },
+            loadMore: { await loadMore() }
+        )
         // Pinned above the scroll rather than inside it: the filter is how you change what the
         // grid IS, and one that scrolls away is one you have to scroll back up to reach.
         .safeAreaInset(edge: .top) { filterBar(library) }
@@ -184,6 +178,104 @@ struct MediaLibraryView: View {
         )
     }
 
+    /// Opens the viewer over the WHOLE library, at the tile that was tapped — and, because the
+    /// viewer reads the store rather than a snapshot of it, a swipe carries on past the rows that
+    /// were loaded at the moment of the tap.
+    private func open(_ attachment: MemoAttachment) {
+        guard let library else { return }
+        viewing = MediaViewerPresentation.viewer(for: library.items, startingAt: attachment.uid)
+    }
+
+    /// Fetches the named file of a tile's attachment and offers it to the share sheet. The
+    /// credential the original tier needs is the session's, and it stays there (see
+    /// `OriginalMedia`).
+    private func fetch(_ attachment: MemoAttachment, _ rendition: AttachmentRendition) async {
+        await saving.save(attachment) { [session] file in
+            try await session.download(file, rendition)
+        }
+    }
+
+    private func load() async {
+        guard let library, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL
+        else { return }
+        await library.refresh(using: handle, baseURL: baseURL)
+    }
+
+    private func loadMore() async {
+        guard let library, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL
+        else { return }
+        await library.loadMore(using: handle, baseURL: baseURL)
+    }
+}
+
+/// The scrolling grid itself, split from the screen so a test can host it.
+///
+/// `MediaLibraryView` reads `SessionStore` from the environment, which the test bundle cannot
+/// build — the reason `TimelineView` and `SettingsView` are not hosted in tests either. The grid
+/// is where MEMNG-206 lived: nothing asserted that a store full of files ever became PLACED
+/// tiles, so the width round-trip could break with every unit around it green. Everything the
+/// grid draws arrives as a value; the session, the store and the fetching stay in the screen.
+struct LibraryGrid: View {
+    let items: [MemoAttachment]
+    /// What the store last failed with, shown at the top of the scroll.
+    let errorText: String?
+    /// Whether the next page is on its way — the spinner at the bottom of the scroll.
+    let loadingMore: Bool
+    /// The screen's zoom namespace: the viewer's transition grows out of the tile it matches.
+    let zoom: Namespace.ID
+    /// Whether the file at this index is near enough the end to fetch the next page. The trigger
+    /// is the store's, not this view's: how close to the end is close enough is a rule with its
+    /// own vectors, not a number in a view body.
+    let wantsMore: (Int) -> Bool
+    let open: (MemoAttachment) -> Void
+    /// Fetch one of a file's renditions and offer it — the menu's two slow actions, as one
+    /// closure, because they differ only in which file they ask for.
+    let fetch: (MemoAttachment, AttachmentRendition) async -> Void
+    let loadMore: () async -> Void
+    /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
+    /// no router, and a missing environment value must be a missing action, not a crash.
+    @Environment(MemoJump.self) private var jump: MemoJump?
+    /// How wide the rows are solved for — the scroll's own width, less the padding. Measured
+    /// rather than assumed, so a rotation or a split view re-packs the library rather than
+    /// running it off the edge.
+    @State private var contentWidth: CGFloat = 0
+
+    var body: some View {
+        // Hoisted because the measuring closure below is `Sendable` and may run off the main
+        // actor, where the design tokens are not reachable.
+        let inset = 2 * DesignTokens.Space.tight
+        ScrollView {
+            LazyVStack(spacing: DesignTokens.Space.tight) {
+                if let error = errorText {
+                    NoticeCard(text: error, tone: .error)
+                        .padding(.horizontal, DesignTokens.Space.roomy)
+                }
+                gallery
+                // The next page is on its way; this is what says so at the bottom of the scroll.
+                if loadingMore {
+                    ProgressView().padding(DesignTokens.Space.roomy)
+                }
+            }
+            .padding(.vertical, DesignTokens.Space.tight)
+        }
+        // Measured on the scroll, whose frame is real from the first layout pass, items or none.
+        // It was measured on the row stack itself, which is EMPTY until a width exists — and an
+        // empty lazy stack's geometry never fired on device, so the width stayed zero, zero
+        // solved to no rows, and no rows kept the stack empty: a library that could never draw
+        // its first page (MEMNG-206). What the rows are owed is the scroll's width inside the
+        // safe area, less the gallery's own padding either side.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            max(
+                0,
+                proxy.size.width - proxy.safeAreaInsets.leading - proxy.safeAreaInsets.trailing
+                    - inset)
+        } action: { width in
+            contentWidth = width
+        }
+    }
+
     /// The library as justified rows: every file in its own proportions, rows that fill the width.
     ///
     /// A `LazyVStack` of rows rather than one layout over every tile, and that is the reason the
@@ -191,18 +283,15 @@ struct MediaLibraryView: View {
     /// places all of its subviews, and this grid is a thousand files long. Solved into rows first,
     /// the stack stays lazy — only the rows near the screen are ever built — while each row is a
     /// plain `HStack` of boxes the solver has already sized.
-    private func gallery(_ library: MediaLibraryStore) -> some View {
+    private var gallery: some View {
         LazyVStack(spacing: DesignTokens.Space.tight) {
-            ForEach(rows(of: library)) { row in
+            ForEach(rows) { row in
                 HStack(spacing: DesignTokens.Space.tight) {
                     ForEach(row.tiles) { placed in
                         tile(placed.attachment)
                             .frame(width: placed.width, height: placed.height)
-                            // The trigger is the store's, not this view's: how close to the end is
-                            // close enough is a rule with its own vectors, not a number in a view
-                            // body. It is measured in the file's place in the WHOLE list.
                             .onAppear {
-                                guard library.shouldLoadMore(after: placed.index) else { return }
+                                guard wantsMore(placed.index) else { return }
                                 Task { await loadMore() }
                             }
                     }
@@ -212,21 +301,12 @@ struct MediaLibraryView: View {
                 }
             }
         }
-        // Stated so the stack reports the width it was OFFERED even while it is empty. Without it
-        // an empty library measures zero, and a zero width solves to no rows at all — which is a
-        // grid that can never draw its first page.
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.width
-        } action: { width in
-            contentWidth = width
-        }
         .padding(.horizontal, DesignTokens.Space.tight)
     }
 
-    private func rows(of library: MediaLibraryStore) -> [LibraryRow] {
+    private var rows: [LibraryRow] {
         MediaLibraryPresentation.rows(
-            for: library.items,
+            for: items,
             width: Double(contentWidth),
             gap: Double(DesignTokens.Space.tight)
         )
@@ -243,7 +323,7 @@ struct MediaLibraryView: View {
                 // same slot the memo card's justified rows use.
                 slot: MemoPresentation.justifiedSlot(for: attachment)
             )
-            .mediaTransitionSource(id: attachment.uid, in: mediaZoom)
+            .mediaTransitionSource(id: attachment.uid, in: zoom)
             .contentShape(.rect)
             .onTapGesture { open(attachment) }
             .accessibilityAddTraits(.isButton)
@@ -267,8 +347,8 @@ struct MediaLibraryView: View {
                 mime: attachment.mime,
                 actions: MediaTileMenu.actions(for: attachment),
                 showMemo: { jump?.request($0) },
-                saveOriginal: { file in
-                    Task { await save(file) }
+                fetch: { file, rendition in
+                    Task { await fetch(file, rendition) }
                 }
             )
             .contextMenu { menu(attachment) }
@@ -283,8 +363,8 @@ struct MediaLibraryView: View {
             MediaTileActionItem(
                 action: action,
                 showMemo: { jump?.request($0) },
-                saveOriginal: { file in
-                    Task { await save(file) }
+                fetch: { file, rendition in
+                    Task { await fetch(file, rendition) }
                 }
             )
         }
@@ -300,36 +380,6 @@ struct MediaLibraryView: View {
             slot: MemoPresentation.detailSlot(for: attachment)
         )
         .frame(width: MediaLibraryPresentation.previewWidth)
-    }
-
-    /// Opens the viewer over the WHOLE library, at the tile that was tapped — and, because the
-    /// viewer reads the store rather than a snapshot of it, a swipe carries on past the rows that
-    /// were loaded at the moment of the tap.
-    private func open(_ attachment: MemoAttachment) {
-        guard let library else { return }
-        viewing = MediaViewerPresentation.viewer(for: library.items, startingAt: attachment.uid)
-    }
-
-    /// Fetches the original of a tile's file and offers it to the share sheet. The credential the
-    /// original tier needs is the session's, and it stays there (see `OriginalMedia`).
-    private func save(_ attachment: MemoAttachment) async {
-        await saving.save(attachment) { [session] file in
-            try await session.downloadOriginal(file)
-        }
-    }
-
-    private func load() async {
-        guard let library, let client = session.api, let baseURL = session.serverBaseURL else {
-            return
-        }
-        await library.refresh(using: client, baseURL: baseURL)
-    }
-
-    private func loadMore() async {
-        guard let library, let client = session.api, let baseURL = session.serverBaseURL else {
-            return
-        }
-        await library.loadMore(using: client, baseURL: baseURL)
     }
 }
 
@@ -350,7 +400,7 @@ struct DocumentTile: View {
     /// is drawn at all — a control that opens an empty menu is worse than no control.
     var actions: [MediaTileAction] = []
     var showMemo: (String) -> Void = { _ in }
-    var saveOriginal: (MemoAttachment) -> Void = { _ in }
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
 
     var body: some View {
         Color.clear
@@ -376,9 +426,7 @@ struct DocumentTile: View {
         if !actions.isEmpty {
             Menu {
                 ForEach(actions) { action in
-                    MediaTileActionItem(
-                        action: action, showMemo: showMemo, saveOriginal: saveOriginal
-                    )
+                    MediaTileActionItem(action: action, showMemo: showMemo, fetch: fetch)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle.fill")

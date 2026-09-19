@@ -98,7 +98,10 @@ public struct TimelineView: View {
             // what they already looked like they were.
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: SettingsRoute.self) { _ in
+            // `stackDestination`, not `navigationDestination`: what the tab bar does under a
+            // pushed screen is the route's to say, and saying it here is how Settings came to be
+            // drawn under the Timeline and Library icons it has nothing to do with (MEMNG-220).
+            .stackDestination(for: SettingsRoute.self) { _ in
                 SettingsView(signOut: signOut, avatar: avatar)
             }
             // The memo is looked for in BOTH lists. A card tapped on the search results is a
@@ -106,7 +109,7 @@ public struct TimelineView: View {
             // knew the timeline pushed an empty screen for exactly those memos. Whichever list
             // held it is also the list the detail screen edits, so an edit made from a result
             // lands where it was read.
-            .navigationDestination(for: MemoRoute.self) { route in
+            .stackDestination(for: MemoRoute.self) { route in
                 if let found = holder(of: route.uid) {
                     MemoDetailView(uid: route.uid, initial: found.memo, timeline: found.store)
                 }
@@ -146,8 +149,11 @@ public struct TimelineView: View {
                 SearchSheet(
                     search: raised.search,
                     loadHeatmap: { store in
-                        guard let client = session.api else { return }
-                        await store.load(using: client)
+                        guard let handle = session.activeHandle else { return }
+                        // Named before the read, so a failure that never reached the server lands
+                        // in the session's one banner instead of on this card.
+                        store.reports(to: session)
+                        await store.load(using: handle)
                     },
                     chose: { choice in
                         jump(to: choice.anchor)
@@ -160,8 +166,9 @@ public struct TimelineView: View {
                         searchPresentation.chose(choice)
                     },
                     loadTags: { store in
-                        guard let client = session.api else { return }
-                        await store.load(using: client)
+                        guard let handle = session.activeHandle else { return }
+                        store.reports(to: session)
+                        await store.load(using: handle)
                     },
                     runSearch: { query, text in raised.search.run(query, showing: text) },
                     close: { searchPresentation.close() },
@@ -198,19 +205,49 @@ public struct TimelineView: View {
         // Decoded once, here, because the toolbar shows it on every frame of the timeline and the
         // Settings screen shows it again — one decode, handed to both.
         .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
+        // The foreground trigger, and one of only two the re-validation has. `initial: true`
+        // because a timeline created while the app is ALREADY active never sees a change — which
+        // is every launch — and the session's single-flight absorbs the overlap with the launch
+        // check this joins.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            switch phase {
+            case .active: Task { await session.enteredForeground() }
+            case .background, .inactive: session.enteredBackground()
+            @unknown default: break
+            }
+        }
         .task {
             if timeline == nil {
-                timeline = TimelineStore(
+                let store = TimelineStore(
                     // Every day this screen can be anchored at is a day the heatmap named, and
                     // the heatmap's days are the server's UTC ones — see
                     // `HeatmapDateJump.anchorCalendar` for what reading them in the device's zone
                     // would hide.
                     calendar: HeatmapDateJump.anchorCalendar,
-                    onUnauthorized: { [session] in
-                        await session.handle(.unauthorized)
+                    snapshots: session.snapshots,
+                    snapshotIdentity: snapshotIdentity,
+                    // The one list in the app that is worth opening on tomorrow.
+                    persists: true,
+                    onUnauthorized: { [session] refusal in
+                        await session.handle(refusal)
                     }
                 )
+                // Before anything is read off the disk: a store that persists reads the session's
+                // incarnation through this seam, and a picture stamped before it was named would
+                // carry a number belonging to nobody.
+                store.reports(to: session)
+                // Published BEFORE the read, not after it: the read is an await, and the
+                // withdrawal below reaches this store through `timeline`. Assigned afterwards,
+                // an account switch during the read would have nothing to tell.
+                timeline = store
+                // Before `load()`, and that order is the feature: the rows this phone last saw go
+                // on screen while the request that will replace them is still out — or never
+                // answers at all.
+                await store.restoreSnapshot()
             }
+            // A failure that never reached the server belongs to the session's one banner, not to
+            // an error card over this list (`SessionReporting`).
+            timeline?.reports(to: session)
             await load()
             // What "Default" resolves to is the account's setting, not something the app can
             // guess. It is fetched here rather than during sign-in so a slow or missing
@@ -218,6 +255,12 @@ public struct TimelineView: View {
             await session.loadSettings()
             // Adopt whatever the last run left in flight before anything new is scheduled.
             await outbox?.start()
+        }
+        // A snapshot on screen belongs to the identity that wrote it. If the session becomes
+        // somebody else's — or nobody's — while it is up, it goes; a list the server has since
+        // sent is left alone.
+        .onChange(of: session.state.user?.subject) {
+            timeline?.sessionIdentityChanged(to: snapshotIdentity)
         }
         // The live media channel, and its single owner.
         //
@@ -248,6 +291,8 @@ public struct TimelineView: View {
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
             Task { await load() }
         }
+        // The server is answering again, and this list was read while it was not.
+        .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
         // A memo asked for from the Library. Keyed on the request rather than run from an
         // `onChange`, because satisfying it can mean reading the memo from the server first and
         // that read must be cancellable with the screen.
@@ -271,11 +316,12 @@ public struct TimelineView: View {
         case .push:
             path.append(MemoRoute(uid: uid))
         case .fetchThenPush:
-            guard let client = session.api, let baseURL = session.serverBaseURL else { return }
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+            else { return }
             let outcome = await timeline.jump(
                 to: uid,
                 calendar: HeatmapDateJump.anchorCalendar,
-                using: client,
+                using: handle,
                 baseURL: baseURL
             )
             switch outcome {
@@ -294,6 +340,12 @@ public struct TimelineView: View {
                 // Switching tabs and then doing nothing reads as the app losing the tap. Say what
                 // happened instead: the memo is gone, or it is not in the list this screen shows.
                 jumpNotice = "That memo is no longer here."
+            case .unreadable:
+                // The read failed — dropped on the way, or refused by the server with an error of
+                // its own — so nothing here knows whether the memo is still there, and saying it
+                // is gone would be a guess, and the wrong one. When it was the server that could
+                // not be reached, the banner above this says so, once.
+                jumpNotice = "That memo couldn't be opened just now."
             }
         }
     }
@@ -447,9 +499,10 @@ public struct TimelineView: View {
                             guard let index = positions[memo.uid],
                                 timeline.shouldLoadMore(after: index)
                             else { return }
-                            guard let client = session.api, let baseURL = session.serverBaseURL
+                            guard let handle = session.activeHandle,
+                                let baseURL = session.serverBaseURL
                             else { return }
-                            await timeline.loadMore(using: client, baseURL: baseURL)
+                            await timeline.loadMore(using: handle, baseURL: baseURL)
                         }
                     }
                 } header: {
@@ -485,11 +538,11 @@ public struct TimelineView: View {
             ForEach(MemoVisibility.allCases, id: \.self) { option in
                 Button {
                     Task {
-                        guard let client = session.api,
+                        guard let handle = session.activeHandle,
                             let baseURL = session.serverBaseURL
                         else { return }
                         await timeline.setVisibility(
-                            option, uid: memo.uid, using: client, baseURL: baseURL
+                            option, uid: memo.uid, using: handle, baseURL: baseURL
                         )
                     }
                 } label: {
@@ -531,14 +584,16 @@ public struct TimelineView: View {
     /// without a session is not a search: signed out there is no timeline either, and a loupe that
     /// opened an empty sheet would be the only control on the screen that pretended to work.
     private func openSearch() {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        searchPresentation.open(
-            MemoSearch(
-                client: client,
-                baseURL: baseURL,
-                onUnauthorized: { [session] in await session.handle(.unauthorized) }
-            )
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        let search = MemoSearch(
+            handle: handle,
+            baseURL: baseURL,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) }
         )
+        // The second `TimelineStore` in the app, and its failures are as much the session's as the
+        // first one's (`SessionReporting`).
+        search.reports(to: session)
+        searchPresentation.open(search)
     }
 
     /// Every way the sheet closes funnels through here.
@@ -603,28 +658,37 @@ public struct TimelineView: View {
     private func runMediaChannel() async {
         guard mediaChannelRuns,
             let timeline,
-            let client = session.api,
+            let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
         else { return }
+        // The channel reconnects for as long as this screen is up, so what it presents has to
+        // keep proving it belongs to a session this device holds — asked by the transport, at
+        // each connect. The session's OWN authority, not one assembled here: it carries the
+        // credential and its epoch as well as the verdict, which is what lets the transport
+        // present the token the device is holding NOW and the client tell a refusal of that from a
+        // refusal of one it has already replaced (`SendAuthority`).
         await MediaChannel.consume(
-            MediaEventClient.device().stream(),
+            MediaEventClient.device(
+                grant: { [session] in session.credentialGrant() },
+                authority: session.sendAuthority()
+            ).stream(),
             into: timeline,
             alongside: { [searchPresentation] in searchPresentation.liveResults },
-            using: client,
+            using: handle,
             baseURL: baseURL
         )
     }
 
     private func delete(_ memo: Memo, in timeline: TimelineStore) async {
-        guard let client = session.api else { return }
-        if await timeline.delete(uid: memo.uid, using: client) {
+        guard let handle = session.activeHandle else { return }
+        if await timeline.delete(uid: memo.uid, using: handle) {
             feedback.fire(.deleted)
         }
     }
 
     private func setPinned(_ pinned: Bool, on memo: Memo, in timeline: TimelineStore) async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        guard await timeline.setPinned(pinned, uid: memo.uid, using: client, baseURL: baseURL)
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        guard await timeline.setPinned(pinned, uid: memo.uid, using: handle, baseURL: baseURL)
         else { return }
         feedback.fire(pinned ? .pinned : .unpinned)
     }
@@ -636,39 +700,58 @@ public struct TimelineView: View {
         _ mode: ComposeView.Mode,
         submission: ComposeSubmission,
         to timeline: TimelineStore
-    ) async -> Bool {
-        let posted: Bool
+    ) async -> ComposeOutcome {
+        let outcome: ComposeOutcome
         switch mode {
         case .create:
-            guard let outbox else { return false }
-            posted = await outbox.enqueue(
+            guard let outbox else { return .failed(.authorization) }
+            let saved = await outbox.enqueue(
                 content: submission.content,
                 visibility: submission.visibility?.rawValue,
                 // A backdated capture keeps the date it was given all the way through the queue:
-                // the job's capture stamp IS what the create call sends as `created_at`.
+                // the job's capture stamp IS what the create call sends as `created_at`. On Auto
+                // that date is the earliest instant the attached files carried, resolved before
+                // the sheet would let this be tapped.
                 capturedAt: submission.capturedAt(),
                 sources: submission.attachments.map(\.stagedSource)
             )
+            outcome =
+                saved
+                ? .saved
+                : .failed(
+                    outbox.lastEnqueueFailure == .notSignedIn ? .authorization : .storage)
         case .edit(let uid, _, let createdAt):
-            guard let client = session.api, let baseURL = session.serverBaseURL else {
-                return false
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
+                return .failed(.authorization)
             }
-            posted = await timeline.edit(
+            outcome = await timeline.edit(
                 uid: uid,
                 content: submission.content,
                 createdAt: MemoDetailPresentation.editedDate(
                     chosen: submission.createdAt, original: createdAt
                 ),
-                // Files added to an EXISTING memo go up in the foreground, whole or not at all —
-                // the outbox above owns new captures, and a queued edit cannot be retried safely
-                // until an edit key exists to make the retry idempotent.
+                // Files added to an EXISTING memo go up in the FOREGROUND: the outbox above owns
+                // new captures, and an edit that failed is answered honestly on the sheet that is
+                // still open rather than queued (outbox-backed edits are MEMNG-124's line).
                 attaching: submission.attachments.map(\.stagedSource),
-                using: client,
+                using: handle,
                 baseURL: baseURL
             )
         }
-        feedback.fire(posted ? .posted : .postFailed)
-        return posted
+        feedback.fire(outcome.isSaved ? .posted : .postFailed)
+        return outcome
+    }
+
+    /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.
+    ///
+    /// Nil until there is both a server and a user, which is also the only state in which nothing
+    /// should be read off the disk: a snapshot with no signed-in identity to match against is
+    /// somebody's memos and no way to tell whose.
+    private var snapshotIdentity: TimelineSnapshotIdentity? {
+        guard let server = session.serverBaseURL, let subject = session.state.user?.subject else {
+            return nil
+        }
+        return TimelineSnapshotIdentity(server: server, subject: subject)
     }
 
     /// Everything this screen reads from the server, on the one signal that already means "read
@@ -679,8 +762,8 @@ public struct TimelineView: View {
     /// of (MEMNG-166); it belongs to the search sheet now and is read when that opens
     /// (MEMNG-126).
     private func load() async {
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        await timeline?.refresh(using: client, baseURL: baseURL)
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        await timeline?.refresh(using: handle, baseURL: baseURL)
     }
 
     /// A day chosen on the sheet: the list comes back anchored at that day.
@@ -722,8 +805,8 @@ public struct TimelineView: View {
     /// out, so arriving at the top repeatedly costs one request, not one per frame.
     private func loadNewer(in timeline: TimelineStore) async {
         guard timeline.shouldLoadNewer(before: 0) else { return }
-        guard let client = session.api, let baseURL = session.serverBaseURL else { return }
-        guard let top = await timeline.loadNewer(using: client, baseURL: baseURL) else { return }
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        guard let top = await timeline.loadNewer(using: handle, baseURL: baseURL) else { return }
         restoreTop = top
         restores += 1
     }

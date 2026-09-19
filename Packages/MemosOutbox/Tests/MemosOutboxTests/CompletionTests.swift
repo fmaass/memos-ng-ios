@@ -37,8 +37,7 @@ struct CompletionTests {
             ScriptedHTTP.json(["uid": "m1"], status: 201)
         }
         let outcome = await MemoCompletionEndpoint(http: http).create(
-            job: job, credentials: Fixture.credentials()
-        )
+            job: job, credentials: Fixture.credentials(), under: .unfenced)
         #expect(outcome == .created(uid: "m1"))
 
         let request = try #require(http.requests.first)
@@ -60,8 +59,7 @@ struct CompletionTests {
         job.visibility = nil
         let http = ScriptedHTTP { _ in ScriptedHTTP.json(["uid": "m1"], status: 201) }
         _ = await MemoCompletionEndpoint(http: http).create(
-            job: job, credentials: Fixture.credentials()
-        )
+            job: job, credentials: Fixture.credentials(), under: .unfenced)
         let body = try #require(http.requests.first?.httpBody)
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
         #expect(json["visibility"] == nil)
@@ -129,7 +127,7 @@ struct CompletionTests {
         }
         #expect(message.contains("same key"))
         // Nothing was stored under the key, so this must never look like a refusal that holds.
-        #expect(outcome != .refused(message))
+        #expect(outcome != .refused(message, nil))
     }
 
     @Test(
@@ -139,8 +137,12 @@ struct CompletionTests {
         let http = ScriptedHTTP { _ in ScriptedHTTP.json(["uid": "m1"], status: 201) }
         let endpoint = MemoCompletionEndpoint(http: http)
         let job = job(uids: ["u1"])
-        let first = await endpoint.create(job: job, credentials: Fixture.credentials())
-        let replay = await endpoint.create(job: job, credentials: Fixture.credentials())
+        let first = await endpoint.create(
+            job: job, credentials: Fixture.credentials(), under: .unfenced
+        )
+        let replay = await endpoint.create(
+            job: job, credentials: Fixture.credentials(), under: .unfenced
+        )
         #expect(first == .created(uid: "m1"))
         #expect(replay == first)
         // Same key on both attempts is what makes the second one a replay rather than a memo.
@@ -158,7 +160,7 @@ struct CompletionTests {
         struct Offline: Error {}
         let http = ScriptedHTTP { _ in throw Offline() }
         let outcome = await MemoCompletionEndpoint(http: http).create(
-            job: job(uids: []), credentials: Fixture.credentials()
+            job: job(uids: []), credentials: Fixture.credentials(), under: .unfenced
         )
         if case .retry = outcome {
         } else {

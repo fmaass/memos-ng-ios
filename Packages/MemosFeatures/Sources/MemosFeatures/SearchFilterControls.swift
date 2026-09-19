@@ -97,7 +97,7 @@ struct SearchFiltersSection: View {
                 expanded.toggle()
             }
             if expanded {
-                controls
+                panel { controls }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -110,6 +110,19 @@ struct SearchFiltersSection: View {
         .task(id: lifecycle.appearances) {
             guard lifecycle.appearances > 0 else { return }
             await load(tags)
+        }
+    }
+
+    /// Puts what the disclosure opened on a surface of its own — or does not. Which of the two is
+    /// `SearchTagRowStyle`'s decision rather than this view's, because it is the same decision as
+    /// which heading the row inside carries: both are how the opened panel says it is not the
+    /// shortcut row it replaced (MEMNG-214).
+    @ViewBuilder
+    private func panel(@ViewBuilder _ content: () -> some View) -> some View {
+        if SearchTagRowStyle.signature(for: .filter).insidePanel {
+            SearchFilterPanel { content() }
+        } else {
+            content()
         }
     }
 
@@ -170,6 +183,25 @@ struct SearchFiltersSection: View {
                 self.apply(next)
             }
         )
+    }
+}
+
+/// The card the Filters row opens into.
+///
+/// Its own type so that it is measurable: a surface that does not inset what it draws is not a
+/// surface, and only a measurement says so (`SearchFilterControlsTests`). The tokens are the
+/// sheet's own — the same card the field, the matched-outcome row and the activity panel are drawn
+/// on — so the opened filters read as one more of the sheet's blocks rather than a shape of their
+/// own.
+struct SearchFilterPanel<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .padding(DesignTokens.Space.regular)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground))
+            .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
     }
 }
 
@@ -249,7 +281,7 @@ struct FilterTagChipRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
             if shows {
-                Text("Tags")
+                Text(SearchTagRowStyle.signature(for: .filter).heading)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 // Scrolled rather than wrapped, for the reason the shortcut row is: chips grow

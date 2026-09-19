@@ -1,7 +1,7 @@
 # Provenance of the memos-ng artefacts vendored into this package.
 # Written by scripts/sync-openapi.sh — do not edit by hand.
 repo=memos-ng
-commit=b4c7944e07a9c59e600c07e5ab7ccdc851eed986
-subject=Mint a management grant from a fresh sign-on, and let it manage tokens (#115)
-committed=2026-08-28T07:41:54+02:00
-files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md
+commit=a29c2e12fa055d511feef2f7b26b68370cfa5ab5
+subject=Read the thermal guard's sensor by name, and set its limit for the host it runs on (#167)
+committed=2026-09-18T12:24:36+02:00
+files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md Sources/MemosAPI/Fixtures/auto-memo-date.json Sources/MemosAPI/Fixtures/auto-memo-date/heic-offset.heic Sources/MemosAPI/Fixtures/auto-memo-date/jpeg-no-offset.jpg Sources/MemosAPI/Fixtures/auto-memo-date/jpeg-offset.jpg Sources/MemosAPI/Fixtures/auto-memo-date/mov-creationdate.mov Sources/MemosAPI/Fixtures/auto-memo-date/mp4-header-only.mp4 Sources/MemosAPI/Fixtures/auto-memo-date/mp4-zero-header.mp4 Sources/MemosAPI/Fixtures/auto-memo-date/png-exif-after-idat.png Sources/MemosAPI/Fixtures/auto-memo-date/png-exif.png Sources/MemosAPI/Fixtures/auto-memo-date/png-none.png

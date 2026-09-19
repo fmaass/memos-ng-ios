@@ -5,6 +5,56 @@ public enum OutboxStorageError: Error, Equatable {
     case unreadableSource(String)
     case mediaMissing(String)
     case shortRead(expected: Int, got: Int)
+    /// The root could not be leased, so nothing was written. Not a disk failure and not a lost
+    /// capture: the queue is held by another process for an instant, and the caller may try again.
+    case queueBusy(OutboxLockFailure)
+}
+
+extension OutboxStorageError: LocalizedError {
+    /// One case, one sentence — the only one of these a person can do anything about, and now the
+    /// only one that can reach a screen after the caller has already waited out its bound. Every
+    /// other case keeps the description it has always had, which is why the rest answer nil rather
+    /// than a sentence somebody would have to keep true.
+    public var errorDescription: String? {
+        switch self {
+        case .queueBusy: "The memos queue on this device is busy. Try posting again in a moment."
+        default: nil
+        }
+    }
+}
+
+/// What a sweep did, or why it did nothing.
+///
+/// A deferral is not a failure. A pass that does not run costs disk until the next one and never
+/// costs a capture, which is the whole trade this lock makes. It is a value rather than a silence
+/// so the one state that is NOT ordinary — a lock that does not work on this device — can be seen
+/// from outside, which is what the fallback decision would rest on.
+public enum SweepOutcome: Sendable, Equatable {
+    case swept(media: Int, chunks: Int)
+    case deferred(Deferral)
+
+    public enum Deferral: Sendable, Equatable {
+        /// Somebody else holds the root: a capture being written, or a second sweep.
+        case contended
+        /// The lock did not work here, and the errno that said so.
+        case lockUnavailable(Int32)
+    }
+}
+
+/// The exclusive hold a sweep deletes under, together with the live set that was read once it was
+/// held.
+///
+/// The two travel as one thing because the second half may not re-derive either of them: a list
+/// read before the lease was taken is a list another process can still have grown, and that list
+/// is what every deletion below rests on.
+final class SweepLease {
+    let lease: OutboxLease
+    let live: Set<String>
+
+    init(lease: OutboxLease, live: Set<String>) {
+        self.lease = lease
+        self.live = live
+    }
 }
 
 /// One captured file on its way in, before the outbox owns a copy of it.
@@ -15,13 +65,45 @@ public struct StagedSource: Sendable, Equatable {
     public var filename: String
     public var mime: String
     public var lastModified: Date?
+    /// What names this file for as long as the layer above is holding it.
+    ///
+    /// Never nil: a source that is handed none MINTS one, because the alternative — naming a file
+    /// by where it is — is the one thing that cannot be an identity. A path can be reused: replace
+    /// the bytes at `…/photo.jpg` and it is a different file with the same name, and an edit key
+    /// built from that name would let the server replay the edit that carried the OLD bytes and
+    /// answer 200 while the replacement went nowhere. Every construction of this value is an
+    /// import, and every import is its own thing.
+    ///
+    /// A caller that wants two constructions to BE the same thing says so by passing the identity —
+    /// which is exactly what a retry does (`PickedMedia.stagedSource`), and the only way two of
+    /// these are ever equal for the edit key.
+    ///
+    /// The outbox does not read it: a queued capture is identified by its job and by `OutboxFile.id`,
+    /// which is minted where the bytes are copied and is what the manifest carries. This one lives
+    /// exactly as long as the fact it stands for — one compose session's edit key.
+    public var identity: UUID
 
-    public init(url: URL, filename: String, mime: String, lastModified: Date? = nil) {
+    public init(
+        url: URL,
+        filename: String,
+        mime: String,
+        lastModified: Date? = nil,
+        identity: UUID = UUID()
+    ) {
         self.url = url
         self.filename = filename
         self.mime = mime
         self.lastModified = lastModified
+        self.identity = identity
     }
+
+    /// How this file is named in an edit key: its token, and nothing else.
+    ///
+    /// No fallback to anything about the file, because every candidate is a lie somewhere. The
+    /// basename is shared by two directories; the full path is reused when the bytes at it are
+    /// replaced; the modification date moves when the picker exports again. Only a token minted at
+    /// the import says "this attachment", and only a token carried forward says "the same one".
+    public var editIdentity: String { identity.uuidString }
 }
 
 /// The queue on disk, as everything above it needs to see it.
@@ -34,8 +116,44 @@ public protocol OutboxPersisting: Sendable {
     func loadJobs() async throws -> [UploadJob]
     func job(_ id: UUID) async -> UploadJob?
     func save(_ job: UploadJob) async throws
+
+    /// Writes `job` — but only if the manifest on disk is still the one `snapshot` was read from,
+    /// and only if the authority `job` was decided under still stands; otherwise writes `fallback`,
+    /// or nothing at all.
+    ///
+    /// TWO fences, and they answer different questions:
+    ///
+    /// - **is this still the same capture?** `snapshot` is what the caller read before it began.
+    ///   Between that read and this write the caller suspended, and inside that suspension another
+    ///   pass can advance the job — or finish it and delete the manifest whole. Writing then either
+    ///   overwrites progress the server has already confirmed or resurrects a capture that is gone,
+    ///   without the originals it named. Neither candidate is about the manifest that is on disk
+    ///   now, so NEITHER is written. It is the same rule the drain already applies to a chunk answer
+    ///   whose offset no longer matches, taken where nothing can land after it.
+    /// - **is this still the same authority?** A hold decided under a credential the device has
+    ///   since replaced is a capture stranded behind a "sign in again" its owner already did, so
+    ///   `fallback` is written instead and the next pass sends under the successor.
+    ///
+    /// Both are asked HERE, inside the implementation, immediately before the bytes go down and with
+    /// nothing awaited in between. Asked by the caller they are verdicts carried across a hop into
+    /// this actor, which is the whole class this exists to close.
+    ///
+    /// A `nil` epoch is unknown, which writes `job` — the behaviour this lane always had.
+    ///
+    /// - Returns: the job actually written, AS THE DISK NOW HOLDS IT — dates are persisted to
+    ///   whole seconds, so this is not always the value that was offered, and a caller that
+    ///   fences its next write on what it just saved must carry this value on rather than its own.
+    ///   `nil` when the manifest moved on and nothing was written at all. `nil` is not a storage
+    ///   failure: there is nothing to report and nothing to retry, because a later pass already
+    ///   owns this capture.
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob?
     func delete(_ job: UploadJob) async
-    func sweepOrphans() async throws
+    func sweepOrphans() async throws -> SweepOutcome
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
     ) async throws -> URL
@@ -56,16 +174,57 @@ public protocol OutboxPersisting: Sendable {
 /// The order matters: media is copied first and the manifest is written last, atomically, so a
 /// crash mid-capture leaves at worst an unreferenced media directory (swept on the next launch)
 /// and never a job whose files are missing.
+///
+/// Which is also why the tree is leased rather than merely owned by an actor. That unreferenced
+/// media directory is exactly what a capture in mid-copy looks like, this actor's isolation stops
+/// at the process boundary, and the share extension is a SECOND process over this same tree: a
+/// capture is written under a shared lease on `<root>/.lock` and a sweep deletes under an
+/// exclusive one, so the two can never be in here at once.
 public actor OutboxRepository {
     private let root: URL
+    /// Whether an authority epoch handed out earlier still stands, asked at the instant of a write.
+    ///
+    /// A closure rather than the provider itself, so the durability layer takes no dependency on
+    /// the credentials protocol and the on-disk format is untouched. The default answers "nothing
+    /// moves", which is correct for every repository that no drain is behind — the share
+    /// extension's, and the fixtures with no engine — and wrong for one that is, which is why the
+    /// call sites that feed an engine pass the real predicate.
+    private let stillCurrent: @Sendable (Int) -> Bool
 
-    public init(root: URL) throws {
+    /// What keeps the app's housekeeping and the share extension's capture out of each other.
+    private let lock: OutboxLock
+
+    public init(root: URL, stillCurrent: @escaping @Sendable (Int) -> Bool = { _ in true }) throws {
         self.root = root
+        self.stillCurrent = stillCurrent
+        self.lock = OutboxLock(url: root.appending(path: ".lock"))
+        try prepare()
+    }
+
+    /// The same repository with `flock(2)` replaced, which is the only way to ask for the branch a
+    /// filesystem that does not implement locking would take — the branch both sides degrade
+    /// closed on. Internal: nothing outside this package may choose how the queue excludes the
+    /// other process.
+    init(
+        root: URL,
+        stillCurrent: @escaping @Sendable (Int) -> Bool = { _ in true },
+        flock: @escaping @Sendable (Int32, Int32) -> Int32
+    ) throws {
+        self.root = root
+        self.stillCurrent = stillCurrent
+        self.lock = OutboxLock(url: root.appending(path: ".lock"), flock: flock)
+        try prepare()
+    }
+
+    /// The four directories, and the lock file beside them rather than inside any of them: the
+    /// sweep lists `media` and `chunks`, so a file at the root is out of its reach by construction.
+    private nonisolated func prepare() throws {
         for directory in [jobsRoot, mediaRoot, chunksRoot, quarantineRoot] {
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true
             )
         }
+        lock.createFile()
     }
 
     /// The queue's home inside the app group, or nil when the container is not reachable — which
@@ -163,9 +322,53 @@ public actor OutboxRepository {
     }
 
     public func save(_ job: UploadJob) throws {
+        _ = try persist(job)
+    }
+
+    /// The write, and the value the DISK now holds — which is not always the value it was handed.
+    ///
+    /// Dates go down as ISO 8601, whole seconds (`.iso8601` on both sides), so a job carrying a
+    /// fractional instant — every `backingOff(at:)` and `released(at:)` taken from a real clock —
+    /// is NOT equal to what the next read decodes. That matters because the fence below is a
+    /// full-value compare: a caller that saves a value and then fences its next write on the
+    /// value it saved would be asking about a manifest this device never held, and a legitimate
+    /// write would be dropped with nobody competing for the row. So what comes back here is the
+    /// round trip, and a caller that carries on carries on with what is on disk.
+    private func persist(_ job: UploadJob) throws -> UploadJob {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(job).write(to: manifestURL(job.id), options: .atomic)
+        let data = try encoder.encode(job)
+        try data.write(to: manifestURL(job.id), options: .atomic)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        // The bytes ARE written by now, so a round trip that somehow could not be read back is not
+        // a failed write and must not be reported as one: the candidate is handed back, which is
+        // what every caller got before this returned anything else.
+        return (try? decoder.decode(UploadJob.self, from: data)) ?? job
+    }
+
+    /// Both questions and the write, on one isolation with no suspension between them — see
+    /// `OutboxPersisting`. `job(_:)` and `save(_:)` below are a synchronous read and a synchronous
+    /// `Data.write`, so from the first question to the bytes there is no instant for a renewal, a
+    /// sibling drain or a background callback to land in.
+    public func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) throws -> UploadJob? {
+        // The manifest IS the capture: no row means a pass that finished ahead of this one deleted
+        // it, and writing either candidate now would put it back without the originals it names.
+        guard let onDisk = self.job(snapshot.id) else { return nil }
+        // Value equality rather than a field: `UploadJob` is `Equatable`, every mutation this queue
+        // makes produces a different value, and a comparison that named some of the fields would be
+        // a second copy of "what counts as progress" to keep in step with the first.
+        guard onDisk == snapshot else { return nil }
+        let stands = epoch.map(stillCurrent) ?? true
+        let chosen = stands ? job : fallback
+        // As persisted, not as offered — see `persist`. A caller that fences its NEXT write on
+        // this value is asking about the row on disk, so this has to BE the row on disk.
+        return try persist(chosen)
     }
 
     /// A job leaves the outbox whole: the manifest goes first, so a crash between the two calls
@@ -373,6 +576,18 @@ public actor OutboxRepository {
     ///
     /// Nothing here talks to a network, and the manifest is the last thing written: when this
     /// returns, the capture survives a crash, a reboot and a force-quit.
+    ///
+    /// All of it under a SHARED lease on the root, taken before the first byte and released after
+    /// the manifest. Between those two moments the media directory exists with nothing naming it,
+    /// which is indistinguishable from a crash's leftovers to a sweep in the other process — so
+    /// the sweep is excluded for the duration rather than asked to guess. Shared, so two captures
+    /// never refuse each other; only a sweep does.
+    ///
+    /// A lease that cannot be taken refuses the capture, whichever way it failed. Unavailability
+    /// is LOCAL to this process — a descriptor limit is per process — so it is no evidence about
+    /// whether the other one is sweeping at that instant, and a capture published on that reading
+    /// is the silent loss this lock exists to stop. A refusal is visible and can be retried; the
+    /// loss is neither.
     public func enqueue(
         content: String,
         visibility: String?,
@@ -380,8 +595,18 @@ public actor OutboxRepository {
         binding: AccountBinding,
         sources: [StagedSource],
         id: UUID = UUID(),
-        idempotencyKey: UUID = UUID()
+        idempotencyKey: UUID = UUID(),
+        under authority: SendAuthority = .unfenced
     ) throws -> UploadJob {
+        let lease: OutboxLease
+        switch lock.acquire(.shared) {
+        case .leased(let held):
+            lease = held
+        case .refused(let failure):
+            // Before the directory exists, so a refused capture leaves nothing behind at all.
+            throw OutboxStorageError.queueBusy(failure)
+        }
+        defer { lease.release() }
         let directory = mediaDirectory(id)
         do {
             try FileManager.default.createDirectory(
@@ -399,6 +624,11 @@ public actor OutboxRepository {
                 files: files,
                 binding: binding
             )
+            // The LAST word, on this executor, immediately before the manifest is committed.
+            // Copying the files above is the slow part of a capture and the caller's check was
+            // before it: an account switch landing in that interval would otherwise commit a job
+            // stamped with the account that is leaving, which the next drain can only hold.
+            guard authority.holds() else { throw SendAuthorityWithdrawn() }
             try save(job)
             return job
         } catch {
@@ -483,21 +713,81 @@ public actor OutboxRepository {
     ///
     /// Every deletion below rests on the list of live jobs, so when that list cannot be produced
     /// NOTHING here runs: an empty one would take every capture's originals with it.
-    public func sweepOrphans() throws {
-        let live = Set(try loadJobs().map(\.id.uuidString))
+    ///
+    /// And a list is only the truth for as long as nobody else can add to it, which no actor can
+    /// promise across processes. So the whole pass runs under an EXCLUSIVE lease on the root —
+    /// taken BEFORE the list is read, released after the last deletion — and defers when it cannot
+    /// have one. A deferred pass costs disk until the next launch; a pass that deleted without the
+    /// lease would cost somebody the photographs they watched the share sheet accept.
+    public func sweepOrphans() throws -> SweepOutcome {
+        let started: SweepLease?
+        do {
+            started = try beginSweep()
+        } catch OutboxStorageError.queueBusy(.unavailable(let code)) {
+            return .deferred(.lockUnavailable(code))
+        }
+        guard let started else { return .deferred(.contended) }
+        return try finishSweep(started)
+    }
+
+    /// The first half: the exclusive lease, and then the live set read under it. Nothing is deleted
+    /// here.
+    ///
+    /// Separated from the deletions for ONE reason — a test parks a sweep exactly where the bug
+    /// lived, between the list read and the loop, and drives a real `enqueue` through a second
+    /// repository over the same root while it is parked. Production never separates them:
+    /// `sweepOrphans()` is the only caller of both halves.
+    ///
+    /// `sending`, because that test receives the lease on another isolation. It is one descriptor
+    /// and one immutable set, transferred out rather than shared.
+    ///
+    /// - Returns: the lease and the live set, or nil when another holder has the root — the
+    ///   ordinary refusal, and the only thing nil is allowed to mean. A lock that does not work at
+    ///   all is not ordinary and travels as a throw, because nil cannot carry the errno the
+    ///   outcome names.
+    func beginSweep() throws -> sending SweepLease? {
+        let lease: OutboxLease
+        switch lock.acquire(.exclusive) {
+        case .leased(let held):
+            lease = held
+        case .refused(.contended):
+            return nil
+        case .refused(.unavailable(let code)):
+            throw OutboxStorageError.queueBusy(.unavailable(code))
+        }
+        do {
+            return SweepLease(lease: lease, live: Set(try loadJobs().map(\.id.uuidString)))
+        } catch {
+            // The list is what everything below rests on, so this pass is over — and a lease that
+            // outlived its pass would lock the next capture out for nothing.
+            lease.release()
+            throw error
+        }
+    }
+
+    /// The second half: both deletion passes, inside the one lease, and the release.
+    ///
+    /// A listing that cannot be produced still throws, exactly as it did before there was a lease:
+    /// a media root nobody can read is no licence to go on and sweep the chunks.
+    func finishSweep(_ sweep: sending SweepLease) throws -> SweepOutcome {
+        defer { sweep.lease.release() }
+        var media = 0
         let directories = try FileManager.default.contentsOfDirectory(
             at: mediaRoot, includingPropertiesForKeys: nil
         )
-        for directory in directories where !live.contains(directory.lastPathComponent) {
-            try? FileManager.default.removeItem(at: directory)
+        for directory in directories where !sweep.live.contains(directory.lastPathComponent) {
+            if (try? FileManager.default.removeItem(at: directory)) != nil { media += 1 }
         }
-        let chunks = try FileManager.default.contentsOfDirectory(
+        var chunks = 0
+        let parts = try FileManager.default.contentsOfDirectory(
             at: chunksRoot, includingPropertiesForKeys: nil
         )
-        for chunk in chunks {
+        for chunk in parts {
             let owner = String(chunk.lastPathComponent.prefix(36))
-            if !live.contains(owner) { try? FileManager.default.removeItem(at: chunk) }
+            guard !sweep.live.contains(owner) else { continue }
+            if (try? FileManager.default.removeItem(at: chunk)) != nil { chunks += 1 }
         }
+        return .swept(media: media, chunks: chunks)
     }
 }
 

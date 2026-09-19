@@ -54,15 +54,15 @@ struct TimelinePaginationFenceTests {
                 : Stub.json(Stub.memoList(["fresh-a"], nextCursor: nil))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["a"])
         #expect(store.hasMore)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["fresh-a"], "the refresh did not replace the list")
         release.set(true)
         await inFlight.value
@@ -97,9 +97,9 @@ struct TimelinePaginationFenceTests {
             return Stub.json(Stub.memoList(["b"], nextCursor: nil))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
@@ -128,12 +128,12 @@ struct TimelinePaginationFenceTests {
         }
         let store = TimelineStore(pageSize: 1)
 
-        let first = Task { await store.refresh(using: client, baseURL: Stub.baseURL) }
+        let first = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
         // A second pull, mid-first. The store turns it away rather than reading page one twice.
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         await first.value
 
@@ -141,7 +141,7 @@ struct TimelinePaginationFenceTests {
         #expect(store.memos.map(\.uid) == ["a"])
         // And the generation is not left ahead of the list: the page that follows the refresh that
         // DID run still belongs to it, so it still lands.
-        await store.loadMore(using: client, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["a", "b"], "the turned-away pull fenced a valid page")
     }
 
@@ -170,14 +170,14 @@ struct TimelinePaginationFenceTests {
             return Stub.json(Stub.memoList(["b", "c"], nextCursor: "page-3"))
         }
         let store = TimelineStore(pageSize: 2)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.map(\.uid) == ["a", "b"])
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
-        let removed = await store.delete(uid: "b", using: client)
+        let removed = await store.delete(uid: "b", using: client.handle)
         release.set(true)
         await inFlight.value
 
@@ -223,16 +223,20 @@ struct TimelinePaginationFenceTests {
             return Stub.json(Stub.memoList(["b"], nextCursor: nil))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.memos.first?.attachments.first?.readiness == .waiting)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
         // The reconciling read the channel makes when it starts, and one event off the stream.
-        let reconciled = await store.refreshMemo(uid: "a", using: client, baseURL: Stub.baseURL)
-        store.apply(
+        let reconciled = await store.refreshMemo(
+            uid: "a",
+            using: client.handle,
+            baseURL: Stub.baseURL
+        )
+        await store.apply(
             MediaEvent(uid: "a1", status: .ready, progressPercent: 100, width: 1000, height: 1000)
         )
         release.set(true)
@@ -277,13 +281,13 @@ struct TimelinePaginationFenceTests {
                 : Stub.json(Stub.memoList(["fresh-a"], nextCursor: "fresh-2"))
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !entered.get() {
             await Task.yield()
         }
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         await inFlight.value
 
@@ -333,13 +337,13 @@ struct TimelinePaginationFenceTests {
             }
         }
         let store = TimelineStore(pageSize: 1)
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let inFlight = Task { await store.loadMore(using: client, baseURL: Stub.baseURL) }
+        let inFlight = Task { await store.loadMore(using: client.handle, baseURL: Stub.baseURL) }
         while !enteredAlpha.get() {
             await Task.yield()
         }
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         releaseAlpha.set(true)
         // The store asks again on its own — and the list changes under THAT read too. This wait
         // is the only one with a deadline on it: if the second ask never comes, the point of the
@@ -349,7 +353,7 @@ struct TimelinePaginationFenceTests {
             await Task.yield()
         }
         #expect(enteredBeta.get(), "the store never asked again for the page it dropped")
-        await store.refresh(using: client, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         releaseBeta.set(true)
         await inFlight.value
 

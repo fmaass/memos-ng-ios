@@ -18,7 +18,12 @@ final class ScriptedHTTP: OutboxHTTPPerforming, @unchecked Sendable {
         self.handler = handler
     }
 
-    func perform(_ request: URLRequest) async throws -> OutboxHTTPResponse {
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        // The double answers the same question the real performer does, so a test can put the
+        // withdrawal between two sends and see the second one refused.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         lock.withLock { seen.append(request) }
         return try handler(request)
     }
@@ -89,6 +94,18 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         self.pretendInFlight = inFlight
     }
 
+    private var hook: (@Sendable () -> Void)?
+    private var verdicts: [Bool] = []
+    /// The credential generation each chunk went out under, as the production scheduler records it.
+    private var issued: [String: Int] = [:]
+
+    func epoch(of identity: OutboxTaskIdentity) -> Int? {
+        lock.withLock { issued[identity.taskDescription] }
+    }
+
+    /// What the authority answered, in order, each time this executor was reached.
+    var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
+
     func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { pretendInFlight } }
 
     /// Set after the harness knows the job and file ids a relaunch would have left behind.
@@ -96,7 +113,28 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         lock.withLock { pretendInFlight = identities }
     }
 
-    func upload(_ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity) async {
+    /// Run the instant BEFORE the authority is asked — how a test puts an account switch inside
+    /// the hop between the engine's decision to send and this executor performing it.
+    var beforeUpload: (@Sendable () -> Void)? {
+        get { lock.withLock { hook } }
+        set { lock.withLock { hook = newValue } }
+    }
+
+    func upload(
+        _ request: URLRequest,
+        fromFile file: URL,
+        identity: OutboxTaskIdentity,
+        under authority: SendAuthority,
+        issuedUnder epoch: Int
+    ) async {
+        beforeUpload?()
+        lock.withLock { issued[identity.taskDescription] = epoch }
+        // The double does NOT enforce the policy it is used to test — a stand-in that implements
+        // the guard proves only that the stand-in has one. It records the verdict the PRODUCTION
+        // `SendAuthority` gives at the instant this executor runs, and the test reads that.
+        let permitted = authority.holds()
+        lock.withLock { verdicts.append(permitted) }
+        guard permitted else { return }
         lock.withLock {
             scheduled.append(
                 Scheduled(
@@ -176,8 +214,13 @@ final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
         self.lastOutcome = last ?? outcomes.last ?? .created(uid: "m1")
     }
 
-    func create(job: UploadJob, credentials: OutboxCredentials) async -> MemoCompletionOutcome {
-        lock.withLock {
+    func create(
+        job: UploadJob,
+        credentials: OutboxCredentials,
+        under authority: SendAuthority
+    ) async -> MemoCompletionOutcome {
+        guard authority.holds() else { return .retry("no authority") }
+        return lock.withLock {
             attempts.append(job.idempotencyKey)
             guard !outcomes.isEmpty else { return lastOutcome }
             return outcomes.removeFirst()
@@ -220,9 +263,25 @@ actor FaultyPersistence: OutboxPersisting {
         try await inner.save(job)
     }
 
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        guard refusals == 0 else {
+            refusals -= 1
+            refusedSaves += 1
+            throw Refused()
+        }
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
-    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
@@ -295,9 +354,270 @@ actor GatedPersistence: OutboxPersisting {
         try await inner.save(job)
     }
 
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        if held > 0 {
+            held -= 1
+            await gate.pass()
+        }
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
-    func sweepOrphans() async throws { try await inner.sweepOrphans() }
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// Supersedes the grant on the way INTO the write — the hop `OutboxEngine` makes into
+/// `OutboxRepository`, and the one no engine-side comparison can close.
+///
+/// It intercepts the REFUSAL writes, which are the ones that name an epoch: since MEMNG-289 every
+/// ordinary write crosses this signature too, and superseding on those would renew the grant during
+/// the setup drain of every test below — the premise each of them asserts (`the chunk really was
+/// sent under the grant the engine still holds`) would be false before the answer it is about ever
+/// arrived. An ordinary write asks nothing about a credential, which is exactly what
+/// `ifStillCurrent: nil` says, so it is let through untouched. Because the CHOICE is made inside
+/// `inner`, after the line below, the fallback is what lands.
+actor SupersedingPersister: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let provider: SwitchableCredentials
+    private(set) var fencedSaves = 0
+
+    init(_ inner: OutboxRepository, superseding provider: SwitchableCredentials) {
+        self.inner = inner
+        self.provider = provider
+    }
+
+    func save(_ job: UploadJob) async throws { try await inner.save(job) }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        guard epoch != nil else {
+            return try await inner.save(
+                job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+            )
+        }
+        fencedSaves += 1
+        // The renewal commits between the engine's decision and the repository's write.
+        provider.supersede()
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// Credentials that let another pass land INSIDE the acquisition hop.
+///
+/// `OutboxEngine.handle` reads the manifest, matches the answer against the offset on disk, and
+/// only then awaits `currentCredentials()`. That await is a suspension, and a sibling drain or a
+/// newer chunk answer can advance the capture — or finish it and delete the manifest — while it is
+/// open. This double is that other pass, on demand and deterministically: the action runs once, at
+/// the acquisition, so the handler resumes holding a snapshot that no longer describes the disk.
+final class InterferingCredentials: OutboxCredentialsProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: OutboxCredentials?
+    private var epoch = 0
+    private var fired = false
+    private let onAcquire: @Sendable () async -> Void
+
+    init(_ current: OutboxCredentials?, onAcquire: @escaping @Sendable () async -> Void) {
+        self.current = current
+        self.onAcquire = onAcquire
+    }
+
+    func currentCredentials() async -> OutboxCredentials? {
+        // Once. A drain acquires more than once, and the point is one interleaving, not a loop.
+        let shouldFire: Bool = lock.withLock {
+            let first = !fired
+            fired = true
+            return first
+        }
+        if shouldFire { await onAcquire() }
+        return lock.withLock {
+            guard var acquired = current else { return nil }
+            acquired.epoch = epoch
+            return acquired
+        }
+    }
+
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        lock.withLock { epoch == credentials.epoch }
+    }
+
+    func stillCurrent(epoch: Int) -> Bool { lock.withLock { self.epoch == epoch } }
+}
+
+/// Refuses the FIRST fenced write and moves the capture while doing it, so the storage-failure
+/// recovery runs against a manifest that has changed underneath it.
+///
+/// The recovery is one more write, and the window that swallowed the first one is still open. This
+/// double is that window, on demand: the interference lands inside the throwing call, and the
+/// recovery call that follows is let through to the real repository so the test can read back what
+/// it actually did.
+actor FailingThenInterferingPersister: OutboxPersisting {
+    struct Refused: Error {}
+
+    private let inner: OutboxRepository
+    private let interfere: @Sendable () async -> Void
+    private var refusedFirst = false
+    private(set) var recoveryWrites = 0
+
+    init(_ inner: OutboxRepository, interfering: @escaping @Sendable () async -> Void) {
+        self.inner = inner
+        self.interfere = interfering
+    }
+
+    func save(_ job: UploadJob) async throws {
+        recoveryWrites += 1
+        try await inner.save(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        guard refusedFirst else {
+            refusedFirst = true
+            // The other pass lands while this write is failing.
+            await interfere()
+            throw Refused()
+        }
+        recoveryWrites += 1
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+    ) async throws -> URL {
+        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    }
+}
+
+/// The other pass, landing INSIDE the write hop of ONE chosen write.
+///
+/// `FailingThenInterferingPersister` above is this shape for the recovery window; this is the
+/// ordinary one, and it is what a witness for a fenced write is made of. The write is named by a
+/// predicate over the CANDIDATE the engine offers — a line number would not survive the next edit,
+/// and the candidate is what the site is — the interference runs once, before that write is let
+/// through to the real repository, and what the fence reads inside `inner` is therefore a manifest
+/// the other pass has already changed.
+///
+/// Nothing is parked and no continuation is held: the interference is awaited inside the save the
+/// engine is suspended in, which IS the interleaving, deterministically and with no sleeping.
+actor InterferingPersistence: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let matches: @Sendable (UploadJob) -> Bool
+    private let interfere: @Sendable () async -> Void
+    /// Whether the chosen write was reached at all — a premise a test asserts rather than assumes.
+    private(set) var didInterfere = false
+    /// Writes the engine attempted AFTER the overtaken one, so "and nothing further was written for
+    /// that capture" is a number rather than a hope.
+    private(set) var attemptsAfter = 0
+
+    init(
+        _ inner: OutboxRepository,
+        when matches: @escaping @Sendable (UploadJob) -> Bool,
+        interfering: @escaping @Sendable () async -> Void
+    ) {
+        self.inner = inner
+        self.matches = matches
+        self.interfere = interfering
+    }
+
+    private func arrive(_ job: UploadJob) async {
+        guard !didInterfere else {
+            attemptsAfter += 1
+            return
+        }
+        guard matches(job) else { return }
+        didInterfere = true
+        await interfere()
+    }
+
+    func save(_ job: UploadJob) async throws {
+        await arrive(job)
+        try await inner.save(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        await arrive(job)
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
@@ -331,6 +651,8 @@ final class MutableClock: @unchecked Sendable {
 final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendable {
     private let lock = NSLock()
     private var current: OutboxCredentials?
+    private var epoch = 0
+    private var supersedeOnAcquire = false
 
     init(_ current: OutboxCredentials?) { self.current = current }
 
@@ -338,13 +660,45 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
         lock.withLock { current = credentials }
     }
 
-    func currentCredentials() async -> OutboxCredentials? { lock.withLock { current } }
+    /// Somebody signs in as somebody else RIGHT NOW — driven from inside the scripted server, so
+    /// a test can put the switch between two sends rather than only before the first.
+    func supersede() { lock.withLock { epoch += 1 } }
+
+    /// Somebody signs in as somebody else the instant AFTER a pass acquires its credential — the
+    /// window the acquisition itself cannot close, and the one every request in that pass is then
+    /// inside of.
+    func supersedeAfterNextAcquisition() { lock.withLock { supersedeOnAcquire = true } }
+
+    func currentCredentials() async -> OutboxCredentials? {
+        lock.withLock {
+            guard var acquired = current else { return nil }
+            acquired.epoch = epoch
+            if supersedeOnAcquire {
+                epoch += 1
+                supersedeOnAcquire = false
+            }
+            return acquired
+        }
+    }
+
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool {
+        lock.withLock { epoch == credentials.epoch }
+    }
+
+    func stillCurrent(epoch: Int) -> Bool {
+        lock.withLock { self.epoch == epoch }
+    }
 }
 
 struct StaticCredentials: OutboxCredentialsProviding {
     var credentials: OutboxCredentials?
 
     func currentCredentials() async -> OutboxCredentials? { credentials }
+
+    /// Nothing moves under this one, so what it granted always still stands.
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
+
+    func stillCurrent(epoch: Int) -> Bool { true }
 }
 
 enum Fixture {

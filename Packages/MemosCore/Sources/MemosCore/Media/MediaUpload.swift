@@ -23,7 +23,8 @@ public enum MediaUploadError: Error, Equatable, LocalizedError {
 }
 
 extension MediaUploadError: APIErrorCarrying {
-    /// A refusal is the server's answer and keeps its identity — above all a 401, which ends the
+    /// A refusal is the server's answer and keeps its identity — above all a rejected credential,
+    /// which ends the
     /// session wherever it happens. The other two are this device's own trouble and carry none.
     public var apiError: APIError? {
         guard case .refused(let error) = self else { return nil }
@@ -57,14 +58,20 @@ public enum MediaUpload {
     /// finalizes pending uploads as part of the memo write that names them
     /// (`app/routers/memos.py`, "finalize-on-post"), so a client that called `/finalize` itself
     /// would produce an attachment belonging to no memo — an orphan in the library.
+    /// - Parameter authority: asked immediately before EVERY request this makes — the start, each
+    ///   chunk, and the offset HEAD a gap recovers through. A chunked upload is the longest-lived
+    ///   thing this app sends and the one most likely to still be going when a session ends, and
+    ///   it runs off the main actor, so the check travels with it rather than being made once by
+    ///   the caller (`SendAuthority`).
     public static func upload(
         _ source: StagedSource,
         using client: any APIProtocol,
         fileManager: FileManager = .default,
-        offsetDeadline deadline: Duration = offsetDeadline
+        offsetDeadline deadline: Duration = offsetDeadline,
+        under authority: SendAuthority = .unfenced
     ) async throws -> String {
         let size = try byteSize(of: source.url, fileManager: fileManager)
-        let started = try await start(source, size: size, using: client)
+        let started = try await start(source, size: size, using: client, under: authority)
         guard size > 0 else { return started.uploadUid }
 
         let handle: FileHandle
@@ -75,7 +82,7 @@ public enum MediaUpload {
         }
         defer { try? handle.close() }
 
-        var offset = Int64(started.bytesReceived)
+        var offset = try position(started.bytesReceived, atMost: size)
         var chunkSize = usableChunkSize(started.chunkSize)
         var resyncs = 0
         while offset < size {
@@ -84,45 +91,62 @@ public enum MediaUpload {
             // the declared size can no longer be reached and the server will never call it
             // complete.
             guard !piece.isEmpty else { throw MediaUploadError.stalled }
-            switch try await append(piece, to: started.uploadUid, at: offset, using: client) {
+            switch try await append(
+                piece, to: started.uploadUid, at: offset, using: client, under: authority
+            ) {
             case .accepted(let answer):
                 // The SERVER's count is the position, never this loop's arithmetic: it is what a
-                // resume would read, and the one number that cannot disagree with what it holds.
-                guard Int64(answer.bytesReceived) > offset else { throw MediaUploadError.stalled }
-                offset = Int64(answer.bytesReceived)
+                // resume would read, and the one number that cannot disagree with what it holds —
+                // as far as the bytes this chunk actually carried, and no further.
+                let received = try position(
+                    answer.bytesReceived, atMost: offset + Int64(piece.count)
+                )
+                guard received > offset else { throw MediaUploadError.stalled }
+                offset = received
                 chunkSize = usableChunkSize(answer.chunkSize)
             case .offsetGap:
                 // The contract's own answer to a gap, and the outbox's: ask the session where it
                 // stands and resend from there (`app/routers/uploads.py` — "Offset gap; re-sync
                 // via HEAD"). Same semantics as the background lane, over the generated client.
                 //
-                // It is asked, and today it cannot answer. The route is published with an
-                // `application/json` body it does not send — a HEAD carries a status and the
-                // `Upload-Offset` header and nothing else — so the generated client cannot read
-                // the answer back. That is measured rather than assumed: see
-                // `theOffsetRouteCannotBeReadAsPublished`, which fails on the real shape and
-                // succeeds on the same response with a body, naming the cause exactly.
+                // The ask is on a DEADLINE. The failure it meets is not always prompt: an answer
+                // this client cannot read fails as soon as it is parsed, but a session that simply
+                // does not answer is bounded only by the URL loading system's own request timeout
+                // — a minute of a Save sitting frozen on a screen somebody is waiting at. A few
+                // seconds is the whole of what a resume is worth here.
                 //
-                // The ask is on a DEADLINE for that reason. The failure it meets is not always
-                // prompt: a bodyless answer fails as soon as it is parsed, but a session that
-                // simply does not answer is bounded only by the URL loading system's own request
-                // timeout — a minute of a Save sitting frozen on a screen somebody is waiting at.
-                // A few seconds is the whole of what a resume is worth here.
-                //
-                // So a gap ends the upload instead, which is safe: no memo patch is sent, nothing
-                // is half-attached, and the retry the person makes carries the same edit key
-                // (`TimelineStore.edit`). Fixing the contract in memos-ng is what makes this
-                // branch resume on its own — and that test is what will say so when it does,
-                // rather than this comment quietly going stale.
+                // An answer that does not arrive, or does not say a number, ends the upload
+                // instead, which is safe: no memo patch is sent, nothing is half-attached, and the
+                // retry the person makes carries the same edit key (`TimelineStore.edit`).
                 resyncs += 1
-                guard
-                    let synced = try? await self.offset(
-                        of: started.uploadUid, using: client, within: deadline
+                let reported: Int64
+                do {
+                    reported = try await self.offset(
+                        of: started.uploadUid, using: client, within: deadline, under: authority
                     )
-                else { throw MediaUploadError.refused(.server(status: 409)) }
-                // Two ways this stops instead of spinning: a server that reports the very offset
-                // it just refused is not converging, and a run of gaps on a session nothing else
-                // is writing to means something is wrong that resending cannot fix.
+                } catch let ours as MediaUploadError where ours.apiError == nil {
+                    // Flattened ONLY where the trouble is positively this device's own and named
+                    // by this type: the deadline elapsing, or a session that answered without
+                    // saying where it stands. There is nothing to resume from either way, so the
+                    // gap stands.
+                    //
+                    // Everything else travels on untouched, and that is the point of the shape:
+                    // an INSTALLED credential rejected by the server is minted where the
+                    // credential is attached, inside the generated client's envelope, so it is
+                    // not a `MediaUploadError` at all and never reaches this clause. Caught and
+                    // renamed, it would reach no store, the epoch of the credential that earned
+                    // it would be lost, and a verdict would be taken here about an instant that
+                    // has passed by the time the effect runs. An answer this client cannot parse
+                    // fails inside that same envelope and keeps its own sentence too — nothing
+                    // here reads any of them.
+                    throw MediaUploadError.refused(.server(status: 409))
+                }
+                // A position no session of ours can be at is refused by the shared bounds rule
+                // below; two ways are left to stop instead of carrying on. A server that reports
+                // the very offset it just refused is not converging, and a run of gaps on a
+                // session nothing else is writing to means something is wrong that resending
+                // cannot fix.
+                let synced = try position(reported, atMost: offset + Int64(piece.count))
                 guard synced != offset, resyncs <= maximumResyncs else {
                     throw MediaUploadError.stalled
                 }
@@ -147,6 +171,24 @@ public enum MediaUpload {
     /// not a resumable upload. The outbox is the lane built for genuinely long-lived sessions.
     static let maximumResyncs = 3
 
+    /// A position the SERVER reported, taken only where this upload could actually be.
+    ///
+    /// Every one of these numbers arrives as a plain `integer` with no minimum in the contract, and
+    /// the one the loop adopts is fed to `FileHandle.seek(toOffset:)` — a `UInt64`. A negative one
+    /// is therefore not a failed upload but a dead process, taking the sheet and the words somebody
+    /// was writing with it. Past `ceiling` is the other half: resuming there would skip bytes
+    /// nobody ever sent, call the upload whole and patch the memo to an attachment with a hole in
+    /// the middle.
+    ///
+    /// `.stalled` because that is what happened — the answer arrived and cannot be resumed from —
+    /// and because it carries no `apiError`: nothing the server says about a number ends a session.
+    static func position(_ reported: some BinaryInteger, atMost ceiling: Int64) throws -> Int64 {
+        guard let position = Int64(exactly: reported), position >= 0, position <= ceiling else {
+            throw MediaUploadError.stalled
+        }
+        return position
+    }
+
     /// The size to read next. A server that names no size of its own — or an impossible one — must
     /// not turn into a loop that sends nothing: zero bytes would be refused for ever, and a
     /// negative one is not a length at all.
@@ -163,11 +205,16 @@ public enum MediaUpload {
     public static func uploadAll(
         _ sources: [StagedSource],
         using client: any APIProtocol,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        under authority: SendAuthority = .unfenced
     ) async throws -> [String] {
         var uids: [String] = []
         for source in sources {
-            uids.append(try await upload(source, using: client, fileManager: fileManager))
+            uids.append(
+                try await upload(
+                    source, using: client, fileManager: fileManager, under: authority
+                )
+            )
         }
         return uids
     }
@@ -193,8 +240,11 @@ public enum MediaUpload {
     static func start(
         _ source: StagedSource,
         size: Int64,
-        using client: any APIProtocol
+        using client: any APIProtocol,
+        under authority: SendAuthority = .unfenced
     ) async throws -> Components.Schemas.UploadOut {
+        // Immediately before the send, on the executor doing it.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let response = try await client.startUploadApiUploadsPost(
             .init(
                 body: .json(
@@ -244,10 +294,11 @@ public enum MediaUpload {
     static func offset(
         of uploadUID: String,
         using client: any APIProtocol,
-        within deadline: Duration = offsetDeadline
+        within deadline: Duration = offsetDeadline,
+        under authority: SendAuthority = .unfenced
     ) async throws -> Int64 {
         try await withThrowingTaskGroup(of: Int64.self) { group in
-            group.addTask { try await read(offsetOf: uploadUID, using: client) }
+            group.addTask { try await read(offsetOf: uploadUID, using: client, under: authority) }
             group.addTask {
                 try await Task.sleep(for: deadline)
                 throw MediaUploadError.stalled
@@ -260,8 +311,11 @@ public enum MediaUpload {
 
     private static func read(
         offsetOf uploadUID: String,
-        using client: any APIProtocol
+        using client: any APIProtocol,
+        under authority: SendAuthority = .unfenced
     ) async throws -> Int64 {
+        // Immediately before the send, on the executor doing it.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let response = try await client.uploadOffsetApiUploadsUploadUidHead(
             .init(path: .init(uploadUid: uploadUID))
         )
@@ -269,10 +323,11 @@ public enum MediaUpload {
         case .ok(let ok):
             guard let offset = ok.headers.uploadOffset else {
                 // A re-sync that cannot read the offset has nothing to resume from, and guessing
-                // one would resend into the very gap this call exists to close.
-                throw MediaUploadError.refused(
-                    .unexpected(description: "the upload session did not report its offset")
-                )
+                // one would resend into the very gap this call exists to close. Named as THIS
+                // device's trouble rather than as an answer the server gave: the server said
+                // nothing here, and only an error carrying no `apiError` can be flattened by the
+                // gap branch without that branch having to read an answer to tell them apart.
+                throw MediaUploadError.stalled
             }
             return Int64(offset)
         case .unprocessableContent:
@@ -286,8 +341,11 @@ public enum MediaUpload {
         _ piece: Data,
         to uploadUID: String,
         at offset: Int64,
-        using client: any APIProtocol
+        using client: any APIProtocol,
+        under authority: SendAuthority = .unfenced
     ) async throws -> ChunkOutcome {
+        // Immediately before the send, on the executor doing it — every chunk, not only the first.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
         let response = try await client.appendChunkApiUploadsUploadUidPatch(
             .init(
                 path: .init(uploadUid: uploadUID),

@@ -53,6 +53,58 @@ public enum StoreFailure {
         return false
     }
 
+    /// The refusal this error carries, or nil for one that is not a refusal at all.
+    ///
+    /// The chain, not the top: the generated client's envelope wraps whatever it is given, exactly
+    /// as it does a cancellation. A `Bool` was the old shape and it is the wrong one — a verdict
+    /// taken here is a verdict about the instant the answer arrived, and the effect it triggers
+    /// happens hops later. What comes back is the epoch, so the effect can ask the question itself
+    /// (`CredentialRefusal.concernsCurrentCredential`).
+    ///
+    /// A refusal that names no epoch is still a refusal. A client built from a bare token closure
+    /// records no generation, so its 401 arrives as `APIError.unauthorized` — plain, and about a
+    /// credential nothing here can date. `nil` for `issuedUnder` is that state, and unknown is
+    /// treated as current: the share extension's lane and every bare-token caller end a session on
+    /// a 401 exactly as they always did.
+    public static func refusal(_ error: any Error) -> CredentialRefusal? {
+        var current: (any Error)? = error
+        for _ in 0..<maximumDepth {
+            guard let error = current else { return nil }
+            if let refusal = error as? CredentialRefusal { return refusal }
+            if let api = error as? APIError, api == .unauthorized {
+                return CredentialRefusal(issuedUnder: nil)
+            }
+            if let carried = (error as? any APIErrorCarrying)?.apiError, carried == .unauthorized {
+                return CredentialRefusal(issuedUnder: nil)
+            }
+            if let client = error as? ClientError {
+                current = client.underlyingError
+                continue
+            }
+            current = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return nil
+    }
+
+    /// The classification of a failure that never reached the server, or nil for one that did.
+    ///
+    /// This is the fork the whole "one surface for can't-reach-the-server" rule turns on. A
+    /// transport-class failure goes to the session sink and never into a store's `lastError`; an
+    /// answer the server gave — a 403, a 500 — is about the thing somebody just did and is
+    /// reported where it always was. A cancellation is neither: it is this app's own supersede
+    /// coming back at it.
+    ///
+    /// A gateway answer is the one status class that crosses that line, and only for the two
+    /// statuses this server never emits itself: 502 and 504 mean the reverse proxy is up and the
+    /// server behind it is not, which is the same fact a timeout carries. 503 stays on the
+    /// "answered" side because memos-ng raises it deliberately — a raced write, a degraded health
+    /// check — and reading its own answer as "cannot reach the server" would mistranslate it.
+    public static func transportFailure(_ error: any Error) -> ServerReachability.Reason? {
+        guard !isCancellation(error), refusal(error) == nil else { return nil }
+        guard case .unreachable(let reason) = ServerReachability.classify(error) else { return nil }
+        return reason
+    }
+
     /// The failure a store should report, or nil for one it must swallow.
     ///
     /// Only cancellation is swallowed. Everything else — a 500, a decode, a phone with no network
@@ -66,6 +118,10 @@ public enum StoreFailure {
     /// reaches the rule that ends the session.
     public static func reportable(_ error: any Error) -> APIError? {
         guard !isCancellation(error) else { return nil }
+        // Before the unwrapping below, because a refusal is neither an `APIError` nor a carrier of
+        // one: read as an opaque error it becomes `.unexpected(description:)`, and the sentence
+        // that produces is about this device's own bookkeeping rather than about the server.
+        if refusal(error) != nil { return .unauthorized }
         if let error = error as? APIError { return error }
         if let carried = (error as? any APIErrorCarrying)?.apiError { return carried }
         return .unexpected(description: error.localizedDescription)

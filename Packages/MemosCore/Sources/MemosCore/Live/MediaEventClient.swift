@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 
 /// Where the stream connects and what it presents.
 ///
@@ -136,6 +137,9 @@ public final class MediaEventClient: Sendable {
     /// thrown error means storage would not answer, and only the first of those is terminal.
     private let credentials: @Sendable () async throws -> MediaEventCredentials?
     private let generation: @Sendable () async -> Int
+    /// Asked by the TRANSPORT before every connect, first and reconnect alike — this loop outlives
+    /// any one session (`SendAuthority`).
+    private let authority: SendAuthority
     private let backoff: SSEBackoff
     private let idleReconnectDelay: TimeInterval
     private let transport: any SSEConnecting
@@ -147,10 +151,12 @@ public final class MediaEventClient: Sendable {
         backoff: SSEBackoff = SSEBackoff(),
         idleReconnectDelay: TimeInterval = 15,
         transport: any SSEConnecting = URLSessionSSETransport(),
-        sleeper: any SSESleeper = ContinuousClockSleeper()
+        sleeper: any SSESleeper = ContinuousClockSleeper(),
+        authority: SendAuthority = .unfenced
     ) {
         self.credentials = credentials
         self.generation = generation
+        self.authority = authority
         self.backoff = backoff
         self.idleReconnectDelay = idleReconnectDelay
         self.transport = transport
@@ -171,27 +177,31 @@ public final class MediaEventClient: Sendable {
     /// `DeviceOutboxCredentials` reads it too.
     @MainActor
     public static func device(
-        credentials store: any CredentialStore = DeviceCredentials.keychain(),
+        grant: @escaping @MainActor @Sendable () -> CredentialGrant?,
         identity: MediaIdentity = .shared,
         backoff: SSEBackoff = SSEBackoff(),
         idleReconnectDelay: TimeInterval = 15,
         transport: any SSEConnecting = URLSessionSSETransport(),
-        sleeper: any SSESleeper = ContinuousClockSleeper()
+        sleeper: any SSESleeper = ContinuousClockSleeper(),
+        authority: SendAuthority = .unfenced
     ) -> MediaEventClient {
         MediaEventClient(
             credentials: {
-                guard let token = try await store.string(for: SessionStore.tokenAccount),
-                    !token.isEmpty,
-                    let address = try await store.string(for: SessionStore.serverAccount),
-                    let configuration = ServerConfiguration(serverAddress: address)
-                else { return nil }
-                return MediaEventCredentials(baseURL: configuration.baseURL, token: token)
+                // From the SESSION, in memory, not from the keychain. The two can disagree: a
+                // sign-in as B whose credential would not store leaves B established here and A's
+                // token in the vault, and a channel reading the vault would then present A's
+                // credential under B's session — the pairing `credentialGrant` exists to make
+                // impossible, since the subject and the token come out of one object in one
+                // instant. Read per connection, so a renewal is simply what the next one carries.
+                guard let grant = await grant(), !grant.token.isEmpty else { return nil }
+                return MediaEventCredentials(baseURL: grant.serverBaseURL, token: grant.token)
             },
             generation: { await identity.generation },
             backoff: backoff,
             idleReconnectDelay: idleReconnectDelay,
             transport: transport,
-            sleeper: sleeper
+            sleeper: sleeper,
+            authority: authority
         )
     }
 
@@ -209,6 +219,11 @@ public final class MediaEventClient: Sendable {
         var attempt = 0
         var lastEventID: String?
         var serverRetryHint: TimeInterval?
+        /// The bound on re-granting. ONE immediate reconnect per refusal of a replaced credential,
+        /// and it is spent until a connection opens or the server closes one cleanly. A second in
+        /// a row is not a rotation the device is chasing — it is a credential the server keeps
+        /// refusing, and that IS the end of the channel.
+        var regrants = 0
 
         while !Task.isCancelled {
             guard await generation() == fence else {
@@ -240,13 +255,28 @@ public final class MediaEventClient: Sendable {
             case .cancelled:
                 stop(.cancelled, into: continuation)
                 return
+            case .superseded:
+                guard regrants == 0 else {
+                    MemosLog.media.info("a second refusal in a row is not a rotation to chase")
+                    stop(.unauthorized, into: continuation)
+                    return
+                }
+                regrants += 1
+                // The credential moved, not the session: reconnect at once, and do not spend a
+                // step of the backoff on somebody else's rotation.
+                attempt = max(attempt - 1, 0)
+                delay = 0
             case .ended:
                 // The server closes when nothing is in flight. That is not a failure and must not
                 // escalate the backoff — the next connection is a fresh first attempt.
                 attempt = 0
+                regrants = 0
                 delay = idleReconnectDelay
             case .failed(let opened):
-                if opened { attempt = 0 }
+                if opened {
+                    attempt = 0
+                    regrants = 0
+                }
                 delay = backoff.delay(forAttempt: max(attempt, 1), serverHint: serverRetryHint)
             }
 
@@ -308,11 +338,30 @@ public final class MediaEventClient: Sendable {
 
         var opened = false
         do {
-            let connection = try await transport.connect(request)
+            // Every attempt, including each reconnect: this loop outlives any one session and
+            // the credential it presents is the one this device held when it started.
+            let connection = try await transport.connect(request, under: authority)
             switch connection.statusCode {
             case 200:
                 break
             case 401, 403:
+                // Judged against what the connect actually PRESENTED. This loop outlives any one
+                // credential: a renewal lands between the request being built and the transport
+                // sending it, the transport correctly presents the successor, and if the answer is
+                // about the token this device has since replaced then it says nothing about the one
+                // it is holding. Ending the channel on it takes live updates away from a session
+                // that is perfectly valid.
+                // The same value, and the same one rule, as every other lane — minted here because
+                // this connection never goes through the generated client. `.superseded` is a
+                // RECONNECT signal rather than a discard, which is why the answer is read locally
+                // instead of being handed to the session's funnel.
+                let refusal = CredentialRefusal(issuedUnder: authority.presented()?.epoch)
+                if connection.statusCode == 401,
+                    !refusal.concernsCurrentCredential(ofEpoch: authority.currentEpoch())
+                {
+                    MemosLog.media.info("a 401 for a replaced credential does not end the channel")
+                    return result(.superseded)
+                }
                 MemosLog.media.info("GET /api/events refused the credential")
                 return result(.unauthorized)
             default:
@@ -378,6 +427,9 @@ public final class MediaEventClient: Sendable {
     private enum ConnectionOutcome: Sendable, Equatable {
         case ended
         case failed(opened: Bool)
+        /// A refusal of a credential this device has already replaced. Not an answer about the one
+        /// it is holding, so the channel re-grants and connects again — see the bound in `run`.
+        case superseded
         case unauthorized
         case signedOut
         case identityChanged

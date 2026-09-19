@@ -200,8 +200,8 @@ targets:
         # is verified from Apple's documentation and what is not: the durable fix for a duplicate
         # build number under Xcode Cloud is a ci_scripts/ci_pre_xcodebuild.sh that stamps
         # CURRENT_PROJECT_VERSION from $CI_BUILD_NUMBER, so that no hand edit is needed here.
-        MARKETING_VERSION: "1.0.4"
-        CURRENT_PROJECT_VERSION: "11"
+        MARKETING_VERSION: "1.5.0"
+        CURRENT_PROJECT_VERSION: "19"
         # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
         # classifies API calls as Local Network access; without this declaration iOS 18+ denies
         # them silently (NSURLError -1009 with a satisfied path).
@@ -213,6 +213,13 @@ targets:
         # taking photos never touches it.
         INFOPLIST_KEY_NSCameraUsageDescription: Memos uses the camera to take a photo or a video for the memo you are writing. It goes to your own memos server exactly as the camera recorded it.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Memos uses the microphone to record the sound of a video you take for a memo. Photos never use it.
+        # The system share sheet is handed the downloaded file with no activity excluded
+        # (`MediaSaveFlow.swift`, `ShareSheet`), so it offers "Save Image" and "Save Video", and
+        # iOS asks this string of any app a photo is added to the library from. ADD-ONLY on
+        # purpose, never `NSPhotoLibraryUsageDescription`: the app reads nothing from the library
+        # — composing picks through `PhotosPicker`, which needs no key — and asking for less is
+        # the point.
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: Memos saves the photo or video you chose to keep into your photo library. It never reads your library.
         # Signing lives in signing.default.yml (committed, ad-hoc, simulator-only) overridden by
         # signing.local.yml (gitignored, per-machine device team) — see the include list at the
         # top of this file. Never set signing here and never click it into the generated project.
@@ -273,8 +280,8 @@ targets:
         # without a bundle version cannot be installed at all — "bundleVersion must be set in
         # placeholder attributes for an app extension placeholder", which is a failure to
         # INSTALL the host app, not a warning about the extension.
-        MARKETING_VERSION: "1.0.4"
-        CURRENT_PROJECT_VERSION: "11"
+        MARKETING_VERSION: "1.5.0"
+        CURRENT_PROJECT_VERSION: "19"
 
   MemosAPITests:
     type: bundle.unit-test
@@ -331,6 +338,15 @@ targets:
       # asserted against — from ONE memos-ng commit, same as the parity fixture.
       - path: Packages/MemosAPI/Sources/MemosAPI/openapi.json
         buildPhase: resources
+      # The Auto memo date and the capture order are ONE rule set for every client, and this is
+      # where the rule set lives: the artefact vendored from the same memos-ng commit as the
+      # document above, with the binaries it names beside it. The vectors and the files are read
+      # out of this bundle at run time, so the reader and the vector suites are held to the same
+      # artefact the server and the SPA are held to — not to cases copied into Swift.
+      - path: Packages/MemosAPI/Sources/MemosAPI/Fixtures/auto-memo-date.json
+        buildPhase: resources
+      - path: Packages/MemosAPI/Sources/MemosAPI/Fixtures/auto-memo-date
+        buildPhase: resources
     dependencies:
       - package: MemosOutbox
       - target: MemosNG
@@ -338,6 +354,13 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: live.discomarder.memosng.outboxtests
+        # The capture fixtures are VENDORED BYTES, and this bundle checks each one's sha256
+        # against the artefact that describes it. Xcode re-encodes PNG resources on the way in —
+        # measured on this project 2026-09-06: png-none.png went from 77 bytes to 85 — which
+        # rewrites the very files the digests are about, and can move the eXIf chunk whose
+        # PLACEMENT one of them exists to test. So the copy is left alone here.
+        COMPRESS_PNG_FILES: NO
+        STRIP_PNG_TEXT: NO
 
   MemosShareKitTests:
     type: bundle.unit-test

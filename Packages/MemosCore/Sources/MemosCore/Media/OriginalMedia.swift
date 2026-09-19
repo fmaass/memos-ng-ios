@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 import UniformTypeIdentifiers
 
 /// What streams a response to a FILE rather than into memory.
@@ -12,12 +13,21 @@ import UniformTypeIdentifiers
 public protocol MediaDownloadTransport: Sendable {
     /// The URL loading system's own temporary copy, which it deletes as soon as this call returns
     /// — so a caller that wants the file has to move it before then.
-    func download(_ request: URLRequest) async throws -> (URL, URLResponse)
+    /// - Parameter authority: asked INSIDE this transport, immediately before the request goes
+    ///   out. The caller fences the answer on both ways back, but the send itself happens on
+    ///   another executor and an original is the longest-lived request this app makes — the one
+    ///   most likely to leave under an account the device no longer holds (`SendAuthority`).
+    func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
 }
 
 extension MediaSession: MediaDownloadTransport {
-    public func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
-        try await session.download(for: request)
+    public func download(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (URL, URLResponse)
+    {
+        // On the executor that sends, with nothing between the answer and the request.
+        guard authority.holds() else { throw SendAuthorityWithdrawn() }
+        return try await session.download(for: authority.presenting(request))
     }
 }
 
@@ -33,6 +43,10 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
     case foreignHost
     /// The server answered, and the answer was not the file.
     case refused(APIError)
+    /// The server REFUSED the credential, and this is which credential it refused. Its own case
+    /// rather than a `refused(.unauthorized)`, because the epoch is what the effect needs and a
+    /// bare `APIError` has thrown it away by the time anything can act on it (MEMNG-270).
+    case credentialRefused(CredentialRefusal)
     /// It arrived and could not be kept.
     case notStored(String)
     /// The sign-in that asked for it moved on while it was on its way. Two ways that happens: the
@@ -49,6 +63,7 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
         case .foreignHost:
             "This file is hosted somewhere other than the server you are signed in to."
         case .refused(let error): error.errorDescription
+        case .credentialRefused(let refusal): refusal.errorDescription
         case .notStored(let detail): "The download could not be saved: \(detail)"
         case .superseded: "The download was cancelled because this device's sign-in changed."
         }
@@ -58,8 +73,72 @@ public enum OriginalMediaError: Error, Equatable, LocalizedError {
 extension OriginalMediaError: APIErrorCarrying {
     /// Only a refusal is the server's word; the rest describe this device.
     public var apiError: APIError? {
-        guard case .refused(let error) = self else { return nil }
-        return error
+        switch self {
+        case .refused(let error): error
+        // The status it stands for, so `StoreFailure.reportable` and `ComposeOutcome` keep
+        // reading this lane exactly as they did.
+        case .credentialRefused: .unauthorized
+        default: nil
+        }
+    }
+}
+
+/// Which of an attachment's files a download asks the server for.
+///
+/// Two, because the app has two different questions about one upload. Somebody keeping a
+/// photograph wants the file as it was taken; somebody sending a clip to a friend wants something
+/// that will actually arrive. Naming them once here, rather than picking a URL at each call site,
+/// is what stops a tile menu and the viewer's overlay from disagreeing about which file "Share"
+/// means.
+public enum AttachmentRendition: Sendable, Equatable {
+    /// The file as it was uploaded — the archive master (ADR-0008).
+    case original
+    /// The copy this app hands to somebody else. See `MemoAttachment.file(_:)` for what that is,
+    /// and why it is the master nearly every time.
+    case shared
+}
+
+/// One fetchable file of an attachment: where it is, and what it is.
+///
+/// The mime travels WITH the URL because a derived rendition is not the mime the upload carries: a
+/// clip uploaded as `video/quicktime` is handed on as the `video/mp4` the server made of it, and
+/// the extension the share sheet reads comes off THIS mime, not off the attachment's.
+public struct AttachmentFile: Sendable, Equatable {
+    public let url: URL
+    public let mime: String
+
+    public init(url: URL, mime: String) {
+        self.url = url
+        self.mime = mime
+    }
+}
+
+extension MemoAttachment {
+    /// Where a rendition of this file is, or nil when the payload names no such file.
+    ///
+    /// `shared` is the archive master for everything except a clip, and what decides that is what
+    /// the server actually holds. Only three derived tiers are real files — `thumb` and `mobile`
+    /// are JPEGs of a PICTURE, `web` is the mp4 of a VIDEO — yet every payload carries a signed
+    /// URL for all four whether the file behind it exists or not (memos-ng
+    /// `app/services/asset_urls.py` signs the set unconditionally, from the uid alone). A derived
+    /// URL is therefore a guess, and `downloadUrl` is the one file every attachment really has.
+    /// For a picture or a document that settles it twice over: the thing somebody asked to send IS
+    /// the file they are looking at, and it is the tier certain to be there.
+    ///
+    /// A clip is the exception, on size. Its master is what the camera wrote — HEVC, often
+    /// gigabytes — while the mp4 beside it is the rendition this app already plays and small
+    /// enough for a message to carry. That is the difference between a share that completes and
+    /// one that never does.
+    public func file(_ rendition: AttachmentRendition) -> AttachmentFile? {
+        switch rendition {
+        case .original:
+            return downloadURL.map { AttachmentFile(url: $0, mime: mime) }
+        case .shared:
+            guard isVideo, let webURL else { return file(.original) }
+            // Not a guess about this upload: the web tier IS an mp4, whatever was uploaded
+            // (memos-ng `app/services/asset_paths.py`).
+            return AttachmentFile(url: webURL, mime: "video/mp4")
+        }
     }
 }
 
@@ -187,18 +266,32 @@ public enum OriginalMedia {
         server: URL,
         transport: any MediaDownloadTransport,
         into directory: URL = .temporaryDirectory,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        under authority: SendAuthority = .unfenced
     ) async throws -> URL {
         // BEFORE the request is built, so a URL the credential may not be offered to produces no
         // request at all rather than one that is thrown away afterwards.
         guard sameOrigin(url, as: server) else { throw OriginalMediaError.foreignHost }
         let (temporary, response): (URL, URLResponse)
         do {
-            (temporary, response) = try await transport.download(request(url: url, token: token))
+            (temporary, response) = try await transport.download(
+                request(url: url, token: token), under: authority
+            )
+        } catch is SendAuthorityWithdrawn {
+            throw OriginalMediaError.superseded
         } catch {
             throw OriginalMediaError.refused(.transport(description: error.localizedDescription))
         }
-        try accept(response)
+        do {
+            try accept(response)
+        } catch OriginalMediaError.refused(.unauthorized) {
+            // Minted HERE rather than in `accept`, which has no authority to read an epoch from.
+            // What the send actually PRESENTED is the only number this refusal is about, and the
+            // grant is the one thing that recorded it (`SendAuthority.presented`).
+            throw OriginalMediaError.credentialRefused(
+                CredentialRefusal(issuedUnder: authority.presented()?.epoch)
+            )
+        }
         let enclosure = directory.appending(path: UUID().uuidString)
         let destination = enclosure.appending(path: filename(uid: uid, mime: mime))
         do {

@@ -1,6 +1,7 @@
+import MemosCore
 import SwiftUI
 
-/// The signed-in app's surfaces, as a value rather than as two literals inside a `TabView`.
+/// The signed-in app's surfaces, as a value rather than as literals inside a `TabView`.
 ///
 /// It exists so what the app's main navigation OFFERS is assertable: a tab whose title or glyph is
 /// written inline in a view body is a thing no test can read back, and this is the one list that
@@ -8,6 +9,7 @@ import SwiftUI
 public enum MainTab: String, CaseIterable, Identifiable, Sendable {
     case timeline
     case library
+    case places
 
     public var id: String { rawValue }
 
@@ -15,6 +17,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .timeline: "Timeline"
         case .library: "Library"
+        case .places: "Places"
         }
     }
 
@@ -23,6 +26,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .timeline: "list.bullet"
         case .library: "photo.on.rectangle.angled"
+        case .places: "map"
         }
     }
 }
@@ -31,9 +35,10 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
 ///
 /// A tab bar rather than a screen with a button to somewhere else: the library is a place people
 /// go back to, and a destination reached by pushing off the timeline is one that loses its scroll
-/// position every time. Both tabs keep their own navigation stack, which is what makes going back
+/// position every time. Each tab keeps its own navigation stack, which is what makes going back
 /// and forth between them cost nothing.
 struct MainTabView: View {
+    @Environment(SessionStore.self) private var session
     @State private var selection: MainTab = .timeline
     /// A memo asked for from a tab that cannot open one.
     ///
@@ -44,20 +49,47 @@ struct MainTabView: View {
     @State private var jump = MemoJump()
 
     var body: some View {
+        VStack(spacing: 0) {
+            // Above the tabs rather than inside one, because it is true of the whole app: the
+            // library is as stale as the timeline when the server cannot be reached. Persistent
+            // and not dismissable — it is not a notification of an event, it is the state the
+            // session is in, and it goes away when the session leaves that state.
+            notice
+            tabs
+        }
+    }
+
+    /// The one card the session is entitled to, and never two: which of them is on screen is
+    /// decided by `SessionBanner.notice`, so the weighing is a function with its own cases rather
+    /// than two conditions sitting next to each other in a view body.
+    @ViewBuilder
+    private var notice: some View {
+        switch SessionBanner.notice(
+            showingUnreachable: session.showsUnreachableNotice,
+            verification: session.verification
+        ) {
+        case .unreachable(let text):
+            UnreachableBanner(text: text, retry: { await session.retryNow() })
+                .padding(.horizontal, DesignTokens.Space.regular)
+                .padding(.top, DesignTokens.Space.regular)
+        case .unverified(let text):
+            NoticeCard(text: text, tone: .warning)
+                .padding(.horizontal, DesignTokens.Space.regular)
+                .padding(.top, DesignTokens.Space.regular)
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private var tabs: some View {
+        // The bar IS `MainTab.allCases`: its content and its order are the enum's, so a case added
+        // without a screen is a compile error rather than a tab nobody can reach, and a test that
+        // reads the enum reads what a person touches.
         TabView(selection: $selection) {
-            Tab(
-                MainTab.timeline.title,
-                systemImage: MainTab.timeline.symbol,
-                value: MainTab.timeline
-            ) {
-                TimelineView()
-            }
-            Tab(
-                MainTab.library.title,
-                systemImage: MainTab.library.symbol,
-                value: MainTab.library
-            ) {
-                MediaLibraryView()
+            ForEach(MainTab.allCases) { tab in
+                Tab(tab.title, systemImage: tab.symbol, value: tab) {
+                    screen(for: tab)
+                }
             }
         }
         .environment(jump)
@@ -65,6 +97,15 @@ struct MainTabView: View {
         // Timeline is what reads that and pushes it, because it owns both the list and the stack.
         .onChange(of: jump.pending) { _, pending in
             selection = MemoJumpRouting.tab(showing: selection, whenJumping: pending)
+        }
+    }
+
+    @ViewBuilder
+    private func screen(for tab: MainTab) -> some View {
+        switch tab {
+        case .timeline: TimelineView()
+        case .library: MediaLibraryView()
+        case .places: PlacesView()
         }
     }
 }

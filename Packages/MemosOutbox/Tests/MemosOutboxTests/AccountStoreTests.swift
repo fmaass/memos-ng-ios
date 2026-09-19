@@ -62,7 +62,7 @@ struct AccountStoreTests {
         }
     }
 
-    @Test("the published file carries a server and an owner, and nothing else")
+    @Test("the published file carries a server, an owner and the grant, and nothing else")
     func holdsNoCredential() throws {
         try withStore { store, root in
             store.publish(Fixture.binding())
@@ -70,7 +70,67 @@ struct AccountStoreTests {
             let fields = try #require(
                 try JSONSerialization.jsonObject(with: data) as? [String: String]
             )
-            #expect(fields.keys.sorted() == ["ownerSubject", "serverBaseURL"])
+            #expect(fields.keys.sorted() == ["incarnation", "ownerSubject", "serverBaseURL"])
+        }
+    }
+
+    // MARK: - which grant of the licence this is
+
+    /// The app republishes the same pair every time it revalidates the session in the foreground.
+    /// A new grant there would refuse a share that is doing nothing but waiting for the queue.
+    @Test("a licence republished over itself keeps the grant it already had")
+    func republishingKeepsTheGrant() throws {
+        try withStore { store, _ in
+            store.publish(Fixture.binding())
+            let first = try #require(store.currentLicence()?.incarnation)
+            store.publish(Fixture.binding())
+            #expect(store.currentLicence()?.incarnation == first)
+            #expect(store.current() == Fixture.binding())
+        }
+    }
+
+    /// The window this exists for: forgotten and signed into again, the pair is identical and the
+    /// session is not, so the pair alone cannot say a capture admitted before it may be published
+    /// after it.
+    @Test("a licence revoked and granted again to the same account is a different grant")
+    func reissuingChangesTheGrant() throws {
+        try withStore { store, _ in
+            store.publish(Fixture.binding())
+            let first = try #require(store.currentLicence()?.incarnation)
+            try store.clear()
+            store.publish(Fixture.binding())
+            let second = try #require(store.currentLicence()?.incarnation)
+            #expect(second != first)
+            #expect(store.current() == Fixture.binding(), "and it is still the same account")
+        }
+    }
+
+    @Test("another account's licence is another grant")
+    func anotherAccountIsAnotherGrant() throws {
+        try withStore { store, _ in
+            store.publish(Fixture.binding())
+            let first = try #require(store.currentLicence()?.incarnation)
+            store.publish(Fixture.binding(owner: "someone-else"))
+            #expect(store.currentLicence()?.incarnation != first)
+        }
+    }
+
+    /// The file a build that predates grants left behind. It reads, and it fences nothing — which
+    /// is the honest answer about a fact the file never carried.
+    @Test("a licence written before grants existed reads as a licence with none")
+    func readsALicenceFromBeforeGrants() throws {
+        try withStore { store, root in
+            let file = root.appending(path: "outbox/account.json")
+            try FileManager.default.createDirectory(
+                at: file.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try JSONEncoder().encode(Fixture.binding()).write(to: file)
+            #expect(store.current() == Fixture.binding())
+            #expect(store.currentLicence()?.incarnation == nil)
+            // And the next thing the app publishes grants one, so the fence starts working without
+            // anybody signing out.
+            store.publish(Fixture.binding())
+            #expect(store.currentLicence()?.incarnation != nil)
         }
     }
 }

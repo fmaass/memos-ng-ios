@@ -169,7 +169,13 @@ struct UploadTriggerTests {
 
     private func makeHarness() async throws -> Harness {
         let root = try Fixture.temporaryDirectory()
-        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        // `StaticCredentials` answers "nothing moves", passed explicitly rather than defaulted so
+        // the intent is written down beside the repository an engine is behind.
+        let credentials = StaticCredentials(credentials: Fixture.credentials())
+        let repository = try OutboxRepository(
+            root: root.appending(path: "outbox"),
+            stillCurrent: { credentials.stillCurrent(epoch: $0) }
+        )
         let source = try Fixture.file(in: root, named: "one.heic", bytes: 400)
         let job = try await repository.enqueue(
             content: "on the beach",
@@ -183,7 +189,7 @@ struct UploadTriggerTests {
         let preferences = Fixture.preferences()
         let outbox = Outbox(
             repository: repository,
-            credentials: StaticCredentials(credentials: Fixture.credentials()),
+            credentials: credentials,
             http: ScriptedHTTP.standard(chunkSize: 400),
             scheduler: scheduler,
             completion: ScriptedCompletion([.retry("not now")], repeating: .retry("not now")),

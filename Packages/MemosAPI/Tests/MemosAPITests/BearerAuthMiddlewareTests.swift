@@ -109,13 +109,15 @@ struct BearerAuthMiddlewareTests {
 
     /// The renewal's window, at the layer that can see it: the request left carrying the token the
     /// renewal then destroyed, so the server refuses it — correctly, and about nothing this device
-    /// still holds. Letting that 401 out would make it indistinguishable from a revoked session.
-    @Test("a 401 for a token the credential has since replaced is not a 401 to anyone else")
-    func supersededRefusalIsFenced() async {
+    /// still holds. What travels out is the epoch the request PRESENTED; whether that is still the
+    /// device's credential is the question the effect asks, hops later, and not this one's.
+    @Test("a 401 carries the generation the refused request presented")
+    func supersededRefusalCarriesItsEpoch() async {
         let credential = PresentedCredential("first")
+        credential.install()
         let middleware = BearerAuthMiddleware(credential: credential)
 
-        await #expect(throws: CredentialSuperseded.self) {
+        await #expect(throws: CredentialRefusal(issuedUnder: 0)) {
             try await middleware.intercept(
                 request(),
                 body: nil,
@@ -130,11 +132,33 @@ struct BearerAuthMiddlewareTests {
         }
     }
 
-    /// The control, and the reason the fence is a fence rather than a hole: the same 401, with no
-    /// replacement in between, is passed straight through to be read as the end of the session.
-    @Test("a 401 for the token the credential still holds passes through untouched")
-    func currentRefusalPassesThrough() async throws {
+    /// The same value for the un-raced 401, and that is the point: the middleware records, it does
+    /// not decide. A verdict taken here is a verdict about the instant the answer arrived, which is
+    /// never the instant the wipe runs.
+    @Test("a 401 for the token the credential still holds is thrown as a refusal too")
+    func currentRefusalIsThrownAsARefusal() async {
         let credential = PresentedCredential("first")
+        credential.install()
+        let middleware = BearerAuthMiddleware(credential: credential)
+
+        await #expect(throws: CredentialRefusal(issuedUnder: 0)) {
+            try await middleware.intercept(
+                request(),
+                body: nil,
+                baseURL: baseURL,
+                operationID: "listMemos",
+                next: { _, _, _ in (HTTPResponse(status: .unauthorized), nil) }
+            )
+        }
+    }
+
+    /// A credential nothing has adopted is a CANDIDATE — the pasted token being validated before
+    /// anything installs it. Nothing can renew it underneath its own check, so its 401 is the
+    /// server's plain answer about what was typed in, and it keeps the `.undocumented(401)` path
+    /// that turns into the sentence its owner needs.
+    @Test("a 401 for a credential nothing installed passes through untouched")
+    func uninstalledCredentialRefusalPassesThrough() async throws {
+        let credential = PresentedCredential("candidate")
         let middleware = BearerAuthMiddleware(credential: credential)
 
         let (response, _) = try await middleware.intercept(

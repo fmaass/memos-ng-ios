@@ -163,16 +163,18 @@ public final class MemoEditFlow {
     @discardableResult
     public func submit(
         _ submission: ComposeSubmission,
-        save: (ComposeView.Mode, ComposeSubmission) async -> Bool
-    ) async -> Bool {
-        guard let mode = editing else { return false }
-        let saved = await save(mode, submission)
-        lastError = saved ? nil : Self.failureMessage
-        if saved { editing = nil }
-        return saved
+        save: (ComposeView.Mode, ComposeSubmission) async -> ComposeOutcome
+    ) async -> ComposeOutcome {
+        guard let mode = editing else { return .failed(.authorization) }
+        let outcome = await save(mode, submission)
+        // The sentence is the failure's own, because they are not interchangeable: a request that
+        // never left the device DID change nothing, and one whose answer was lost may well have
+        // changed everything. The old single message claimed the first about both.
+        lastError = outcome.failure.map(ComposeFailurePresentation.sentence(for:))
+        if outcome.isSaved { editing = nil }
+        return outcome
     }
 
-    static let failureMessage = "This memo could not be saved. Nothing was changed on the server."
     static let deleteFailureMessage =
         "This memo could not be deleted. It is still on the server."
 }

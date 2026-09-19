@@ -26,6 +26,13 @@ struct MediaViewerView: View {
     /// memo's viewer is `.fixed`; the library's is `.library`, which is what lets a swipe carry on
     /// past the page the grid had loaded when the file was tapped (MEMNG-189).
     let source: MediaViewerSource
+    /// How a page is removed from the server, when this viewer is allowed to remove one at all.
+    ///
+    /// Passed IN rather than reached for, exactly as the memo delete's request is: the viewer has
+    /// no store and no client, and the screen that presented it is the only thing that knows which
+    /// memo these pictures hang on. `nil` is a viewer that cannot delete — the media library's —
+    /// and it is what makes a control with nothing behind it impossible rather than merely absent.
+    let delete: (@MainActor (String) async -> Bool)?
 
     @Environment(\.dismiss) private var dismiss
     /// The way out of a tab that cannot open a memo. Optional: a preview or a test host has no
@@ -50,10 +57,24 @@ struct MediaViewerView: View {
     /// the sound needs — none of which a view body can be asked about, so none of which is
     /// decided in one (`MediaViewerPlaybackCoordinator`).
     @State private var playback: MediaViewerPlaybackCoordinator
+    /// How far the delete conversation has got, and about which page (`AttachmentDeleteFlow`).
+    @State private var deletion = AttachmentDeleteFlow()
+    /// The pages the server has confirmed gone, from this viewer.
+    ///
+    /// It has to be kept, not merely removed from `shown`. A memo's source is FIXED and never
+    /// shrinks, and `pages` is recomputed from it every evaluation — so a page taken out of `shown`
+    /// alone is put straight back by the next one. `MediaViewerPager.visible` is where the two
+    /// meet.
+    @State private var removed: Set<MediaPage.ID> = []
 
-    init(selection: MediaViewerSelection, source: MediaViewerSource) {
+    init(
+        selection: MediaViewerSelection,
+        source: MediaViewerSource,
+        delete: (@MainActor (String) async -> Bool)? = nil
+    ) {
         self.selection = selection
         self.source = source
+        self.delete = delete
         _currentPage = State(initialValue: selection.startPage.id)
         _shown = State(initialValue: selection.pages)
         _playback = State(initialValue: MediaViewerPlaybackCoordinator(selection: selection))
@@ -66,7 +87,24 @@ struct MediaViewerView: View {
             closeButton
         }
         .overlay(alignment: .topTrailing) { actions }
-        .savingOriginal(saving)
+        .overlay(alignment: .bottom) { failureNotice }
+        // The question lives HERE, on the cover, and not on the screen that presented it: an alert
+        // attached under a full-screen presentation never appears at all. An alert rather than a
+        // confirmation dialog for the reason `ComposeView.deleteRow` records — the dialog put its
+        // Cancel neither on screen nor in the accessibility tree.
+        .alert(
+            asked.map { AttachmentDeleteFlow.question(for: $0.attachment) } ?? "",
+            isPresented: askingDelete,
+            presenting: asked
+        ) { page in
+            Button(AttachmentDeleteFlow.title(for: page.attachment), role: .destructive) {
+                send(.confirmed)
+            }
+            Button("Cancel", role: .cancel) { send(.cancelled) }
+        } message: { _ in
+            Text(AttachmentDeleteFlow.explanation)
+        }
+        .fetchingFile(saving)
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -147,42 +185,114 @@ struct MediaViewerView: View {
     @ViewBuilder
     private var actions: some View {
         let page = pages.first { $0.id == currentPage }
-        let available = page.map { MediaTileMenu.actions(for: $0.attachment) } ?? []
-        if !available.isEmpty {
-            Menu {
-                ForEach(available) { action in
-                    MediaTileActionItem(
-                        action: action,
-                        showMemo: { uid in
-                            // Out of the cover FIRST: the jump changes tabs, and a full-screen
-                            // cover presented by the tab being left would be a black screen over
-                            // the memo.
-                            dismiss()
-                            jump?.request(uid)
-                        },
-                        saveOriginal: { attachment in
-                            Task { await save(attachment) }
-                        }
-                    )
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding()
+        HStack(spacing: 0) {
+            // Beside the file's own actions rather than inside them: `MediaTileMenu`'s list is what
+            // the library tile and this overlay share, and a destructive row that exists on only
+            // one of the two surfaces does not belong in the shared list.
+            if selection.deletable, delete != nil, let page {
+                deleteButton(for: page)
             }
-            .accessibilityLabel("More")
+            MediaViewerActions(
+                control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
+                showMemo: { uid in
+                    // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
+                    // presented by the tab being left would be a black screen over the memo.
+                    dismiss()
+                    jump?.request(uid)
+                },
+                fetch: { attachment, rendition in
+                    Task { await fetch(attachment, rendition) }
+                }
+            )
         }
     }
 
-    /// Fetches the original of the file on screen and offers it to the share sheet.
+    /// The same glyph, in the same size, in the same corner as the actions beside it — the picture
+    /// underneath is the only thing on this screen, so every control on it is drawn one way.
+    private func deleteButton(for page: MediaPage) -> some View {
+        Button {
+            send(.tapped(page.attachment.uid))
+        } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 30))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding()
+        }
+        .accessibilityLabel(AttachmentDeleteFlow.title(for: page.attachment))
+    }
+
+    /// What a refused delete says, on the one screen with nowhere else to say it.
+    ///
+    /// The detail view behind this cover has a notice of its own, but it is a DIFFERENT flow's and
+    /// it is behind a full-screen cover nobody can see past — so a delete refused from in here
+    /// used to fail in silence, the picture simply staying where it was. It is the same card the
+    /// timeline shows a failure in, so one refusal does not look like two different things, and
+    /// the next question clears it (`AttachmentDeleteFlow` settles `lastError` on every `tapped`).
+    @ViewBuilder
+    private var failureNotice: some View {
+        if let failure = deletion.lastError {
+            NoticeCard(text: failure, tone: .error)
+                .padding(DesignTokens.Space.roomy)
+        }
+    }
+
+    /// The page a question is open about, or nil.
+    private var asked: MediaPage? {
+        guard let uid = deletion.asking else { return nil }
+        return pages.first { $0.id == uid }
+    }
+
+    /// What the alert binds to. Only dismissal comes back through it — the question is opened by
+    /// the button, never by an assignment from outside, the same discipline `MemoEditFlow.sheet` is
+    /// built on.
+    private var askingDelete: Binding<Bool> {
+        Binding(get: { asked != nil }, set: { if !$0 { send(.cancelled) } })
+    }
+
+    /// Every event goes through the flow, and the STATE MOVES HERE — synchronously, before any
+    /// task exists.
+    ///
+    /// The alert's dismissal binding fires in the same turn as the button that dismissed it, so a
+    /// confirmation and a cancellation both wrapped in tasks would be two pieces of work with no
+    /// order between them, and the cancellation winning would silently swallow a Delete somebody
+    /// pressed. Claimed first, the confirmation is already at `deleting` when the dismissal lands.
+    /// Only the REQUEST needs a task — and none at all on a viewer that was handed no way to
+    /// delete.
+    private func send(_ event: AttachmentDeleteFlow.Event) {
+        guard let delete else { return }
+        // Read from the claim rather than before it: the stage now names the page the request is
+        // for, and by the time the answer is back it is `idle` again and says nothing.
+        guard deletion.claim(event), let target = deletion.deleting else { return }
+        Task {
+            let gone = await deletion.perform(delete: delete)
+            guard gone else { return }
+            remove(target)
+        }
+    }
+
+    /// The page is gone from the server; take it off the screen, and keep it off.
+    private func remove(_ id: MediaPage.ID) {
+        removed.insert(id)
+        let outcome = MediaViewerPager.removing(id, from: shown, current: currentPage ?? id)
+        shown = outcome.pages
+        // Nothing left to look at. An empty pager is a black screen with a close button on it, so
+        // the viewer closes itself instead.
+        guard let next = outcome.current else {
+            dismiss()
+            return
+        }
+        currentPage = next
+        playback.adopt(pages: shown, startingAt: next)
+    }
+
+    /// Fetches the named file of the picture or clip on screen and offers it to the share sheet.
     ///
     /// The session is what holds the credential; without one there is nothing to present, which is
-    /// the same refusal `SessionStore.downloadOriginal` makes for a session that has ended.
-    private func save(_ attachment: MemoAttachment) async {
+    /// the same refusal `SessionStore.download` makes for a session that has ended.
+    private func fetch(_ attachment: MemoAttachment, _ rendition: AttachmentRendition) async {
         await saving.save(attachment) { [session] attachment in
             guard let session else { throw OriginalMediaError.notSignedIn }
-            return try await session.downloadOriginal(attachment)
+            return try await session.download(attachment, rendition)
         }
     }
 
@@ -199,7 +309,7 @@ struct MediaViewerView: View {
     /// `onAppear` above. `MediaViewerPager.extended` is what decides whether the source is this
     /// list grown longer or a different list altogether.
     private var pages: [MediaPage] {
-        MediaViewerPager.extended(shown, with: source.pages)
+        MediaViewerPager.visible(shown: shown, source: source.pages, removed: removed)
     }
 
     /// Locks the reconciled list in, and tells playback about it — the two pieces of state that
@@ -213,6 +323,66 @@ struct MediaViewerView: View {
     }
 }
 
+/// The viewer's control over the file on screen, in whichever shape its actions call for.
+///
+/// A view of its own rather than a branch written into the viewer's body, for the reason every
+/// other seam in this file exists: what it draws is decided by `MediaTileMenu.control(of:)` and
+/// what a press DOES is `MediaTileActionItem.tapped()`, so both halves can be asserted without a
+/// full-screen cover, a pager and a player standing behind them.
+///
+/// A single action is drawn as itself — its own icon, one tap — because a three-dots menu fronting
+/// one row is an indirection that buys nothing (MEMNG-213). Two or more keep the menu.
+///
+/// Both shapes press the SAME row. That is what keeps the one-download-at-a-time guard and the
+/// session's own fence behind Share on one path: the direct button is different chrome around the
+/// dispatch the menu row already had, not a second way to start a download.
+struct MediaViewerActions: View {
+    let control: MediaActionControl
+    let showMemo: (String) -> Void
+    /// Defaulted for the same reason the row's is: a surface that cannot download still builds the
+    /// control rather than being handed a different one.
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
+
+    var body: some View {
+        switch control {
+        case .hidden:
+            EmptyView()
+        case .direct(let action):
+            // Labelled with the action's own name, not "More": the glyph now says which action it
+            // is, and VoiceOver has to say the same thing.
+            Button {
+                row(action).tapped()
+            } label: {
+                glyph(action.symbol)
+            }
+            .accessibilityLabel(action.title)
+        case .menu(let actions):
+            Menu {
+                ForEach(actions) { action in
+                    row(action)
+                }
+            } label: {
+                glyph("ellipsis.circle.fill")
+            }
+            .accessibilityLabel("More")
+        }
+    }
+
+    /// The row, whichever shape it ends up drawn in — a menu item, or the button itself.
+    private func row(_ action: MediaTileAction) -> MediaTileActionItem {
+        MediaTileActionItem(action: action, showMemo: showMemo, fetch: fetch)
+    }
+
+    /// The overlay's one glyph, so the direct button and the menu are the same target in the same
+    /// corner of the same picture.
+    private func glyph(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 30))
+            .foregroundStyle(.white.opacity(0.85))
+            .padding()
+    }
+}
+
 /// One row of the actions menu, on the tile and in the viewer alike.
 ///
 /// A view of its own because the two surfaces must offer the same thing built the same way: a
@@ -221,30 +391,39 @@ struct MediaViewerView: View {
 struct MediaTileActionItem: View {
     let action: MediaTileAction
     let showMemo: (String) -> Void
-    /// What the slow one does. Defaulted so a surface that cannot download — a preview, a fitting
-    /// test — still builds the row rather than being handed a different menu.
-    var saveOriginal: (MemoAttachment) -> Void = { _ in }
+    /// What the two slow ones do: fetch the named file and offer it. Defaulted so a surface that
+    /// cannot download — a preview, a fitting test — still builds the row rather than being handed
+    /// a different menu.
+    var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
 
-    var body: some View {
+    /// Everything a tap on this row does — the button's whole action, and the only thing it does.
+    ///
+    /// It is a method rather than three closures written into three branches of `body`, and the
+    /// reason is that a `Button`'s action is unreachable from a test: SwiftUI hands out no way to
+    /// invoke one, and the probe this bundle has reads accessibility LABELS, which are identical
+    /// whatever the control turns out to be. Written inline, the one thing that decides whether a
+    /// recipient is handed a file or a link — which rendition each row asks for — was asserted by
+    /// nothing at all, and the row could go back to being a share-link control over `webURL` with
+    /// every test still green (MEMNG-207, review round 1).
+    func tapped() {
         switch action {
-        case .showMemo(let uid):
-            Button {
-                showMemo(uid)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
-        case .share(let url):
-            ShareLink(item: url) {
-                Label(action.title, systemImage: action.symbol)
-            }
-        case .saveOriginal(let attachment):
-            // A plain Button, not a `ShareLink`: the file it will share does not exist yet, and
-            // the wait for it is the reason this action is not the same thing as `Share`.
-            Button {
-                saveOriginal(attachment)
-            } label: {
-                Label(action.title, systemImage: action.symbol)
-            }
+        case .showMemo(let uid): showMemo(uid)
+        // Neither of these is SwiftUI's built-in share-link control, and it is the same reason for
+        // both: that control hands over a value it is already holding, and neither of these files
+        // is on the phone until somebody has waited for it. It is what the Share row used to be,
+        // which is exactly how the value it was holding came to be a URL.
+        case .share(let attachment): fetch(attachment, .shared)
+        case .saveOriginal(let attachment): fetch(attachment, .original)
+        }
+    }
+
+    /// One button, whatever the row is. There is no per-case branch here on purpose: a branch is
+    /// where a row that hands over a URL grew last time, and where the next one would.
+    var body: some View {
+        Button {
+            tapped()
+        } label: {
+            Label(action.title, systemImage: action.symbol)
         }
     }
 }

@@ -65,12 +65,22 @@ public struct MediaPage: Identifiable, Equatable, Sendable {
 public struct MediaViewerSelection: Identifiable, Equatable, Sendable {
     public let pages: [MediaPage]
     public let startIndex: Int
+    /// Whether these pictures may be REMOVED from where they are being looked at.
+    ///
+    /// It rides on the selection rather than on the viewer because the answer is a fact about where
+    /// the pages came from, and the viewer serves two places that differ in exactly that: a memo of
+    /// mine, whose attachments the server will let me delete, and the media library, which is a
+    /// read surface over files that may belong to anybody. Defaulted to false so the capability is
+    /// something a caller has to ASK for — a new surface that forgets to think about it gets the
+    /// safe answer.
+    public let deletable: Bool
 
     /// Non-empty pages and an in-range start index are the invariant; the only way to build one is
     /// `MediaViewerPresentation.viewer(for:startingAt:)`, which enforces both.
-    init(pages: [MediaPage], startIndex: Int) {
+    init(pages: [MediaPage], startIndex: Int, deletable: Bool = false) {
         self.pages = pages
         self.startIndex = min(max(0, startIndex), max(0, pages.count - 1))
+        self.deletable = deletable
     }
 
     public var startPage: MediaPage { pages[startIndex] }
@@ -108,17 +118,23 @@ public enum MediaViewerPresentation {
     /// `nil` means "there is nothing to open" — a tapped attachment that is not viewable, or a
     /// memo with no viewable media at all. The caller decides what to do instead; silently opening
     /// page 1 of something else would be worse than doing nothing.
+    /// A memo's own viewer, which carries the delete capability when the memo is mine — the same
+    /// `mine` gate every other own-memo affordance is nil-gated on, because the server refuses the
+    /// delete on somebody else's file.
     public static func viewer(for memo: Memo, startingAt uid: String) -> MediaViewerSelection? {
-        viewer(for: memo.attachments, startingAt: uid)
+        viewer(for: memo.attachments, startingAt: uid, deletable: memo.mine)
     }
 
+    /// The list overload, which the media library uses. It defaults to NOT deletable: a row there
+    /// is an upload with no memo in hand, so nothing on that screen knows whose it is.
     public static func viewer(
         for attachments: [MemoAttachment],
-        startingAt uid: String
+        startingAt uid: String,
+        deletable: Bool = false
     ) -> MediaViewerSelection? {
         let pages = pages(for: attachments)
         guard let index = pages.firstIndex(where: { $0.id == uid }) else { return nil }
-        return MediaViewerSelection(pages: pages, startIndex: index)
+        return MediaViewerSelection(pages: pages, startIndex: index, deletable: deletable)
     }
 
     /// A picture or a video with something to render.

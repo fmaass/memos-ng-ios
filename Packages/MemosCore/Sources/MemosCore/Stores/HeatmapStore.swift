@@ -34,9 +34,29 @@ public final class HeatmapStore {
     /// just-deleted day's square back.
     private var attempt = 0
 
+    /// Where a failure that never reached the server goes instead of `lastError` — its twin's
+    /// sink, for its twin's reason (`TagStore`).
+    private var session: (any SessionReporting)?
+
     public init() {}
 
-    public func load(using client: any APIProtocol) async {
+    /// Whether the session that ISSUED an operation is still the one this device is running — the
+    /// same rule, for the same reason, as `TimelineStore.sessionStillCurrent`.
+    private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        guard let current = session.activeHandle?.generation else { return false }
+        return current == handle.generation
+    }
+
+    /// Names the session this store's transport failures belong to. Idempotent.
+    public func reports(to session: any SessionReporting) { self.session = session }
+
+    public func load(using handle: SessionHandle) async {
+        // The client and the incarnation it belongs to arrive as ONE value and are carried
+        // through every request and every apply point below. Nothing here re-samples the session:
+        // re-sampling is what let a request rejected as one session's reissue itself under the
+        // next one's number, with the first one's client still in hand.
+        let client = handle.client
         attempt += 1
         let mine = attempt
         isLoading = true
@@ -54,17 +74,41 @@ public final class HeatmapStore {
                 MemosLog.api.info("GET /api/stats/heatmap answered for a load that was overtaken")
                 return
             }
-            counts = loaded
-            hasLoaded = true
-            lastError = nil
+            if sessionStillCurrent(handle) {
+                counts = loaded
+                hasLoaded = true
+                lastError = nil
+                // Counts that arrived are the session's to act on, as a question and not an
+                // answer (`noteTransportSuccess`).
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+            } else {
+                MemosLog.api.info("an answer for a session that has ended is not applied")
+            }
         } catch {
             guard mine == attempt else { return }
             // The counts already on screen stay. A heatmap that empties itself because one
             // refresh failed says the household wrote nothing, which is a worse lie than a
             // heatmap that is a few minutes stale.
             //
-            // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180).
-            if let apiError = StoreFailure.reportable(error) {
+            // A cancellation is not a refresh that failed — see `StoreFailure` (MEMNG-180). Nor
+            // is a server that never answered: that one is the session's to say, once, in a banner.
+            // Fenced like every other apply point: an answer for a session that has ended is
+            // not this one's to speak about — see `TimelineStore.report`. It falls THROUGH rather
+            // than returning, because the spinner below is this call's own and nobody else is
+            // coming to take it down.
+            if !sessionStillCurrent(handle) {
+                MemosLog.api.info("a failure for a session that has ended is not reported")
+            } else if let failure = StoreFailure.transportFailure(error) {
+                session?.noteTransportFailure(failure, issuedUnder: handle.generation)
+            } else if let refusal = StoreFailure.refusal(error) {
+                // One more arm in the chain and deliberately no `return`: the spinner below is this
+                // call's own. A refusal of a credential this device has already replaced is not
+                // this row's news, and "sign in again" over a session that renewed a second ago is
+                // a false instruction.
+                if session?.stillNamesCurrentCredential(refusal) ?? true {
+                    lastError = refusal.errorDescription
+                }
+            } else if let apiError = StoreFailure.reportable(error) {
                 lastError = apiError.errorDescription
             }
         }

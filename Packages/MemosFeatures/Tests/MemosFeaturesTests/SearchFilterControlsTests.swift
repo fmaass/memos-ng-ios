@@ -222,6 +222,60 @@ struct SearchFilterControlsTests {
         #expect(longer.width > chosen.width)
     }
 
+    /// MEMNG-214, and the whole of what the owner saw. The sheet draws chips in two places that
+    /// land one after the other — the shortcut row under the collapsed Filters row, and the filter
+    /// panel's own row as the first thing that replaces it — and it swaps one for the other the
+    /// instant the filters open. Drawn identically, that swap is INVISIBLE: the row under "Filters"
+    /// looks untouched, and Visibility and Archived arriving under it read as the filter content
+    /// opening below the tags rather than under the row that opened it.
+    ///
+    /// So the two rows have to be tellable apart on sight. The placement was never wrong
+    /// (`SearchSheetTagShortcut` says so, and always did); the presentation was.
+    @Test("the sheet's two rows of tag chips cannot be mistaken for one another")
+    func theTwoTagRowsAreTellableApart() {
+        let shortcut = SearchTagRowStyle.signature(for: .shortcut)
+        let filter = SearchTagRowStyle.signature(for: .filter)
+
+        #expect(shortcut != filter, "the two rows of chips are drawn exactly the same")
+        #expect(shortcut.heading != filter.heading, "both rows are headed \"\(shortcut.heading)\"")
+        // The panel is the other half of the answer. The opened filters are a surface of their own,
+        // hanging from the row that opened them; the shortcut row is a row of the sheet and is on
+        // no panel at all.
+        #expect(filter.insidePanel, "the opened filters draw no surface of their own")
+        #expect(!shortcut.insidePanel, "the shortcut row was drawn inside the filter panel")
+
+        // Exhaustive over the rows, so a third one cannot arrive wearing a heading that already
+        // means something else — and so neither of these two can quietly take the other's.
+        let headings = SearchTagRow.allCases.map { SearchTagRowStyle.signature(for: $0).heading }
+        #expect(headings.count == 2, "a row of chips was added without a case here")
+        #expect(Set(headings).count == headings.count, "two rows share a heading: \(headings)")
+        for heading in headings {
+            #expect(!heading.isEmpty, "a row of chips is headed by nothing")
+        }
+    }
+
+    /// The surface itself. A stack with no card under it is simply more sheet, and more sheet under
+    /// a row that already had a row of chips under it is the swap nobody could see — so a panel
+    /// that did not inset what it draws would be a panel in name only.
+    @Test("the panel the filter row opens is a surface, not a bare stack")
+    func theFilterPanelInsetsWhatItDraws() {
+        let content = Color.clear.frame(width: 100, height: 40)
+        let bare = LayoutProbe.size(content, width: Self.contentWidth, typeSize: .large)
+        let panelled = LayoutProbe.size(
+            SearchFilterPanel { content },
+            width: Self.contentWidth,
+            typeSize: .large
+        )
+
+        // Control: the content really is the height it asked for, so the difference below is the
+        // panel's doing.
+        #expect(bare.height == 40, "the control content is not the height it asked for")
+        #expect(
+            panelled.height > bare.height,
+            "the panel drew its content flush, so nothing separates it from the sheet"
+        )
+    }
+
     /// The one row that is always on screen, at the text size where a row stops fitting. It is a
     /// glyph, a word, whatever the filters say, and a chevron on one line; the summary can
     /// truncate, but the row may not overflow the sheet.

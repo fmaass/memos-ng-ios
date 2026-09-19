@@ -22,9 +22,16 @@ on the application-groups entitlement instead; the share extension declares no k
 both declare the app group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
 check (below) → `xcodebuild test` (all five test bundles) → a read-back of the BUILT app and
 .appex (each one's `PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
-a rebuild of every package with its warnings fatal (`swift build -warnings-as-errors` for the four
-that declare macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes
-from its own manifest) → the dependency-rule greps → a
+a rebuild of every package with its warnings fatal, each against the tracked `Package.resolved`
+copied beside its manifest and refused any version that file does not name, so a fresh upstream
+tag cannot reach this step alone (`swift build -warnings-as-errors` for the four that declare
+macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes from its own
+manifest) → the dependency-rule greps → the share-link rule
+(`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
+`Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → the
+generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
+document is either named in the generator config's inclusion list or is one of the named
+exclusions, with the operation count it read as the control) → a
 per-bundle test-count check. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
@@ -44,8 +51,44 @@ a version bump can never take the fast path. Every run writes what it classified
 `.gate-artifacts/classification.txt`, fast path or not. `bin/mac-gate.sh --classify-only` prints
 that classification and stops, without needing a build host.
 
+Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-gate.sh --quick
+[--bundle <name>|--only-testing <id>]` runs the selftests, the release-version check, the
+classification, the same lane lock and load gate, then rsyncs and — on the lane's private
+simulator, reusing its DerivedData — lints, generates, compiles for testing and runs the named
+bundle or suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the
+pins and the entitlement, dependency-rule and share-link greps and the generated-surface rule. The
+lint is the same `swift format lint --strict --recursive .` the full gate runs, it comes first, and
+a lint error stops the run there: generate, build and tests are not invoked and the exit is the
+lint's own code. It prints its own
+`MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only
+the full gate writes `mac-gate SUMMARY`.
+
+Each branch has its own lane on the build host — `~/build/memos-ng-ios/gate/<branch>` for the
+mirror and `~/build/memos-ng-ios/work/<branch>` for its DerivedData — and runs of one branch are
+serialised by a lock on that lane: a second live run says who holds it and stops (exit 3). The
+tree's retention policy is two lock-aware sweeps that a full run reaches, each subject to its own
+preconditions (the docs-only fast path reaches neither). Before anything is copied, and only after a successful pruned fetch with
+the standard refspec, unlocked lanes older than 24 hours whose branch exists neither locally nor
+on origin are reaped, the current lane always protected, with each reaped lane's size and the
+data volume's free space logged before and after. After the mirror is in place, when the root
+volume has less than 15G free, unlocked sibling trees go oldest-stamped first — gate lanes, then
+work lanes — until 20G is free or nothing unlocked remains, each removed path and the free space
+afterwards logged. The reaper and the shared lock predicate live in `scripts/reap-gate-lanes.sh`
+and are exercised by `tests/gate/reap-lanes-test.sh`; the pressure sweep lives in
+`bin/mac-gate.sh` beside it, its thresholds not under test. So a lane is eligible once its branch
+is absent from both inventories, it is unlocked, and both of its directories are older than 24
+hours by their modification time — an already-old lane qualifies the moment its branch goes —
+and it disappears on the next full run whose fetch was accepted: an opportunity, not a deadline.
+
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
+
+The gate keeps its own complete log of every run at
+`MAC_GATE_ARTIFACTS/mac-gate-<branch>-<run token>.log` and names that path on the line before its
+verdict, so two runs — two branches, or two runs of the same branch — can never write the same
+file. Any redirect of a gate's output by a caller uses a path unique to the branch and the run
+too, never a generic name in a shared directory: that is how one run's evidence gets truncated
+mid-write by another's (`tests/gate/concurrent-log-test.sh` holds the gate to its half of it).
 
 **Git is the only medium between the two machines.** The gate directory is a mirror, never a
 checkout, and it is never opened in Xcode. A hands-on clone on the Mac lives at
@@ -88,6 +131,38 @@ build to fail. A canary that survives is the failure. The verdict is two exit co
 `scripts/warnings-canary-verdict.sh` (fed pairs by `tests/gate/warnings-canary-test.sh`); both
 build logs come back as `.gate-artifacts/MemosFeatures-warnings-build.log` and
 `.gate-artifacts/MemosFeatures-canary-build.log`. The manifest grep survives as an early hint.
+
+## Invariants every change carries
+
+Paste this block verbatim into every implementation brief and review-gate prompt for this
+repo. Each line was bought by external review re-catching the same class on multiple
+slices in one session (2026-08-28, session-32 postmortem); the gate must not be the only
+memory of them.
+
+- **A store serializes its own mutations.** A disabled button is never the guard: two
+  overlapping invocations of the same operation must be one request on the wire (join or
+  refuse — state which), and a state the operation left must not be resurrectable by a
+  response that outlived it. Precedents: the edit-key slot, renewal joining,
+  ManageTokensStore's work gate.
+- **Every credential- or identity-scoped read is epoch-fenced.** A response is judged
+  against the identity/generation that ISSUED its request, never the current one: a stale
+  401 must not end a renewed session, a stale file must not be handed over, a stale list
+  must not repopulate a forgotten state. Precedents: PresentedCredential epochs, the
+  session-generation download fence, the media fetch generation.
+- **A one-shot answer is deduplicated at the callback site, synchronously.** When a
+  framework can answer through more than one callback (success + terminal-failure pairs),
+  exactly one delivery wins, claimed BEFORE any actor hop — hop ordering is not guaranteed.
+  Precedent: PhotoDelegate's oneAnswer claim.
+- **A refusal carries the epoch of the credential that earned it, all the way to the
+  effect.** Classifying a 401 where the answer arrives and acting on it hops later is the
+  same defect written twice: the decision is taken about an instant that has passed. So the
+  401 becomes ONE typed value — `CredentialRefusal` for the generated-client and download
+  lanes, `OutboxRefusal` for the outbox — carrying which generation the request PRESENTED,
+  and the ONE decision rule is asked synchronously on the isolation that performs the
+  effect: the main actor for a sign-out or a wipe, `OutboxRepository` for a hold, with
+  nothing awaited between the question and the write. Never re-derive it per site, and never
+  hand a Bool across a hop. Enforced by `scripts/refusal-sites-rule.sh` — rule 1 (the
+  literal, a hint) and rule 2 (pinned entry points and call counts, the fence).
 
 ## Tests
 
@@ -164,3 +239,17 @@ Anything that leaves this repo under my name — App Store listing text, release
 README, an issue or a PR body — is first-person **singular**, carries **no AI attribution** (no
 "Generated with…", no `Co-authored-by`, no bot sign-off), and leaks nothing internal (no ticket
 keys, no internal hostnames, no estate paths). Verification claims must be literally true.
+
+## BookStack Page Registry
+
+Writes to known pages resolve BY ID from here; name-search is discovery only.
+
+- Book: book:3153 (memos-ng-ios — Features)
+- Charter: page:3158
+- Documentation Backlog: none — work is tracked in windshift workspace `MEMNG`
+- Lessons Learned: page:3281
+- Feature — Places: page:3855
+- Session Reviews chapter: chapter:3155
+- Decisions chapter: chapter:3154 (ADR-0001: page:3157)
+- Register / Roadmap: none — implementation plans are pages in the book (page:3186, page:3274),
+  each filed as a windshift Epic

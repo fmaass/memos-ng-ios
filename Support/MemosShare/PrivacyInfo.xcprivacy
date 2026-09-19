@@ -4,17 +4,51 @@
   Privacy manifest for the MemosShare app extension.
 
   An .appex is its own bundle and Apple reads its manifest separately from the host app's, so
-  this file declares what THIS process does, which is a strict subset of the app:
+  this file declares what THIS bundle's executable can reach, which is a strict subset of the app:
 
-    NSPrivacyAccessedAPICategoryFileTimestamp — SharedFile.imported() reads
-    `.contentModificationDateKey` off the copy it just made of a shared file
-    (Packages/MemosShareKit/Sources/MemosShareKit/SharedItem.swift). The copy is staged in this
-    extension's own temporary directory, so the reason is C617.1; the timestamp reaches the
-    server as an upload's `last_modified`, which rules out DDA9.1.
+    NSPrivacyAccessedAPICategoryFileTimestamp — TWO keys, one from each package this bundle
+    links, because the category is a claim about every file-timestamp API the executable can
+    reach:
+
+      * `.contentModificationDateKey` — SharedFile.imported() reads it off the copy it just made
+        of a shared file (Packages/MemosShareKit/Sources/MemosShareKit/SharedItem.swift). The copy
+        is staged in this extension's own temporary directory, so the reason is C617.1; the
+        timestamp reaches the server as an upload's `last_modified`, which rules out DDA9.1.
+      * `.creationDateKey` — OutboxRepository reads it off an outbox manifest whose JSON could not
+        be read (Packages/MemosOutbox/Sources/MemosOutbox/OutboxRepository.swift), so that the
+        capture keeps a place in capture order. MemosOutbox is linked into this bundle as well as
+        into the app, so the read is declared by both. For THIS bundle the file is always in the
+        app group container the extension is a member of, and C617.1 covers that container. There
+        is no second location: ShareRootView.post() takes the queue root from
+        `OutboxRepository.appGroupRoot()` alone and, when the group cannot be reached, refuses the
+        post and says so instead of writing anywhere else
+        (Sources/MemosShare/ShareRootView.swift) — a capture outside the group is a capture the
+        app would never drain. The app's own Application Support fallback is `Outbox.live`, which
+        this executable does not call. The
+        value never leaves the device: it is the `capturedAt` of a stand-in job CONSTRUCTED in
+        memory with state `.held` and a binding that names the file rather than a server, so
+        nothing drains it.
+
+    AVAsset's `.creationDate` (Packages/MemosOutbox/Sources/MemosOutbox/Capture/CaptureReader.swift)
+    is deliberately NOT in that list, for the reason the app's manifest gives: it loads an
+    AVMetadataItem carrying the movie header's own creation date — a separate source from the
+    keyed QuickTime creation-date metadata that file prefers, and like it a piece of the file's
+    CONTENT rather than a timestamp the file system keeps.
+
+    NSPrivacyAccessedAPICategoryUserDefaults — declared for what this bundle CARRIES rather than
+    for what it calls. The extension asks for no preference of its own, but MemosOutbox is linked
+    into it, and among the packages this extension links it is the only one that uses the API:
+    the outbox's mobile-data choice
+    (Packages/MemosOutbox/Sources/MemosOutbox/UploadPreferences.swift). The app has three more
+    uses of its own, which is why the two manifests declare the same reasons for different code. Apple reads each
+    bundle's manifest against the executable that bundle holds, so an .appex declares the reasons
+    the code inside it earns. 1C8F.1 for the app group's suite the choice is kept in — the group
+    this extension is a member of, which is the point of keeping it there — and CA92.1 for the
+    fallback to this process's own defaults when that group is unreachable.
 
   Audited and deliberately NOT declared: the extension links only MemosShareKit and MemosOutbox,
-  neither of which touches UserDefaults, volume capacity, system uptime or active input modes.
-  The extension carries no client, no session and no credential.
+  neither of which reads volume capacity, system uptime or active input modes. The extension
+  carries no client, no session and no credential.
 
   Nothing is collected and nothing is tracked: the extension writes a capture into the app
   group's outbox and returns.
@@ -35,6 +69,15 @@
             <key>NSPrivacyAccessedAPITypeReasons</key>
             <array>
                 <string>C617.1</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+                <string>1C8F.1</string>
             </array>
         </dict>
     </array>

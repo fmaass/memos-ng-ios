@@ -3,7 +3,7 @@ import MemosAPI
 
 /// Who the token belongs to. `GET /api/auth/user` is also how a pasted token is validated, so this
 /// type doubles as the proof that a credential works.
-public struct User: Sendable, Equatable, Identifiable {
+public struct User: Sendable, Equatable, Identifiable, Codable {
     public var subject: String
     public var displayName: String?
     public var email: String?

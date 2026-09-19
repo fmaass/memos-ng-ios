@@ -9,8 +9,9 @@
 # exit code unmasked.
 #
 # The ordered checks are: the gate's own classifier test, generate the project, lint, test, rebuild
-# every package with warnings as errors, check the dependency rule, read the SHIPPING bundles back,
-# and count the tests that actually ran.
+# every package with warnings as errors, check the dependency rule, the share-link rule, the
+# refusal-sites rule and the openapi-coverage rule, read the SHIPPING bundles back, and count the
+# tests that actually ran.
 #
 # A change set of documentation and repository metadata only takes a FAST PATH. What the branch
 # changed against origin/main (merge-base, renames not followed, so a rename is judged by both of
@@ -34,10 +35,32 @@
 #
 # Usage:
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
+#   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh --quick [--bundle <name> | --only-testing <id>]
+#                                     the ITERATION loop, never a verdict: lint, then compile for
+#                                     testing on this branch's warm lane and run the named scope on
+#                                     it. A lint error stops the run before anything is built.
+#                                     --bundle names one of the gate's test bundles;
+#                                     --only-testing takes an xcodebuild identifier
+#                                     (Bundle, Bundle/Suite or Bundle/Suite/test). Neither means
+#                                     anything without --quick, and only one of them at a time.
+#                                     With --quick alone every bundle runs.
 #   bin/mac-gate.sh --classify-only   print how this branch's change set classifies, and stop.
 #                                     Needs no build host. Exit 0 = the docs-only fast path
 #                                     applies, 10 = the full gate is owed.
 #   bin/mac-gate.sh --help            print this usage.
+#
+# What the quick mode SKIPS is the whole difference: the package rebuilds with warnings fatal, the
+# warnings canary, the pin check, the entitlement, dependency-rule, share-link, refusal-sites and
+# openapi-coverage rules, the
+# shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
+# a run safe to start: the selftests, the release-version check, the classification, this branch's
+# lane lock, the load gate and the private simulator — and the lint, which costs seconds and which
+# the full gate would fail on anyway. It prints one line of its own,
+# MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's
+# summary line — a quick run can never be read, or pasted, as a verdict. The verdict is the full
+# gate.
+# It reuses the lane's DerivedData, which is why it is quick and why it takes the same lock: the
+# tree it compiles into is the tree a full run of this branch would rsync --delete.
 #
 # Two gates for two branches can run at the same time. They must not share a simulator: the
 # device holds ONE installation per bundle id, so a second branch installing over the first
@@ -56,8 +79,10 @@
 #   MAC_GATE_DEVICE_TYPE device type identifier for the private device
 #                        (e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro). Default:
 #                        chosen on the build host from the newest installed iOS runtime.
-#   MAC_GATE_ARTIFACTS   local directory for the copied-back .xcresult/screenshots/log
-#                        (default: <repo>/.gate-artifacts)
+#   MAC_GATE_ARTIFACTS   local directory for the copied-back .xcresult/screenshots and for this
+#                        run's own log, mac-gate-<branch>-<run token>.log — one file per run, so
+#                        two runs cannot write over each other and a caller's redirect cannot
+#                        truncate either (default: <repo>/.gate-artifacts)
 #   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The three
 #                        bundles below are always enforced and cannot be removed by setting
 #                        this — an override that could shrink the list would let a suite stop
@@ -68,6 +93,11 @@
 # the tree the first is building and the verdict belongs to neither. Those runs are serialised by
 # a lock on the branch's gate directory, taken before anything is copied. The loser does not
 # wait: it says who holds the lock and stops.
+#
+# Before copying, a successful pruned origin fetch with the standard fetch refspec lets the
+# build host reclaim unlocked gate/work lanes older than 24 hours and absent from both local
+# and origin heads. Current lanes are protected. Reaping logs directory sizes and the data
+# volume's free space before and after; a failed fetch or non-standard refspec skips it.
 #
 # Exit codes: 2 = refusal (unsafe or unusable inputs, nothing was copied or run);
 #             3 = another run of this branch holds the gate lock (nothing was copied or run);
@@ -106,13 +136,60 @@ usage() {
 # answerable without a Mac: it is what the gate's own test suite drives, and a classification that
 # needed the build host would be the gate rather than a decision about it.
 CLASSIFY_ONLY=0
-for arg in "$@"; do
-  case "$arg" in
+QUICK=0
+QUICK_BUNDLE=""
+QUICK_ONLY_TESTING=""
+# A while/shift loop rather than `for arg`, because two of these take a value. The value is
+# checked where it is read: a flag whose argument is missing would otherwise swallow the NEXT
+# flag, and `--quick --bundle --only-testing X` would run a scope nobody asked for.
+while [ $# -gt 0 ]; do
+  case "$1" in
     --classify-only) CLASSIFY_ONLY=1 ;;
+    --quick) QUICK=1 ;;
+    --bundle)
+      case "${2:-}" in
+        ""|-*) die_refuse "--bundle needs a test bundle name (one of: $TEST_BUNDLES)" ;;
+      esac
+      QUICK_BUNDLE="$2"; shift ;;
+    --only-testing)
+      case "${2:-}" in
+        ""|-*) die_refuse "--only-testing needs an xcodebuild test identifier (Bundle, Bundle/Suite or Bundle/Suite/test)" ;;
+      esac
+      QUICK_ONLY_TESTING="$2"; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) die_refuse "unknown argument: $(printf '%q' "$arg") (see --help)" ;;
+    *) die_refuse "unknown argument: $(printf '%q' "$1") (see --help)" ;;
   esac
+  shift
 done
+
+# The combinations, refused here rather than half-honoured later. A scope is a thing only the
+# quick mode has; the full gate runs every bundle and always will, so a scope beside it is an
+# instruction this script cannot carry out, not a preference it can ignore.
+if [ -n "$QUICK_BUNDLE" ] && [ -n "$QUICK_ONLY_TESTING" ]; then
+  die_refuse "--bundle and --only-testing are two ways to name one scope; pass one of them"
+fi
+if [ "$QUICK" -eq 0 ] && { [ -n "$QUICK_BUNDLE" ] || [ -n "$QUICK_ONLY_TESTING" ]; }; then
+  die_refuse "--bundle and --only-testing only mean something with --quick; the full gate runs every bundle"
+fi
+if [ "$QUICK" -eq 1 ] && [ "$CLASSIFY_ONLY" -eq 1 ]; then
+  die_refuse "--quick and --classify-only ask for different things: one builds and tests, the other only says whether a build is owed"
+fi
+if [ -n "$QUICK_BUNDLE" ]; then
+  # Whitespace first, and then a whole-word comparison. The bundle list is one space-separated
+  # string, so a substring test against it accepts a value that spans two names — "MemosAPITests
+  # MemosCoreTests" is inside " $TEST_BUNDLES " and names no bundle at all — and a trailing space
+  # turns a good name into one xcodebuild would read as an identifier that matches nothing.
+  case "$QUICK_BUNDLE" in
+    *[[:space:]]*)
+      die_refuse "--bundle names ONE test bundle, and $(printf '%q' "$QUICK_BUNDLE") contains whitespace (one of: $TEST_BUNDLES)" ;;
+  esac
+  quick_bundle_known=0
+  for known_bundle in $TEST_BUNDLES; do
+    [ "$QUICK_BUNDLE" != "$known_bundle" ] || quick_bundle_known=1
+  done
+  [ "$quick_bundle_known" -eq 1 ] \
+    || die_refuse "--bundle $QUICK_BUNDLE: not one of the test bundles this gate builds ($TEST_BUNDLES)"
+fi
 
 # Single-quote escaping for values interpolated into a script sent to the build host, so a branch
 # name can never become remote shell syntax.
@@ -161,6 +238,7 @@ CLASSIFY_VERDICT=""
 CLASSIFY_BASE="-"
 CLASSIFY_REASON=""
 CLASSIFY_PATHS=""
+ORIGIN_FETCHED=0
 
 # The allowlist, by NAME. Conservative on purpose: it names what cannot change a build, and
 # everything it does not name meets the full gate — project.yml (where the release numbers live),
@@ -186,21 +264,23 @@ gate_classify() {
   CLASSIFY_REASON=""
   CLASSIFY_PATHS=""
 
-  # main is not a branch measured against origin/main, and it is where a release is cut from.
-  case "$branch" in
-    main|master)
-      CLASSIFY_REASON="the branch is $branch, which is not a change set measured against origin/main"
-      return 0 ;;
-  esac
-
   # Fetched first: the base is only as honest as the ref it is read from, and a stale origin/main
   # would make an old change set look small. A fetch that cannot reach the remote is not fatal —
   # it falls back to the ref on disk and says so — but a base that cannot be resolved at all owes
   # the full gate, because then nothing is known about what changed.
   local fetch_note=""
-  if ! git fetch --quiet origin 2>/dev/null; then
+  # Pruning makes deleted branches disappear from the local inventory used by the lane reaper.
+  if git fetch --quiet --prune origin 2>/dev/null; then
+    ORIGIN_FETCHED=1
+  else
     fetch_note=" (origin could not be fetched — the origin/main already on disk was used)"
   fi
+  # main needs the inventory too, even though it has no change set to classify.
+  case "$branch" in
+    main|master)
+      CLASSIFY_REASON="the branch is $branch, which is not a change set measured against origin/main${fetch_note}"
+      return 0 ;;
+  esac
   local base
   base="$(git merge-base origin/main HEAD 2>/dev/null)" || base=""
   if [ -z "$base" ]; then
@@ -298,43 +378,65 @@ gate_classify() {
   return 0
 }
 
+# --- this run's own log ---------------------------------------------------------------------------
+# The gate keeps its whole output itself, at a path no other run can have produced: the artifacts
+# directory, the branch, and this run's token. A caller may redirect stdout wherever it likes and
+# none of it can reach this file — which is the point. Two agents once pointed two runs at one
+# generic name in a shared scratch directory; the second `>` truncated the first run's evidence
+# while it was still being written, the reader watching that file was left with nothing, and the
+# run had to be started again (2026-09-09). So two runs of the SAME branch write two files, and
+# every exit path names the one it wrote on the line before its verdict.
+branch_slug="$(printf '%s' "$branch" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-')"
+branch_slug="${branch_slug:0:40}"
+# A token, because a pid is not proof of identity to the far side: the remote half of this run has
+# to be able to ask "is the lock in that directory still MINE", and a reap replaces the directory
+# with one that carries somebody else's token. The log is named for it for the same reason the lock
+# carries it — one run, one name, and a re-run of a branch never lands on the file its predecessor
+# is still writing.
+RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
+artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
+log="$artifacts/mac-gate-$branch_slug-$RUN_TOKEN.log"
+# Opened where the run wants it rather than on the way past, because the default artifacts
+# directory is INSIDE the tree the classifier reads: a log created before the classification would
+# be an untracked path in the change set it is classifying.
+open_run_log() {
+  mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
+  : > "$log" || die_refuse "cannot write $log"
+}
+say() { printf '%s\n' "$*" | tee -a "$log"; }
+
 if [ "$CLASSIFY_ONLY" -eq 1 ]; then
   gate_classify
-  printf 'CLASSIFY verdict=%s\n' "$CLASSIFY_VERDICT"
-  printf 'CLASSIFY base=%s\n' "$CLASSIFY_BASE"
-  printf 'CLASSIFY reason=%s\n' "$CLASSIFY_REASON"
-  if [ -n "$CLASSIFY_PATHS" ]; then
-    printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/CLASSIFY path /'
-  fi
+  # Opened after the classification, never before it: see open_run_log.
+  open_run_log
+  {
+    printf 'CLASSIFY verdict=%s\n' "$CLASSIFY_VERDICT"
+    printf 'CLASSIFY base=%s\n' "$CLASSIFY_BASE"
+    printf 'CLASSIFY reason=%s\n' "$CLASSIFY_REASON"
+    if [ -n "$CLASSIFY_PATHS" ]; then
+      printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/CLASSIFY path /'
+    fi
+    printf 'CLASSIFY log=%s\n' "$log"
+  } | tee -a "$log"
   [ "$CLASSIFY_VERDICT" = fastpath ] && exit 0
   exit 10
 fi
 
 # The private device is named here, where the branch and this process are known: the branch so a
 # stray device says which run left it behind, the pid so two runs of the SAME branch (a re-run
-# started before the first one let go) still cannot land on one device. Reduced to the character
-# set the branch validation above already allows, minus '/', and cut short enough to stay a
-# readable name in `simctl list`.
-branch_slug="$(printf '%s' "$branch" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-')"
-branch_slug="${branch_slug:0:40}"
+# started before the first one let go) still cannot land on one device. It reuses the branch slug
+# the run log is named from, which is already reduced to the character set the branch validation
+# above allows, minus '/', and cut short enough to stay a readable name in `simctl list`.
 DEVICE_NAME="gate-${branch_slug}-$$"
 
 # Who this run is, for the gate lock below. The host is in it because the pid alone is only
-# meaningful to the machine that issued it, and the lock is read by whoever comes next.
+# meaningful to the machine that issued it, and the lock is read by whoever comes next; the token
+# is the one this run's log is named for.
 LOCK_DIR=""
-# A token, because a pid is not proof of identity to the far side: the remote half of this run has
-# to be able to ask "is the lock in that directory still MINE", and a reap replaces the directory
-# with one that carries somebody else's token.
-RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-[ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
 LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) token=$RUN_TOKEN"
 
-artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
-mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
-log="$artifacts/mac-gate.log"
-: > "$log" || die_refuse "cannot write $log"
-
-say() { printf '%s\n' "$*" | tee -a "$log"; }
+open_run_log
 
 # The build host deletes the device when the remote script ends, however it ends. That covers a
 # failing step and a refusal — it does NOT cover this script being interrupted: a remote shell
@@ -378,6 +480,10 @@ REL_EOF
 die_locked() {
   printf 'mac-gate: REFUSED: %s\n' "$1" >&2
   printf 'mac-gate: REFUSED: %s\n' "$1" >> "$log" 2>/dev/null
+  # A quick run that never got the lock built nothing, so it reports nothing built — but it still
+  # reports, on its own line, because that line is what the caller reads.
+  [ "${QUICK:-0}" -eq 0 ] \
+    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- | exit=3\n' | tee -a "$log"
   exit 3
 }
 
@@ -417,8 +523,28 @@ summary_and_exit() {
   local line="mac-gate SUMMARY:" i
   for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
   line="$line | exit=$first_fail"
+  say "run log     : $log"
   say "$line"
   exit "$first_fail"
+}
+# The quick mode's line is a different sentence on purpose. `mac-gate SUMMARY: … | exit=0` is the
+# one thing in this repo that means "this change may merge", and a run that skipped the pins, the
+# warnings rebuilds and the shipping-bundle read-back must not be able to produce it — not by
+# accident, and not by a copy-paste out of a terminal. So the quick mode says what it did (the
+# lint, the build and the tests it ran) under a name of its own, and never reaches summary_and_exit.
+# A dash means "never got that far": the build host was never asked, or it stopped before saying.
+QUICK_LINT_RC="-"
+QUICK_BUILD_RC="-"
+QUICK_TESTS_RC="-"
+quick_summary_and_exit() {
+  say "run log     : $log"
+  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
+  say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
+  exit "$first_fail"
+}
+end_run() {
+  if [ "$QUICK" -eq 1 ]; then quick_summary_and_exit; fi
+  summary_and_exit
 }
 
 # --- the gate's own integrity check --------------------------------------------------------------
@@ -450,7 +576,7 @@ for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
 done
 record selftest "$selftest_rc"
-[ "$first_fail" -eq 0 ] || summary_and_exit
+[ "$first_fail" -eq 0 ] || end_run
 
 # --- release-version authority ------------------------------------------------------------------
 # Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
@@ -523,7 +649,7 @@ fi
 say "classify    : written to $artifacts/classification.txt"
 record classify 0
 
-if [ "$CLASSIFY_VERDICT" = fastpath ]; then
+if [ "$CLASSIFY_VERDICT" = fastpath ] && [ "$QUICK" -eq 0 ]; then
   # No device was ever created and no lock was ever taken, so nothing is owed back to the build
   # host; cleared here so the exit trap does not ssh over there to delete a device that was
   # only ever a name.
@@ -533,14 +659,41 @@ if [ "$CLASSIFY_VERDICT" = fastpath ]; then
   printf 'verdict : PASS (fast path: docs-only)\n' >> "$artifacts/classification.txt"
   summary_and_exit
 fi
+# The fast path answers "does this change set owe a build". A quick run is not asking that: it is
+# an explicit request to compile and test, and the change set it is asked about is usually one the
+# author is in the middle of writing. So it goes to the build host regardless — and, because it is
+# not a verdict, skipping it would have saved nothing anyone could merge on.
+if [ "$CLASSIFY_VERDICT" = fastpath ]; then
+  say "classify    : docs-only, but --quick was asked for a build rather than for a verdict — continuing"
+fi
 
 # --- (2) resolve the remote target and refuse anything outside the gate root -------------------
 # Resolved on the build host, where the path actually exists: lexically (so a `..` in the branch
 # name cannot escape) AND physically (so a symlink planted in the gate root cannot either).
+surviving_branches=""
+reap_skip_reason="origin fetch failed; local refs may be incomplete"
+origin_fetch_refspec="$(git config --get-all remote.origin.fetch)" || origin_fetch_refspec=""
+if [ "$origin_fetch_refspec" != '+refs/heads/*:refs/remotes/origin/*' ]; then
+  ORIGIN_FETCHED=0
+  reap_skip_reason="non-standard fetch refspec"
+  say "GATE_REAP skipped: $reap_skip_reason"
+fi
+if [ "$ORIGIN_FETCHED" -eq 1 ]; then
+  surviving_refs="$(git for-each-ref refs/heads refs/remotes/origin --format='%(refname)')" \
+    || die_refuse "cannot enumerate local and origin branches for lane reaping"
+  surviving_branches="$(printf '%s\n' "$surviving_refs" \
+    | sed -e '/^refs\/remotes\/origin\/HEAD$/d' -e 's#^refs/heads/##' -e t \
+      -e 's#^refs/remotes/origin/##' | sort -u)"
+fi
 preflight_out="$(
   {
     printf "branch='%s'\n" "$(esc "$branch")"
     printf "lock_owner='%s'\n" "$(esc "$LOCK_OWNER")"
+    printf "origin_fetched='%s'\n" "$(esc "$ORIGIN_FETCHED")"
+    printf "reap_skip_reason='%s'\n" "$(esc "$reap_skip_reason")"
+    printf "surviving_branches='%s'\n" "$(esc "$surviving_branches")"
+    cat "$repo_root/scripts/reap-gate-lanes.sh"
+    cat "$repo_root/scripts/gate-work-dir.sh"
     cat <<'PRE_EOF'
 set -uo pipefail
 gate_root_raw="$HOME/build/memos-ng-ios/gate"
@@ -580,6 +733,23 @@ if [ -e "$target" ]; then
     exit 2
   fi
 fi
+echo "GATE_REAP data volume before:"
+df -h "$gate_root" | sed 's/^/GATE_REAP /' || exit 2
+if [ "$origin_fetched" -eq 1 ]; then
+  survivors_file="$(mktemp "${TMPDIR:-/tmp}/gate-survivors-XXXXXX")" || exit 2
+  trap 'rm -f "$survivors_file"' EXIT
+  printf '%s\n' "$surviving_branches" > "$survivors_file" || exit 2
+  # The work root comes off the resolved gate root, the same sibling the build half will use: a
+  # symlinked ~/build or ~/build/memos-ng-ios (the likely answer to a full disk) would otherwise
+  # leave the two halves reaping different trees. Resolved, because the reaper compares physical
+  # paths and refuses a symlinked root — a work tree moved onto another volume is ordinary here.
+  work_root="$(gate_work_root_resolved "$gate_root")" || exit 2
+  reap_gate_lanes "$gate_root" "$work_root" "$branch" "$survivors_file" || exit 2
+else
+  echo "GATE_REAP skipped: $reap_skip_reason"
+fi
+echo "GATE_REAP data volume after:"
+df -h "$gate_root" | sed 's/^/GATE_REAP /' || exit 2
 mkdir -p "$target" || { echo "REFUSE cannot create $target"; exit 2; }
 # The lock is a directory, because mkdir is the one atomic "claim it or find it claimed" this
 # host has in every shell it runs: /bin/bash here is 3.2 and has no flock. It is taken now,
@@ -605,6 +775,9 @@ PRE_EOF
 )"
 preflight_rc=$?
 printf '%s\n' "$preflight_out" | tee -a "$log" >/dev/null
+while IFS= read -r preflight_line; do
+  case "$preflight_line" in GATE_REAP*) say "$preflight_line" ;; esac
+done <<< "$preflight_out"
 if [ "$preflight_rc" -ne 0 ]; then
   printf '%s\n' "$preflight_out" >&2
   exit 2
@@ -797,17 +970,24 @@ rsync -a --delete \
   -e ssh \
   "$repo_root"/ "$host:$target/" 2>&1 | tee -a "$log"
 record rsync "${PIPESTATUS[0]}"
-[ "$first_fail" -eq 0 ] || summary_and_exit
+[ "$first_fail" -eq 0 ] || end_run
 
 # --- (4) the ordered, fail-fast checks on the build host --------------------------------------
 say "--- step: remote ---"
 {
   printf "GATE_TARGET='%s'\n" "$(esc "$target")"
+  printf "GATE_ROOT='%s'\n" "$(esc "$gate_root")"
   printf "GATE_SIMULATOR='%s'\n" "$(esc "$SIMULATOR")"
   printf "GATE_DEVICE_NAME='%s'\n" "$(esc "$DEVICE_NAME")"
   printf "GATE_DEVICE_TYPE='%s'\n" "$(esc "$DEVICE_TYPE")"
   printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
+  printf "GATE_BRANCH='%s'\n" "$(esc "$branch")"
+  printf "GATE_QUICK='%s'\n" "$(esc "$QUICK")"
+  printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
+  printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
+  cat "$repo_root/scripts/reap-gate-lanes.sh"
+  cat "$repo_root/scripts/gate-work-dir.sh"
   cat <<'REMOTE_EOF'
 set -uo pipefail
 
@@ -842,9 +1022,11 @@ XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG.xcresult"
 # Build scratch lives OUTSIDE the mirrored tree. Inside it, `swift format lint --recursive .`
 # would walk the dependency checkouts SwiftPM drops in DerivedData and lint other people's code;
 # keeping it outside also lets the incremental build survive the next `rsync --delete`.
-GATE_WORK="$(printf '%s' "$GATE_TARGET" \
-  | sed 's#/build/memos-ng-ios/gate/#/build/memos-ng-ios/work/#')"
-[ "$GATE_WORK" != "$GATE_TARGET" ] || { echo "remote: cannot derive a work directory"; exit 2; }
+# It is the work/ sibling of the gate root the preflight resolved and this run was handed, never
+# a rewritten substring of the gate path: ~/build/memos-ng-ios may resolve anywhere at all.
+GATE_WORK="$(gate_work_dir "$GATE_ROOT" "$GATE_BRANCH")" \
+  || { echo "remote: cannot derive a work directory"; exit 2; }
+[ "$GATE_WORK" != "$GATE_TARGET" ] || { echo "remote: the work directory is the gate target"; exit 2; }
 mkdir -p "$GATE_WORK" || { echo "remote: cannot create $GATE_WORK"; exit 2; }
 DERIVED="$GATE_WORK/DerivedData"
 
@@ -857,6 +1039,8 @@ DERIVED="$GATE_WORK/DerivedData"
 # far more often than that. Locks are NEVER sweep targets — they are owned by the runs that hold
 # them and clean themselves up through the trap; deleting one from the side would strip a live
 # run of its serialization.
+HYGIENE_GATE_ROOT="${GATE_TARGET%/"$GATE_BRANCH"}"
+HYGIENE_WORK_ROOT="${GATE_WORK%/"$GATE_BRANCH"}"
 touch "$GATE_TARGET" "$GATE_WORK" 2>/dev/null
 for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
   find "$hygiene_root" -mindepth 2 -maxdepth 2 -type d -mtime +3 \
@@ -865,25 +1049,27 @@ for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
         case "$stale" in
           *.lock*) continue ;;
         esac
+        gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$stale" || continue
         rm -rf "$stale" && echo "GATE_HYGIENE swept stale tree $stale"
       done
 done
 # Age alone is not enough on a busy day: five concurrent branches at ~3G each filled the host
 # to ENOSPC while every tree was hours old. Under PRESSURE the age rule yields — when free
-# space is below 10G, the oldest-stamped sibling trees go, newest-stamped last, until 15G is
-# free or nothing sweepable remains. The current run's trees and every lock stay untouchable;
-# a still-active sibling loses only an incremental cache it will rebuild, which is the right
-# trade against every gate on the host dying on a full disk.
+# space is below 15G, the oldest-stamped sibling trees go, newest-stamped last, until 20G is
+# free or nothing sweepable remains. Locked siblings may be waiting or building, so their
+# trees must survive even under pressure; an unlocked sibling can rebuild its cache next run.
 free_kb() { df -k / | awk 'NR==2 {print $4}'; }
-if [ "$(free_kb)" -lt 10485760 ]; then
-  echo "GATE_HYGIENE pressure: under 10G free — reaping oldest sibling trees"
+# The 2026-09-05 mid-run ENOSPC needs more headroom for DerivedData and warnings rebuilds.
+if [ "$(free_kb)" -lt 15728640 ]; then
+  echo "GATE_HYGIENE pressure: under 15G free — reaping oldest sibling trees"
   for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
     ls -1dtr "$hygiene_root"/*/* 2>/dev/null | while IFS= read -r victim; do
       [ -d "$victim" ] || continue
       case "$victim" in
         "$GATE_TARGET"|"$GATE_WORK"|*.lock*) continue ;;
       esac
-      [ "$(free_kb)" -ge 15728640 ] && break
+      [ "$(free_kb)" -ge 20971520 ] && break
+      gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$victim" || continue
       rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
     done
   done
@@ -1552,6 +1738,7 @@ build_memos_features() { # $1 = where the build log goes; returns xcodebuild's o
          -destination 'generic/platform=iOS Simulator' \
          -derivedDataPath "$GATE_WORK/warnings/MemosFeatures" \
          -clonedSourcePackagesDirPath "$GATE_WORK/warnings/spm" \
+         -onlyUsePackageVersionsFromResolvedFile \
          -skipPackagePluginValidation ) > "$1" 2>&1
 }
 
@@ -1575,12 +1762,24 @@ s_warnings() {
   # forced-cast warning this gate's failure; scoping both to the simulator SDK only moves it to
   # MarkdownUI's @_implementationOnly warning. A gate that goes red for a warning nobody here can
   # fix is a gate that gets ignored.
+  #
+  # Each package is its own root here, so SwiftPM would resolve each one's graph afresh from the
+  # manifests' lower bounds — and a new upstream tag then reaches this step alone, past the pins
+  # the rest of the gate builds against. It did: three tags published 1–3 Sep 2026 (generator
+  # 1.13.1, runtime 1.12.1, http-types 1.7.0) put 192 unused-`public import` diagnostics into the
+  # generated client while the pinned xcodebuild had none. So the tracked Package.resolved is
+  # placed beside each manifest and the build is refused any version it does not name — the same
+  # mechanism as -onlyUsePackageVersionsFromResolvedFile on the test build. SwiftPM accepts a
+  # file that pins more packages than the root needs (measured on this host 2026-09-03).
   local rc=0 pkg
   for pkg in Packages/MemosAPI Packages/MemosCore Packages/MemosOutbox Packages/MemosShareKit; do
-    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host)"
+    echo "--- $pkg with -warnings-as-errors (SwiftPM, this host, tracked pins)"
+    cp Package.resolved "$pkg/Package.resolved" || { rc=1; continue; }
     swift build --package-path "$pkg" \
       --scratch-path "$GATE_WORK/warnings/$(basename "$pkg")" \
+      --only-use-versions-from-resolved-file \
       -Xswiftc -warnings-as-errors || rc=$?
+    rm -f "$pkg/Package.resolved"
   done
 
   echo "--- Packages/MemosFeatures with warnings as errors (xcodebuild, iOS simulator, Debug)"
@@ -1611,6 +1810,10 @@ s_warnings() {
   # Every source of the target is made to compile again: an incremental build that compiles nothing
   # cannot go red for a warning sitting in a file it skipped.
   find Packages/MemosFeatures/Sources -name '*.swift' -exec touch {} +
+  # The same pins as the four builds above: xcodebuild reads a package's resolved file from beside
+  # its manifest, and the flag in build_memos_features refuses any version it does not name.
+  cp Package.resolved Packages/MemosFeatures/Package.resolved \
+    || { echo "WARNAERR FAIL: cannot place the tracked pins beside Packages/MemosFeatures"; return 1; }
   build_memos_features "$mf_build_log"
   local real_rc=$?
 
@@ -1626,6 +1829,7 @@ s_warnings() {
     echo "               that build would read as a warning being fatal. Rename it and run again."
     echo "MemosFeatures build exit $real_rc; the canary build did not run, so this step cannot pass"
     cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
+    rm -f Packages/MemosFeatures/Package.resolved
     [ "$rc" -ne 0 ] || rc=1
     return $rc
   fi
@@ -1645,6 +1849,7 @@ SWIFT
   canary_rc=$?
   rm -f "$GATE_CANARY_FILE"
   GATE_CANARY_FILE=""
+  rm -f Packages/MemosFeatures/Package.resolved
 
   cp "$mf_build_log" .gate-artifacts/MemosFeatures-warnings-build.log
   cp "$mf_canary_log" .gate-artifacts/MemosFeatures-canary-build.log
@@ -1666,9 +1871,12 @@ s_deps() {
   local rc=0 pkg
   for pkg in Packages/*/; do
     [ -f "$pkg/Package.swift" ] || continue
-    echo "--- swift package show-dependencies: $pkg"
+    echo "--- swift package show-dependencies: $pkg (tracked pins)"
+    # Listed from the same pins the builds used, so the graph this prints is the graph that built.
+    cp Package.resolved "$pkg/Package.resolved" || { rc=1; continue; }
     swift package --package-path "$pkg" --scratch-path "$GATE_WORK/scratch/$(basename "$pkg")" \
-      show-dependencies || rc=$?
+      --only-use-versions-from-resolved-file show-dependencies || rc=$?
+    rm -f "$pkg/Package.resolved"
   done
   # The dependency rule is a property of the manifests, so it is checked on the manifests, with a
   # positive control in the same run: a grep that finds nothing proves nothing on its own.
@@ -1729,11 +1937,70 @@ s_deps() {
   return $rc
 }
 
+s_sharelink() {
+  # SwiftUI's built-in share-link control shares a value it is already holding, so a row built from
+  # one can only ever hand over something that exists before the tap — which is how a signed
+  # household URL was handed to a recipient instead of the file (MEMNG-207). No test in the
+  # Features bundle can tell that control from a Button: SwiftUI exposes no view tree, and the
+  # accessibility probe reads the same label either way. So it is held the way the dependency rule
+  # and the keychain rule are held, by a literal grep with a positive control in the same run. The
+  # arithmetic lives in a script of its own because that script's text must carry the literal, and
+  # anything under the checked package may not.
+  echo "--- share-link rule (no share-link control in the Features layer) ---"
+  local sharelink_rule="$GATE_TARGET/scripts/sharelink-rule.sh"
+  if [ -x "$sharelink_rule" ]; then
+    "$sharelink_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "SHARELINK FAIL: $sharelink_rule is missing or not executable, so the Features layer was"
+  echo "                never checked and this step proves nothing"
+  return 1
+}
+
+s_refusal() {
+  # A refusal is judged where the answer arrives and acted on one or more actor hops later, and in
+  # between a renewal can replace the credential it was about. The fix is one typed value carrying
+  # the epoch of the credential that EARNED the refusal and one decision taken at the effect
+  # (MEMNG-270); what this step adds is that a NEW classification or effect site cannot be added
+  # without a reviewer seeing it. Two rules, and they are not equal: rule 1 is a literal grep and a
+  # HINT, rule 2 is the fence — pinned entry points and pinned call counts. The arithmetic lives in
+  # a script of its own for the reason the share-link rule's does: that script's text must carry the
+  # literal, and the scope it checks may not.
+  echo "--- refusal-sites rule (one typed refusal, an enumerated set of effects) ---"
+  local refusal_rule="$GATE_TARGET/scripts/refusal-sites-rule.sh"
+  if [ -x "$refusal_rule" ]; then
+    "$refusal_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "REFUSAL FAIL: $refusal_rule is missing or not executable, so the refusal sites were never"
+  echo "              checked and this step proves nothing"
+  return 1
+}
+
+s_apicover() {
+  # The generated client's filter is inclusion-only: an operation the config does not name is not
+  # generated, no build mentions it, and the first sign is a feature nobody can write. That is the
+  # same silence this repo already met from the other side (a nullable union dropped from a
+  # generated type), so the subtraction the config is derived from — every operationId in the
+  # vendored document minus a named exclusion set — is checked here rather than trusted. The
+  # arithmetic lives in a script of its own for the reason the other two rules' does: that script
+  # carries the exclusion set and its reasons, and the files it checks may not.
+  echo "--- openapi-coverage rule (every vendored operation generated or knowingly excluded) ---"
+  local coverage_rule="$GATE_TARGET/scripts/openapi-coverage-rule.sh"
+  if [ -x "$coverage_rule" ]; then
+    "$coverage_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "OPENAPI-COVERAGE FAIL: $coverage_rule is missing or not executable, so the generator's"
+  echo "                       filter was never checked and this step proves nothing"
+  return 1
+}
+
 s_testcount() {
   # Swift Testing does not emit XCTest's "Executed N tests" line (a correct Swift Testing bundle
   # reads 0 there), so the per-bundle counts come from the result bundle, which is authoritative
-  # for both harnesses. A bundle that ran zero tests is a failure: a suite that silently stops
-  # being built would otherwise pass the gate.
+  # for both harnesses. A bundle that EXECUTED zero cases is a failure: a suite that silently stops
+  # being built, or one whose every case skipped itself, would otherwise pass the gate.
   [ -d "$XCRESULT" ] || { echo "no result bundle at $XCRESULT"; return 1; }
   xcrun xcresulttool get test-results tests --path "$XCRESULT" --format json \
     > .gate-artifacts/test-results.json || return 1
@@ -1742,31 +2009,196 @@ import json, sys
 wanted = sys.argv[1].split()
 data = json.load(open(".gate-artifacts/test-results.json"))
 
-def walk(node, bundle, counts):
+# A case that SKIPPED did not run, and this count exists to answer "did each bundle run anything".
+# Several suites here skip themselves when their preconditions are absent (no server credentials,
+# no device capability), so a bundle counted by its Test Case NODES reports a full suite while
+# having executed nothing — the failure this step was written to catch, passing it. Only the
+# outcomes that mean a body executed are counted; everything else — Skipped, and any result this
+# walker has never been shown — is counted apart and named. The tuple is the quick mode's counter's,
+# kept in step by hand: the two are separate heredocs, and only this one is fed a full-gate result
+# bundle.
+EXECUTED = ("Passed", "Failed", "Expected Failure")
+
+def walk(node, bundle, ran, idle):
     kind = node.get("nodeType")
     name = node.get("name", "")
     if kind in ("Unit test bundle", "UI test bundle"):
         bundle = name[:-len(".xctest")] if name.endswith(".xctest") else name
-        counts.setdefault(bundle, 0)
+        ran.setdefault(bundle, 0)
+        idle.setdefault(bundle, 0)
     if kind == "Test Case" and bundle:
-        counts[bundle] = counts.get(bundle, 0) + 1
+        if node.get("result") in EXECUTED:
+            ran[bundle] = ran.get(bundle, 0) + 1
+        else:
+            idle[bundle] = idle.get(bundle, 0) + 1
     for child in node.get("children", []) or []:
-        walk(child, bundle, counts)
+        walk(child, bundle, ran, idle)
 
-counts = {}
+ran, idle = {}, {}
 for root in data.get("testNodes", []) or []:
-    walk(root, None, counts)
-print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "(none)"))
+    walk(root, None, ran, idle)
+print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(ran.items())) or "(none)"))
+print("skipped or not run: " + (", ".join(f"{k}={v}" for k, v in sorted(idle.items())) or "(none)"))
 rc = 0
 for bundle in wanted:
-    n = counts.get(bundle, 0)
+    n = ran.get(bundle, 0)
+    skipped = idle.get(bundle, 0)
     print(f"Executed {n} tests in {bundle}")
     if n < 1:
-        print(f"TESTCOUNT FAIL: {bundle} ran {n} tests")
+        print(f"TESTCOUNT FAIL: {bundle} executed {n} test cases ({skipped} skipped or not run)")
         rc = 1
 sys.exit(rc)
 PY
 }
+
+# --- the quick mode's own sequence ----------------------------------------------------------------
+# Everything above this line is the preamble both modes share: the lock check, the work
+# directories, the disk sweep, this run's private device and its accessibility keys. From here the
+# two part company. The quick sequence lints, generates the project (which is also what puts the
+# tracked Package.resolved where SwiftPM reads it), compiles the test bundles, and runs the scope it
+# was given on the device — nothing else, and each step only if the one before it passed. It ends by
+# exiting, so the full gate's steps below are never reached and MAC_GATE_REMOTE_SUMMARY, the line a
+# verdict is read from, is never printed.
+if [ "${GATE_QUICK:-0}" -eq 1 ]; then
+  QUICK_XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG-quick.xcresult"
+  # One scope, already validated on the controller: --only-testing is passed through verbatim,
+  # --bundle is the same thing spelled with a bundle name. Empty means every bundle.
+  if [ -n "$GATE_QUICK_ONLY_TESTING" ]; then
+    quick_scope="$GATE_QUICK_ONLY_TESTING"
+  else
+    quick_scope="$GATE_QUICK_BUNDLE"
+  fi
+
+  s_quick_generate() {
+    [ -f project.yml ] || { echo "no project.yml in $GATE_TARGET — nothing to generate"; return 3; }
+    bin/generate.sh --spec project.yml
+  }
+
+  s_quick_build() {
+    # -onlyUsePackageVersionsFromResolvedFile for the same reason the full gate's test build
+    # carries it: a lockfile pins only the builds that READ it, and a quick build free to resolve
+    # its own way would compile against a graph nothing in this repo names.
+    xcodebuild build-for-testing \
+      -scheme MemosNG \
+      -destination "$GATE_DESTINATION" \
+      -derivedDataPath "$DERIVED" \
+      -onlyUsePackageVersionsFromResolvedFile \
+      -skipPackagePluginValidation 2>&1 | tee .gate-artifacts/quick-build.log
+    return "${PIPESTATUS[0]}"
+  }
+
+  s_quick_tests() {
+    rm -rf "$QUICK_XCRESULT"
+    set -- xcodebuild test-without-building \
+      -scheme MemosNG \
+      -destination "$GATE_DESTINATION" \
+      -derivedDataPath "$DERIVED" \
+      -resultBundlePath "$QUICK_XCRESULT" \
+      -onlyUsePackageVersionsFromResolvedFile \
+      -skipPackagePluginValidation
+    [ -z "$quick_scope" ] || set -- "$@" "-only-testing:$quick_scope"
+    "$@" 2>&1 | tee .gate-artifacts/quick-test.log
+    quick_run_rc="${PIPESTATUS[0]}"
+    # A green run of nothing is the failure this counts for. xcodebuild accepts an -only-testing
+    # identifier that names no test and reports success, and Swift Testing emits no "Executed N
+    # tests" line to contradict it — so the count comes from the result bundle, the same walk the
+    # full gate's testcount step uses, scoped to what was asked for.
+    if [ ! -d "$QUICK_XCRESULT" ]; then
+      echo "QUICK FAIL: no result bundle at $QUICK_XCRESULT, so nothing says a test ran"
+      [ "$quick_run_rc" -ne 0 ] || quick_run_rc=1
+      return "$quick_run_rc"
+    fi
+    if ! xcrun xcresulttool get test-results tests --path "$QUICK_XCRESULT" --format json \
+         > .gate-artifacts/quick-test-results.json; then
+      echo "QUICK FAIL: the result bundle at $QUICK_XCRESULT could not be read"
+      [ "$quick_run_rc" -ne 0 ] || quick_run_rc=1
+      return "$quick_run_rc"
+    fi
+    /usr/bin/python3 - "$quick_scope" <<'QUICKCOUNT_PY'
+import json, sys
+scope = sys.argv[1]
+bundle = scope.split("/")[0] if scope else ""
+data = json.load(open(".gate-artifacts/quick-test-results.json"))
+
+# A case that SKIPPED did not run, and this count exists to answer "did anything run". Several
+# suites here skip themselves when their preconditions are absent (no server credentials, no
+# device capability), so a scope of nothing but those would otherwise come back green having
+# exercised no code at all. Only the outcomes that mean a body executed are counted; everything
+# else — Skipped, and any result this walker has never been shown — is counted apart and named.
+EXECUTED = ("Passed", "Failed", "Expected Failure")
+
+def walk(node, current, ran, idle):
+    kind = node.get("nodeType")
+    name = node.get("name", "")
+    if kind in ("Unit test bundle", "UI test bundle"):
+        current = name[:-len(".xctest")] if name.endswith(".xctest") else name
+        ran.setdefault(current, 0)
+        idle.setdefault(current, 0)
+    if kind == "Test Case" and current:
+        if node.get("result") in EXECUTED:
+            ran[current] = ran.get(current, 0) + 1
+        else:
+            idle[current] = idle.get(current, 0) + 1
+    for child in node.get("children", []) or []:
+        walk(child, current, ran, idle)
+
+ran, idle = {}, {}
+for root in data.get("testNodes", []) or []:
+    walk(root, None, ran, idle)
+print("executed test cases for the quick scope: "
+      + (", ".join("%s=%d" % (k, v) for k, v in sorted(ran.items())) or "(none)"))
+print("skipped or not run: "
+      + (", ".join("%s=%d" % (k, v) for k, v in sorted(idle.items())) or "(none)"))
+executed = ran.get(bundle, 0) if bundle else sum(ran.values())
+skipped = idle.get(bundle, 0) if bundle else sum(idle.values())
+if executed < 1:
+    print("QUICK FAIL: %s executed %d test cases (%d skipped or not run)"
+          % (scope or "every bundle", executed, skipped))
+    sys.exit(1)
+print("Executed %d test cases for %s (%d skipped or not run)"
+      % (executed, scope or "every bundle", skipped))
+QUICKCOUNT_PY
+    if [ $? -ne 0 ] && [ "$quick_run_rc" -eq 0 ]; then quick_run_rc=1; fi
+    return "$quick_run_rc"
+  }
+
+  quick_tests_rc="-"
+  quick_build_rc="-"
+  # Lint before anything is generated or compiled: it is the same s_format the full gate runs, it
+  # reads nothing a build produces, and a run that stops here costs seconds instead of the minutes
+  # a build would spend before failing the merge verdict for a reason already known.
+  echo "::: lint :::"
+  s_format
+  quick_lint_rc=$?
+  echo "MAC_GATE_STEP lint $quick_lint_rc"
+  quick_exit="$quick_lint_rc"
+  if [ "$quick_lint_rc" -eq 0 ]; then
+    echo "::: generate :::"
+    s_quick_generate
+    quick_build_rc=$?
+    echo "MAC_GATE_STEP generate $quick_build_rc"
+    if [ "$quick_build_rc" -eq 0 ]; then
+      echo "::: build :::"
+      s_quick_build
+      quick_build_rc=$?
+      echo "MAC_GATE_STEP build $quick_build_rc"
+    fi
+    if [ "$quick_build_rc" -eq 0 ]; then
+      echo "::: tests${quick_scope:+ ($quick_scope)} :::"
+      s_quick_tests
+      quick_tests_rc=$?
+      echo "MAC_GATE_STEP tests $quick_tests_rc"
+      quick_exit="$quick_tests_rc"
+    else
+      echo "::: tests skipped (the build failed) :::"
+      quick_exit="$quick_build_rc"
+    fi
+  else
+    echo "::: generate, build and tests skipped (the lint failed) :::"
+  fi
+  echo "MAC_GATE_QUICK_REMOTE: lint=$quick_lint_rc build=$quick_build_rc tests=$quick_tests_rc"
+  exit "$quick_exit"
+fi
 
 step xcodegen   s_xcodegen
 step entitlements s_entitlements
@@ -1776,6 +2208,9 @@ step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck
 step warnaserr  s_warnings
 step deps       s_deps
+step refusal    s_refusal
+step sharelink  s_sharelink
+step apicover   s_apicover
 step testcount  s_testcount
 
 echo "MAC_GATE_REMOTE_SUMMARY:$summary | exit=$first_fail"
@@ -1785,10 +2220,29 @@ REMOTE_EOF
 remote_rc="${PIPESTATUS[1]}"
 record remote "$remote_rc"
 
+# The quick mode's three numbers come from the line the build host printed, read back out of the log
+# the stream above was tee'd into. Anything that is not a run of digits is not a number this
+# script will repeat: a remote that stopped before it said anything leaves them all as "-", which is
+# the honest answer and cannot be misread as a zero.
+if [ "$QUICK" -eq 1 ]; then
+  quick_remote_line="$(sed -n 's/^MAC_GATE_QUICK_REMOTE: //p' "$log" | tail -1)"
+  quick_field() {
+    local value
+    value="$(printf '%s\n' "$quick_remote_line" | sed -n "s/.*$1=\\([^ ]*\\).*/\\1/p")"
+    case "$value" in
+      ''|*[!0-9]*) printf -- '-' ;;
+      *) printf '%s' "$value" ;;
+    esac
+  }
+  QUICK_LINT_RC="$(quick_field lint)"
+  QUICK_BUILD_RC="$(quick_field build)"
+  QUICK_TESTS_RC="$(quick_field tests)"
+fi
+
 # --- (7) copy the evidence back ---------------------------------------------------------------
 say "--- step: copyback ---"
 rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
 record copyback "${PIPESTATUS[0]}"
 say "artifacts   : $artifacts"
 
-summary_and_exit
+end_run

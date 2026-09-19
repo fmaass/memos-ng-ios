@@ -22,11 +22,12 @@ Platform facts below were researched on 2026-08-23.
 | Dependency injection | **SwiftUI environment** (`.environment`) | Apple's own guidance: `@Observable` models owned by `@State`, injected through the environment. No container, no singletons |
 | State | One **`@Observable` store per feature** — `SessionStore`, `TimelineStore` | Community mainstream in 2026. No Combine |
 | Networking | **swift-openapi-generator** over a vendored `openapi.json`; auth as a `BearerAuthMiddleware`; `ServerConfiguration` holds the base URL; `APIClientFactory` builds the client | The generator does not generate security schemes, so authentication is a middleware — one place that decides what credential a request carries. The generated `APIProtocol` is the seam tests substitute |
-| Persistence | **No offline writes.** No read cache in v1 | Offline editing and sync are out of scope; a cache is a later decision, not a foundation one |
+| Persistence | **No offline editing.** A durable capture outbox (MEMNG-100), and a timeline READ cache: one versioned `Codable` snapshot per (server base URL, user id) under `Library/Caches/<bundle id>/timeline/`, rewritten on every server-confirmed change of the plain timeline — the newest 200 rows of it — and deleted wherever the credential is | ADR-0002. A pure read cache is a snapshot the next successful load replaces whole — it is never authoritative and never a source of pagination cursors, so it needs neither a query engine nor a migration story. The rule that comes with it: the store graduates to GRDB the day offline EDITING enters scope |
 | Auth | **PAT in the Keychain** (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) in an access group the APP alone declares, `$(AppIdentifierPrefix)live.discomarder.memosng.credentials` | An app group identifier is itself a keychain access group, so a token in the shared group is a token the share extension can read. The app group carries the queue and the identity JSON; the token has a namespace of its own |
 | Testing | **Swift Testing**; XCTest only for UI and performance tests | Default for new test targets since Xcode 16 |
 | Formatting | **`swift format`** from the toolchain; the gate runs `swift format lint --strict --recursive .` | No SwiftLint |
 | Rendering | **MarkdownUI** (GFM, task lists) — the only third-party dependency | Verified against this toolchain before adoption; see "Markdown parity" |
+| Maps | **MapKit**, and only inside `MemosFeatures` — an `MKMapView` behind a representable, with MapKit's own clustering | The map is a screen, not a domain rule. `MemosCore`'s Places functions decide in plain degrees and import no MapKit, so what a tap opens is testable without one. What the basemap costs, and why no tile pipeline of this app's own ships: see "The basemap" |
 | Gate | **`bin/mac-gate.sh`** | A Swift phase cannot be built on the Linux dev machine, so the Mac build host is the only build authority. See `CLAUDE.md` |
 
 ## Module boundaries
@@ -43,6 +44,34 @@ App target (composition only)
 - **`MemosFeatures`** — screens: `TimelineView`, `MemoDetailView`, `SignInView`.
 
 **Nothing imports Features.** Enforced by the manifests, checked mechanically by the gate.
+
+**Places is the worked example of where that line falls.** Everything a tap decides is a pure
+function of a value, so a test can hold what the screen presents without running a map:
+`Packages/MemosCore/Sources/MemosCore/Places/` carries the domain model and its wire conversion
+(`PlaceMarker.swift`, `PlaceMarker+Wire.swift`), the geometry — coordinate keys, grouping,
+bounding box, the visible box and the antimeridian cases it brings (`PlaceGeo.swift`), the pin
+specification and the add/repaint/drop diff a map is driven by (`PlaceClustering.swift`), the
+displayed order and the slide a tapped photograph opens (`PlaceOrder.swift`), which of the four
+states a read is in (`PlacesStatus.swift`), and the adapter that turns a marker into the
+attachment the existing viewer already opens on (`PlaceAttachment.swift`). None of those files
+imports MapKit; `PlaceGeo` states its sides as plain doubles for exactly that reason.
+`Stores/PlacesStore.swift` is the one read: `GET /api/map/markers` takes no parameters, so it asks
+one question, refuses a second ask while the first is out, and judges the answer against the
+session handle that ISSUED the request.
+
+`Packages/MemosFeatures/Sources/MemosFeatures/` holds the drawing: `PlacesView.swift` (the screen,
+keyed on the signed-in subject), `PlacesMapView.swift` (the `UIViewRepresentable` around
+`MKMapView`, its delegate, and the annotation objects the map keeps), `PlacePinView.swift` (the
+`MKAnnotationView` a pin and a cluster share, UIKit all the way down) and
+`PlacesPresentation.swift`, the seam between the two layers. The last three are also the only
+production sources in the tree that import MapKit; the screen itself needs none of it.
+`PlacesPresentation.swift` is where the seam's decisions are DEFINED and nowhere else — the
+region-to-box conversion, which member lends a cluster its photograph, what a tap opens and how
+close the camera may come — and the map view reaches for them by name rather than redefining any
+of them. What the map view does decide is its own lifecycle: when a replaced map has to start its
+annotations over, and that the first fit happens once. MapKit does not leave this package, but it
+does not stop at its sources either: the Places tests import it too, because holding the seam to
+a real `MKMapView` is the point of them.
 
 ## Concurrency
 
@@ -79,8 +108,45 @@ so the code is not on it. That delegate is log-only.
   **A failed revoke KEEPS the credential** and reports `revokeFailed`: a device that believes it
   is signed out while a live token sits in whatever took it is the worse of the two states.
   Discarding it anyway is a deliberate choice made on the screen (`signOutWithoutRevoking`).
+  A 401 to the revoke means "already dead" only when it names the credential this device is STILL
+  holding. A renewal landing while the revoke is on the wire makes the server refuse it because the
+  token it named is gone — and the successor is live, was never revoked, and is valid for up to a
+  year in whatever holds it. That case reports `revokeFailed(.unauthorized)` and KEEPS the
+  credential; the screen offers the sign-out again, which then revokes the token this device is
+  actually holding. Same rule as the line above, applied to the one refusal that looks like
+  permission to wipe (MEMNG-270).
 - A stored credential is **re-validated at launch**, not trusted, and removed when the server
   rejects it.
+- **"Cannot reach the server" is read off request OUTCOMES, never off a path monitor.** The
+  failure it exists for: the VPN tunnel drops, the routing table still says satisfied, and every
+  request dies on the way. `ServerReachability` decides it from the error alone: any error in the
+  URL loading system's own domain, anywhere in the chain and whichever code — the codes it names
+  carry a named reason, the Local Network denial among them, the rest arrive as `other` — and the
+  two statuses a proxy answers with for a server that did not, 502 and 504. That domain rather than
+  every error that is not an `APIError`: the wider test would also catch a body this app could not
+  decode, which is an answer the server gave and keeps its error card, as do a 500 and the 503
+  memos-ng raises deliberately for a raced write. A refusal is classified first, so a 401 stays an
+  auth outcome.
+- **No second state machine.** The state is still `SessionVerification`, written in one private
+  setter in `SessionStore` that stamps the outage only where nothing has stamped it yet — four
+  failures in a row are one outage — and on `.verified` clears the stamp, the notice and any wake
+  asleep on its account. The notice waits `bannerDelay`, two seconds, so a healthy launch and a
+  brief drop-out pass through unconfirmed without a flicker; the wake publishes only if it still
+  holds the slot it was armed in, and asks the present rather than asserting the past.
+- **Recovery is asked, never declared.** A store that reaches the server calls
+  `noteTransportSuccess(issuedUnder:)`, which decides nothing itself: for an unconfirmed session it
+  asks a whoami through the single-flight validation slot, and for a confirmed one it is a no-op,
+  so a store may call it on every page it applies. Only the whoami says the credential is still
+  good, and the generation that issued the request is compared at the report, after the hop, and
+  inside the validation body.
+- **The tab roots reload on a CHANGE of `reachabilityRecoveries`**, over and above the ordinary
+  load each does when it appears: only an unconfirmed session becoming confirmed bumps the counter,
+  not a confirmed one confirmed again, and not a sign-out, which writes `.verified` because nothing
+  is owed an answer any more. `TimelineView`, `MediaLibraryView` and `PlacesView` apply the
+  modifier, `reloadsOnRecovery`.
+- **One function decides which card is on screen** (`SessionBanner.notice`), so the unreachable
+  notice and the unconfirmed line cannot stack. It sits above the tabs because it is true of the
+  whole app, and is not dismissable: the state the session is in, not a notification of an event.
 
 ## Media cache
 
@@ -88,6 +154,17 @@ Derived media is served through HMAC-signed URLs with an expiry. A cached respon
 not outlive the signature that authorised it: `SignedMediaURL` parses `exp` out of the URL, bounds
 the cache lifetime by whichever of `exp` and the server's `max-age` is shorter, and bypasses the
 cache entirely once the signature has expired. Asserted in a Core test, not assumed.
+
+## The basemap
+
+The map under the Places pins is Apple's, drawn by MapKit. The consequence is stated rather than
+implied: the viewport's tile requests go to Apple, and what a reader pans over is known to Apple as
+a viewport. Nothing else about the household's photographs is: the marker coordinates, the
+thumbnails on the pins and the memo content behind them are fetched only from the household's own
+server, over the same signed-URL media path everything else uses. The app fetches, caches and
+serves no map tiles of its own, and the self-hosted basemap the web client draws is deliberately
+not consumed here — a second tile pipeline on a phone buys a privacy property this app already has
+for the photographs and pays for it in cache, battery and a renderer nobody maintains.
 
 ## Markdown parity
 
@@ -140,6 +217,15 @@ editing, widgets, App Intents, watchOS, macOS and iPad layout.
 Custom URL-scheme auth callbacks were on that list and are not any more. On an internal-only-DNS
 estate the custom scheme is the sign-in lane, permanently — see **Sign-in** above.
 
+The Places **playback timeline** is not shipped, and the list above would not say so on its own,
+because the code for it is in the tree:
+`Packages/MemosCore/Sources/MemosCore/Places/PlaceTimeline.swift` holds the month histogram, the
+playhead reducer and the playhead's effect on the marker set, with
+`PlaceTimelineTests` asserting all of it. Nothing draws it — no other Swift file names
+`PlaceTimeline`, `PlaceHistogram`, `PlaceBucket`, `PlaybackSpeed` or `TimelineMode` — so the
+shipped map is a map without a scrubber. Tested pure rules waiting for a screen, not a feature
+somebody removed the last call to.
+
 ## Known deviations of the built skeleton from this draft
 
 Recorded here rather than quietly absorbed, for the review that turns v0 into v1.
@@ -186,10 +272,18 @@ Recorded here rather than quietly absorbed, for the review that turns v0 into v1
 3. **`MemosCore` links `OpenAPIRuntime` directly.** The generated request types ARE OpenAPIRuntime
    types, and the default arguments Core inlines when it builds one are defined in that module.
    The layering rule is unchanged; this is a link-time fact, not a new direction of dependency.
-4. **The vendored `openapi.json` is normalised during the sync.** FastAPI's
-   `anyOf: [X, {"type": "null"}]` is rewritten to an OAS 3.1 type array, because the generator
-   otherwise drops every nullable property without failing. The rewrite is lossless and its
-   counts are recorded in `OPENAPI_SOURCE`; the real fix belongs in memos-ng's schema output.
+4. **The vendored `openapi.json` is copied verbatim, and what the generator cannot express is
+   excluded rather than rewritten.** The sync writes the file byte for byte as memos-ng emits it,
+   so its provenance is one `git show` away; nothing here transforms the contract. memos-ng has
+   written nullable scalars as OAS 3.1 type arrays since 433a3fe, which the generator handles, so
+   the normalisation step that used to run here is gone. What it never covered is a nullable
+   `$ref` — `anyOf: [{$ref: X}, {"type": "null"}]` — which this generator version skips with a
+   warning that fails nothing, leaving a property silently absent. Where that idiom appears on a
+   surface the app does not read, the operations that reach it are left out of
+   `openapi-generator-config.yaml`'s inclusion filter, so no half-generated type exists to be
+   trusted; `scripts/openapi-coverage-rule.sh` holds that list to the document so nothing else
+   drops out with it. The real fix belongs in memos-ng's schema output, and a local transform is
+   not a substitute for it.
 5. **The test bundles are Xcode targets, not SwiftPM test targets.** An XcodeGen scheme's test
    action cannot reference a package's test targets. The bundle names and the requirement that
    `xcodebuild test` runs all three are unchanged.

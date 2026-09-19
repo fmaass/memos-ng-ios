@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import SwiftUI
 import Testing
 
 @testable import MemosFeatures
@@ -75,5 +76,33 @@ struct ComposeDateTests {
         // them out on the pill costs the row its other two.
         #expect(!shown.contains(year))
         #expect(shown == MemoDateChoice.title(for: capture, compact: true, locale: locale))
+    }
+
+    /// The picker's binding is what a tap on the calendar reaches, so driving it is the tap. Noon
+    /// UTC, because the picker reads its days in the device's calendar: half an hour past noon UTC
+    /// is the same local day in every zone there is, and two days on is another day in all of them.
+    @Test("a day picked on the calendar closes the picker; a moved time leaves it up")
+    func pickingADayClosesThePicker() {
+        let noon = Date(timeIntervalSince1970: 1_749_988_800)
+        let held = Held()
+        let picker = MemoDatePicker(
+            date: Binding(get: { held.date }, set: { held.date = $0 }),
+            seed: noon
+        ) { held.closed += 1 }
+
+        let laterThatDay = noon.addingTimeInterval(30 * 60)
+        picker.chosen.wrappedValue = laterThatDay
+        #expect(held.date == laterThatDay, "moving the time still dates the memo")
+        #expect(held.closed == 0, "moving the time is not what closes the picker")
+
+        let anotherDay = laterThatDay.addingTimeInterval(2 * 86_400)
+        picker.chosen.wrappedValue = anotherDay
+        #expect(held.date == anotherDay)
+        #expect(held.closed == 1)
+    }
+
+    private final class Held {
+        var date: Date?
+        var closed = 0
     }
 }
