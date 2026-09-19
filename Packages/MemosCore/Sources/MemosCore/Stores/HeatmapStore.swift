@@ -78,6 +78,9 @@ public final class HeatmapStore {
                 counts = loaded
                 hasLoaded = true
                 lastError = nil
+                // Counts that arrived are the session's to act on, as a question and not an
+                // answer (`noteTransportSuccess`).
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
             } else {
                 MemosLog.api.info("an answer for a session that has ended is not applied")
             }

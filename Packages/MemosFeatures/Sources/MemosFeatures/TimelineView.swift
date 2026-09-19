@@ -291,6 +291,8 @@ public struct TimelineView: View {
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
             Task { await load() }
         }
+        // The server is answering again, and this list was read while it was not.
+        .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
         // A memo asked for from the Library. Keyed on the request rather than run from an
         // `onChange`, because satisfying it can mean reading the memo from the server first and
         // that read must be cancellable with the screen.

@@ -39,6 +39,33 @@ public enum SessionRestoreFailure: Error, Sendable, Equatable {
         case .other(let detail): self = .unreachable(host: host, detail: detail)
         }
     }
+
+    /// The same three sentences, over the classification a STORE's failure produces.
+    ///
+    /// Two vocabularies, one set of sentences: the sign-in lane classifies into
+    /// `NativeLoginTransportFailure` and a store's request into `ServerReachability.Reason`, and
+    /// what the person reads must not depend on which lane noticed. Everything that is neither the
+    /// Local Network denial nor a phone with no network is the same "can't reach it" sentence with
+    /// a short detail — the status for a gateway, the domain and code otherwise, and never the
+    /// error's own text.
+    public init(_ reason: ServerReachability.Reason, host: String) {
+        switch reason {
+        case .localNetworkDenied: self = .localNetworkDenied
+        case .offline: self = .offline(host: host)
+        case .gateway(let status):
+            self = .unreachable(host: host, detail: "HTTP \(status)")
+        case .other(let detail):
+            self = .unreachable(host: host, detail: detail)
+        case .timedOut:
+            self = .unreachable(host: host, detail: "timed out")
+        case .cannotConnect:
+            self = .unreachable(host: host, detail: "no connection to the host")
+        case .connectionLost:
+            self = .unreachable(host: host, detail: "the connection was lost")
+        case .dnsFailure:
+            self = .unreachable(host: host, detail: "its name would not resolve")
+        }
+    }
 }
 
 extension SessionRestoreFailure: LocalizedError {

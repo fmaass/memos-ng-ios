@@ -54,12 +54,30 @@ struct MainTabView: View {
             // library is as stale as the timeline when the server cannot be reached. Persistent
             // and not dismissable — it is not a notification of an event, it is the state the
             // session is in, and it goes away when the session leaves that state.
-            if let notice = SessionBanner.text(for: session.verification) {
-                NoticeCard(text: notice, tone: .warning)
-                    .padding(.horizontal, DesignTokens.Space.regular)
-                    .padding(.top, DesignTokens.Space.regular)
-            }
+            notice
             tabs
+        }
+    }
+
+    /// The one card the session is entitled to, and never two: which of them is on screen is
+    /// decided by `SessionBanner.notice`, so the weighing is a function with its own cases rather
+    /// than two conditions sitting next to each other in a view body.
+    @ViewBuilder
+    private var notice: some View {
+        switch SessionBanner.notice(
+            showingUnreachable: session.showsUnreachableNotice,
+            verification: session.verification
+        ) {
+        case .unreachable(let text):
+            UnreachableBanner(text: text, retry: { await session.retryNow() })
+                .padding(.horizontal, DesignTokens.Space.regular)
+                .padding(.top, DesignTokens.Space.regular)
+        case .unverified(let text):
+            NoticeCard(text: text, tone: .warning)
+                .padding(.horizontal, DesignTokens.Space.regular)
+                .padding(.top, DesignTokens.Space.regular)
+        case nil:
+            EmptyView()
         }
     }
 

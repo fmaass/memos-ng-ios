@@ -93,13 +93,16 @@ public enum StoreFailure {
     /// answer the server gave — a 403, a 500 — is about the thing somebody just did and is
     /// reported where it always was. A cancellation is neither: it is this app's own supersede
     /// coming back at it.
-    public static func transportFailure(_ error: any Error) -> NativeLoginTransportFailure? {
+    ///
+    /// A gateway answer is the one status class that crosses that line, and only for the two
+    /// statuses this server never emits itself: 502 and 504 mean the reverse proxy is up and the
+    /// server behind it is not, which is the same fact a timeout carries. 503 stays on the
+    /// "answered" side because memos-ng raises it deliberately — a raced write, a degraded health
+    /// check — and reading its own answer as "cannot reach the server" would mistranslate it.
+    public static func transportFailure(_ error: any Error) -> ServerReachability.Reason? {
         guard !isCancellation(error), refusal(error) == nil else { return nil }
-        guard !(error is APIError), (error as? any APIErrorCarrying)?.apiError == nil else {
-            return nil
-        }
-        guard NativeLoginTransportFailure.isTransportFailure(error) else { return nil }
-        return NativeLoginTransportFailure.classify(error)
+        guard case .unreachable(let reason) = ServerReachability.classify(error) else { return nil }
+        return reason
     }
 
     /// The failure a store should report, or nil for one it must swallow.
