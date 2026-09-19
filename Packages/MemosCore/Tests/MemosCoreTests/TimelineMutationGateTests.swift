@@ -289,6 +289,49 @@ struct TimelineMutationGateTests {
         #expect(store.memos.map(\.uid) == ["b"])
     }
 
+    @Test("a tick is refused while a save of the same memo is unfinished")
+    func aTickIsRefusedWhileASaveOfTheSameMemoIsUnfinished() async throws {
+        let store = TimelineStore()
+        let patches = Counter()
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "- [ ] milk")]))
+            }
+            patches.increment()
+            let content = (try await Stub.body(body))["content"] as? String ?? ""
+            try await hold(until: release)
+            return Stub.json(Stub.memo(uid: "a", content: content))
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let saving = Task {
+            await store.edit(
+                uid: "a", content: "new words", using: client.handle, baseURL: Stub.baseURL
+            )
+        }
+        while patches.count == 0 {
+            await Task.yield()
+        }
+        // A tap on the box of a memo whose words are being rewritten. The tick is a whole content
+        // patch derived from the row as it stands, so it is refused outright rather than queued —
+        // queued, it would send the person words they have just replaced.
+        let ticked = Task {
+            await store.toggleTask(at: 0, in: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        await timeForARequestToArrive()
+
+        #expect(patches.count == 1, "the tick was sent while a save of that memo was unfinished")
+        #expect(store.memos[0].content == "- [ ] milk", "a refused tick still moved the box")
+        release.set(true)
+        #expect(await saving.value.isSaved, "control: the save landed")
+        #expect(
+            !(await ticked.value),
+            "the tick was taken while a save of that memo was unfinished"
+        )
+        #expect(store.memos[0].content == "new words")
+    }
+
     @Test("a save joined while it is still uploading uploads its files once")
     func aJoinedSaveUploadsItsFilesOnce() async throws {
         let file = try stagedFile()
