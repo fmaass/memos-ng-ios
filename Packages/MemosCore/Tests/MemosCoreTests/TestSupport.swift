@@ -144,12 +144,33 @@ enum Stub {
     /// exercising a client the management lane never has.
     static func client(
         grant: ManagementGrant,
+        licence: GrantSendLicence = GrantSendLicence { true },
         handler: @escaping StubTransport.Handler
     ) -> any APIProtocol {
         APIClientFactory.make(
             configuration: ServerConfiguration(baseURL: baseURL),
             grant: grant,
+            licence: licence,
             transport: StubTransport(handler: handler)
+        )
+    }
+
+    /// The management client with a middleware in FRONT of the grant one, so a test can hold a
+    /// request on its way OUT.
+    ///
+    /// Holding an answer exercises the store's fence; only holding the request itself reaches the
+    /// instant the licence is asked, which is after every main-actor check the store can make.
+    static func client(
+        grant: ManagementGrant,
+        licence: GrantSendLicence,
+        ahead: any ClientMiddleware,
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        Client(
+            serverURL: baseURL,
+            configuration: APIClientFactory.runtimeConfiguration,
+            transport: StubTransport(handler: handler),
+            middlewares: [ahead, GrantAuthMiddleware(grant: grant, licence: licence)]
         )
     }
 

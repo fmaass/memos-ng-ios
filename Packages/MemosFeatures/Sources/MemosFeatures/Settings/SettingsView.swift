@@ -86,7 +86,7 @@ struct SettingsView: View {
         // sign-on is a round trip to that server, and there is nowhere to send it otherwise.
         .sheet(isPresented: $managingTokens) {
             if let baseURL = session.serverBaseURL {
-                ManageTokensView(serverBaseURL: baseURL)
+                ManageTokensView(serverBaseURL: baseURL, session: session)
             }
         }
     }

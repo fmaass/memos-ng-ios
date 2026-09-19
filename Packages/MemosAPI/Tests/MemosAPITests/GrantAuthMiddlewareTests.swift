@@ -41,7 +41,9 @@ struct GrantAuthMiddlewareTests {
         let grant = ManagementGrant()
         grant.hold("mg_abc", until: future)
 
-        let seen = try await send(GrantAuthMiddleware(grant: grant))
+        let seen = try await send(
+            GrantAuthMiddleware(grant: grant, licence: GrantSendLicence { true })
+        )
 
         #expect(seen?.headerFields[.authorization] == "Grant mg_abc")
     }
@@ -53,7 +55,9 @@ struct GrantAuthMiddlewareTests {
         let grant = ManagementGrant()
         grant.hold("mg_abc", until: future)
 
-        let seen = try await send(GrantAuthMiddleware(grant: grant))
+        let seen = try await send(
+            GrantAuthMiddleware(grant: grant, licence: GrantSendLicence { true })
+        )
 
         #expect(seen?.headerFields[.authorization]?.hasPrefix("Bearer") == false)
     }
@@ -64,7 +68,9 @@ struct GrantAuthMiddlewareTests {
         grant.hold("mg_abc", until: future)
         grant.forget()
 
-        let seen = try await send(GrantAuthMiddleware(grant: grant))
+        let seen = try await send(
+            GrantAuthMiddleware(grant: grant, licence: GrantSendLicence { true })
+        )
 
         #expect(seen?.headerFields[.authorization] == nil)
     }
@@ -73,7 +79,9 @@ struct GrantAuthMiddlewareTests {
     /// present, and that request has to go out anonymously or it could never buy a grant.
     @Test("a grant that was never held attaches nothing")
     func emptyGrantAttachesNothing() async throws {
-        let seen = try await send(GrantAuthMiddleware(grant: ManagementGrant()))
+        let seen = try await send(
+            GrantAuthMiddleware(grant: ManagementGrant(), licence: GrantSendLicence { true })
+        )
 
         #expect(seen?.headerFields[.authorization] == nil)
     }
@@ -82,7 +90,7 @@ struct GrantAuthMiddlewareTests {
     func readsTheGrantPerRequest() async throws {
         let grant = ManagementGrant()
         grant.hold("first", until: future)
-        let middleware = GrantAuthMiddleware(grant: grant)
+        let middleware = GrantAuthMiddleware(grant: grant, licence: GrantSendLicence { true })
         var headers: [String?] = []
         for _ in 0..<2 {
             _ = try await middleware.intercept(
@@ -99,6 +107,38 @@ struct GrantAuthMiddlewareTests {
         }
 
         #expect(headers == ["Grant first", "Grant second"])
+    }
+
+    /// The instant no check above this layer can cover: work that was current when it started is
+    /// sent from another executor, and the identity that bought the grant can be gone by then.
+    ///
+    /// Nothing is attached and nothing is forwarded — a request that left would be authorised by a
+    /// grant nobody holds any more, and its answer would be read by nobody.
+    @Test("a refused licence attaches nothing, forwards nothing, and says which refusal it was")
+    func aRefusedLicenceSendsNothing() async throws {
+        let grant = ManagementGrant()
+        grant.hold("mg_abc", until: future)
+        let middleware = GrantAuthMiddleware(grant: grant, licence: GrantSendLicence { false })
+        var forwarded = false
+        var thrown: (any Error)?
+
+        do {
+            _ = try await middleware.intercept(
+                request(),
+                body: nil,
+                baseURL: baseURL,
+                operationID: "list_pats_api_pats_get",
+                next: { _, _, _ in
+                    forwarded = true
+                    return (HTTPResponse(status: .ok), nil)
+                }
+            )
+        } catch {
+            thrown = error
+        }
+
+        #expect(!forwarded)
+        #expect(thrown is ManagementIdentityWithdrawn)
     }
 }
 

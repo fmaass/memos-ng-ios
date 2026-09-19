@@ -87,11 +87,13 @@ public enum APIClientFactory {
     public static func make(
         configuration: ServerConfiguration,
         grant: ManagementGrant,
+        licence: GrantSendLicence,
         urlSession: URLSession = .shared
     ) -> any APIProtocol {
         make(
             configuration: configuration,
             grant: grant,
+            licence: licence,
             transport: URLSessionTransport(configuration: .init(session: urlSession))
         )
     }
@@ -99,13 +101,14 @@ public enum APIClientFactory {
     public static func make(
         configuration: ServerConfiguration,
         grant: ManagementGrant,
+        licence: GrantSendLicence,
         transport: any ClientTransport
     ) -> any APIProtocol {
         Client(
             serverURL: configuration.baseURL,
             configuration: runtimeConfiguration,
             transport: transport,
-            middlewares: [GrantAuthMiddleware(grant: grant)]
+            middlewares: [GrantAuthMiddleware(grant: grant, licence: licence)]
         )
     }
 }

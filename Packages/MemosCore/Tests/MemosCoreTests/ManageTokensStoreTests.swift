@@ -72,13 +72,15 @@ private final class Pages: @unchecked Sendable {
 struct ManageTokensStoreTests {
     private func makeStore(
         seen: LockedValue<[Seen]>,
+        session: (any SessionReporting)? = nil,
         now: @escaping @Sendable () -> Date = { managementNow },
         handler: @escaping @Sendable (String) async throws -> HTTPResponseLike
     ) -> ManageTokensStore {
         ManageTokensStore(
             configuration: ServerConfiguration(baseURL: Stub.baseURL),
-            makeClient: { _, grant in
-                Stub.client(grant: grant) { request, _, operation in
+            session: session,
+            makeClient: { _, grant, licence in
+                Stub.client(grant: grant, licence: licence) { request, _, operation in
                     seen.set(
                         seen.get()
                             + [
@@ -221,8 +223,8 @@ struct ManageTokensStoreTests {
         }
         let store = ManageTokensStore(
             configuration: ServerConfiguration(baseURL: Stub.baseURL),
-            makeClient: { _, grant in
-                Stub.client(grant: grant) { request, _, operation in
+            makeClient: { _, grant, licence in
+                Stub.client(grant: grant, licence: licence) { request, _, operation in
                     record(request, operation)
                     return try await handler(operation).parts
                 }
@@ -881,5 +883,244 @@ extension ManageTokensStoreTests {
 
         #expect(third)
         #expect(store.minted?.secret == "memos_pat_second")
+    }
+}
+
+/// Holds a request on its way OUT, in front of the grant middleware.
+///
+/// The gate inside the transport holds an ANSWER, which is a different instant: by then the request
+/// has already been authorised and sent. The only way to ask what happens to a request that was
+/// started while the identity was there and leaves after it went is to hold it before it goes.
+private struct HoldingOnTheWayOut: ClientMiddleware {
+    typealias Answer = (HTTPResponse, HTTPBody?)
+    /// `@concurrent` for the reason `RenewingOnRefusal` carries it: under this target's MainActor
+    /// default isolation the conformance fails without it.
+    typealias Next = @concurrent @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> Answer
+
+    let operation: String
+    let armed: LockedValue<Bool>
+    let gate: RequestGate
+
+    nonisolated func intercept(
+        _ request: HTTPRequest,
+        body: HTTPBody?,
+        baseURL: URL,
+        operationID: String,
+        next: Next
+    ) async throws -> Answer {
+        if operationID == operation, armed.get() { await gate.hold() }
+        return try await next(request, body, baseURL)
+    }
+}
+
+/// A step-up belongs to the identity that bought it, and that identity can be withdrawn while the
+/// management screen is still up: the session drops its client and moves its incarnation
+/// synchronously, and the sheet is torn down afterwards.
+///
+/// Every test here drives a REAL `SessionStore`, because the question is what the app's identity
+/// says about itself. A stand-in would answer with whatever it was told to answer.
+extension ManageTokensStoreTests {
+    private func signedInSession() async -> SessionStore {
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            },
+            sleeper: { _ in throw CancellationError() }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        return session
+    }
+
+    @Test("a list that lands after the app identity went does not reach the screen")
+    func aHeldListCannotInstallForAnIdentityThatWent() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let armed = LockedValue(false)
+        let pages = Pages([
+            "[\(Stub.pat(id: 1, name: "Kitchen phone"))]",
+            "[\(Stub.pat(id: 1, name: "Kitchen phone")),\(Stub.pat(id: 2, name: "Laptop"))]",
+        ])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            if operation == listOperation, armed.get() { await gate.hold() }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json(pages.next())
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+        armed.set(true)
+
+        async let reading: Void = store.refresh()
+        await gate.waitForArrival()
+        await session.signOutWithoutRevoking()
+        #expect(session.activeHandle == nil, "the identity was still there to be judged against")
+        await gate.release()
+        await reading
+
+        #expect(rows(store.state)?.map(\.id) == [1], "a list from a gone identity was installed")
+    }
+
+    /// The plaintext of a minted token is shown once, on the screen that asked for it. After the
+    /// identity went there is no such screen, and the notice about the loss belongs to it too —
+    /// surfacing it later would be a sentence about somebody else's account.
+    @Test("a token minted after the app identity went is neither shown nor announced")
+    func aHeldCreateCannotShowForAnIdentityThatWent() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            if operation == createOperation {
+                await gate.hold()
+                return .created(
+                    Stub.patCreated(id: 2, name: "Laptop", token: "memos_pat_brand_new")
+                )
+            }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[]")
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+
+        async let creating = store.create(name: "Laptop")
+        await gate.waitForArrival()
+        await session.signOutWithoutRevoking()
+        #expect(session.activeHandle == nil, "the identity was still there to be judged against")
+        await gate.release()
+        let created = await creating
+
+        #expect(!created)
+        #expect(store.minted == nil, "a plaintext was shown for an identity that is gone")
+        #expect(!store.mintedSecretLost, "the loss was announced to an identity that is gone")
+    }
+
+    /// A failure answers through a different continuation than a success, and every one of them
+    /// writes the screen. A mint that failed for an identity that has gone must write none of them.
+    @Test("a mint the server refused after the app identity went says nothing")
+    func aHeldMintRefusalCannotSpeakForAnIdentityThatWent() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            guard operation == mintOperation else { return .status(.internalServerError) }
+            await gate.hold()
+            return .status(.notFound)
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        await session.signOutWithoutRevoking()
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(!signedOn)
+        #expect(store.state != .unsupported, "a refusal was written for an identity that is gone")
+    }
+
+    @Test("a handoff code the server rejected after the app identity went says nothing either")
+    func aHeldMintRejectionCannotSpeakForAnIdentityThatWent() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            guard operation == mintOperation else { return .status(.internalServerError) }
+            await gate.hold()
+            return .detail("code_expired", status: .badRequest)
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        await session.signOutWithoutRevoking()
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(!signedOn)
+        #expect(
+            store.state != .locked(.refused(.exchangeRejected(.codeExpired))),
+            "a refusal was written for an identity that is gone"
+        )
+    }
+
+    /// The browser is out of the app's hands: a callback can come back at any moment, including
+    /// after the person signed out from another screen. The handoff code it carries buys a grant on
+    /// an account nobody is signed in to any more, so it is not exchanged at all.
+    @Test("a browser callback that returns after the app identity went exchanges nothing")
+    func aCallbackAfterTheIdentityWentIsNotExchanged() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+        let reentrant = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        reentrant.reenter = {
+            await session.signOutWithoutRevoking()
+            return true
+        }
+
+        let signedOn = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: reentrant
+        )
+
+        #expect(!signedOn)
+        #expect(session.activeHandle == nil, "the identity was still there to be judged against")
+        #expect(seen.get().isEmpty, "a handoff code was exchanged for an identity that is gone")
+    }
+
+    /// The last instant, and the one no check on the main actor can cover: the request was started
+    /// while the identity was there and leaves after it went.
+    @Test("a request already on its way out is not sent once the app identity goes")
+    func aRequestOnItsWayOutIsNotSentAfterTheIdentityGoes() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let armed = LockedValue(false)
+        let session = await signedInSession()
+        let store = ManageTokensStore(
+            configuration: ServerConfiguration(baseURL: Stub.baseURL),
+            session: session,
+            makeClient: { _, grant, licence in
+                Stub.client(
+                    grant: grant,
+                    licence: licence,
+                    ahead: HoldingOnTheWayOut(operation: listOperation, armed: armed, gate: gate)
+                ) { request, _, operation in
+                    seen.set(
+                        seen.get()
+                            + [
+                                Seen(
+                                    operation: operation,
+                                    method: request.method.rawValue,
+                                    path: request.path ?? "",
+                                    authorization: request.headerFields[.authorization]
+                                )
+                            ]
+                    )
+                    switch operation {
+                    case mintOperation: return Stub.json(liveGrant)
+                    case listOperation:
+                        return Stub.json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+                    default: return Stub.empty(.internalServerError)
+                    }
+                }
+            },
+            now: { managementNow }
+        )
+        await signOn(store)
+        armed.set(true)
+
+        async let reading: Void = store.refresh()
+        await gate.waitForArrival()
+        await session.signOutWithoutRevoking()
+        await gate.release()
+        await reading
+
+        #expect(
+            seen.get().filter { $0.operation == listOperation }.count == 1,
+            "a request left for an identity that is gone"
+        )
     }
 }

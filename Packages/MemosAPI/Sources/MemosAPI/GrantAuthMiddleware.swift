@@ -20,11 +20,39 @@ import OpenAPIRuntime
 ///
 /// The value is read per request rather than captured, so a re-authentication mid-screen reaches a
 /// client that was already built — the same reason `BearerAuthMiddleware` reads its credential.
+/// Answers, at the instant a request is about to leave, whether the identity the grant was bought
+/// under is still the app's identity.
+///
+/// The question is asked through a closure rather than a type of this layer's own, because the
+/// identity it consults lives above this layer and this layer imports nothing above itself. The
+/// closure is wrapped in a value for the reason `SendAuthority` is one: a bare function type
+/// travelling through a `makeClient` seam is a non-escaping parameter at every site it passes
+/// through, and none of those sites could store it.
+public struct GrantSendLicence: Sendable {
+    private let stillCurrent: @Sendable () -> Bool
+
+    public init(_ stillCurrent: @escaping @Sendable () -> Bool) {
+        self.stillCurrent = stillCurrent
+    }
+
+    public func holds() -> Bool { stillCurrent() }
+}
+
+/// Thrown instead of sending, when the licence refuses.
+///
+/// Its own type, so a caller can tell a withdrawn identity from anything the server said: there is
+/// nobody left to read a notice about it, and the answer must not be mistaken for one.
+public struct ManagementIdentityWithdrawn: Error, Equatable {
+    public init() {}
+}
+
 public struct GrantAuthMiddleware: ClientMiddleware {
     private let grant: ManagementGrant
+    private let licence: GrantSendLicence
 
-    public init(grant: ManagementGrant) {
+    public init(grant: ManagementGrant, licence: GrantSendLicence) {
         self.grant = grant
+        self.licence = licence
     }
 
     public func intercept(

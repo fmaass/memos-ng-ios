@@ -30,8 +30,13 @@ struct ManageTokensView: View {
 
     /// Takes the server's base URL rather than a configuration: `ServerConfiguration` belongs to
     /// the API layer, which this one reaches through `MemosCore` and never directly.
-    init(serverBaseURL: URL) {
-        _store = State(initialValue: ManageTokensStore(serverBaseURL: serverBaseURL))
+    /// The session comes with it because a step-up belongs to the identity that bought it: this
+    /// screen's own teardown happens after the session has already withdrawn, so the store has to
+    /// be able to ask the session itself.
+    init(serverBaseURL: URL, session: any SessionReporting) {
+        _store = State(
+            initialValue: ManageTokensStore(serverBaseURL: serverBaseURL, session: session)
+        )
     }
 
     var body: some View {

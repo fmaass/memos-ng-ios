@@ -91,17 +91,38 @@ public final class ManageTokensStore {
     /// the one it took.
     private var workSequence = 0
 
+    /// The app session this management session is a step-up on, and the incarnation it was bought
+    /// under.
+    ///
+    /// A grant speaks for one signed-in identity and means nothing once that identity is gone. The
+    /// screen's own teardown cannot stand in for the question: the session withdraws its client and
+    /// its incarnation synchronously, and the sheet goes away afterwards.
+    private let session: (any SessionReporting)?
+    private let boughtUnder: Int?
+
     public init(
         configuration: ServerConfiguration,
-        makeClient: (ServerConfiguration, ManagementGrant) -> any APIProtocol = {
-            APIClientFactory.make(configuration: $0, grant: $1)
+        session: (any SessionReporting)? = nil,
+        makeClient: (ServerConfiguration, ManagementGrant, GrantSendLicence) -> any APIProtocol = {
+            APIClientFactory.make(configuration: $0, grant: $1, licence: $2)
         },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         let grant = ManagementGrant()
+        // Read off the main actor, at the instant a request leaves: a check made here, where the
+        // work was started, cannot speak for the moment the transport sends.
+        let licence: GrantSendLicence
+        if let incarnation = session?.sessionIncarnation {
+            let granted = incarnation.current
+            licence = GrantSendLicence { incarnation.isCurrent(granted) }
+        } else {
+            licence = GrantSendLicence { true }
+        }
         self.configuration = configuration
+        self.session = session
+        self.boughtUnder = session?.activeHandle?.generation
         self.grant = grant
-        self.client = makeClient(configuration, grant)
+        self.client = makeClient(configuration, grant, licence)
         self.now = now
     }
 
@@ -110,8 +131,8 @@ public final class ManageTokensStore {
     /// It exists because the layer above cannot name a `ServerConfiguration`: that type belongs to
     /// the API layer, and the screens layer reaches the API through this one and never directly
     /// (the dependency rule, checked by the gate). A URL is a thing both layers can say.
-    public convenience init(serverBaseURL: URL) {
-        self.init(configuration: ServerConfiguration(baseURL: serverBaseURL))
+    public convenience init(serverBaseURL: URL, session: any SessionReporting) {
+        self.init(configuration: ServerConfiguration(baseURL: serverBaseURL), session: session)
     }
 
     // MARK: - buying a management session
