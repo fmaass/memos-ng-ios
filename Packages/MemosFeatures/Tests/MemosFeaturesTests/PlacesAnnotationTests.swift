@@ -152,12 +152,15 @@ struct PlacesAnnotationTests {
         let second = URL(string: "https://memos.example.invalid/a/thumb?exp=2&sig=two")!
 
         coordinator.show([placePin(key: "a", thumbnail: first)], through: sink)
-        let afterFirst = sink.calls
         coordinator.show([placePin(key: "a", thumbnail: second)], through: sink)
 
-        #expect(sink.calls == afterFirst, "an unchanged pin needs no repaint to hold a new URL")
+        #expect(sink.calls == [.add(["a"]), .refresh("a")])
         #expect(sink.added.count == 1, "the pin was rebuilt rather than handed the new URL")
         let born = try #require(sink.added.first)
+        #expect(
+            sink.refreshed.first === born,
+            "a rebuilt annotation costs the view its thumbnail and makes the pin blink"
+        )
         #expect(
             born.pin.leadThumbnailURL == second,
             "the annotation kept a signature that lapses while a live one was thrown away"
@@ -217,6 +220,39 @@ struct PlacesAnnotationTests {
         if let png = picture.pngData() {
             Attachment.record(png, named: "places-map.png")
         }
+    }
+}
+
+/// The sink with a view behind it: what the production one does, minus the map.
+///
+/// `RecordingSink` above says which change the coordinator decided on, which is all the cases up
+/// there need. A case about what the PIN then asks the loader for needs the other half — a real
+/// `PlacePinView` per key, configured on a refresh exactly as `MapViewAnnotationSink` configures
+/// the view MapKit holds.
+@MainActor
+final class PinViewSink: AnnotationSink {
+    private(set) var refreshed: [String] = []
+    private(set) var views: [String: PlacePinView] = [:]
+
+    func add(_ annotations: [PlaceAnnotation]) {
+        for annotation in annotations {
+            // Built empty and then given its annotation, which is the order MapKit uses and the
+            // only one that asks for the photograph exactly once: a view built AROUND its
+            // annotation configures twice, once through the property and once in the initialiser,
+            // and a count of requests could not tell that apart from a retry.
+            let view = PlacePinView(annotation: nil, reuseIdentifier: "place")
+            view.annotation = annotation
+            views[annotation.pin.spec.key] = view
+        }
+    }
+
+    func remove(_ annotations: [PlaceAnnotation]) {
+        for annotation in annotations { views.removeValue(forKey: annotation.pin.spec.key) }
+    }
+
+    func refresh(_ annotation: PlaceAnnotation) {
+        refreshed.append(annotation.pin.spec.key)
+        views[annotation.pin.spec.key]?.configure()
     }
 }
 
@@ -371,6 +407,66 @@ extension MediaImageLoaderTests {
             #expect(
                 view.shownImage == nil,
                 "a photograph belonging to the previous account was painted on a pin"
+            )
+        }
+    }
+
+    /// The grey square that stays grey. The pin's specs are identical across the reload — same
+    /// place, same photographs — so no diff bucket holds it, and the only thing that changed is the
+    /// signature on its thumbnail. Without a repaint the view is never asked again and the failure
+    /// lasts until MapKit happens to rebuild the view.
+    @Test("a pin whose photograph never arrived is asked for it again on the next read")
+    func aPinThatFetchedNothingIsAskedAgain() async {
+        let transport = RefusingTransport()
+        await withTransport(transport) {
+            let coordinator = PlacesMapCoordinator()
+            let sink = PinViewSink()
+            let uid = "place-retry"
+            let first = MediaFixture.signed(uid: uid, sig: "one")
+            let second = MediaFixture.signed(uid: uid, sig: "two")
+
+            coordinator.show([placePin(key: "retry", uid: uid, thumbnail: first)], through: sink)
+            await sink.views["retry"]?.loading?.value
+            let askedAtMount = await transport.calls
+            #expect(askedAtMount == 1, "the pin asked for its photograph once and no more")
+            #expect(sink.views["retry"]?.shownImage == nil, "the fetch was supposed to fail")
+
+            // The reload a recovery already performs: the same pin, a freshly signed URL.
+            coordinator.show([placePin(key: "retry", uid: uid, thumbnail: second)], through: sink)
+            await sink.views["retry"]?.loading?.value
+            let askedAfterReload = await transport.calls
+
+            #expect(sink.refreshed == ["retry"], "the pin was left holding its failure")
+            #expect(askedAfterReload == 2, "the grey square was never asked about again")
+        }
+    }
+
+    /// The other half of the same rule, and the reason the repaint is free: a pin that HAS its
+    /// photograph reads it back out of the decoded cache, which is keyed on the uid and so survives
+    /// the re-signing. No second request, and nothing blinks.
+    @Test("a pin already showing its photograph is not sent back to the network by a reload")
+    func aLoadedPinIsNotFetchedTwice() async {
+        let transport = ScriptedTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let coordinator = PlacesMapCoordinator()
+            let sink = PinViewSink()
+            let uid = "place-loaded"
+            let first = MediaFixture.signed(uid: uid, sig: "one")
+            let second = MediaFixture.signed(uid: uid, sig: "two")
+
+            coordinator.show([placePin(key: "loaded", uid: uid, thumbnail: first)], through: sink)
+            await sink.views["loaded"]?.loading?.value
+            let painted = sink.views["loaded"]?.shownImage
+            #expect(painted != nil, "the pin was supposed to be holding a photograph")
+
+            coordinator.show([placePin(key: "loaded", uid: uid, thumbnail: second)], through: sink)
+            await sink.views["loaded"]?.loading?.value
+            let askedInAll = await transport.calls
+
+            #expect(askedInAll == 1, "a photograph in hand was fetched a second time")
+            #expect(
+                sink.views["loaded"]?.shownImage === painted,
+                "the pin dropped the picture it was showing and blinked"
             )
         }
     }

@@ -40,8 +40,14 @@ nonisolated final class PlaceAnnotation: NSObject, MKAnnotation {
     /// refresh is holding a signature that will lapse while the one that replaces it is thrown
     /// away. Separate from `update(to:)` because writing `coordinate` is a KVO notification to the
     /// map, and a pin that did not move must not send one.
-    func adopt(_ pin: PlacePin) {
+    ///
+    /// Answers whether that URL is a different one, because a pin whose fetch came back with
+    /// nothing has no other occasion to ask again: its spec is unchanged, so no bucket of the diff
+    /// holds it, and a fresh signature is the only thing that says the picture is worth asking for.
+    func adopt(_ pin: PlacePin) -> Bool {
+        let previousURL = self.pin.leadThumbnailURL
         self.pin = pin
+        return pin.leadThumbnailURL != previousURL
     }
 
     /// The same object, now standing for a different set of photographs.
@@ -80,11 +86,12 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
     /// The map this coordinator speaks for, kept so Zoom-in has something to move.
     ///
     /// The coordinator outlives the map: the screen holds it so a sheet can move the map, while
-    /// the map itself is rebuilt whenever it leaves the hierarchy and comes back — a failed reload
-    /// replacing it with a notice, and Retry putting one back, is exactly that. What is recorded
-    /// below describes ONE map: which annotation objects are installed on it, and whether it has
-    /// had its opening view. A different map holds neither, so the record goes with the map it
-    /// described and the next pass adds every pin afresh and frames the new map once. The same map
+    /// the map itself is rebuilt whenever it leaves the hierarchy and comes back — a read that
+    /// comes back with no placed photograph left replacing it with the empty notice, and a later
+    /// one putting a map back, is exactly that. What is recorded below describes ONE map: which
+    /// annotation objects are installed on it, and whether it has had its opening view. A
+    /// different map holds neither, so the record goes with the map it described and the next pass
+    /// adds every pin afresh and frames the new map once. The same map
     /// attached again is not a change — re-installing there would remove and re-add every pin,
     /// which is the blink the diff exists to prevent.
     func attach(to mapView: MKMapView) {
@@ -154,13 +161,16 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         apply(diff, from: wanted, through: sink)
 
         // What the diff cannot see: a pin in no bucket is the same place with the same
-        // photographs, and its thumbnail URL is nonetheless a new one. The annotation takes it
-        // and nothing is repainted — the picture is cached under the uid, which did not change,
-        // so there is nothing new to draw until the old signature lapses.
+        // photographs, and its thumbnail URL is nonetheless a new one. The annotation takes it,
+        // and the one whose URL actually changed is repainted — that repaint is the only occasion
+        // a pin whose fetch came back with nothing ever gets to ask again. It costs a pin that has
+        // its photograph nothing: the picture is cached under the uid, which did not change, so
+        // the repaint reads it straight back and paints the same picture without a request.
         var touched = Set(diff.added.map(\.key))
         touched.formUnion(diff.updated.map(\.key))
         for (key, pin) in wanted where !touched.contains(key) {
-            annotations[key]?.adopt(pin)
+            guard let annotation = annotations[key] else { continue }
+            if annotation.adopt(pin) { sink.refresh(annotation) }
         }
     }
 
