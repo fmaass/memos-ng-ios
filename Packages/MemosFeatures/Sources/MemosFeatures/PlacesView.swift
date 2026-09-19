@@ -33,9 +33,10 @@ private struct PlacesScreen: View {
     @State private var map = PlacesMapCoordinator()
     /// The photographs a tap on a crowded pin or a cluster listed.
     @State private var sheet: PlaceSheet?
-    /// The viewer opened from the map, by a pin that holds one photograph.
+    /// The viewer opened from the map with no sheet up, by a pin that holds one photograph.
     @State private var viewing: MediaViewerSelection?
-    /// The viewer opened from INSIDE the sheet, presented by the sheet itself. A second state
+    /// The viewer opened while the sheet is up — by a photograph inside it, or by a pin tapped on
+    /// the map behind it — presented by the sheet itself. A second state
     /// rather than the one above because both covers would be live at once while the sheet is up,
     /// and a photograph tapped in the sheet must not need the sheet dismissed first: dismissing
     /// and presenting in one turn is how the second presentation gets dropped.
@@ -89,6 +90,11 @@ private struct PlacesScreen: View {
                 .sheet(item: $sheet) { sheet in
                     sheetContents(sheet)
                         .presentationDetents([.medium, .large])
+                        // At half height the sheet is a drawer under the map, not a dialog over
+                        // it: the map stays live, so the reader can pan, or tap another place and
+                        // have its photographs replace these. Pulled to full height it covers the
+                        // map and is modal again.
+                        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
                 }
         case .empty, .error:
             notice(
@@ -185,7 +191,14 @@ private struct PlacesScreen: View {
     private func open(_ action: PlaceTapAction) {
         switch action {
         case .viewer(let selection):
-            viewing = selection
+            // The map stays live under a half-height sheet, so a pin of one photograph can be
+            // tapped while the sheet is up. Whatever is on top is what presents: a cover asked of
+            // the screen underneath a live sheet is the presentation that gets dropped.
+            if sheet == nil {
+                viewing = selection
+            } else {
+                viewingFromSheet = selection
+            }
         case .sheet(let listed):
             sheet = listed
         }
