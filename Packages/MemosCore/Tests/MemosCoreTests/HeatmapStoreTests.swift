@@ -145,4 +145,95 @@ struct HeatmapStoreTests {
         #expect(store.lastError == nil)
         #expect(!store.isLoading)
     }
+
+    /// The banner owns what an unreachable server says, and a sentence the server's own answer left
+    /// behind is not about a request that never reached it: left standing, the card explains this
+    /// failure with the last one's words — and the sheet reads that sentence as a section that has
+    /// something to say.
+    @Test("a load that never reached the server takes the last answer's sentence down")
+    func transportFailureClearsTheAnsweredSentence() async {
+        let calls = Counter()
+        let client = Stub.client { _, _, _ in
+            calls.increment()
+            guard calls.count > 1 else { return Stub.empty(.internalServerError) }
+            throw URLError(.notConnectedToInternet)
+        }
+        let store = HeatmapStore()
+        let session = ReportingSink(for: client.handle)
+        store.reports(to: session)
+
+        await store.load(using: client.handle)
+        #expect(store.lastError != nil, "the premise: the server's own answer wrote a sentence")
+
+        await store.load(using: client.handle)
+
+        #expect(store.lastError == nil, "a server that never answered kept the 500's words")
+        #expect(session.transportFailures == [.offline], "the session was never told")
+        #expect(!store.isLoading, "the transport arm stopped falling through to the spinner")
+    }
+
+    /// The witness against the cheaper rule that passes the case above. Clearing the sentence when
+    /// a load BEGINS blanks an answer the server really gave while the next request is still in the
+    /// air, so the card goes quiet about a 500 that nothing has replaced yet.
+    @Test("the answered sentence stands until the request that never arrived has failed")
+    func theAnsweredSentenceStandsWhileTheNextLoadIsOut() async {
+        let entered = LockedValue<Bool>(false)
+        let release = LockedValue<Bool>(false)
+        let calls = Counter()
+        let client = Stub.client { _, _, _ in
+            calls.increment()
+            guard calls.count > 1 else { return Stub.empty(.internalServerError) }
+            entered.set(true)
+            try await Self.hold(until: release)
+            throw URLError(.notConnectedToInternet)
+        }
+        let store = HeatmapStore()
+        let session = ReportingSink(for: client.handle)
+        store.reports(to: session)
+
+        await store.load(using: client.handle)
+        #expect(store.lastError != nil, "the premise: the server's own answer wrote a sentence")
+
+        let inFlight = Task { await store.load(using: client.handle) }
+        while !entered.get() {
+            await Task.yield()
+        }
+        #expect(
+            store.lastError != nil,
+            "the answer's sentence went when a request left rather than when one failed"
+        )
+
+        release.set(true)
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a server that never answered kept the 500's words")
+        #expect(
+            session.transportFailures == [.offline],
+            "control: the held request really did fail at the transport"
+        )
+    }
+}
+
+/// The session as the reporting stores see it, held still so a test can read back what it was told.
+///
+/// The protocol rather than a whole `SessionStore` (`SessionReporting`): what is asserted here is
+/// that the failure reached the sink at all, and a session brings a sign-in, a credential and a
+/// verification state that say nothing about that.
+private final class ReportingSink: SessionReporting {
+    let activeHandle: SessionHandle?
+    nonisolated let sessionIncarnation = SessionEpoch()
+    private(set) var transportFailures: [ServerReachability.Reason] = []
+
+    init(for handle: SessionHandle) { activeHandle = handle }
+
+    func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool { true }
+
+    func noteTransportFailure(
+        _ failure: ServerReachability.Reason,
+        issuedUnder generation: Int
+    ) {
+        transportFailures.append(failure)
+    }
+
+    func noteTransportSuccess(issuedUnder generation: Int) {}
 }

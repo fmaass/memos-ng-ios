@@ -98,6 +98,10 @@ public final class TagStore {
             if !sessionStillCurrent(handle) {
                 MemosLog.api.info("a failure for a session that has ended is not reported")
             } else if let failure = StoreFailure.transportFailure(error) {
+                // And a sentence an earlier answer left must not stand in for this one: the banner
+                // owns what an unreachable server says, and a stale "the server returned 500" under
+                // it would be the row explaining this failure with the last one's words.
+                lastError = nil
                 session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             } else if let refusal = StoreFailure.refusal(error) {
                 // One more arm in the chain and deliberately no `return`: the spinner below is this

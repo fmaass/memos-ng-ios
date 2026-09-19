@@ -452,6 +452,95 @@ struct MediaLibraryStoreTests {
         await inFlight.value
         #expect(store.items.map(\.uid) == ["a", "b", "c", "d"])
     }
+
+    /// The banner owns what an unreachable server says, and a sentence the server's own answer left
+    /// behind is not about a request that never reached it: left standing, the grid explains this
+    /// failure with the last one's words.
+    @Test("a refresh that never reached the server takes the last answer's sentence down")
+    func transportFailureClearsTheAnsweredSentence() async {
+        let calls = Counter()
+        let client = Stub.client { _, _, _ in
+            calls.increment()
+            guard calls.count > 1 else { return Stub.empty(.internalServerError) }
+            throw URLError(.notConnectedToInternet)
+        }
+        let store = MediaLibraryStore(pageSize: 2)
+        let session = ReportingSink(for: client.handle)
+        store.reports(to: session)
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.lastError != nil, "the premise: the server's own answer wrote a sentence")
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.lastError == nil, "a server that never answered kept the 500's words")
+        #expect(session.transportFailures == [.offline], "the session was never told")
+    }
+
+    /// The witness against the cheaper rule that passes the case above. Clearing the sentence when
+    /// a refresh BEGINS blanks an answer the server really gave while the next request is still in
+    /// the air, so the grid goes quiet about a 500 that nothing has replaced yet.
+    @Test("the answered sentence stands until the request that never arrived has failed")
+    func theAnsweredSentenceStandsWhileTheNextRefreshIsOut() async {
+        let entered = Signal()
+        let release = Signal()
+        let calls = Counter()
+        let client = Stub.client { _, _, _ in
+            calls.increment()
+            guard calls.count > 1 else { return Stub.empty(.internalServerError) }
+            entered.signal()
+            await release.wait()
+            throw URLError(.notConnectedToInternet)
+        }
+        let store = MediaLibraryStore(pageSize: 2)
+        let session = ReportingSink(for: client.handle)
+        store.reports(to: session)
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.lastError != nil, "the premise: the server's own answer wrote a sentence")
+
+        let inFlight = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
+        // Resumes at the moment the second request ENTERS the transport, so what is read below is
+        // read with that request provably still out.
+        await entered.wait()
+        #expect(
+            store.lastError != nil,
+            "the answer's sentence went when a request left rather than when one failed"
+        )
+
+        release.signal()
+        await inFlight.value
+
+        #expect(store.lastError == nil, "a server that never answered kept the 500's words")
+        #expect(
+            session.transportFailures == [.offline],
+            "control: the held request really did fail at the transport"
+        )
+    }
+}
+
+/// The session as the reporting stores see it, held still so a test can read back what it was told.
+///
+/// The protocol rather than a whole `SessionStore` (`SessionReporting`): what is asserted here is
+/// that the failure reached the sink at all, and a session brings a sign-in, a credential and a
+/// verification state that say nothing about that.
+private final class ReportingSink: SessionReporting {
+    let activeHandle: SessionHandle?
+    nonisolated let sessionIncarnation = SessionEpoch()
+    private(set) var transportFailures: [ServerReachability.Reason] = []
+
+    init(for handle: SessionHandle) { activeHandle = handle }
+
+    func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool { true }
+
+    func noteTransportFailure(
+        _ failure: ServerReachability.Reason,
+        issuedUnder generation: Int
+    ) {
+        transportFailures.append(failure)
+    }
+
+    func noteTransportSuccess(issuedUnder generation: Int) {}
 }
 
 /// A one-shot hand-off between a test and the scripted transport it is driving.
