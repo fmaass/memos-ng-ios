@@ -3,8 +3,9 @@
 # The quick mode's own check: `bin/mac-gate.sh --quick` is an ITERATION loop, never a verdict.
 #
 # Two things make that true, and neither is visible in a build log. The first is the line it
-# prints: `MAC_GATE_QUICK: build=<rc> tests=<rc> | exit=<rc>` is deliberately not the full gate's
-# `mac-gate SUMMARY: … | exit=<rc>`, so a quick run can never be pasted into a merge as evidence.
+# prints: `MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` is deliberately not the full
+# gate's `mac-gate SUMMARY: … | exit=<rc>`, so a quick run can never be pasted into a merge as
+# evidence.
 # The second is what it refuses: a scope flag without --quick, two scopes at once, a bundle the
 # gate does not build, --quick beside --classify-only. Both are checked here, against throwaway
 # repositories and PATH stubs for ssh and rsync — no build host, no network, no Mac.

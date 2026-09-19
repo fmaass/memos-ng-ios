@@ -54,8 +54,8 @@
 # openapi-coverage rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
-# lane lock, the load gate and the private simulator — and the lint, which costs seconds and is a
-# merge verdict either way. It prints one line of its own,
+# lane lock, the load gate and the private simulator — and the lint, which costs seconds and which
+# the full gate would fail on anyway. It prints one line of its own,
 # MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's
 # summary line — a quick run can never be read, or pasted, as a verdict. The verdict is the full
 # gate.
