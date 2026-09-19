@@ -117,6 +117,31 @@ so the code is not on it. That delegate is log-only.
   permission to wipe (MEMNG-270).
 - A stored credential is **re-validated at launch**, not trusted, and removed when the server
   rejects it.
+- **"Cannot reach the server" is read off request OUTCOMES, never off a path monitor.** The failure
+  it exists for leaves a perfectly good network path: the VPN tunnel drops, the routing table still
+  says satisfied, and every request dies on the way. `ServerReachability` decides it from the error
+  alone: the URL errors it names, the Local Network denial, and the two statuses a proxy answers
+  with for a server that did not, 502 and 504. An answer — a 500, a body that would not decode, a
+  503 memos-ng raises deliberately for a raced write — keeps the error card it always had, and a
+  refusal is classified before reachability is asked, so a 401 stays the auth outcome it always was.
+- **No second state machine.** The state is still `SessionVerification`, written in one private
+  setter in `SessionStore` that stamps the outage only where nothing has stamped it yet — four
+  failures in a row are one outage — and on `.verified` clears the stamp, the notice and any wake
+  asleep on its account. The notice waits `bannerDelay`, two seconds, so a healthy launch and a
+  brief drop-out pass through unconfirmed without a flicker; the wake publishes only if it still
+  holds the slot it was armed in, and asks the present rather than asserting the past.
+- **Recovery is asked, never declared.** A store that reaches the server calls
+  `noteTransportSuccess(issuedUnder:)`, which asks a whoami through the single-flight validation
+  slot and decides nothing itself: a page that arrived was answered under one credential at an
+  instant that has passed, and only the whoami says the credential is still good. The generation
+  that issued the request is compared at the report, after the hop, and inside the validation body.
+- **The tab roots reload on a CHANGE of `reachabilityRecoveries`, never on appearance.** Only an
+  unconfirmed session becoming confirmed counts: not a confirmed one confirmed again, and not a
+  sign-out, which writes `.verified` because nothing is owed an answer any more. `TimelineView`,
+  `MediaLibraryView` and `PlacesView` apply `ReloadsOnRecovery`.
+- **One function decides which card is on screen** (`SessionBanner.notice`), so the unreachable
+  notice and the unconfirmed line cannot stack. It sits above the tabs because it is true of the
+  whole app, and is not dismissable: the state the session is in, not a notification of an event.
 
 ## Media cache
 
