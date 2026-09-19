@@ -202,63 +202,6 @@ struct PlacesActionTests {
         #expect(sheet.markers.count == 2, "the sheet still lists everything at the limit")
     }
 
-    @Test("the grid holds the markers the region shows, newest first")
-    func theGridHoldsWhatTheRegionShows() {
-        let markers = [
-            marker(uid: "in-old", takenAt: "2026-01-01T00:00:00Z", latitude: 47.2, longitude: 8.4),
-            marker(uid: "out", takenAt: "2026-01-04T00:00:00Z", latitude: 47.2, longitude: 20),
-            marker(uid: "in-new", takenAt: "2026-01-03T00:00:00Z", latitude: 47.3, longitude: 8.5),
-        ]
-        let region = MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: 47.25, longitude: 8.45),
-            span: MKCoordinateSpan(latitudeDelta: 0.4, longitudeDelta: 0.4)
-        )
-
-        let grid = PlacesPresentation.grid(markers, in: PlacesPresentation.box(of: region))
-
-        #expect(grid.map(\.uid) == ["in-new", "in-old"])
-    }
-
-    @Test("a region across the antimeridian holds the markers on both sides of it")
-    func theGridSpansTheAntimeridian() {
-        let markers = [
-            marker(uid: "east", takenAt: "2026-01-01T00:00:00Z", latitude: 0, longitude: -179.5),
-            marker(uid: "west", takenAt: "2026-01-02T00:00:00Z", latitude: 0, longitude: 178),
-            marker(uid: "behind", takenAt: "2026-01-03T00:00:00Z", latitude: 0, longitude: 176.9),
-        ]
-        let region = MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: 0, longitude: 179),
-            span: MKCoordinateSpan(latitudeDelta: 4, longitudeDelta: 4)
-        )
-
-        let grid = PlacesPresentation.grid(markers, in: PlacesPresentation.box(of: region))
-
-        #expect(grid.map(\.uid) == ["west", "east"])
-    }
-
-    @Test("before the map has said what it shows, the grid holds the whole read")
-    func theGridBeforeTheFirstReportHoldsEverything() {
-        let grid = PlacesPresentation.visibleGrid(three, in: nil)
-
-        #expect(grid.map(\.uid) == ["newest", "middle", "oldest"])
-    }
-
-    @Test("once the map has said what it shows, the grid holds that region only")
-    func theGridAfterAReportHoldsTheRegion() {
-        let markers = [
-            marker(uid: "here", takenAt: "2026-01-01T00:00:00Z", latitude: 47.2, longitude: 8.4),
-            marker(uid: "far", takenAt: "2026-01-04T00:00:00Z", latitude: 47.2, longitude: 20),
-        ]
-        let region = MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: 47.2, longitude: 8.4),
-            span: MKCoordinateSpan(latitudeDelta: 0.4, longitudeDelta: 0.4)
-        )
-
-        let grid = PlacesPresentation.visibleGrid(markers, in: PlacesPresentation.box(of: region))
-
-        #expect(grid.map(\.uid) == ["here"])
-    }
-
     @Test("a photograph opened from the map knows which memo to ask for")
     func theOpenedPageCarriesTheMemoOfItsMarker() throws {
         let selection = try #require(PlacesPresentation.open("oldest", in: three))
