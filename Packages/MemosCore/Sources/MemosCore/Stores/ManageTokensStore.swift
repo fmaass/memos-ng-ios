@@ -188,22 +188,27 @@ public final class ManageTokensStore {
             // second copy of it here would be a second answer to "did this come back with a code".
             let code = try SessionStore.code(from: callbackURL)
             guard let verifier = pkce.verifier else { throw NativeLoginError.unusableRequest }
+            // The browser is gone for as long as the person is in it, and what it comes back to
+            // may no longer be the app it left. Asked before the exchange and not only after it:
+            // a handoff code spent here would buy a management session for an identity that has
+            // already been withdrawn, and the grant it bought would outlive the sign-out.
+            guard isCurrent(mine) else { return false }
             let held = try await Self.mintGrant(client, code: code, verifier: verifier)
-            guard mine == generation else { return false }
+            guard isCurrent(mine) else { return false }
             grant.hold(held.grant, until: held.expiresAt)
             MemosLog.session.info("POST /api/auth/native/manage-grant -> 200")
             await refresh()
             return true
         } catch is RouteMissing {
-            guard mine == generation else { return false }
+            guard isCurrent(mine) else { return false }
             state = .unsupported
             return false
         } catch let error as NativeLoginError {
-            guard mine == generation else { return false }
+            guard isCurrent(mine) else { return false }
             state = .locked(.refused(error))
             return false
         } catch {
-            guard mine == generation else { return false }
+            guard isCurrent(mine) else { return false }
             // Named by what the failure WAS, never by its own description: this request's body is
             // the handoff code and the PKCE verifier, and the error text carries the request.
             state = .locked(.refused(.transport(NativeLoginTransportFailure.classify(error))))
@@ -274,7 +279,11 @@ public final class ManageTokensStore {
                 MemosLog.session.error(
                     "a token was created for a management session that had already ended"
                 )
-                mintedSecretLost = true
+                // Only while the app identity that bought this session is still signed in. Past
+                // that, the notice has nobody to reach: the screen it would appear on belongs to
+                // whoever signs in next, and telling them about a token on an account they are not
+                // holding is not a recovery, it is a leak of the last person's account activity.
+                if appIdentityHolds { mintedSecretLost = true }
                 endWork(work)
                 return false
             }
@@ -392,9 +401,11 @@ public final class ManageTokensStore {
     ///
     /// The grant is checked before the request rather than after the 401, because the app already
     /// knows the answer — asking anyway would spend a round trip to be told something it holds.
+    /// The identity it was bought under is checked for the same reason: a live grant that speaks
+    /// for an account nobody is signed in to any more is not authority to send anything.
     private func beginWork() -> Work? {
         guard runningWork == nil else { return nil }
-        guard grant.isLive(at: now()) else {
+        guard isCurrent(generation), grant.isLive(at: now()) else {
             lapse()
             return nil
         }
@@ -404,9 +415,30 @@ public final class ManageTokensStore {
         return Work(id: workSequence, generation: generation)
     }
 
+    /// Whether the app identity this management session was bought under is still the app's
+    /// identity.
+    ///
+    /// Asked here and nowhere else, so there is one answer to it. A store with no session named to
+    /// it has nothing to be wrong about; a session that has withdrawn its handle has no identity to
+    /// match, and that is a no.
+    private var appIdentityHolds: Bool {
+        guard let session else { return true }
+        guard let boughtUnder, let current = session.activeHandle?.generation else { return false }
+        return current == boughtUnder
+    }
+
+    /// Whether a management session generation still speaks for what is on screen — which means
+    /// both that this screen's own session has not been replaced AND that the identity it is a
+    /// step-up on is still signed in. Neither half alone is the question: the app withdraws its
+    /// incarnation synchronously and tears this screen down afterwards, so a generation that still
+    /// matches says nothing about whether anybody is left to read what it would write.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == self.generation && appIdentityHolds
+    }
+
     /// Whether this work still speaks for the session on screen. False means its answer is about a
     /// management session that has ended, and nothing it learned may be written anywhere.
-    private func isCurrent(_ work: Work) -> Bool { work.generation == generation }
+    private func isCurrent(_ work: Work) -> Bool { isCurrent(work.generation) }
 
     /// Hands the gate back — but only if this work still holds it. `forget()` and `lapse()` both
     /// release the gate as they happen, so by the time an abandoned operation lands the gate may

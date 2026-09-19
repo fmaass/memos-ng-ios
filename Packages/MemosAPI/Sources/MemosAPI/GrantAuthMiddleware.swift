@@ -62,6 +62,11 @@ public struct GrantAuthMiddleware: ClientMiddleware {
         operationID: String,
         next: (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)
     ) async throws -> (HTTPResponse, HTTPBody?) {
+        // Here and not where the work was started: this is the last instant before the request
+        // leaves, and nothing is awaited between the answer and the forward. A check made on the
+        // main actor can only speak for a moment that has already passed by the time the transport
+        // sends.
+        guard licence.holds() else { throw ManagementIdentityWithdrawn() }
         var request = request
         if let value = grant.current, !value.isEmpty {
             request.headerFields[.authorization] = "Grant \(value)"
