@@ -36,10 +36,10 @@ private struct PlacesScreen: View {
     /// The viewer opened from the map with no sheet up, by a pin that holds one photograph.
     @State private var viewing: MediaViewerSelection?
     /// The viewer opened while the sheet is up — by a photograph inside it, or by a pin tapped on
-    /// the map behind it — presented by the sheet itself. A second state
-    /// rather than the one above because both covers would be live at once while the sheet is up,
-    /// and a photograph tapped in the sheet must not need the sheet dismissed first: dismissing
-    /// and presenting in one turn is how the second presentation gets dropped.
+    /// the map behind it — presented by the sheet itself. A second state rather than the one
+    /// above because both covers would be live at once while the sheet is up, and a photograph
+    /// tapped in the sheet must not need the sheet dismissed first: dismissing and presenting in
+    /// one turn is how the second presentation gets dropped.
     @State private var viewingFromSheet: MediaViewerSelection?
 
     var body: some View {
