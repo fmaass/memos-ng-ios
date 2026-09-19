@@ -348,6 +348,18 @@ extension MediaImageLoaderTests {
                     "\(fixture): a pin is cut off at the bottom"
                 )
             }
+
+            // Containment alone is met by a map of the whole world. On the axis that binds, the
+            // box has to reach across most of the frame the margins leave: MapKit widens the OTHER
+            // axis to fill the pane, never this one, so the larger of the two shares is the test.
+            let points = corners(of: box).map { mapView.convert($0, toPointTo: mapView) }
+            let across = points.map(\.x)
+            let down = points.map(\.y)
+            let reach = max(
+                ((across.max() ?? 0) - (across.min() ?? 0)) / (mapView.bounds.width - 52 - 52),
+                ((down.max() ?? 0) - (down.min() ?? 0)) / (mapView.bounds.height - 84 - 26)
+            )
+            #expect(reach >= 0.5, "\(fixture): the map opened far wider than its pins need")
             window.isHidden = true
         }
     }
