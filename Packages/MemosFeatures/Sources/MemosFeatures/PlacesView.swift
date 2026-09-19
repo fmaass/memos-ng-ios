@@ -6,7 +6,7 @@ import SwiftUI
 /// The screen is one line here because everything it holds lives in the view below, keyed on the
 /// subject signed in. A revalidation can come back as somebody ELSE while the signed-in hierarchy
 /// stands (`SessionStore.establish`), and nothing in that hierarchy is keyed on who it is — so
-/// this key is what drops the first person's store, markers, grid, sheet and viewer in one go,
+/// this key is what drops the first person's store, markers, sheet and viewer in one go,
 /// including whatever state the screen grows later. The next subject's view then loads on its own
 /// first appearance, and a read still in flight for the previous one lands in a store nothing
 /// shows and is refused against the handle it presented.
@@ -31,21 +31,15 @@ private struct PlacesScreen: View {
     /// The map's delegate, held by the screen because Zoom-in is an action ON the map taken from a
     /// sheet the map does not present.
     @State private var map = PlacesMapCoordinator()
-    /// What the map last settled on, and nil until it has settled once.
-    @State private var visible: PlaceBBox?
     /// The photographs a tap on a crowded pin or a cluster listed.
     @State private var sheet: PlaceSheet?
-    /// The viewer opened from the map or from the grid under it.
+    /// The viewer opened from the map, by a pin that holds one photograph.
     @State private var viewing: MediaViewerSelection?
     /// The viewer opened from INSIDE the sheet, presented by the sheet itself. A second state
     /// rather than the one above because both covers would be live at once while the sheet is up,
     /// and a photograph tapped in the sheet must not need the sheet dismissed first: dismissing
     /// and presenting in one turn is how the second presentation gets dropped.
     @State private var viewingFromSheet: MediaViewerSelection?
-
-    /// How much of the screen the map keeps, the grid taking the rest. Chosen for parity with the
-    /// web's phone layout; a number to look at on a device rather than one anything depends on.
-    private static let mapShare: CGFloat = 0.55
 
     var body: some View {
         Group {
@@ -91,7 +85,7 @@ private struct PlacesScreen: View {
             // has not been earned.
             ProgressView()
         case .ready:
-            mapWithGrid(places)
+            wholeMap(places)
                 .sheet(item: $sheet) { sheet in
                     sheetContents(sheet)
                         .presentationDetents([.medium, .large])
@@ -104,45 +98,23 @@ private struct PlacesScreen: View {
         }
     }
 
-    /// The map over the photographs it is currently showing.
+    /// The map, and nothing beside it.
     ///
-    /// The grid is rebuilt from what the map REPORTS once it has stopped moving, never from the
-    /// pins it happens to be drawing: a list that reshuffled under the finger during a pan is the
-    /// one thing this layout must not do.
-    @ViewBuilder
-    private func mapWithGrid(_ places: PlacesStore) -> some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                PlacesMapView(
-                    pins: PlacesPresentation.pins(for: places.markers),
-                    region: PlacesPresentation.fitRegion(for: places.markers),
-                    markers: places.markers,
-                    onRegionChange: { visible = $0 },
-                    onTap: { open($0) },
-                    control: map
-                )
-                .frame(height: geometry.size.height * Self.mapShare)
-                .ignoresSafeArea(edges: .top)
-                grid(PlacesPresentation.visibleGrid(places.markers, in: visible))
-            }
-        }
-    }
-
-    /// The photographs of the part of the map on screen.
-    @ViewBuilder
-    private func grid(_ markers: [PlaceMarker]) -> some View {
-        if markers.isEmpty {
-            // Not the screen's empty state: the library has photographs with a place, this piece
-            // of the map has none. Saying so here leaves the map where the reader put it.
-            Text("No photos in this part of the map.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                tiles(markers, opening: $viewing)
-            }
-        }
+    /// The screen opens on the whole map, and photographs appear only where the reader asks for
+    /// them: a crowded pin or a cluster presents its sheet, a pin of one photograph opens the
+    /// viewer. A grid that was always on screen took nearly half of it to repeat what the pins
+    /// already say. The map runs under the status bar and the tab bar so that it is the screen
+    /// rather than a panel between two bars — a thing to look at on a device, not one anything
+    /// here depends on.
+    private func wholeMap(_ places: PlacesStore) -> some View {
+        PlacesMapView(
+            pins: PlacesPresentation.pins(for: places.markers),
+            region: PlacesPresentation.fitRegion(for: places.markers),
+            markers: places.markers,
+            onTap: { open($0) },
+            control: map
+        )
+        .ignoresSafeArea()
     }
 
     /// One tappable square per photograph, in the order the list is already in.
