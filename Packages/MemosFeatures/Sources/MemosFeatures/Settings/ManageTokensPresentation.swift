@@ -61,6 +61,17 @@ enum ManageTokensPresentation {
 
     static let empty = "This account has no access tokens."
 
+    // MARK: - a live session whose list did not arrive
+
+    /// Said when the grant is live and the list is not. What went wrong is in the notice above this
+    /// card; what this adds is that the sign-in was not wasted — the other reading, that it was, is
+    /// the one that makes somebody close the screen and buy another one.
+    static let unlisted =
+        "This account's tokens could not be read. The management session is still live, so the "
+        + "list can be asked for again."
+    static let rereadTitle = "Try again"
+    static let rereadLabel = "Read this account's tokens again"
+
     // MARK: - the one look anybody gets at a new token
 
     static let secretHeading = "New token"
@@ -89,6 +100,16 @@ enum ManageTokensPresentation {
     static let createCaption =
         "A new token never expires and can do everything this account can. Revoke it here when it "
         + "is no longer needed."
+
+    /// Whether Create is there to be pressed, decided from what the screen was given.
+    ///
+    /// The plaintext panel is part of the answer and not only the store's: while it is up, the
+    /// store refuses a create outright, and a control that looked pressable would spend somebody's
+    /// tap to be told why it did nothing. The store keeps its own refusal — this is the same rule
+    /// said in the one place the screen can say it, not a second copy of the decision.
+    static func createIsDisabled(isBusy: Bool, secretShowing: Bool, draft: String) -> Bool {
+        isBusy || secretShowing || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// Named, because a screen reader reaching a row of identical "Revoke" buttons cannot tell
     /// which token it is about to destroy.

@@ -32,6 +32,7 @@ struct ManageTokensScreenTests {
         isBusy: Bool = false,
         draft: Held<String>? = nil,
         signOn: @escaping () -> Void = {},
+        reread: @escaping () -> Void = {},
         create: @escaping (String) -> Void = { _ in },
         revoke: @escaping (Int) -> Void = { _ in },
         copySecret: @escaping (String) -> Void = { _ in },
@@ -47,6 +48,7 @@ struct ManageTokensScreenTests {
             now: now,
             draft: Binding(get: { held.value }, set: { held.value = $0 }),
             signOn: signOn,
+            reread: reread,
             create: create,
             revoke: revoke,
             copySecret: copySecret,
@@ -132,6 +134,32 @@ struct ManageTokensScreenTests {
 
         #expect(says(ManageTokensPresentation.signingOn, labels))
         #expect(!says(ManageTokensPresentation.signOnLabel, labels))
+    }
+
+    /// A read that did not arrive is not a session that ended, and the difference is the whole
+    /// sentence: one is mended by pressing something here, the other by buying another sign-on.
+    @Test("a session whose list did not arrive says the session is still good")
+    func anUnlistedSessionSaysItIsStillLive() {
+        let labels = ScreenProbe.labels(of: screen(state: .unlisted))
+
+        #expect(says("could not be read", labels))
+        #expect(says(ManageTokensPresentation.rereadLabel, labels))
+        #expect(!says(ManageTokensPresentation.signingOn, labels))
+    }
+
+    /// The affordance itself: without something to press, a first read that failed is a screen with
+    /// a live grant on it and no way to spend it.
+    @Test("pressing the read-again control asks for the list once")
+    func rereadingAsksForTheListOnce() {
+        let asked = Held(0)
+
+        let pressed = PressProbe.withElement(
+            labelled: ManageTokensPresentation.rereadLabel,
+            in: screen(state: .unlisted, reread: { asked.value += 1 })
+        ) { $0?.accessibilityActivate() ?? false }
+
+        #expect(pressed, "the read-again control did not accept an activation")
+        #expect(asked.value == 1)
     }
 
     @Test("an account with no tokens says so rather than showing an empty card")
@@ -229,6 +257,40 @@ struct ManageTokensScreenTests {
 
         #expect(onScreen, "the revoke control left the screen instead of going quiet")
         #expect(asked.value == nil)
+    }
+
+    /// The store refuses a create while a plaintext is still up — minting over it would take a live
+    /// token's only copy away from somebody who has not read it yet. The control says the same
+    /// thing, because a press whose one possible outcome is a sentence explaining itself is not an
+    /// offer.
+    @Test("nothing is created while a token's text is still on screen")
+    func creatingIsRefusedWhileASecretShows() {
+        let draft = Held("Laptop")
+        let sent = Held<String?>(nil)
+        let minted = MintedToken(
+            token: token(id: 9, name: "Laptop"),
+            secret: "memos_pat_brand_new"
+        )
+
+        let onScreen = PressProbe.withElement(
+            labelled: ManageTokensPresentation.createLabel,
+            in: screen(
+                state: .listed([]),
+                minted: minted,
+                draft: draft,
+                create: { sent.value = $0 }
+            ),
+            // The plaintext panel sits above the card Create is in, and a list only builds the
+            // rows it has room for.
+            height: 1200
+        ) { element -> Bool in
+            let present = element != nil
+            element?.accessibilityActivate()
+            return present
+        }
+
+        #expect(onScreen, "the create control left the screen instead of going quiet")
+        #expect(sent.value == nil)
     }
 
     // MARK: - the one look at a new token
@@ -373,6 +435,33 @@ struct ManageTokensPresentationTests {
         #expect(
             ManageTokensPresentation.detail(token, now: now)
                 == "Never expires · Last used 2 minutes ago"
+        )
+    }
+
+    /// Each of the three reasons on its own, so that one of them holding is not mistaken for all
+    /// three — the plaintext one above all, which is the store's own refusal said in the only place
+    /// the screen can say it before the tap.
+    @Test("create is offered only with a name typed, nothing in flight and no plaintext up")
+    func createIsOfferedOnlyWhenItWouldBeAccepted() {
+        #expect(
+            !ManageTokensPresentation.createIsDisabled(
+                isBusy: false, secretShowing: false, draft: "Laptop"
+            )
+        )
+        #expect(
+            ManageTokensPresentation.createIsDisabled(
+                isBusy: false, secretShowing: true, draft: "Laptop"
+            )
+        )
+        #expect(
+            ManageTokensPresentation.createIsDisabled(
+                isBusy: true, secretShowing: false, draft: "Laptop"
+            )
+        )
+        #expect(
+            ManageTokensPresentation.createIsDisabled(
+                isBusy: false, secretShowing: false, draft: "   "
+            )
         )
     }
 }

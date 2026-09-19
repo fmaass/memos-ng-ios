@@ -641,6 +641,74 @@ struct ManageTokensStoreTests {
         #expect(reentrant.secondResult == false, "the second sign-on should have opened nothing")
         #expect(seen.get().filter { $0.operation == mintOperation }.count == 1)
     }
+
+    /// A list that did not arrive is not the end of a management session. The grant the sign-on
+    /// just bought is live for minutes yet and the only thing missing is the read, so the way out
+    /// is another read — which the screen can only offer from a state that is no longer the
+    /// sign-on's own.
+    @Test("a first list that failed leaves a live session that can be read again")
+    func aFailedFirstListLeavesTheSessionReadable() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let attempts = LockedValue<Int>(0)
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                return .json(liveGrant)
+            case listOperation:
+                let attempt = attempts.get() + 1
+                attempts.set(attempt)
+                return attempt == 1
+                    ? .status(.internalServerError)
+                    : .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default:
+                return .status(.internalServerError)
+            }
+        }
+
+        let signedOn = await signOn(store)
+
+        #expect(signedOn)
+        #expect(store.state != .authenticating, "a read that failed left the screen mid-sign-on")
+        #expect(store.notice != nil)
+        #expect(!store.isBusy)
+
+        // The read the screen offers, under the grant that was bought before the failure: it can
+        // only be served if that grant is still held.
+        await store.refresh()
+
+        let listed = try #require(rows(store.state))
+        #expect(listed.map(\.name) == ["Kitchen phone"])
+        #expect(store.notice == nil)
+    }
+
+    /// Asked from the failed state itself, with no read in between. A screen that still believed a
+    /// sign-on was under way would refuse this one, and there is nothing else on it to press.
+    @Test("a sign-on is offered again from a first list that failed")
+    func aFailedFirstListDoesNotRefuseAnotherSignOn() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let attempts = LockedValue<Int>(0)
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                return .json(liveGrant)
+            case listOperation:
+                let attempt = attempts.get() + 1
+                attempts.set(attempt)
+                return attempt == 1
+                    ? .status(.internalServerError)
+                    : .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default:
+                return .status(.internalServerError)
+            }
+        }
+
+        await signOn(store)
+        let again = await signOn(store)
+
+        #expect(again, "the second sign-on was refused as one already under way")
+        let listed = try #require(rows(store.state))
+        #expect(listed.map(\.name) == ["Kitchen phone"])
+    }
 }
 
 /// A presenter that calls back INTO the store while its own sign-on is still open — the only

@@ -50,9 +50,10 @@ struct ManageTokensView: View {
                 now: .now,
                 draft: $draft,
                 signOn: { Task { await signOn() } },
+                reread: { Task { await store.refresh() } },
                 create: { name in Task { await create(name) } },
                 revoke: { id in Task { await store.revoke(id) } },
-                copySecret: { UIPasteboard.general.string = $0 },
+                copySecret: { ManageTokensClipboard.copy($0) },
                 dismissSecret: { store.dismissMinted() }
             )
             .toolbar {

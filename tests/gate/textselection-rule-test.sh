@@ -131,6 +131,10 @@ check "a tree with no Settings directory" 2 "$w"
 # And a root that is not a tree at all.
 check "a root that does not exist" 2 "$tmp/absent"
 
+# And the repository this suite ships in, which is the point of the whole exercise: the secret is
+# shown by a screen nobody can pick characters out of, and it stays that way.
+check "the real repository tree" 0 "$repo_root"
+
 # --- verdict --------------------------------------------------------------------------------------
 # The positive control on the suite itself: if no case was accepted, a rule script that refused
 # everything would pass every expectation above that expects a refusal.

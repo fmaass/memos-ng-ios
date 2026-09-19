@@ -32,6 +32,10 @@ public enum ManageTokensState: Sendable, Equatable {
     case authenticating
     /// A live grant, and the account's tokens as the server last listed them.
     case listed([ManagedToken])
+    /// A live grant and no list: the read that should have brought one did not arrive. What went
+    /// wrong is in `notice`, and the way out is another read rather than another sign-on — the
+    /// minutes this session was bought for are still running.
+    case unlisted
     /// This server has no token management for a native client at all.
     case unsupported
 }
@@ -239,6 +243,12 @@ public final class ManageTokensStore {
         } catch {
             guard isCurrent(work) else { return }
             report(error)
+            // A read that failed with nothing yet on screen has to land somewhere it can be asked
+            // again from. Left as it was, the sign-on this list belongs to is still "in progress":
+            // the screen draws a spinner with nothing to press, and the round trip that would mend
+            // it is refused for being already under way. A failure with a list already on screen
+            // keeps that list — it is still the last thing the server said.
+            if case .authenticating = state { state = .unlisted }
         }
     }
 

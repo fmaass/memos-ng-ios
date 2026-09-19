@@ -45,6 +45,8 @@ struct ManageTokensScreen: View {
     let now: Date
     @Binding var draft: String
     let signOn: () -> Void
+    /// Asks for the list again, under the grant this screen already holds.
+    let reread: () -> Void
     let create: (String) -> Void
     let revoke: (Int) -> Void
     let copySecret: (String) -> Void
@@ -98,6 +100,13 @@ struct ManageTokensScreen: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            case .unlisted:
+                Text(ManageTokensPresentation.unlisted)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(ManageTokensPresentation.rereadTitle, action: reread)
+                    .accessibilityLabel(ManageTokensPresentation.rereadLabel)
+                    .disabled(isBusy)
             case .listed(let tokens):
                 creation
                 Divider()
@@ -127,7 +136,13 @@ struct ManageTokensScreen: View {
             // the request is built — a second copy of the rule here would be a second answer.
             Button(ManageTokensPresentation.createTitle) { create(draft) }
                 .accessibilityLabel(ManageTokensPresentation.createLabel)
-                .disabled(isBusy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    ManageTokensPresentation.createIsDisabled(
+                        isBusy: isBusy,
+                        secretShowing: minted != nil,
+                        draft: draft
+                    )
+                )
             if isBusy {
                 ProgressView().controlSize(.small)
             }
@@ -162,9 +177,12 @@ struct ManageTokensScreen: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text(minted.token.name)
+            // Not pickable by hand. The system's own copy of a dragged-over run of characters
+            // would put a token on the clipboard that nothing here has any say over — no deadline,
+            // and half a secret if the drag stopped short. Copy below is the one way out of this
+            // panel, and it takes the whole thing.
             Text(minted.secret)
                 .font(.footnote.monospaced())
-                .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text(ManageTokensPresentation.secretCaption)
                 .font(.footnote)
