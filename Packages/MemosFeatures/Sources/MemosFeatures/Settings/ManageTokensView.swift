@@ -22,6 +22,10 @@ struct ManageTokensView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
 
+    /// Handed in by the screen that already reads the session, because this view holds a
+    /// `SessionReporting` and that protocol knows nothing about who is signed in.
+    private let appAccountName: String
+
     @State private var store: ManageTokensStore
     /// This screen's own browser presenter, not the sign-in screen's: each of them owns one
     /// attempt at a time, and sharing one would let a sign-in and a step-up cancel each other.
@@ -33,7 +37,8 @@ struct ManageTokensView: View {
     /// The session comes with it because a step-up belongs to the identity that bought it: this
     /// screen's own teardown happens after the session has already withdrawn, so the store has to
     /// be able to ask the session itself.
-    init(serverBaseURL: URL, session: any SessionReporting) {
+    init(serverBaseURL: URL, session: any SessionReporting, appAccountName: String) {
+        self.appAccountName = appAccountName
         _store = State(
             initialValue: ManageTokensStore(serverBaseURL: serverBaseURL, session: session)
         )
@@ -43,6 +48,7 @@ struct ManageTokensView: View {
         NavigationStack {
             ManageTokensScreen(
                 state: store.state,
+                appAccountName: appAccountName,
                 minted: store.minted,
                 secretLost: store.mintedSecretLost,
                 notice: store.notice,

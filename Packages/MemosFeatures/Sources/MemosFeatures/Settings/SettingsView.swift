@@ -86,7 +86,14 @@ struct SettingsView: View {
         // sign-on is a round trip to that server, and there is nowhere to send it otherwise.
         .sheet(isPresented: $managingTokens) {
             if let baseURL = session.serverBaseURL {
-                ManageTokensView(serverBaseURL: baseURL, session: session)
+                // The same identifier the account row above shows: the display name if the server
+                // sent one, otherwise the address, otherwise the subject it issued. The screen
+                // says it out loud because only the browser knows whose tokens it will list.
+                ManageTokensView(
+                    serverBaseURL: baseURL,
+                    session: session,
+                    appAccountName: session.state.user?.name ?? ""
+                )
             }
         }
     }

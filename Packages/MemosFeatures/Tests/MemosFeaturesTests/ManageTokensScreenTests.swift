@@ -26,6 +26,7 @@ struct ManageTokensScreenTests {
 
     private func screen(
         state: ManageTokensState,
+        appAccountName: String = "fabian@example.invalid",
         minted: MintedToken? = nil,
         secretLost: Bool = false,
         notice: String? = nil,
@@ -41,6 +42,7 @@ struct ManageTokensScreenTests {
         let held = draft ?? Held("")
         return ManageTokensScreen(
             state: state,
+            appAccountName: appAccountName,
             minted: minted,
             secretLost: secretLost,
             notice: notice,
@@ -84,7 +86,7 @@ struct ManageTokensScreenTests {
     func offersTheRoundTrip() {
         let labels = ScreenProbe.labels(of: screen(state: .locked(.never)))
 
-        #expect(says("needs a fresh sign-in", labels))
+        #expect(says("goes through the browser's sign-in", labels))
         #expect(says(ManageTokensPresentation.signOnLabel, labels))
     }
 
@@ -187,6 +189,56 @@ struct ManageTokensScreenTests {
         #expect(says("Expires in 365 days", labels))
         #expect(says("Never expires", labels))
         #expect(says("Not used yet", labels))
+    }
+
+    /// The screen's one statement of what it cannot check, where it is still a warning rather than
+    /// an explanation: it names the account the APP is signed in as, says the list may not be that
+    /// account's, and is read before anything here can mint or destroy a token. Order is asserted
+    /// and not only presence, because the same sentence under the list would be an account
+    /// somebody learns about after revoking somebody else's token.
+    @Test("the unverified account is stated before Create and before every Revoke")
+    func theAccountStatementComesBeforeAnythingThatChangesTokens() throws {
+        let listed = ScreenProbe.labels(
+            of: screen(
+                state: .listed([token(id: 1, name: "Kitchen phone"), token(id: 7, name: "Laptop")]),
+                appAccountName: "fabian@example.invalid"
+            ),
+            size: CGSize(width: 393, height: 1400)
+        )
+
+        #expect(says("signed in as fabian@example.invalid", listed))
+        let statement = try #require(
+            listed.firstIndex { $0.contains("cannot verify that these are the same account") },
+            "the listed screen never said the two accounts are unverified"
+        )
+        let create = try #require(
+            listed.firstIndex { $0.contains(ManageTokensPresentation.createLabel) },
+            "the listed screen had no create control for the statement to be ahead of"
+        )
+        // Every occurrence, not the first: a control is reached through more than one branch of
+        // the tree the probe walks, and it is the LAST of them the statement has to precede.
+        let revokes = listed.indices.filter {
+            listed[$0] == ManageTokensPresentation.revokeLabel(for: "Kitchen phone")
+                || listed[$0] == ManageTokensPresentation.revokeLabel(for: "Laptop")
+        }
+
+        #expect(
+            listed.contains(ManageTokensPresentation.revokeLabel(for: "Kitchen phone")),
+            "the first token's revoke control was not on the screen"
+        )
+        #expect(
+            listed.contains(ManageTokensPresentation.revokeLabel(for: "Laptop")),
+            "the second token's revoke control was not on the screen"
+        )
+        #expect(statement < create, "the statement was read after the create control")
+        #expect(revokes.allSatisfy { statement < $0 }, "a revoke control was read before it")
+
+        // Before the sign-on there is no list, and the opening line already carries the statement.
+        // Saying it twice would read as two different rules about two different things.
+        let locked = ScreenProbe.labels(of: screen(state: .locked(.never)))
+
+        #expect(says("cannot verify that it is the same account as its own", locked))
+        #expect(!says("close this screen before creating or revoking tokens", locked))
     }
 
     /// A screen reader reaching a column of identical "Revoke" buttons cannot tell which token it
@@ -361,13 +413,16 @@ struct ManageTokensScreenTests {
         )
     }
 
-    /// The row says what the tap costs. A row that opened the household sign-on without warning
-    /// would be a surprise, and this screen cannot be reached any other way.
-    @Test("the row says a fresh sign-in is what it costs")
-    func theRowNamesItsPrice() {
+    /// The row says what the tap costs and where the answer comes from. A row that opened the
+    /// household sign-on without warning would be a surprise, and this screen cannot be reached
+    /// any other way; a row that promised this account's tokens would be promising something the
+    /// browser decides.
+    @Test("the row says which sign-in it costs and whose tokens that gets")
+    func theRowNamesItsPriceAndItsAccount() {
         let labels = ScreenProbe.labels(of: ManageTokensRow(open: {}))
 
-        #expect(says("fresh sign-in", labels))
+        #expect(says("browser's sign-in", labels))
+        #expect(says("manages the account signed in there", labels))
     }
 
     @Test("pressing the row opens token management")

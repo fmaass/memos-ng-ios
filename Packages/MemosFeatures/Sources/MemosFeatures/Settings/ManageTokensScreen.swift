@@ -34,6 +34,10 @@ struct ManageTokensRow: View {
 /// arranged by rendering a real screen against a real server.
 struct ManageTokensScreen: View {
     let state: ManageTokensState
+    /// What the APP's own account is called, which is the only half of the comparison this screen
+    /// can make: the list it draws was read with a grant the browser issued, and nothing in that
+    /// answer says which account it belongs to.
+    let appAccountName: String
     /// The token just created, with the one look anybody gets at its text.
     let minted: MintedToken?
     /// A text that went away without being read. Says so rather than showing one panel fewer.
@@ -110,6 +114,12 @@ struct ManageTokensScreen: View {
                     .accessibilityLabel(ManageTokensPresentation.rereadLabel)
                     .disabled(isBusy)
             case .listed(let tokens):
+                // First, above the list and above every control that could change it: read after
+                // a token has been created or revoked, it would be an explanation of something
+                // that already happened. In the screen's own text colour rather than the
+                // secondary one the captions take, for the same reason.
+                Text(ManageTokensPresentation.listedAccountLine(signedInAs: appAccountName))
+                    .font(.footnote)
                 creation
                 Divider()
                 if tokens.isEmpty {

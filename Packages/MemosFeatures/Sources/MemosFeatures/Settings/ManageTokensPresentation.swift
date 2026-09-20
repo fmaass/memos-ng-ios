@@ -15,20 +15,24 @@ enum ManageTokensPresentation {
 
     static let rowTitle = "Manage tokens"
     /// Says the price up front. Opening this costs a sign-in, and a row that did not say so would
-    /// be a tap that unexpectedly throws somebody into the household sign-on.
+    /// be a tap that unexpectedly throws somebody into the household sign-on. It names whose
+    /// tokens those turn out to be as well, because that is decided in the browser and the app has
+    /// no way to check it against the account it is itself signed in as.
     static let rowCaption =
-        "See, create and revoke this account's access tokens. It needs a fresh sign-in."
+        "See, create and revoke access tokens. It goes through the browser's sign-in, and it "
+        + "manages the account signed in there."
     /// Says the price too, and it has to: a button replaces its children's accessibility, so the
     /// caption below the title reaches nobody using a screen reader. A hint would not do — a hint
     /// is optional and can be switched off, and "this throws you into the household sign-on" is
     /// not optional information about a row somebody is deciding whether to press.
     static let rowLabel =
-        "Manage this account's access tokens. It needs a fresh sign-in."
+        "Manage access tokens. It goes through the browser's sign-in, and it manages the account "
+        + "signed in there."
 
     // MARK: - buying a management session
 
     static let signOnTitle = "Sign in to manage"
-    static let signOnLabel = "Sign in again to manage this account's tokens"
+    static let signOnLabel = "Sign in again to manage tokens"
     static let signingOn = "Signing in…"
 
     /// Why the screen is asking for a sign-on rather than showing a list.
@@ -39,7 +43,9 @@ enum ManageTokensPresentation {
     static func lockLine(_ lock: ManageTokensLock) -> String {
         switch lock {
         case .never:
-            "Managing tokens needs a fresh sign-in. It lasts a few minutes and nothing is kept on "
+            "Managing tokens goes through the browser's sign-in. What you see and change here "
+                + "belongs to the account signed in there, and the app cannot verify that it is "
+                + "the same account as its own. It lasts a few minutes and nothing is kept on "
                 + "this phone."
         case .expired:
             "That management session has ended - they last a few minutes by design. Sign in again "
@@ -59,7 +65,20 @@ enum ManageTokensPresentation {
         "This server does not offer token management to the app yet. Nothing is wrong with your "
         + "sign-in; the account's tokens can still be managed in the web app."
 
-    static let empty = "This account has no access tokens."
+    // MARK: - whose tokens are on the screen
+
+    /// Said above the list and above everything that could change it, because it is a warning
+    /// before it is an explanation: the grant this list was read with was bought in the browser,
+    /// where a session that is already open answers the sign-in without anybody typing anything,
+    /// so the account these tokens belong to is one the app cannot hold against its own.
+    static func listedAccountLine(signedInAs name: String) -> String {
+        "These tokens belong to the account signed in through the browser. The app is signed in "
+            + "as \(name), but cannot verify that these are the same account. If you are unsure "
+            + "which account the browser used, close this screen before creating or revoking "
+            + "tokens."
+    }
+
+    static let empty = "The account signed in through the browser has no access tokens."
 
     // MARK: - a live session whose list did not arrive
 
@@ -67,10 +86,10 @@ enum ManageTokensPresentation {
     /// card; what this adds is that the sign-in was not wasted — the other reading, that it was, is
     /// the one that makes somebody close the screen and buy another one.
     static let unlisted =
-        "This account's tokens could not be read. The management session is still live, so the "
-        + "list can be asked for again."
+        "The tokens could not be read. The management session is still live, so the list can be "
+        + "asked for again."
     static let rereadTitle = "Try again"
-    static let rereadLabel = "Read this account's tokens again"
+    static let rereadLabel = "Read the tokens again"
 
     // MARK: - the one look anybody gets at a new token
 
@@ -98,8 +117,8 @@ enum ManageTokensPresentation {
     static let createTitle = "Create token"
     static let createLabel = "Create a token with this name"
     static let createCaption =
-        "A new token never expires and can do everything this account can. Revoke it here when it "
-        + "is no longer needed."
+        "A new token never expires and can do everything the account signed in through the "
+        + "browser can. Revoke it here when it is no longer needed."
 
     /// Whether Create is there to be pressed, decided from what the screen was given.
     ///
