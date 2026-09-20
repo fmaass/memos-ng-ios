@@ -31,6 +31,13 @@ private let liveGrant = Stub.manageGrant(
     expiresAt: iso(managementNow.addingTimeInterval(600))
 )
 
+/// A grant minted after the clock has moved past the wait for the browser step, and still live at
+/// that instant — what a round trip made from there really buys.
+private let grantLiveAfterTheWait = Stub.manageGrant(
+    "mg_after_the_wait",
+    expiresAt: iso(managementNow.addingTimeInterval(1320))
+)
+
 /// One request as the transport saw it — and above all what credential it presented.
 ///
 /// The header is the whole point of most of this suite. A management screen that talked to
@@ -1314,9 +1321,10 @@ extension ManageTokensStoreTests {
         let second = LockedValue<Task<Bool, Never>?>(nil)
         let first = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
         first.reenter = {
-            // The screen went away, and a second sign-on was opened on the way back in. Its own
-            // generation is the current one from here on, and the spinner on screen is ITS.
-            store.forget()
+            // The screen was closed on purpose, which ends the attempt that was open, and a second
+            // sign-on was opened afterwards. Its own generation is the current one from here on,
+            // and the spinner on screen is ITS.
+            store.forget(.closed)
             second.set(
                 Task {
                     await store.authenticate(
@@ -1397,5 +1405,425 @@ extension ManageTokensStoreTests {
             seen.get().filter { $0.operation == listOperation }.count == 1,
             "a request left for an identity that is gone"
         )
+    }
+
+    // MARK: - a sign-on that outlasts the screen it was started from
+
+    /// The browser step is exactly what takes this screen off the display, so a screen that went
+    /// away is what a sign-on LOOKS like from in here. Reading it as the end of one abandons every
+    /// round trip that leaves the app — and there is nothing to drop either, because a sign-on
+    /// that has not come back has bought nothing.
+    @Test("a sign-on in flight survives the screen going away and comes back with the list")
+    func aSignOnInFlightSurvivesTheScreenGoingAway() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
+        }
+        let presenter = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        presenter.reenter = {
+            store.forget()
+            return true
+        }
+
+        let signedOn = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+
+        #expect(signedOn)
+        #expect(
+            seen.get().filter { $0.operation == mintOperation }.count == 1,
+            "the handoff code was never spent"
+        )
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// A list belongs to the account it was read for, not to the screen it is drawn on. An
+    /// identity replaced in place — signed out and signed in again, a handle still there — leaves
+    /// rows on this screen that are somebody else's, and it may not go on reporting them.
+    @Test("a listed screen stops reporting its rows once the app identity is replaced")
+    func aListedScreenStopsReportingOnceTheIdentityIsReplaced() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
+        }
+
+        await signOn(store)
+        #expect(rows(store.state)?.map(\.id) == [1], "there was no list to lose")
+
+        await session.signOutWithoutRevoking()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        #expect(session.activeHandle != nil, "the identity was withdrawn rather than replaced")
+
+        #expect(rows(store.state) == nil, "a list outlived the identity it was read for")
+    }
+
+    /// The same replacement while the browser step is still open. Whatever the round trip comes
+    /// back with belongs to an account nobody is holding, and the screen may not be left on the
+    /// spinner that round trip put up.
+    @Test("a browser step that returns after the identity was replaced leaves no spinner")
+    func aBrowserStepReturningAfterAReplacementLeavesNoSpinner() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+        let presenter = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        presenter.reenter = {
+            await session.signOutWithoutRevoking()
+            await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+            return true
+        }
+
+        let signedOn = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+
+        #expect(!signedOn)
+        #expect(store.state != .authenticating, "a replaced identity was left on a spinner")
+        #expect(seen.get().isEmpty, "a handoff code was exchanged for an identity that is gone")
+    }
+
+    /// The other involuntary report, and the one the phone really does send when a sign-on takes
+    /// somebody into a browser that puts this app behind it.
+    @Test("a sign-on in flight survives the app being put away and comes back with the list")
+    func aSignOnInFlightSurvivesTheAppBeingPutAway() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
+        }
+        let presenter = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        presenter.reenter = {
+            store.forget(.appWentAway)
+            return true
+        }
+
+        let signedOn = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+
+        #expect(signedOn)
+        #expect(
+            seen.get().filter { $0.operation == mintOperation }.count == 1,
+            "the handoff code was never spent"
+        )
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// Close is the one departure somebody chose, and the only one that is unambiguous. It ends
+    /// the attempt in front of them, and the code that comes back afterwards buys nothing.
+    @Test("closing the screen ends a sign-on that is still waiting for its browser step")
+    func closingTheScreenEndsAnInFlightSignOn() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let store = makeStore(seen: seen) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+        let presenter = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        presenter.reenter = {
+            store.forget(.closed)
+            return true
+        }
+
+        let signedOn = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+
+        #expect(!signedOn)
+        #expect(store.state == .locked(.never), "the closed screen was left on its spinner")
+        #expect(seen.get().isEmpty, "a handoff code was spent for a screen that was closed")
+    }
+
+    /// The ender the person reaches for most: they close the browser. The attempt is over, it says
+    /// so, and the screen is free to offer another one.
+    @Test("a browser the person closed ends the sign-on and the next tap is a real round trip")
+    func aClosedBrowserEndsTheSignOn() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let store = makeStore(seen: seen) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+
+        let refused = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: StubPresenter(behaviour: .failure(.cancelled))
+        )
+
+        #expect(!refused)
+        #expect(store.state == .locked(.refused(.cancelled)))
+
+        let again = await signOn(store)
+        #expect(again, "control: the ended attempt refused the next one")
+    }
+
+    // MARK: - the wait for the browser step
+
+    /// A round trip that produces no answer at all has to end in a sentence rather than in a
+    /// spinner nobody can stop. The deadline covers the wait for the browser step and nothing
+    /// after it, and it is decided from the injected clock rather than from a race.
+    @Test("a browser step that never comes back ends with a sentence, not a spinner")
+    func anUnansweredBrowserStepEndsWithASentence() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let clock = LockedValue(managementNow)
+        let store = makeStore(seen: seen, now: { clock.get() }) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+        let presenter = OccupiedPresenter()
+
+        async let signingOn = store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+        await presenter.waitUntilOpen()
+
+        #expect(!store.signOnDeadlinePassed(), "the wait ended before it had run out")
+        #expect(store.state == .authenticating, "the sign-on was not on screen to begin with")
+
+        clock.set(managementNow.addingTimeInterval(ManageTokensStore.browserStepDeadline))
+        #expect(store.signOnDeadlinePassed(), "the wait ran out and nothing said so")
+        #expect(store.state == .locked(.unanswered))
+
+        // The answer the deadline beat. It lost the claim, so it writes nothing at all — including
+        // the grant it would otherwise have gone on to buy.
+        presenter.answer("memosng://auth-callback?code=abc")
+        let signedOn = await signingOn
+
+        #expect(!signedOn)
+        #expect(store.state == .locked(.unanswered), "a beaten answer wrote the screen anyway")
+        #expect(seen.get().isEmpty, "a handoff code was spent for a wait that had ended")
+    }
+
+    /// The window the deadline leaves behind: it cannot take the browser down, so the presenter is
+    /// still holding that attempt while the person is looking at the browser. A tap in that window
+    /// must cost nothing and corrupt nothing, and once the old attempt settles the next tap has to
+    /// be a real round trip.
+    @Test("a retry while the browser step is still open costs nothing, and the next one works")
+    func aRetryWhileTheOldAttemptIsStillOpen() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let clock = LockedValue(managementNow)
+        let store = makeStore(seen: seen, now: { clock.get() }) { operation in
+            switch operation {
+            // Live at the clock this test ends on, so the round trip it finishes with is a round
+            // trip that really lists rather than one that lapses on its way to the list.
+            case mintOperation: .json(grantLiveAfterTheWait)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
+        }
+        // ONE presenter for every attempt, as the screen has: a second stub would answer as if
+        // nothing were open, which is the whole of what this test is asking about.
+        let presenter = OccupiedPresenter()
+
+        async let signingOn = store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+        await presenter.waitUntilOpen()
+        clock.set(managementNow.addingTimeInterval(ManageTokensStore.browserStepDeadline))
+        #expect(store.signOnDeadlinePassed())
+
+        let retried = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+
+        #expect(!retried)
+        #expect(presenter.refusals == 1, "the retry was not refused by the presenter it shares")
+        #expect(seen.get().isEmpty, "a retry spent a handoff code while the old step was open")
+        #expect(
+            store.state == .locked(.refused(.alreadySigningIn)),
+            "the retry left the screen somewhere it cannot be read"
+        )
+
+        presenter.answer("memosng://auth-callback?code=abc")
+        let signedOn = await signingOn
+        #expect(!signedOn)
+
+        // The same presenter, which is the point: it is free again, so this is a real round trip.
+        let again = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: presenter
+        )
+        #expect(again, "control: once the old step settled, the next tap was a real round trip")
+        #expect(seen.get().filter { $0.operation == mintOperation }.count == 1)
+        #expect(rows(store.state)?.map(\.id) == [1], "control: the round trip listed nothing")
+    }
+
+    // MARK: - the window between the browser step and the grant
+
+    /// The exchange is the other half of the same round trip, and it is in the air at exactly the
+    /// moment the phone hands the app back. Nothing has been bought until it answers, so the two
+    /// reports nobody chose may not end it there either.
+    @Test("a sign-on survives the app being put away while its grant exchange is in the air")
+    func aSignOnSurvivesTheAppBeingPutAwayDuringTheExchange() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                await gate.hold()
+                return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.appWentAway)
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(signedOn)
+        #expect(
+            seen.get().filter { $0.operation == mintOperation }.count == 1,
+            "the exchange was sent more than once"
+        )
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// The same window, and the report that cannot be told from the browser being presented over
+    /// this screen in the first place.
+    @Test("a sign-on survives the screen going away while its grant exchange is in the air")
+    func aSignOnSurvivesTheScreenGoingAwayDuringTheExchange() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                await gate.hold()
+                return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.screenWentAway)
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(signedOn)
+        #expect(
+            seen.get().filter { $0.operation == mintOperation }.count == 1,
+            "the exchange was sent more than once"
+        )
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// Where the exemption stops, which is the half that keeps the feature's contract: the grant
+    /// is HELD by the time the first list read is out, so the app going away destroys it exactly
+    /// as it always has, and the list that arrives afterwards has no screen to land on.
+    @Test("a report while the first list read is in the air still discards the grant")
+    func aReportDuringTheFirstListReadStillDiscards() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation:
+                await gate.hold()
+                return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.appWentAway)
+        await gate.release()
+        _ = await signingOn
+
+        #expect(store.state == .locked(.discarded))
+        #expect(rows(store.state) == nil, "a held list repopulated a screen whose grant had gone")
+        #expect(!store.isBusy)
+    }
+
+    /// Close ends the whole round trip wherever it has got to, the exchange included, and what the
+    /// server answers afterwards buys nothing anybody can see.
+    @Test("closing the screen during the grant exchange ends it, and the answer buys nothing")
+    func closingTheScreenDuringTheExchangeEndsIt() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                await gate.hold()
+                return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.closed)
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(!signedOn)
+        #expect(store.state == .locked(.never), "a screen that was closed was left on its spinner")
+        #expect(rows(store.state) == nil)
+        #expect(
+            seen.get().filter { $0.operation == listOperation }.isEmpty,
+            "a list was read for a screen the person had closed"
+        )
+    }
+}
+
+/// One presenter for every attempt on a store, the way the screen has one: it holds the attempt
+/// open until the test answers it, and refuses a second one while it is holding the first — which
+/// is what the real presenter does while it is presenting or exchanging.
+@MainActor
+private final class OccupiedPresenter: NativeLoginPresenter {
+    private(set) var refusals = 0
+    private var open = false
+    private var callback: String?
+
+    func answer(_ callback: String) { self.callback = callback }
+
+    /// Bounded, like every other wait in this suite: a poll nobody answered would hang the suite,
+    /// and a suite that hangs when the behaviour breaks reports nothing.
+    func waitUntilOpen() async {
+        for _ in 0..<2000 {
+            if open { return }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String
+    ) async throws -> URL {
+        guard !open else {
+            refusals += 1
+            throw NativeLoginError.alreadySigningIn
+        }
+        open = true
+        defer { open = false }
+        for _ in 0..<2000 {
+            if let callback {
+                guard let url = URL(string: callback) else { throw NativeLoginError.cancelled }
+                return url
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        throw NativeLoginError.cancelled
     }
 }
