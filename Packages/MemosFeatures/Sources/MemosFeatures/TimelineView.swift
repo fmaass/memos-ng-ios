@@ -211,7 +211,12 @@ public struct TimelineView: View {
         // check this joins.
         .onChange(of: scenePhase, initial: true) { _, phase in
             switch phase {
-            case .active: Task { await session.enteredForeground() }
+            case .active:
+                // A phone put away on a train and taken out at home comes back to whatever its
+                // pictures ended as. Nothing about a tile changes when the app is reopened, so
+                // this is the only moment that can tell one it is worth asking again.
+                MediaRetrySignal.shared.publish()
+                Task { await session.enteredForeground() }
             case .background, .inactive: session.enteredBackground()
             @unknown default: break
             }
@@ -764,6 +769,11 @@ public struct TimelineView: View {
     private func load() async {
         guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
         await timeline?.refresh(using: handle, baseURL: baseURL)
+        // The list has been read again, so the links on it are as fresh as the server will make
+        // them — and a tile still owed its picture has a reason to ask once more. The URLs alone
+        // cannot say so: the server buckets a signed link's expiry, so a read a minute later
+        // commonly hands back the identical URL and no tile sees anything change.
+        MediaRetrySignal.shared.publish()
     }
 
     /// A day chosen on the sheet: the list comes back anchored at that day.

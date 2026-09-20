@@ -61,13 +61,8 @@ struct AttachmentThumbnail: View {
     /// the image lands — and the blurhash underneath gets that identical frame.
     var slot: AttachmentSlot
 
-    /// What THIS view instance loaded, tagged with the key it was loaded for. The tag is not
-    /// bookkeeping: a tile whose attachment or tier changes under it would otherwise keep painting
-    /// the previous photo until the new one arrived, which is the one wrong picture a cache is
-    /// able to show.
-    @State private var loaded: (key: MediaImageKey, image: UIImage)?
-    /// The key whose load came back with nothing. Also tagged, for the same reason.
-    @State private var failedKey: MediaImageKey?
+    /// This tile's own load: what it captured, what it gave up on, and the request it has out.
+    @State private var picture = PictureLoad()
 
     private var url: URL? { MemoPresentation.url(for: attachment, tier: tier) }
     private var key: MediaImageKey { MediaImageLoader.key(for: attachment, tier: tier) }
@@ -92,8 +87,12 @@ struct AttachmentThumbnail: View {
     /// Read in `body`, and synchronous on both paths. The cache lookup is what makes a scroll-back
     /// free; the capture is what keeps it painted afterwards.
     private var image: Image? {
-        Self.painted(captured: loaded, for: key, cached: MediaImageLoader.cachedUIImage(for: key))
-            .map(Image.init(uiImage:))
+        Self.painted(
+            captured: picture.captured,
+            for: key,
+            cached: MediaImageLoader.cachedUIImage(for: key)
+        )
+        .map(Image.init(uiImage:))
     }
 
     private var phase: ThumbnailPhase {
@@ -101,7 +100,7 @@ struct AttachmentThumbnail: View {
             readiness: attachment.readiness,
             hasImage: image != nil,
             hasURL: url != nil,
-            loadFailed: failedKey == key
+            loadFailed: picture.failedKey == key
         )
     }
 
@@ -134,14 +133,6 @@ struct AttachmentThumbnail: View {
         }
     }
 
-    /// What a re-load has to depend on. The URL alone is not enough: a pending attachment's
-    /// derived-tier URL is already in the payload and does not change when the worker finishes, so
-    /// keying on it would leave the tile waiting forever after the status flipped.
-    nonisolated private struct LoadTrigger: Equatable, Sendable {
-        let url: URL?
-        let readiness: AttachmentReadiness
-    }
-
     var body: some View {
         Color.clear
             .aspectRatio(slot.aspectRatio, contentMode: .fit)
@@ -153,11 +144,28 @@ struct AttachmentThumbnail: View {
                     contentMode: slot.contentMode
                 )
             }
-            .task(id: LoadTrigger(url: url, readiness: attachment.readiness)) { await load() }
+            .task(
+                id: PictureTrigger(
+                    url: url,
+                    readiness: attachment.readiness,
+                    attempt: picture.attempt
+                )
+            ) { await load() }
+            // Something happened that could change the answer. Whether it changes anything for
+            // THIS tile is the tile's own to say, and it is the only one that can: the list it
+            // sits in has no idea which of its pictures arrived.
+            .onChange(of: MediaRetrySignal.shared.publications) { _, _ in
+                picture.askAgain(showing: image != nil)
+            }
             .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
     }
 
     private func load() async {
+        // Claimed before anything is awaited and released however this leaves, so a signal that
+        // arrives while this fetch is out is refused rather than answered with a second request —
+        // and a load that returns without fetching anything leaves nothing claimed behind it.
+        let serial = picture.claim()
+        defer { picture.release(serial) }
         // Nothing to fetch while the server is still deriving it, and nothing to fetch for a file
         // it gave up on. Asking anyway is what turned a pending photo into a failure glyph.
         guard attachment.readiness == .ready, let url else { return }
@@ -171,24 +179,18 @@ struct AttachmentThumbnail: View {
         // fetch. It is still taken INTO this view's own state: the frame is already right, and
         // this is what keeps it right if the cache is emptied under a row that stays mounted.
         if let hit = MediaImageLoader.cachedUIImage(for: requested) {
-            loaded = (requested, hit)
-            if failedKey == requested { failedKey = nil }
+            picture.painted(hit, for: requested)
             return
         }
 
         let generation = MediaImageLoader.store.generation
-        let image = await MediaImageLoader.uiImage(for: requested, url: url)
+        let answer = await MediaImageLoader.answer(for: requested, url: url)
         // The same fence the loader applies to its cache, applied to the screen: an answer about
         // the account that was signed in when this started must not be painted for the one signed
         // in now. Nothing is assigned at all — not even a failure, which would put a warning
         // triangle on a tile whose memo is already being replaced.
         guard generation == MediaImageLoader.store.generation else { return }
-        if let image {
-            loaded = (requested, image)
-            if failedKey == requested { failedKey = nil }
-        } else {
-            failedKey = requested
-        }
+        picture.settle(answer, for: requested, serial: serial)
     }
 }
 
