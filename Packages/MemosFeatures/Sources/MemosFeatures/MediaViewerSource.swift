@@ -168,4 +168,18 @@ enum MediaViewerPager {
         // The page that has slid into the gap is the next one; past the end, it is the one before.
         return (remaining, remaining[min(index, remaining.count - 1)].id)
     }
+
+    /// Whether a hold taken by a named page still stands: only while that page is one of the
+    /// pages shown.
+    ///
+    /// A page deleted from the viewer's own overlay never reports its release, because its view
+    /// is gone by the time there would be anything to report — so a slot naming it would keep
+    /// the pager or the interactive dismissal switched off for every page that follows. The id
+    /// left behind in the slot is harmless once the answer is asked here: ids are unique, a
+    /// deleted one is kept out of the rendered list by `removed`, and the next page to take the
+    /// hold overwrites the slot.
+    static func stands(_ holder: MediaPage.ID?, among pages: [MediaPage]) -> Bool {
+        guard let holder else { return false }
+        return pages.contains { $0.id == holder }
+    }
 }
