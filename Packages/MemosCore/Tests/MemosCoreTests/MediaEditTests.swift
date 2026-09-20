@@ -345,12 +345,13 @@ struct MediaEditTests {
 
     /// The window a save closing carelessly opens.
     ///
-    /// A save is not the only thing that can happen while a save is in flight — a second one can
-    /// be submitted before the first one's answer arrives, and this store may not lean on a screen
-    /// to prevent that. The first save then finishes and tidies up, and what it clears is the key
-    /// belonging to the edit that is STILL RUNNING. If that one's response is lost, its retry finds
-    /// nothing, mints a fresh key, and applies the same edit again — the same files attached twice,
-    /// which is the exact harm the key exists to prevent.
+    /// A save is not the only thing that can happen while a save is in flight — a second one with
+    /// different words can be submitted before the first one's answer arrives, and this store may
+    /// not lean on a screen to prevent that. It waits its turn instead of going out beside the
+    /// first, and the key it mints when that turn comes is its own to keep: if ITS response is the
+    /// one that is lost, the retry must find that key rather than mint a fresh one and apply the
+    /// same edit again — the same files attached twice, which is the exact harm the key exists to
+    /// prevent.
     @Test("a save that lands does not throw away the key of one still in flight")
     func aFinishedSaveKeepsAnotherSavesKey() async throws {
         let store = TimelineStore()
@@ -386,14 +387,23 @@ struct MediaEditTests {
         while !entered.get() {
             await Task.yield()
         }
-        // Submitted while the first is still out: it mints its own key into the slot.
-        let second = await store.edit(
-            uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL
-        ).isSaved
-        #expect(!second, "control: the second save failed, so it is the one with a retry to make")
+        // Submitted while the first is still out, and never awaited before that one is released:
+        // it waits for the save ahead of it, so awaiting it here would be waiting for its turn.
+        let second = Task {
+            await store.edit(
+                uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL
+            )
+        }
+        // Long enough for a request nothing holds back to have reached the transport.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(seen.get()["second"] == nil, "a save went out while an earlier one was unanswered")
         release.set(true)
         #expect(
             await first.value.isSaved, "control: the first save landed, which is what tidies up")
+        #expect(
+            !(await second.value).isSaved,
+            "control: the second save failed, so it is the one with a retry to make"
+        )
 
         // The retry of the SECOND save — the one whose response was lost.
         await store.edit(uid: "a", content: "second", using: client.handle, baseURL: Stub.baseURL)
@@ -411,18 +421,17 @@ struct MediaEditTests {
 
     /// The other door into the same harm.
     ///
-    /// Two saves of identical fields share one key, and that is correct — they are one logical
-    /// edit, and the second is answered as a replay of the first rather than applied twice. But
-    /// then the FIRST one's answer arriving would release a key the second is still presenting; if
-    /// the second's response is lost, its retry mints a fresh key and the same files are attached
-    /// a second time. So the key is released only once nothing is still using it.
+    /// Two saves of identical fields are one logical edit, and one request: the second joins the
+    /// one already out and is given its answer. So there is a single key, and both callers are
+    /// holding it — which is why a landing save may not release a key on its own account. If that
+    /// one answer is lost, the retry must present the same key, or the same files are attached a
+    /// second time.
     @Test("a save landing while an identical one is still in flight keeps their shared key")
     func anIdenticalSaveStillInFlightKeepsTheKey() async throws {
         let store = TimelineStore()
         let keys = LockedValue<[String]>([])
         let calls = LockedValue<Int>(0)
         let releaseFirst = LockedValue<Bool>(false)
-        let releaseSecond = LockedValue<Bool>(false)
         let client = Stub.client { _, body, operation in
             guard operation == patchMemoOperation else {
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
@@ -430,17 +439,10 @@ struct MediaEditTests {
             keys.set(keys.get() + [(try await Stub.body(body))["edit_key"] as? String ?? ""])
             let call = calls.get() + 1
             calls.set(call)
-            switch call {
-            case 1:
-                try await hold(until: releaseFirst)
-                return Stub.json(Stub.memo(uid: "a", content: "same"))
-            case 2:
-                // Held so it is STILL in flight when the first one lands, then lost.
-                try await hold(until: releaseSecond)
-                return Stub.empty(.internalServerError)
-            default:
-                return Stub.json(Stub.memo(uid: "a", content: "same"))
-            }
+            guard call == 1 else { return Stub.json(Stub.memo(uid: "a", content: "same")) }
+            // Held so the identical save is submitted while it is out, and then lost.
+            try await hold(until: releaseFirst)
+            return Stub.empty(.internalServerError)
         }
 
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
@@ -450,29 +452,28 @@ struct MediaEditTests {
         while calls.get() < 1 {
             await Task.yield()
         }
-        // Identical fields, so this one shares the first one's key rather than minting another.
+        // Identical fields, so this one joins the save already out rather than sending beside it.
         let second = Task {
             await store.edit(uid: "a", content: "same", using: client.handle, baseURL: Stub.baseURL)
         }
-        while calls.get() < 2 {
-            await Task.yield()
-        }
+        // Long enough for a request nothing holds back to have reached the transport.
+        try await Task.sleep(for: .milliseconds(100))
 
         releaseFirst.set(true)
-        #expect(
-            await first.value.isSaved, "control: the first save landed, which is what tidies up")
-        releaseSecond.set(true)
-        #expect(!(await second.value).isSaved, "control: the second save is the one with a retry")
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+        #expect(calls.get() == 1, "the same save was put on the wire a second time")
+        #expect(firstOutcome == secondOutcome, "one request, one answer, reported to both callers")
+        #expect(!firstOutcome.isSaved, "control: the save is the one with a retry to make")
 
         // The retry of the save whose response was lost.
         await store.edit(uid: "a", content: "same", using: client.handle, baseURL: Stub.baseURL)
 
         let sent = keys.get()
-        #expect(sent.count == 3)
+        #expect(sent.count == 2)
         #expect(!sent[0].isEmpty, "the patch carried no edit key at all")
-        #expect(sent[0] == sent[1], "control: identical saves share one key, which is the point")
         #expect(
-            sent[2] == sent[0],
+            sent[1] == sent[0],
             "a save landing released a key an identical one was still presenting"
         )
     }
