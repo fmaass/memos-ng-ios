@@ -491,16 +491,14 @@ struct TimelineMutationGateTests {
         // it takes its claim and marks the row whatever has happened — so the handle its worker
         // carries is A's either way, and the worker is the only place left to ask.
         await session.signOutWithoutRevoking()
-        let ticked = Task {
-            await store.toggleTask(at: 0, in: "a", using: underA, baseURL: Stub.baseURL)
-        }
-        // One hop, which is all the prefix needs: enough to show the tap WAS taken, so that a
-        // wire nobody wrote to is evidence rather than a tap that never happened.
-        await Task.yield()
+        let ticksSaved = await store.toggleTask(
+            at: 0, in: "a", using: underA, baseURL: Stub.baseURL
+        )
+
+        // The tap WAS taken: the row carries the tick, and keeps it, because nothing is written
+        // for a session that has ended. So a wire nobody wrote to is evidence rather than a tap
+        // that never happened — and it is read after the answer, where no job order can matter.
         #expect(store.memos[0].content == "- [x] milk", "control: the tap was taken")
-
-        let ticksSaved = await ticked.value
-
         #expect(patches.count == 0, "a tick queued under an account that had gone was sent")
         #expect(!ticksSaved, "and it was not reported as saved")
     }
