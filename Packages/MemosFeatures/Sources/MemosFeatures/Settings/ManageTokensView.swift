@@ -3,8 +3,8 @@ import MemosCore
 import SwiftUI
 import UIKit
 
-/// The management screen as the app puts it on a phone: the store, the browser sheet, and the two
-/// moments the grant has to die.
+/// The management screen as the app puts it on a phone: the store, the browser sheet, and the
+/// three moments it reports to the store.
 ///
 /// It is deliberately thin, and everything it does that could be wrong lives somewhere a test can
 /// reach — the states in `ManageTokensStore`, the drawing in `ManageTokensScreen`. What is left
@@ -18,6 +18,11 @@ import UIKit
 /// alert makes a scene inactive, and the Local Network prompt is raised by the very sign-on this
 /// screen is in the middle of — throwing that away would make the first management session on a
 /// fresh install impossible to complete.
+///
+/// What this view does NOT do is decide what any of that means. It reports three facts and the
+/// store answers each of them, because only the store knows whether anything was bought: the two
+/// reports nobody chose cannot be told apart from the browser being presented over this very
+/// screen, and Close can.
 struct ManageTokensView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
@@ -64,14 +69,19 @@ struct ManageTokensView: View {
             )
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                        .accessibilityLabel("Close token management")
+                    // Said before the sheet goes, because the dismissal that follows arrives as a
+                    // report this screen cannot tell from a browser step covering it.
+                    Button("Close") {
+                        store.forget(.closed)
+                        dismiss()
+                    }
+                    .accessibilityLabel("Close token management")
                 }
             }
         }
-        .onDisappear { store.forget() }
+        .onDisappear { store.forget(.screenWentAway) }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { store.forget() }
+            if phase == .background { store.forget(.appWentAway) }
         }
     }
 
