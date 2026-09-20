@@ -31,6 +31,13 @@ private let liveGrant = Stub.manageGrant(
     expiresAt: iso(managementNow.addingTimeInterval(600))
 )
 
+/// A grant minted after the clock has moved past the wait for the browser step, and still live at
+/// that instant — what a round trip made from there really buys.
+private let grantLiveAfterTheWait = Stub.manageGrant(
+    "mg_after_the_wait",
+    expiresAt: iso(managementNow.addingTimeInterval(1320))
+)
+
 /// One request as the transport saw it — and above all what credential it presented.
 ///
 /// The header is the whole point of most of this suite. A management screen that talked to
@@ -1609,7 +1616,13 @@ extension ManageTokensStoreTests {
         let seen = LockedValue<[Seen]>([])
         let clock = LockedValue(managementNow)
         let store = makeStore(seen: seen, now: { clock.get() }) { operation in
-            operation == mintOperation ? .json(liveGrant) : .json("[]")
+            switch operation {
+            // Live at the clock this test ends on, so the round trip it finishes with is a round
+            // trip that really lists rather than one that lapses on its way to the list.
+            case mintOperation: .json(grantLiveAfterTheWait)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
         }
         // ONE presenter for every attempt, as the screen has: a second stub would answer as if
         // nothing were open, which is the whole of what this test is asking about.
@@ -1647,6 +1660,129 @@ extension ManageTokensStoreTests {
         )
         #expect(again, "control: once the old step settled, the next tap was a real round trip")
         #expect(seen.get().filter { $0.operation == mintOperation }.count == 1)
+        #expect(rows(store.state)?.map(\.id) == [1], "control: the round trip listed nothing")
+    }
+
+    // MARK: - the window between the browser step and the grant
+
+    /// The exchange is the other half of the same round trip, and it is in the air at exactly the
+    /// moment the phone hands the app back. Nothing has been bought until it answers, so the two
+    /// reports nobody chose may not end it there either.
+    @Test("a sign-on survives the app being put away while its grant exchange is in the air")
+    func aSignOnSurvivesTheAppBeingPutAwayDuringTheExchange() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                await gate.hold()
+                return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.appWentAway)
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(signedOn)
+        #expect(
+            seen.get().filter { $0.operation == mintOperation }.count == 1,
+            "the exchange was sent more than once"
+        )
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// The same window, and the report that cannot be told from the browser being presented over
+    /// this screen in the first place.
+    @Test("a sign-on survives the screen going away while its grant exchange is in the air")
+    func aSignOnSurvivesTheScreenGoingAwayDuringTheExchange() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                await gate.hold()
+                return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.screenWentAway)
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(signedOn)
+        #expect(
+            seen.get().filter { $0.operation == mintOperation }.count == 1,
+            "the exchange was sent more than once"
+        )
+        #expect(rows(store.state)?.map(\.id) == [1])
+    }
+
+    /// Where the exemption stops, which is the half that keeps the feature's contract: the grant
+    /// is HELD by the time the first list read is out, so the app going away destroys it exactly
+    /// as it always has, and the list that arrives afterwards has no screen to land on.
+    @Test("a report while the first list read is in the air still discards the grant")
+    func aReportDuringTheFirstListReadStillDiscards() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation:
+                await gate.hold()
+                return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.appWentAway)
+        await gate.release()
+        _ = await signingOn
+
+        #expect(store.state == .locked(.discarded))
+        #expect(rows(store.state) == nil, "a held list repopulated a screen whose grant had gone")
+        #expect(!store.isBusy)
+    }
+
+    /// Close ends the whole round trip wherever it has got to, the exchange included, and what the
+    /// server answers afterwards buys nothing anybody can see.
+    @Test("closing the screen during the grant exchange ends it, and the answer buys nothing")
+    func closingTheScreenDuringTheExchangeEndsIt() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                await gate.hold()
+                return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+
+        async let signingOn = signOn(store)
+        await gate.waitForArrival()
+        store.forget(.closed)
+        await gate.release()
+        let signedOn = await signingOn
+
+        #expect(!signedOn)
+        #expect(store.state == .locked(.never), "a screen that was closed was left on its spinner")
+        #expect(rows(store.state) == nil)
+        #expect(
+            seen.get().filter { $0.operation == listOperation }.isEmpty,
+            "a list was read for a screen the person had closed"
+        )
     }
 }
 

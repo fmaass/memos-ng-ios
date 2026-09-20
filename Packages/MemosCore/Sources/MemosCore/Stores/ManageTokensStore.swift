@@ -148,6 +148,13 @@ public final class ManageTokensStore {
     /// The sign-on waiting for its browser step, if there is one. It is also the claim the browser
     /// step's answer and the deadline race for: `nil` means one of them has already taken it.
     private var signOn: SignOn?
+    /// The sign-on that is under way and has bought nothing yet, from the tap until the grant is
+    /// held — the browser step AND the exchange that follows it. The lifecycle cannot be allowed
+    /// to end THAT: the browser is presented over this screen and the app is handed back while
+    /// the exchange is still in the air, so both reports arrive in the middle of an ordinary
+    /// round trip. It is deliberately not the claim slot above, which is about a narrower
+    /// question — who answers first, the browser step or its deadline.
+    private var unboughtSignOn: Int?
     /// What asks the deadline when nothing else happens at all. Cancelled by whoever takes the
     /// attempt, so a clock can never unlock the screen under a callback that already won.
     private var deadlineWake: Task<Void, Never>?
@@ -243,6 +250,10 @@ public final class ManageTokensStore {
         let mine = generation
         heldState = .authenticating
         notice = nil
+        // Cleared on every way out of here, the ones that throw included: a marker left behind
+        // would go on exempting a screen from the reports that are meant to destroy it.
+        defer { if unboughtSignOn == mine { unboughtSignOn = nil } }
+        unboughtSignOn = mine
         armDeadline(for: mine)
         do {
             let callbackURL: URL
@@ -257,10 +268,10 @@ public final class ManageTokensStore {
                 // for the same attempt. The one that takes the attempt is the one that may write
                 // the screen; a loser that threw would paint its refusal over a sentence that is
                 // already there, minutes after anybody could act on it.
-                guard claimSignOn(mine) else { return false }
+                guard claimSignOn(mine) else { return lostTheAttempt(ending: true) }
                 throw error
             }
-            guard claimSignOn(mine) else { return false }
+            guard claimSignOn(mine) else { return lostTheAttempt(ending: false) }
             // The one reading of a callback URL in this app, shared with the sign-in lane: a
             // second copy of it here would be a second answer to "did this come back with a code".
             let code = try SessionStore.code(from: callbackURL)
@@ -273,6 +284,9 @@ public final class ManageTokensStore {
             let held = try await Self.mintGrant(client, code: code, verifier: verifier)
             guard isCurrent(mine) else { return abandonSignOn(mine) }
             grant.hold(held.grant, until: held.expiresAt)
+            // There is something to lose from here, so the reports that destroy it apply again —
+            // the first list read below included.
+            unboughtSignOn = nil
             MemosLog.session.info("POST /api/auth/native/manage-grant -> 200")
             await refresh()
             return true
@@ -440,26 +454,28 @@ public final class ManageTokensStore {
     ///
     /// A screen that never bought anything is left alone: moving it to "that session ended" would
     /// be the app announcing the end of something that never began. A sign-on still waiting for
-    /// its browser step is left alone too, by the two reports nobody chose — the browser is
-    /// presented over this screen, so a screen that went away is what an ordinary sign-on looks
-    /// like from in here, and a rule that ended an attempt there would end every attempt that
-    /// takes somebody out of the app. Nothing has been bought at that point, so nothing is being
-    /// kept alive either: what survives is a round trip, not a credential.
+    /// its grant is left alone too, by the two reports nobody chose — the browser is presented
+    /// over this screen and the app is handed back while the exchange is still out, so both of
+    /// those reports arrive in the middle of an ordinary round trip, and a rule that ended an
+    /// attempt there would end every attempt that takes somebody out of the app. Nothing has been
+    /// bought until the grant is held, so nothing is being kept alive either: what survives is a
+    /// round trip, not a credential. The moment it IS held, both reports destroy it again.
     public func forget(_ departure: ManageTokensDeparture = .screenWentAway) {
         // The held plaintext, not what the screen could still see of it: a session that bought a
         // token ended here whether or not the identity it was bought under is still around.
         let hadSomething = grant.current != nil || heldMinted != nil
-        if !hadSomething, signOn != nil, departure != .closed {
+        if !hadSomething, unboughtSignOn != nil, departure != .closed {
             MemosLog.session.info(
                 "a management sign-on outlived a screen: \(departure.logged, privacy: .public)"
             )
             return
         }
-        if signOn != nil {
+        if unboughtSignOn != nil {
             MemosLog.session.info(
                 "a management sign-on was given up: \(departure.logged, privacy: .public)"
             )
         }
+        unboughtSignOn = nil
         signOn = nil
         deadlineWake?.cancel()
         deadlineWake = nil
@@ -656,6 +672,21 @@ public final class ManageTokensStore {
     private func abandonSignOn(_ mine: Int) -> Bool {
         MemosLog.session.info("a management sign-on came back to a session that had ended")
         if generation == mine, case .authenticating = heldState { heldState = .locked(.never) }
+        return false
+    }
+
+    /// The browser step answered an attempt that something else had already taken — the deadline,
+    /// the Close button, or a newer round trip. It writes no screen state, because the sentence
+    /// that is up belongs to whoever took the attempt. It is said in the log all the same: an
+    /// answer that simply vanished is the one thing a report from a phone cannot show. Fixed
+    /// words, because what this lane carries is a handoff code and, on the failing side, an error
+    /// that quotes the request.
+    private func lostTheAttempt(ending: Bool) -> Bool {
+        if ending {
+            MemosLog.session.info("a management sign-on ended after its attempt had been taken")
+        } else {
+            MemosLog.session.info("a management sign-on came back after its attempt had been taken")
+        }
         return false
     }
 
