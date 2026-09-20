@@ -14,6 +14,7 @@ private let deleteMemoOperation = "delete_memo_api_memos__uid__delete"
 private let startUploadOperation = "start_upload_api_uploads_post"
 private let appendChunkOperation = "append_chunk_api_uploads__upload_uid__patch"
 private let finalizeUploadOperation = "finalize_upload_api_uploads__upload_uid__finalize_post"
+private let getMemoOperation = "get_memo_api_memos__uid__get"
 
 /// Keeps a request open until the test lets it go. `nonisolated`, because it is called from inside
 /// the scripted transport, which the client runs off the main actor.
@@ -572,6 +573,172 @@ struct TimelineMutationGateTests {
         #expect(uploads.count == 0, "a file was posted for a memo the server had confirmed gone")
         #expect(patches.count == 0, "a memo this app had already deleted was patched")
         #expect(!outcome.isSaved, "a save that nothing can keep was reported as saved")
+    }
+
+    /// A uid this store watched go can legitimately come back: the server's importer is rerunnable
+    /// and recreates an absent memo under its old uid. A read ISSUED AFTER the deletion was
+    /// confirmed that still carries the memo is the server saying it exists, and the note that
+    /// refuses every later change to it has to end there — otherwise the memo is uneditable for
+    /// the rest of the session.
+    @Test("a memo the server hands back after a confirmed delete is editable again")
+    func aMemoThatCameBackIsEditableAgain() async throws {
+        let store = TimelineStore()
+        let patches = Counter()
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case deleteMemoOperation:
+                return Stub.empty(.noContent)
+            case patchMemoOperation:
+                patches.increment()
+                return Stub.json(Stub.memo(uid: "a", content: "words"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let gone = await store.delete(uid: "a", using: client.handle)
+        // The import ran again. This read LEFT after the 204, so it is the newest word there is
+        // about that uid, and it carries the memo.
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let outcome = await store.edit(
+            uid: "a", content: "words", using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(gone, "control: the delete landed")
+        #expect(store.memos.map(\.uid) == ["a"], "control: the read put the memo back on the list")
+        #expect(patches.count == 1, "a memo the server handed back was refused a change")
+        #expect(outcome == .saved)
+    }
+
+    /// The other half of that rule. A read issued BEFORE the delete was confirmed says nothing
+    /// about whether the memo exists now, so it retires nothing — a state the delete left must not
+    /// be resurrectable by an answer that outlived it. The single-memo read is the lane where such
+    /// an answer actually reaches the fence: it takes its `issued` before the request and is gated
+    /// only on the identity, where a list read is discarded by the timeline generation first.
+    @Test("a read older than a confirmed delete does not bring the memo back")
+    func aStaleReadDoesNotRetireAConfirmedDelete() async throws {
+        let file = try stagedFile()
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let gets = Counter()
+        let uploads = Counter()
+        let patches = Counter()
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case getMemoOperation:
+                gets.increment()
+                try await hold(until: release)
+                return Stub.json(Stub.memo(uid: "a", content: "words"))
+            case deleteMemoOperation:
+                return Stub.empty(.noContent)
+            case startUploadOperation:
+                uploads.increment()
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
+            case finalizeUploadOperation:
+                return Stub.empty(.ok)
+            case patchMemoOperation:
+                patches.increment()
+                return Stub.json(Stub.memo(uid: "a", content: "words"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        // Out before the delete and held there, so its answer arrives after the 204.
+        let reading = Task {
+            await store.fetchMemo(uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        let arrivalDue = Date().addingTimeInterval(2)
+        while gets.count == 0 && Date() < arrivalDue {
+            await Task.yield()
+        }
+        let gone = await store.delete(uid: "a", using: client.handle)
+        release.set(true)
+        _ = await reading.value
+        let outcome = await store.edit(
+            uid: "a", content: "words", attaching: [file],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(gone, "control: the delete landed")
+        #expect(gets.count == 1, "control: the stale read was out before the delete confirmed")
+        #expect(uploads.count == 0, "a file was posted for a memo the server had confirmed gone")
+        #expect(patches.count == 0, "a read older than the delete brought a deleted memo back")
+        #expect(outcome == .failed(.rejection))
+    }
+
+    /// A delete is a mutation like any other and asks the same question before it sends. It cannot
+    /// join the delete ahead of it when a save stands between them, so without the question it
+    /// sends a second DELETE for a memo this app already removed — the 404 this store reads as a
+    /// fact about its own delete. The ANSWER differs from the other lanes because the question
+    /// does: `delete` asks "is it gone?", and for a memo confirmed gone the true answer is yes.
+    @Test("a delete queued behind a confirmed delete sends nothing and answers yes")
+    func aQueuedDeleteBehindAConfirmedDeleteSendsNothing() async throws {
+        let file = try stagedFile()
+        defer { try? FileManager.default.removeItem(at: file.url) }
+
+        let store = TimelineStore()
+        let deletes = Counter()
+        let uploads = Counter()
+        let patches = Counter()
+        let release = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case deleteMemoOperation:
+                deletes.increment()
+                try await hold(until: release)
+                return Stub.empty(.noContent)
+            case startUploadOperation:
+                uploads.increment()
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
+            case finalizeUploadOperation:
+                return Stub.empty(.ok)
+            case patchMemoOperation:
+                patches.increment()
+                return Stub.json(Stub.memo(uid: "a", content: "words"))
+            default:
+                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let deleting = Task { await store.delete(uid: "a", using: client.handle) }
+        let arrivalDue = Date().addingTimeInterval(2)
+        while deletes.count == 0 && Date() < arrivalDue {
+            await Task.yield()
+        }
+        let saving = Task {
+            await store.edit(
+                uid: "a", content: "words", attaching: [file],
+                using: client.handle, baseURL: Stub.baseURL
+            )
+        }
+        await timeForARequestToArrive()
+        // Behind the save, so its identity is not the line's tail and it cannot join the delete
+        // that is still out.
+        let deletingAgain = Task { await store.delete(uid: "a", using: client.handle) }
+        await timeForARequestToArrive()
+        release.set(true)
+        let gone = await deleting.value
+        let outcome = await saving.value
+        let goneAgain = await deletingAgain.value
+
+        #expect(gone, "control: the delete landed")
+        #expect(deletes.count == 1, "a memo this app had already deleted was deleted again")
+        #expect(uploads.count == 0, "a file was posted for a memo the server had confirmed gone")
+        #expect(patches.count == 0, "a memo this app had already deleted was patched")
+        #expect(outcome == .failed(.rejection))
+        #expect(goneAgain, "the memo is gone, which is what the caller asked")
     }
 
     /// Visibility and the archive reach the server through one request, so they are one mutation

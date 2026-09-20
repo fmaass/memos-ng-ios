@@ -1183,6 +1183,12 @@ public final class TimelineStore {
     /// question: a memo also leaves the loaded list when its archive state or the query it is
     /// filtered by moves, and neither of those means the server stopped holding it. Only a delete
     /// this store saw confirmed does.
+    ///
+    /// The record ends where a read that LEFT after that confirmation comes back still carrying
+    /// the memo: the server's importer is rerunnable and recreates an absent memo under its old
+    /// uid, so a uid that is gone is not gone forever, and a note that never ends would refuse
+    /// every later change to it until the person signs out. A read issued EARLIER ends nothing —
+    /// it was asked about a memo that still existed and is not a statement about now.
     private var confirmedDeletions: Set<String> = []
 
     /// Whether a mutation about to send has been overtaken by a delete of the same memo that the
@@ -1193,6 +1199,17 @@ public final class TimelineStore {
     /// behind them would be a change to a memo this app itself asked to have removed.
     private func serverConfirmedDeletion(of uid: String) -> Bool {
         confirmedDeletions.contains(uid)
+    }
+
+    /// The server is still holding this memo, so the note of its deletion is over.
+    ///
+    /// Called only where a read was NOT fenced — that read left after the last change this store
+    /// confirmed for the memo, so it is the newest word there is, and it carries the memo. A
+    /// fenced read is the opposite case and retires nothing: it was asked before the delete
+    /// landed, and a state the delete left must not be resurrectable by an answer that outlived
+    /// it. `fenced` stays a pure question; this is the one place the answer is acted on.
+    private func serverStillHolds(_ uid: String) {
+        confirmedDeletions.remove(uid)
     }
 
     /// The reads in flight to pay a debt, each one clearing its own entry, in the idiom
@@ -1501,6 +1518,15 @@ public final class TimelineStore {
             mutationChangedNothing(claim, on: uid)
             return .failed(.authorization)
         }
+        // Beside that question, for the reason `performEdit` asks it: a delete that queued behind
+        // another delete of the same memo cannot join it when a save stands between them, and its
+        // DELETE would be the 404 this store reads as a fact about a memo it removed itself. The
+        // ANSWER differs from every other lane because the question does: `delete` asks "is it
+        // gone?", and for a memo the server has confirmed gone the true answer is yes.
+        guard !serverConfirmedDeletion(of: uid) else {
+            mutationChangedNothing(claim, on: uid)
+            return .saved
+        }
 
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
@@ -1520,9 +1546,9 @@ public final class TimelineStore {
                     mutationOutcomeUnknown(claim, on: uid)
                     return .failed(.authorization)
                 }
-                // A memo that is gone owes nothing: there is no row for a read to repair, and this
-                // store keeps no note of the uid to recognise its answer by. Dropped BEFORE the
-                // stamp below, which is what would otherwise find the debt due and pay it.
+                // A memo that is gone owes nothing: there is no row for a read to repair, and a
+                // payment made against it would be a GET the server answers 404. Dropped BEFORE
+                // the stamp below, which is what would otherwise find the debt due and pay it.
                 owedReads[uid] = nil
                 // Written in the same breath as the stamp below, with nothing awaited between, so
                 // that the next lane to resume for this memo cannot ask before the answer that
@@ -1703,7 +1729,10 @@ public final class TimelineStore {
         baseURL: URL
     ) -> [Memo] {
         page.compactMap { memo in
-            guard fenced(memo.uid, issuedAt: issued) else { return memo }
+            guard fenced(memo.uid, issuedAt: issued) else {
+                serverStillHolds(memo.uid)
+                return memo
+            }
             guard let loaded = memos.first(where: { $0.uid == memo.uid }) else { return nil }
             owedReads[memo.uid] = OwedRead(handle: handle, baseURL: baseURL)
             // A row held by a mutation that has already applied has nothing left to wait for.
@@ -1730,7 +1759,10 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) -> Memo? {
-        guard fenced(merged.uid, issuedAt: issued) else { return merged }
+        guard fenced(merged.uid, issuedAt: issued) else {
+            serverStillHolds(merged.uid)
+            return merged
+        }
         guard let loaded = memos.first(where: { $0.uid == merged.uid }) else { return nil }
         owedReads[merged.uid] = OwedRead(handle: handle, baseURL: baseURL)
         payOwedRead(for: merged.uid)
@@ -1979,10 +2011,17 @@ public final class TimelineStore {
                 // what the caller opens the memo with, and nothing is applied over it. No
                 // per-attachment rule here — this lane merges nothing, it hands a memo over.
                 let loaded = memos.first { $0.uid == memo.uid }
-                if fenced(memo.uid, issuedAt: issued), let loaded {
+                let heldBack = fenced(memo.uid, issuedAt: issued)
+                if heldBack, let loaded {
                     owedReads[memo.uid] = OwedRead(handle: handle, baseURL: baseURL)
                     payOwedRead(for: memo.uid)
                     return .memo(loaded)
+                }
+                // Asked separately from the branch above, because the fall-through is also where
+                // a FENCED read with no loaded row lands, and that read is too old to say the
+                // memo exists.
+                if !heldBack {
+                    serverStillHolds(memo.uid)
                 }
                 await apply(memo, under: authority)
                 // AGAIN, after the apply: it awaits its way to the disk, and the memo below is

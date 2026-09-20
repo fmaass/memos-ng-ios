@@ -135,8 +135,9 @@ struct TimelineRowFenceTests {
         await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         _ = await reading.value
-        // Bounded: a store that pays no debt at all has to fail the row below rather than leave
-        // the suite spinning for an answer that is never coming.
+        // Bounded, and the bound is not a detector: the row assertions below are about the window
+        // BEFORE the payment lands, so a store that never pays must let them run and let the suite
+        // end rather than spin for an answer that is never coming. Payment has its own witness.
         let payingDue = Date().addingTimeInterval(2)
         while !payingEntered.get() && Date() < payingDue {
             await Task.yield()
@@ -226,8 +227,9 @@ struct TimelineRowFenceTests {
         await store.edit(uid: "a", content: "#new", using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         _ = await reading.value
-        // Bounded: a store that pays no debt at all has to fail the row below rather than leave
-        // the suite spinning for an answer that is never coming.
+        // Bounded, and the bound is not a detector: the row assertions below are about the window
+        // BEFORE the payment lands, so a store that never pays must let them run and let the suite
+        // end rather than spin for an answer that is never coming. Payment has its own witness.
         let payingDue = Date().addingTimeInterval(2)
         while !payingEntered.get() && Date() < payingDue {
             await Task.yield()
@@ -761,12 +763,17 @@ struct TimelineRowFenceTests {
         // The row this read is allowed to write reaches the list before the picture of it queues
         // behind the held one, and the tier it carries lands whether the rest of it was refused or
         // not — so it says the read has arrived without saying what it was allowed to say.
-        // Bounded for the reason the paying reads above are: an answer that never reaches the row
-        // is a failure of the expectation below, not a suite that never ends.
+        // Bounded so an answer that never reaches the row ends the suite instead of spinning it.
+        // The bound alone says nothing, so the tier the loop waited for is asserted the moment it
+        // stops: that is what makes "it never arrived" a failure rather than a silent pass.
         let landingDue = Date().addingTimeInterval(2)
         while store.memos.first?.attachments.first?.status != .ready && Date() < landingDue {
             await Task.yield()
         }
+        #expect(
+            store.memos.first?.attachments.first?.status == .ready,
+            "the tier the read was allowed to write never reached the row"
+        )
 
         #expect(store.memos.first?.content == "new")
 
