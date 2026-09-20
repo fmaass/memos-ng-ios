@@ -3,9 +3,10 @@ import MemosAPI
 
 /// Why the management screen is asking for a sign-on rather than showing a list.
 ///
-/// Four reasons, and they are told apart because they read differently to the person in front of
+/// Five reasons, and they are told apart because they read differently to the person in front of
 /// the phone: one of them is the ordinary opening state, one is a deadline that passed, one is the
-/// app having been put away, and one is a round trip that went wrong and has something to say.
+/// app having been put away, one is a browser step that never came back, and one is a round trip
+/// that went wrong and has something to say.
 public enum ManageTokensLock: Sendable, Equatable {
     /// Nothing has been asked for yet — the screen as it opens.
     case never
@@ -15,8 +16,35 @@ public enum ManageTokensLock: Sendable, Equatable {
     /// The screen went away or the app was backgrounded, and the grant went with it. Not a
     /// failure either: it is what "in memory only" means, said out loud.
     case discarded
+    /// The browser step was opened and nothing ever came back from it. Nothing was bought, so
+    /// there is nothing to lose here — only a wait that stopped being worth drawing a spinner for.
+    case unanswered
     /// The round trip did not produce a grant, carrying what went wrong.
     case refused(NativeLoginError)
+}
+
+/// What took the management screen away.
+///
+/// The two involuntary reports are told apart only so a log can say which one fired — they end
+/// exactly the same things. Close is the one a person chose, and it is the only one that also ends
+/// a sign-on still waiting for its browser step: the browser is presented over this screen, so a
+/// screen that went away is what an ordinary sign-on looks like from in here and cannot be read as
+/// the end of one.
+public enum ManageTokensDeparture: Sendable, Equatable {
+    /// The screen was taken off the display — which the browser step does by itself.
+    case screenWentAway
+    /// The app was put away: `.background`, and not merely anything short of active.
+    case appWentAway
+    /// The person pressed Close.
+    case closed
+
+    var logged: String {
+        switch self {
+        case .screenWentAway: "the screen went away"
+        case .appWentAway: "the app was put away"
+        case .closed: "it was closed"
+        }
+    }
 }
 
 /// Where the management screen is.
@@ -61,7 +89,17 @@ public enum ManageTokensState: Sendable, Equatable {
 @MainActor
 @Observable
 public final class ManageTokensStore {
-    public private(set) var state: ManageTokensState = .locked(.never)
+    /// Where the screen is — and whose. Judged HERE, as the screen reads, because the app can
+    /// replace the identity underneath this sheet synchronously and tear the sheet down
+    /// afterwards: between those two instants a list read for one account is on screen under
+    /// another, and what it lists is that account's business and nobody else's. Replaced, not
+    /// merely withdrawn — a session that has signed out leaves nobody the old list could be shown
+    /// to, and the plaintext has its own fence for the same instant.
+    public var state: ManageTokensState {
+        appIdentityWasReplaced ? .locked(.never) : heldState
+    }
+    /// What the paths in here write. The read above decides who is left to see it.
+    private var heldState: ManageTokensState = .locked(.never)
     /// The token created in THIS management session, with the one look anybody gets at its
     /// plaintext. `nil` once it has been dismissed or lost.
     ///
@@ -107,6 +145,12 @@ public final class ManageTokensStore {
     private var generation = 0
     /// The operation in flight, if there is one. `nil` means the store is free to start another.
     private var runningWork: Int?
+    /// The sign-on waiting for its browser step, if there is one. It is also the claim the browser
+    /// step's answer and the deadline race for: `nil` means one of them has already taken it.
+    private var signOn: SignOn?
+    /// What asks the deadline when nothing else happens at all. Cancelled by whoever takes the
+    /// attempt, so a clock can never unlock the screen under a callback that already won.
+    private var deadlineWake: Task<Void, Never>?
     /// Only ever goes up, so one piece of work can never be mistaken for a later one — which is
     /// what lets an abandoned operation tell that the gate it is about to hand back is no longer
     /// the one it took.
@@ -173,7 +217,7 @@ public final class ManageTokensStore {
         defer { pkce.zeroize() }
         // A second tap while the browser view is up opens nothing: the view in front of the person
         // is the affordance, and a second round trip would leave one of them unresolvable.
-        if case .authenticating = state { return false }
+        if case .authenticating = heldState { return false }
 
         guard
             let authorizeURL = NativeLogin.authorizeURL(
@@ -185,7 +229,7 @@ public final class ManageTokensStore {
             let callbackHost = NativeLogin.callbackHost(for: configuration)
         else {
             dropGrant()
-            state = .locked(.refused(.unusableRequest))
+            heldState = .locked(.refused(.unusableRequest))
             return false
         }
 
@@ -197,14 +241,26 @@ public final class ManageTokensStore {
         // refused by a dead operation and the screen would sit on its spinner.
         runningWork = nil
         let mine = generation
-        state = .authenticating
+        heldState = .authenticating
         notice = nil
+        armDeadline(for: mine)
         do {
-            let callbackURL = try await presenter.authenticate(
-                authorizeURL: authorizeURL,
-                callbackHost: callbackHost,
-                callbackPath: NativeLogin.callbackPath
-            )
+            let callbackURL: URL
+            do {
+                callbackURL = try await presenter.authenticate(
+                    authorizeURL: authorizeURL,
+                    callbackHost: callbackHost,
+                    callbackPath: NativeLogin.callbackPath
+                )
+            } catch {
+                // The browser step is over whichever way it ended, and the deadline is racing it
+                // for the same attempt. The one that takes the attempt is the one that may write
+                // the screen; a loser that threw would paint its refusal over a sentence that is
+                // already there, minutes after anybody could act on it.
+                guard claimSignOn(mine) else { return false }
+                throw error
+            }
+            guard claimSignOn(mine) else { return false }
             // The one reading of a callback URL in this app, shared with the sign-in lane: a
             // second copy of it here would be a second answer to "did this come back with a code".
             let code = try SessionStore.code(from: callbackURL)
@@ -222,17 +278,17 @@ public final class ManageTokensStore {
             return true
         } catch is RouteMissing {
             guard isCurrent(mine) else { return abandonSignOn(mine) }
-            state = .unsupported
+            heldState = .unsupported
             return false
         } catch let error as NativeLoginError {
             guard isCurrent(mine) else { return abandonSignOn(mine) }
-            state = .locked(.refused(error))
+            heldState = .locked(.refused(error))
             return false
         } catch {
             guard isCurrent(mine) else { return abandonSignOn(mine) }
             // Named by what the failure WAS, never by its own description: this request's body is
             // the handoff code and the PKCE verifier, and the error text carries the request.
-            state = .locked(.refused(.transport(NativeLoginTransportFailure.classify(error))))
+            heldState = .locked(.refused(.transport(NativeLoginTransportFailure.classify(error))))
             return false
         }
     }
@@ -260,7 +316,7 @@ public final class ManageTokensStore {
         do {
             let rows = try await Self.list(client)
             guard isCurrent(work) else { return false }
-            state = .listed(rows)
+            heldState = .listed(rows)
             notice = nil
             return true
         } catch {
@@ -271,7 +327,7 @@ public final class ManageTokensStore {
             // the screen draws a spinner with nothing to press, and the round trip that would mend
             // it is refused for being already under way. A failure with a list already on screen
             // keeps that list — it is still the last thing the server said.
-            if case .authenticating = state { state = .unlisted }
+            if case .authenticating = heldState { heldState = .unlisted }
             return false
         }
     }
@@ -379,14 +435,34 @@ public final class ManageTokensStore {
         return true
     }
 
-    /// The screen went away, or the app did. In memory only means exactly this.
+    /// The screen went away, the app did, or the person closed it. In memory only means exactly
+    /// this.
     ///
     /// A screen that never bought anything is left alone: moving it to "that session ended" would
-    /// be the app announcing the end of something that never began.
-    public func forget() {
+    /// be the app announcing the end of something that never began. A sign-on still waiting for
+    /// its browser step is left alone too, by the two reports nobody chose — the browser is
+    /// presented over this screen, so a screen that went away is what an ordinary sign-on looks
+    /// like from in here, and a rule that ended an attempt there would end every attempt that
+    /// takes somebody out of the app. Nothing has been bought at that point, so nothing is being
+    /// kept alive either: what survives is a round trip, not a credential.
+    public func forget(_ departure: ManageTokensDeparture = .screenWentAway) {
         // The held plaintext, not what the screen could still see of it: a session that bought a
         // token ended here whether or not the identity it was bought under is still around.
         let hadSomething = grant.current != nil || heldMinted != nil
+        if !hadSomething, signOn != nil, departure != .closed {
+            MemosLog.session.info(
+                "a management sign-on outlived a screen: \(departure.logged, privacy: .public)"
+            )
+            return
+        }
+        if signOn != nil {
+            MemosLog.session.info(
+                "a management sign-on was given up: \(departure.logged, privacy: .public)"
+            )
+        }
+        signOn = nil
+        deadlineWake?.cancel()
+        deadlineWake = nil
         generation += 1
         // The operation in flight belonged to the session this ends. Its gate is handed back HERE
         // rather than when it lands: a screen coming back from the background could otherwise
@@ -397,11 +473,11 @@ public final class ManageTokensStore {
         isBusy = false
         notice = nil
         if hadSomething {
-            state = .locked(.discarded)
-        } else if case .authenticating = state {
+            heldState = .locked(.discarded)
+        } else if case .authenticating = heldState {
             // A round trip that was still open when the app went away. Nothing was bought, and the
             // spinner must not outlive the screen that was showing it.
-            state = .locked(.never)
+            heldState = .locked(.never)
         }
     }
 
@@ -426,6 +502,68 @@ public final class ManageTokensStore {
     private struct Work {
         let id: Int
         let generation: Int
+    }
+
+    /// One sign-on waiting for its browser step, and the whole of what the store needs to know
+    /// about it: whose attempt it is, and when waiting for it stops being worth a spinner.
+    private struct SignOn {
+        let generation: Int
+        let deadline: Date
+    }
+
+    /// How long the wait for the browser step may last, and nothing after it.
+    ///
+    /// A CLIENT policy rather than a bound the server would recognise: the two clocks that really
+    /// decide — the sign-in transaction and the handoff code — start at instants this app cannot
+    /// see, so their sum is taken as a ceiling generous enough that somebody who really is signing
+    /// in never meets it.
+    static let browserStepDeadline: TimeInterval = 720
+
+    /// The ONE claim on the sign-on in flight. The browser step's answer and the deadline race for
+    /// it; whoever asks first takes it and the loser writes nothing at all.
+    ///
+    /// Taken synchronously, with nothing awaited between the question and the write, because a
+    /// claim decided across a hop is a claim about an instant that has already passed. Once it has
+    /// been taken there is no deadline any more — what follows a delivered callback is bounded by
+    /// the ordinary request timeout like every other request.
+    private func claimSignOn(_ mine: Int) -> Bool {
+        guard let signOn, signOn.generation == mine else { return false }
+        self.signOn = nil
+        deadlineWake?.cancel()
+        deadlineWake = nil
+        return true
+    }
+
+    /// The wait for the browser step ran out.
+    ///
+    /// It does not cancel the call it is waiting on and it cannot take the browser down: the
+    /// presenter parks a continuation only its own answer resumes. So this takes the attempt and
+    /// writes the screen, and the call stays parked until the browser is closed — at which point
+    /// the answer finds the attempt already taken and says nothing.
+    ///
+    /// - Returns: whether this call took the attempt.
+    @discardableResult
+    func signOnDeadlinePassed() -> Bool {
+        guard let waiting = signOn, now() >= waiting.deadline else { return false }
+        guard claimSignOn(waiting.generation) else { return false }
+        MemosLog.session.info("a management sign-on ran out waiting for the browser step")
+        if case .authenticating = heldState { heldState = .locked(.unanswered) }
+        return true
+    }
+
+    /// Arms the wait. The decision itself is a pure read of the injected clock above; this is only
+    /// what gets it asked when the browser step produces nothing to ask it from.
+    private func armDeadline(for mine: Int) {
+        signOn = SignOn(
+            generation: mine,
+            deadline: now().addingTimeInterval(Self.browserStepDeadline)
+        )
+        deadlineWake?.cancel()
+        deadlineWake = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.browserStepDeadline))
+            guard !Task.isCancelled else { return }
+            self?.signOnDeadlinePassed()
+        }
     }
 
     /// The gate every `/api/pats` call passes: ONE operation at a time, with a live grant behind
@@ -459,6 +597,14 @@ public final class ManageTokensStore {
     /// Asked here and nowhere else, so there is one answer to it. A store with no session named to
     /// it has nothing to be wrong about; a session that has withdrawn its handle has no identity to
     /// match, and that is a no.
+    /// Whether somebody ELSE is signed in to the app now — a different identity in the place this
+    /// management session was bought under. It is the narrower half of the question above, and the
+    /// one the screen's own contents are judged by.
+    private var appIdentityWasReplaced: Bool {
+        guard let boughtUnder, let current = session?.activeHandle?.generation else { return false }
+        return current != boughtUnder
+    }
+
     private var appIdentityHolds: Bool {
         guard let session else { return true }
         guard let boughtUnder, let current = session.activeHandle?.generation else { return false }
@@ -497,7 +643,7 @@ public final class ManageTokensStore {
         generation += 1
         runningWork = nil
         isBusy = false
-        state = .locked(.expired)
+        heldState = .locked(.expired)
     }
 
     /// A sign-on whose management session has gone, leaving the screen as an app that went away
@@ -508,7 +654,8 @@ public final class ManageTokensStore {
     /// round trip that is still running, and taking that down would strand the person in front of
     /// a browser view whose answer no longer has a screen to land on.
     private func abandonSignOn(_ mine: Int) -> Bool {
-        if generation == mine, case .authenticating = state { state = .locked(.never) }
+        MemosLog.session.info("a management sign-on came back to a session that had ended")
+        if generation == mine, case .authenticating = heldState { heldState = .locked(.never) }
         return false
     }
 
@@ -526,7 +673,7 @@ public final class ManageTokensStore {
 
     private func report(_ error: any Error) {
         if error is RouteMissing {
-            state = .unsupported
+            heldState = .unsupported
             return
         }
         // A cancellation is this app's own doing and is never reported back to the person who

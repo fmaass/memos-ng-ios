@@ -444,20 +444,32 @@ struct ManageTokensScreenTests {
 struct ManageTokensPresentationTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-    /// Four states, four sentences. They are not interchangeable: "the app was put away" and
-    /// "that session ended" answer different questions, and a screen that said the same thing for
-    /// both would be telling somebody the wrong story about their own phone.
+    /// Five states, five sentences. They are not interchangeable: "the app was put away", "that
+    /// session ended" and "that sign-in never came back" answer different questions, and a screen
+    /// that said the same thing for them would be telling somebody the wrong story about their own
+    /// phone.
     @Test("every reason for asking to sign on has its own words")
     func eachLockHasItsOwnLine() {
         let lines = [
             ManageTokensPresentation.lockLine(.never),
             ManageTokensPresentation.lockLine(.expired),
             ManageTokensPresentation.lockLine(.discarded),
+            ManageTokensPresentation.lockLine(.unanswered),
             ManageTokensPresentation.lockLine(.refused(.cancelled)),
         ]
 
-        #expect(Set(lines).count == 4)
+        #expect(Set(lines).count == 5)
         #expect(lines.allSatisfy { !$0.isEmpty })
+    }
+
+    /// A sign-on that produced no answer has to end in words rather than in a spinner nobody can
+    /// stop: nothing was bought, so the sentence says what ran out and offers the way back.
+    @Test("a sign-on that never came back is said in words, and says nothing was lost")
+    func anUnansweredSignOnSaysWhatHappened() {
+        let line = ManageTokensPresentation.lockLine(.unanswered)
+
+        #expect(line.contains("did not come back"))
+        #expect(line != ManageTokensPresentation.lockLine(.never))
     }
 
     /// The one refusal with nothing to say is a sign-on already on screen. It falls back to the

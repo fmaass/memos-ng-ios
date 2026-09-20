@@ -37,9 +37,10 @@ enum ManageTokensPresentation {
 
     /// Why the screen is asking for a sign-on rather than showing a list.
     ///
-    /// Four different sentences for four different reasons, because they are not the same thing to
+    /// Five different sentences for five different reasons, because they are not the same thing to
     /// the person reading them: one is how the screen opens, one is a deadline that passed, one is
-    /// the app having been put away, and one is something that actually went wrong.
+    /// the app having been put away, one is a browser step that never came back, and one is
+    /// something that actually went wrong.
     static func lockLine(_ lock: ManageTokensLock) -> String {
         switch lock {
         case .never:
@@ -53,6 +54,10 @@ enum ManageTokensPresentation {
         case .discarded:
             "The app was put away, so the management session went with it. Sign in again to carry "
                 + "on."
+        // Nothing was bought, so nothing is said to have been lost: what ran out is the waiting.
+        case .unanswered:
+            "That sign-in did not come back within a few minutes, so the app stopped waiting for "
+                + "it. Sign in again to carry on."
         // Falls back to the opening line rather than to silence: `alreadySigningIn` is the one
         // outcome with nothing to say, and it means a sign-on is on screen right now.
         case .refused(let error): error.message ?? lockLine(.never)
