@@ -117,8 +117,9 @@ enum ManageTokensPresentation {
     static let createTitle = "Create token"
     static let createLabel = "Create a token with this name"
     static let createCaption =
-        "A new token never expires and can do everything the account signed in through the "
-        + "browser can. Revoke it here when it is no longer needed."
+        "A new token never expires and opens the memos and files of the account signed in "
+        + "through the browser to whoever holds it. Creating tokens and managing other tokens "
+        + "require a sign-in in the browser. Revoke it here when it is no longer needed."
 
     /// Whether Create is there to be pressed, decided from what the screen was given.
     ///

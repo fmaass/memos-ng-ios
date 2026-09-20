@@ -89,11 +89,17 @@ struct SettingsView: View {
                 // The same identifier the account row above shows: the display name if the server
                 // sent one, otherwise the address, otherwise the subject it issued. The screen
                 // says it out loud because only the browser knows whose tokens it will list.
+                // Keyed on the subject for the reason `PlacesView` is: the store under this view
+                // is bought under ONE app identity and can never serve another, and a
+                // revalidation can come back as somebody else while this sheet stands. The key
+                // drops the view and its store together rather than leaving one person's
+                // management session open on the next person's account.
                 ManageTokensView(
                     serverBaseURL: baseURL,
                     session: session,
                     appAccountName: session.state.user?.name ?? ""
                 )
+                .id(session.state.user?.subject)
             }
         }
     }

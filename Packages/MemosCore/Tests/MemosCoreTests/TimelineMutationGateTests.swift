@@ -461,6 +461,48 @@ struct TimelineMutationGateTests {
         #expect(!firstOutcome.isSaved, "A's own answer arrived after A had gone")
     }
 
+    /// The same question, asked by the one lane that used to send without it.
+    ///
+    /// A tick takes its place in line synchronously and sends from a task of its own, so an
+    /// account can end in the gap between the two. What the tick then puts on the wire is a whole
+    /// content patch under the departed session's client, and discarding the answer afterwards
+    /// cannot recall it.
+    @Test("a tick whose session ended before its worker ran sends nothing")
+    func aTickWhoseSessionEndedSendsNothing() async throws {
+        let patches = Counter()
+        let session = await signedIn { _, _, operation in
+            switch operation {
+            case whoamiOperation:
+                return Stub.json(Stub.user)
+            case patchMemoOperation:
+                patches.increment()
+                return Stub.json(Stub.memo(uid: "a", content: "- [x] milk"))
+            default:
+                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "- [ ] milk")]))
+            }
+        }
+        let store = TimelineStore()
+        store.reports(to: session)
+        let underA = try #require(session.activeHandle)
+        await store.refresh(using: underA, baseURL: Stub.baseURL)
+
+        // A goes first and the tap comes after it, so that nothing here depends on which of two
+        // main-actor jobs runs first: the tick's own prefix asks no question about the session —
+        // it takes its claim and marks the row whatever has happened — so the handle its worker
+        // carries is A's either way, and the worker is the only place left to ask.
+        await session.signOutWithoutRevoking()
+        let ticksSaved = await store.toggleTask(
+            at: 0, in: "a", using: underA, baseURL: Stub.baseURL
+        )
+
+        // The tap WAS taken: the row carries the tick, and keeps it, because nothing is written
+        // for a session that has ended. So a wire nobody wrote to is evidence rather than a tap
+        // that never happened — and it is read after the answer, where no job order can matter.
+        #expect(store.memos[0].content == "- [x] milk", "control: the tap was taken")
+        #expect(patches.count == 0, "a tick queued under an account that had gone was sent")
+        #expect(!ticksSaved, "and it was not reported as saved")
+    }
+
     /// A server that refuses a credential has not touched the memo, so a read already on its way
     /// carries that memo as truly as the save that was refused does.
     ///

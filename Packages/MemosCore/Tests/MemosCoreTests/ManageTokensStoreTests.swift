@@ -414,6 +414,43 @@ struct ManageTokensStoreTests {
         #expect(store.state != .unsupported)
     }
 
+    /// A re-read that did not arrive is not "what is there now". The list still on screen is the
+    /// one from before the revoke — the row somebody just pressed included — so calling it current
+    /// would hide the failure the read already reported and vouch for a list nobody could read.
+    @Test("a vanished token whose re-read failed leaves the failure, not 'already gone'")
+    func revokingAVanishedTokenWhoseRereadFailedKeepsTheFailure() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let attempts = LockedValue<Int>(0)
+        let bothRows =
+            "[\(Stub.pat(id: 1, name: "Kitchen phone")),\(Stub.pat(id: 7, name: "Lost phone"))]"
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation:
+                return .json(liveGrant)
+            case listOperation:
+                let attempt = attempts.get() + 1
+                attempts.set(attempt)
+                return attempt == 1 ? .json(bothRows) : .status(.internalServerError)
+            case revokeOperation:
+                return .status(.notFound)
+            default:
+                return .status(.internalServerError)
+            }
+        }
+
+        await signOn(store)
+        let revoked = await store.revoke(7)
+
+        #expect(!revoked)
+        #expect(store.notice != ManageTokensStore.alreadyGone)
+        #expect(
+            store.notice == APIError.server(status: 500).errorDescription,
+            "the re-read's own failure was overwritten"
+        )
+        let listed = try #require(rows(store.state), "the screen lost the list it already had")
+        #expect(listed.map(\.id) == [1, 7], "a list nobody could re-read was called current")
+    }
+
     // MARK: - when the grant ends
 
     /// A management session is minutes long by design, so its end is ordinary rather than an
@@ -1227,6 +1264,86 @@ extension ManageTokensStoreTests {
         #expect(!signedOn)
         #expect(session.activeHandle == nil, "the identity was still there to be judged against")
         #expect(seen.get().isEmpty, "a handoff code was exchanged for an identity that is gone")
+    }
+
+    /// The spinner is the round trip's to take down. Left standing, the screen shows a browser
+    /// step that nobody can answer any more — and the next tap is refused for being one already
+    /// under way, which leaves nothing on the screen to press.
+    @Test("a sign-on abandoned because the identity went takes its own spinner down")
+    func anAbandonedSignOnTakesItsSpinnerDown() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let session = await signedInSession()
+        let store = makeStore(seen: seen, session: session) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+        let reentrant = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        reentrant.reenter = {
+            await session.signOutWithoutRevoking()
+            return true
+        }
+
+        let signedOn = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: reentrant
+        )
+
+        #expect(!signedOn)
+        #expect(store.state == .locked(.never), "the abandoned sign-on left its spinner up")
+        #expect(seen.get().isEmpty, "a handoff code was exchanged for an identity that is gone")
+    }
+
+    /// The other half of the same rule: a spinner belongs to the round trip that is still running,
+    /// and an older one coming back has no business taking it down — the person would be left in
+    /// front of a browser view whose answer has no screen to land on.
+    @Test("a sign-on abandoned for a newer one leaves the newer one's spinner alone")
+    func anAbandonedSignOnLeavesANewerSpinnerAlone() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let release = LockedValue<Bool>(false)
+        let store = makeStore(seen: seen) { operation in
+            guard operation == mintOperation else { return .json("[]") }
+            // Held, so the second round trip is provably still RUNNING — past its browser step, its
+            // exchange unanswered, its spinner up — when the first one comes back. Bounded: a hold
+            // nobody released would hang the suite, and a suite that hangs when the behaviour
+            // breaks reports nothing.
+            for _ in 0..<2000 {
+                if release.get() { break }
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            return .json(liveGrant)
+        }
+        let second = LockedValue<Task<Bool, Never>?>(nil)
+        let first = ReentrantPresenter(callback: "memosng://auth-callback?code=abc")
+        first.reenter = {
+            // The screen went away, and a second sign-on was opened on the way back in. Its own
+            // generation is the current one from here on, and the spinner on screen is ITS.
+            store.forget()
+            second.set(
+                Task {
+                    await store.authenticate(
+                        deviceName: "Fabian's iPhone",
+                        presenter: ReentrantPresenter(callback: "memosng://auth-callback?code=def")
+                    )
+                }
+            )
+            // Bounded, and it waits for the newer round trip to have really put its spinner up:
+            // everything after this has to be about a spinner that belongs to somebody else.
+            for _ in 0..<200 {
+                if case .authenticating = store.state { break }
+                await Task.yield()
+            }
+            return true
+        }
+
+        let firstResult = await store.authenticate(
+            deviceName: "Fabian's iPhone",
+            presenter: first
+        )
+
+        #expect(!firstResult)
+        #expect(store.state == .authenticating, "an older sign-on took a newer one's spinner down")
+        let running = try #require(second.get())
+        release.set(true)
+        #expect(await running.value, "control: the newer sign-on was a real round trip")
     }
 
     /// The last instant, and the one no check on the main actor can cover: the request was started

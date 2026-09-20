@@ -213,23 +213,23 @@ public final class ManageTokensStore {
             // may no longer be the app it left. Asked before the exchange and not only after it:
             // a handoff code spent here would buy a management session for an identity that has
             // already been withdrawn, and the grant it bought would outlive the sign-out.
-            guard isCurrent(mine) else { return false }
+            guard isCurrent(mine) else { return abandonSignOn(mine) }
             let held = try await Self.mintGrant(client, code: code, verifier: verifier)
-            guard isCurrent(mine) else { return false }
+            guard isCurrent(mine) else { return abandonSignOn(mine) }
             grant.hold(held.grant, until: held.expiresAt)
             MemosLog.session.info("POST /api/auth/native/manage-grant -> 200")
             await refresh()
             return true
         } catch is RouteMissing {
-            guard isCurrent(mine) else { return false }
+            guard isCurrent(mine) else { return abandonSignOn(mine) }
             state = .unsupported
             return false
         } catch let error as NativeLoginError {
-            guard isCurrent(mine) else { return false }
+            guard isCurrent(mine) else { return abandonSignOn(mine) }
             state = .locked(.refused(error))
             return false
         } catch {
-            guard isCurrent(mine) else { return false }
+            guard isCurrent(mine) else { return abandonSignOn(mine) }
             // Named by what the failure WAS, never by its own description: this request's body is
             // the handoff code and the PKCE verifier, and the error text carries the request.
             state = .locked(.refused(.transport(NativeLoginTransportFailure.classify(error))))
@@ -251,14 +251,20 @@ public final class ManageTokensStore {
     /// Apart from `refresh()` because a create's read-back must not have to take the gate its own
     /// create is still holding — and because only a caller that still owns its work may write the
     /// screen with what comes back.
-    private func reload(_ work: Work) async {
+    ///
+    /// - Returns: whether this work listed — the list arrived and was written to the screen. A
+    ///   caller that says something ABOUT the list on screen has to know that; one that only
+    ///   reads it back ignores the answer.
+    @discardableResult
+    private func reload(_ work: Work) async -> Bool {
         do {
             let rows = try await Self.list(client)
-            guard isCurrent(work) else { return }
+            guard isCurrent(work) else { return false }
             state = .listed(rows)
             notice = nil
+            return true
         } catch {
-            guard isCurrent(work) else { return }
+            guard isCurrent(work) else { return false }
             report(error)
             // A read that failed with nothing yet on screen has to land somewhere it can be asked
             // again from. Left as it was, the sign-on this list belongs to is still "in progress":
@@ -266,6 +272,7 @@ public final class ManageTokensStore {
             // it is refused for being already under way. A failure with a list already on screen
             // keeps that list — it is still the last thing the server said.
             if case .authenticating = state { state = .unlisted }
+            return false
         }
     }
 
@@ -353,11 +360,13 @@ public final class ManageTokensStore {
             }
             // A 404 from `/api/pats/{id}` is a token that is already gone or was never this
             // account's — NOT a missing route, which is why this branch is here and not in
-            // `report`. The list is re-read either way, so the screen ends up showing what is
-            // really there rather than the row somebody just pressed.
+            // `report`. The list is re-read either way, and only a re-read that ARRIVED may be
+            // announced as what is really there: when it did not, the list on screen may still
+            // hold the row somebody just pressed, and what `reload` reported about the failure is
+            // the last true thing said about it.
             if StoreFailure.reportable(error) == .notFound {
-                await reload(work)
-                if isCurrent(work) { notice = Self.alreadyGone }
+                let listed = await reload(work)
+                if listed, isCurrent(work) { notice = Self.alreadyGone }
                 endWork(work)
                 return false
             }
@@ -489,6 +498,18 @@ public final class ManageTokensStore {
         runningWork = nil
         isBusy = false
         state = .locked(.expired)
+    }
+
+    /// A sign-on whose management session has gone, leaving the screen as an app that went away
+    /// leaves it (`forget()`) rather than on the spinner its own round trip put up.
+    ///
+    /// It writes nothing the round trip learned — the state it was refused from is exactly what it
+    /// may not say. `generation == mine` is the other half: a NEWER sign-on's spinner belongs to a
+    /// round trip that is still running, and taking that down would strand the person in front of
+    /// a browser view whose answer no longer has a screen to land on.
+    private func abandonSignOn(_ mine: Int) -> Bool {
+        if generation == mine, case .authenticating = state { state = .locked(.never) }
+        return false
     }
 
     private func dropGrant() {

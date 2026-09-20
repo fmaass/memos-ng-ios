@@ -381,6 +381,11 @@ struct ComposeAttachmentStateTests {
         #expect(never.contains("nothing has been changed"))
         #expect(lost.contains("could not be confirmed"))
         #expect(!lost.lowercased().contains("nothing was changed"))
+        #expect(
+            !ComposeFailurePresentation.sentence(for: .rejection)
+                .lowercased().contains("nothing was changed"),
+            "a rejection can be a server fault AFTER the edit was committed"
+        )
         #expect(ComposeFailurePresentation.tileCategory(for: .transport(sent: true)) == .transport)
         // A refusal is about the memo, not about the photographs.
         #expect(ComposeFailurePresentation.tileCategory(for: .rejection) == nil)

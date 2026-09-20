@@ -2325,6 +2325,16 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        // Before the first request and AFTER whatever this memo's line made it wait for, for the
+        // reason `performEdit` asks before its uploads. Nothing has been sent, so nothing is
+        // written to the row either: a write for a session that has ended belongs to nobody, and
+        // both claims go back the way the session-ended branches below give them back.
+        guard sessionStillCurrent(handle) else {
+            mutationChangedNothing(gate, on: uid)
+            release(uid, claim: claim)
+            finishMutation(gate, on: uid)
+            return .failed(.authorization)
+        }
         // The client and the incarnation it belongs to arrive as ONE value and are carried
         // through every request and every apply point below. Nothing here re-samples the session:
         // re-sampling is what let a request rejected as one session's reissue itself under the
