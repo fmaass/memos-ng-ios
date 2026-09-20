@@ -221,13 +221,18 @@ enum MemoFixture {
 /// that was never connected.
 @MainActor
 enum PressProbe {
+    /// The window is a phone's width and, by default, a short one: a control that has to be
+    /// scrolled to is a control most people will not find. A screen that legitimately stacks
+    /// panels above the one being pressed asks for a taller one rather than being tested against
+    /// a viewport it could never fit in.
     static func withElement<T>(
         labelled label: String,
         in view: some View,
+        height: CGFloat = 200,
         _ body: (NSObject?) -> T
     ) -> T {
         let host = UIHostingController(rootView: view)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 200))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: height))
         window.rootViewController = host
         window.isHidden = false
 
