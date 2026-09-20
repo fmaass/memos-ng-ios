@@ -2,6 +2,7 @@ import Foundation
 import MemosCore
 import SwiftUI
 import Testing
+import UIKit
 
 @testable import MemosFeatures
 
@@ -289,6 +290,157 @@ struct AttachmentWaitingTests {
         )
         #expect(offered > 10, "the play glyph did not render at all (\(offered) pixels)")
         #expect(waiting == 0, "a video with no poster yet offered to play")
+    }
+}
+
+/// What a view knows about its own picture, and the one rule that decides whether it is worth
+/// asking for again.
+///
+/// Driven as a value rather than through a hosted view and a network, because the cases that
+/// matter are the REFUSALS — a signal that arrives while a fetch is out, a signal for a view
+/// already showing its picture — and a rendered tile is at its worst at showing what did not
+/// happen.
+@MainActor
+@Suite("Asking for a picture again")
+struct PictureLoadTests {
+    private static let key = MediaImageKey(uid: "owed", tier: "thumb")
+    private static let other = MediaImageKey(uid: "owed-other", tier: "thumb")
+
+    /// One whole load, exactly as a view runs it: claimed before anything is awaited, settled with
+    /// the serial it claimed, released however it left.
+    private func load(
+        _ answer: MediaImageAnswer,
+        for key: MediaImageKey,
+        into load: inout PictureLoad
+    ) {
+        let serial = load.claim()
+        load.settle(answer, for: key, serial: serial)
+        load.release(serial)
+    }
+
+    /// The tile's projection of the state below, so these cases are about the glyph a person sees
+    /// and not only about a field.
+    private func tilePhase(_ load: PictureLoad, for key: MediaImageKey) -> ThumbnailPhase {
+        AttachmentThumbnail.phase(
+            readiness: .ready,
+            hasImage: load.captured?.key == key,
+            hasURL: true,
+            loadFailed: load.failedKey == key
+        )
+    }
+
+    /// The whole of the first complaint: only an ANSWER may fail a picture.
+    @Test("a fetch nobody answered leaves the tile loading; a refused one fails it")
+    func onlyAnAnswerFailsAPicture() {
+        var abandoned = PictureLoad()
+        load(.interrupted, for: Self.key, into: &abandoned)
+        #expect(abandoned.failedKey == nil, "a cancelled fetch was painted as a broken file")
+        #expect(tilePhase(abandoned, for: Self.key) == .loading)
+
+        // The control: the same transition for an answer that came back with no picture in it
+        // does fail the tile, so the line above is about the difference and not about the state
+        // machine refusing to fail anything at all.
+        var refused = PictureLoad()
+        load(.unavailable, for: Self.key, into: &refused)
+        #expect(refused.failedKey == Self.key)
+        #expect(tilePhase(refused, for: Self.key) == .failed)
+
+        // And a picture clears the failure of the key it is for, and of no other.
+        var recovered = refused
+        load(.picture(UIImage()), for: Self.other, into: &recovered)
+        #expect(recovered.failedKey == Self.key, "another picture's arrival cleared this failure")
+        load(.picture(UIImage()), for: Self.key, into: &recovered)
+        #expect(recovered.failedKey == nil)
+        #expect(tilePhase(recovered, for: Self.key) == .loaded)
+    }
+
+    /// The rule itself, per input category rather than per happy path.
+    @Test("only a view showing nothing with nothing out is asked again")
+    func theRuleRefusesEveryOtherView() {
+        var owed = PictureLoad()
+        load(.unavailable, for: Self.key, into: &owed)
+        #expect(owed.isOwedAPicture(showing: false))
+        let askedForTheFailed = owed.askAgain(showing: false)
+        #expect(askedForTheFailed, "a failed tile was left holding its failure")
+        #expect(owed.attempt == 1, "the attempt is what the load hangs off, and it did not move")
+
+        var showing = PictureLoad()
+        load(.picture(UIImage()), for: Self.key, into: &showing)
+        #expect(!showing.isOwedAPicture(showing: true))
+        let askedForTheShown = showing.askAgain(showing: true)
+        #expect(!askedForTheShown, "a picture in hand was fetched again")
+        #expect(showing.attempt == 0)
+
+        var fetching = PictureLoad()
+        _ = fetching.claim()
+        #expect(!fetching.isOwedAPicture(showing: false))
+        let askedWhileFetching = fetching.askAgain(showing: false)
+        #expect(!askedWhileFetching, "the fetch already out IS the attempt")
+        #expect(fetching.attempt == 0)
+    }
+
+    /// Two signals inside the gap between the attempt being decided and the replacement load
+    /// starting. The claim is taken where the DECISION is, so the second one has something to be
+    /// refused by — without it both would raise an attempt and two fetches would go out for one
+    /// picture.
+    @Test("a second signal before the load has started is refused")
+    func aSecondSignalInTheGapIsRefused() {
+        var failed = PictureLoad()
+        load(.unavailable, for: Self.key, into: &failed)
+        let first = failed.askAgain(showing: false)
+        #expect(first)
+        let raised = failed.attempt
+
+        let second = failed.askAgain(showing: false)
+        #expect(!second, "the gap before the load starts was unfenced")
+        #expect(failed.attempt == raised, "two signals became two loads for one picture")
+    }
+
+    /// The other half of the same overlap. A changed link starts a load while the one it replaced
+    /// can still be on the wire — that is accepted, and the request out on the old link is the one
+    /// whose answer is about a question this view has stopped asking. Its refusal must not become
+    /// a warning triangle over a load that is still out.
+    @Test("an answer to a load that was superseded settles nothing")
+    func aSupersededAnswerSettlesNothing() {
+        var replaced = PictureLoad()
+        let superseded = replaced.claim()
+        let live = replaced.claim()
+
+        let refusalApplied = replaced.settle(.unavailable, for: Self.key, serial: superseded)
+        #expect(!refusalApplied)
+        #expect(
+            replaced.failedKey == nil,
+            "a link this view had stopped asking about failed the picture it is still loading"
+        )
+        let pictureApplied = replaced.settle(.picture(UIImage()), for: Self.key, serial: superseded)
+        #expect(!pictureApplied)
+        #expect(replaced.captured == nil)
+
+        // The control: the load that still holds the claim settles.
+        let liveApplied = replaced.settle(.unavailable, for: Self.key, serial: live)
+        #expect(liveApplied)
+        #expect(replaced.failedKey == Self.key)
+    }
+
+    /// A changed link is not a retry: it cancels this load and starts another, and the cancelled
+    /// request may still be on the wire when the new one goes. The one that ends LAST must not
+    /// clear a claim it no longer holds, or the next signal sees a view owed a picture and asks
+    /// for one already coming.
+    @Test("a claim is released only by the fetch that still holds it")
+    func aClaimIsReleasedBySerial() {
+        var replaced = PictureLoad()
+        let cancelled = replaced.claim()
+        let live = replaced.claim()
+        #expect(cancelled != live)
+
+        replaced.release(cancelled)
+        #expect(
+            !replaced.isOwedAPicture(showing: false),
+            "the view forgot the request it still has out"
+        )
+
+        replaced.release(live)
+        #expect(replaced.isOwedAPicture(showing: false))
     }
 }
 

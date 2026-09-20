@@ -517,14 +517,11 @@ struct MediaViewerPage: View {
     /// viewport-sized frame below.
     @GestureState private var pinch: MediaZoom.Pinch?
     @GestureState private var pan: CGSize = .zero
-    /// What THIS page loaded, tagged with the key it was loaded for — the same arrangement the
-    /// timeline tiles use, and for the same reason: `NSCache` may drop an entry under a view that
-    /// is still on screen, and a page reading only the cache would fall back to its blurhash and
-    /// stay there.
-    @State private var loaded: (key: MediaImageKey, image: UIImage)?
-    /// The key whose load came back with nothing. Tagged too, so a page that has been swiped on
-    /// does not wear the previous picture's failure.
-    @State private var failedKey: MediaImageKey?
+    /// This page's own load — the same value a timeline tile holds, and for the same reasons:
+    /// `NSCache` may drop an entry under a view that is still on screen, a page that has been
+    /// swiped on must not wear the previous picture's failure, and a picture nobody answered about
+    /// is worth asking for again.
+    @State private var picture = PictureLoad()
 
     var body: some View {
         GeometryReader { proxy in
@@ -637,7 +634,14 @@ struct MediaViewerPage: View {
                 stillPicture
             }
         }
-        .task(id: page.stillURL) { await loadStill() }
+        .task(id: PictureTrigger(url: page.stillURL, attempt: picture.attempt)) {
+            await loadStill()
+        }
+        // The same read a tile takes of the same signal: a still nobody answered about is asked
+        // for again, and one already on screen is left alone.
+        .onChange(of: MediaRetrySignal.shared.publications) { _, _ in
+            picture.askAgain(showing: painted != nil)
+        }
         .accessibilityElement()
         .accessibilityLabel(page.accessibilityLabel)
         .accessibilityAddTraits(.isImage)
@@ -648,17 +652,9 @@ struct MediaViewerPage: View {
     /// would only hide it.
     @ViewBuilder
     private var stillPicture: some View {
-        let key = page.stillKey
-        // Read synchronously in `body`, exactly as a tile does: a picture already decoded is
-        // painted in the frame the page appears in, without passing through the blurhash first.
-        let painted = AttachmentThumbnail.painted(
-            captured: loaded,
-            for: key,
-            cached: MediaImageLoader.cachedUIImage(for: key)
-        )
         if let painted {
             AspectPinnedLayer { Image(uiImage: painted).resizable().scaledToFit() }
-        } else if failedKey == key {
+        } else if picture.failedKey == page.stillKey {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.largeTitle)
                 .foregroundStyle(.white)
@@ -666,9 +662,23 @@ struct MediaViewerPage: View {
         }
     }
 
+    /// Read synchronously in `body`, exactly as a tile does: a picture already decoded is painted
+    /// in the frame the page appears in, without passing through the blurhash first.
+    private var painted: UIImage? {
+        AttachmentThumbnail.painted(
+            captured: picture.captured,
+            for: page.stillKey,
+            cached: MediaImageLoader.cachedUIImage(for: page.stillKey)
+        )
+    }
+
     /// The full-screen rendition: dropped from both caches if its signature has lapsed, then
     /// fetched once and decoded once through the page's own transport.
     private func loadStill() async {
+        // Claimed before anything is awaited and released however this leaves — see the tile's
+        // load for what the claim is for.
+        let serial = picture.claim()
+        defer { picture.release(serial) }
         guard let url = page.stillURL else { return }
         // Captured before the await: the pager can hand this view a different page while the
         // fetch is in flight, and the answer belongs to the key it was asked for.
@@ -683,23 +693,17 @@ struct MediaViewerPage: View {
         // state anyway: that is what keeps it painted if the cache is emptied under a page that
         // stays on screen.
         if let hit = MediaImageLoader.cachedUIImage(for: requested) {
-            loaded = (requested, hit)
-            if failedKey == requested { failedKey = nil }
+            picture.painted(hit, for: requested)
             return
         }
 
         let generation = MediaImageLoader.store.generation
-        let image = await MediaImageLoader.uiImage(for: requested, url: url, transport: transport)
+        let answer = await MediaImageLoader.answer(for: requested, url: url, transport: transport)
         // The same fence the loader applies to its cache, applied to the screen: an answer about
         // the account that was signed in when this started must not be painted for the one signed
         // in now — not even as a failure.
         guard generation == MediaImageLoader.store.generation else { return }
-        if let image {
-            loaded = (requested, image)
-            if failedKey == requested { failedKey = nil }
-        } else {
-            failedKey = requested
-        }
+        picture.settle(answer, for: requested, serial: serial)
     }
 
     /// A real control rather than a tap on the poster, so it is reachable with VoiceOver.
