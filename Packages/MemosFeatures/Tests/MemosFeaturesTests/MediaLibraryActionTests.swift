@@ -548,6 +548,41 @@ struct MediaViewerPagerTests {
         let shown = pages(["p0", "p1"])
         #expect(MediaViewerPager.extended(shown, with: shown) == shown)
     }
+
+    @Test("a hold stands only while the page that took it is shown")
+    func holdNeedsItsPage() {
+        let shown = pages(["a", "b"])
+
+        #expect(MediaViewerPager.stands(nil, among: shown) == false)
+        #expect(MediaViewerPager.stands("a", among: shown) == true)
+        #expect(MediaViewerPager.stands("z", among: shown) == false)
+    }
+
+    /// The page holding the pager and the dismissal is the page deleted from the viewer's own
+    /// overlay, so its view goes without ever reporting the release. Asked through the real
+    /// rules, in the order the viewer asks them, because the composition is what is held: a
+    /// memo's source is FIXED and still names the deleted page, and the rendered list is what
+    /// the hold is judged against.
+    @Test("a hold taken by a deleted page holds nothing afterwards")
+    func holdDiesWithItsPage() {
+        let source = pages(["a", "b"])
+        let holder: MediaPage.ID = "a"
+
+        let outcome = MediaViewerPager.removing(holder, from: source, current: "a")
+        #expect(outcome.current == "b")
+        #expect(MediaViewerPager.stands(holder, among: outcome.pages) == false)
+
+        let rendered = MediaViewerPager.visible(
+            shown: outcome.pages,
+            source: source,
+            removed: [holder]
+        )
+        #expect(rendered.map(\.id) == ["b"])
+        #expect(
+            MediaViewerPager.stands(holder, among: rendered) == false,
+            "the pager and the interactive dismissal stayed off after the holder was deleted"
+        )
+    }
 }
 
 /// MEMNG-189: what a page says out loud, now that the list it is in can grow.

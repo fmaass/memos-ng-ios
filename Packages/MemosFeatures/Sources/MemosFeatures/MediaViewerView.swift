@@ -118,7 +118,7 @@ struct MediaViewerView: View {
         // The platform's own switch for a presentation's interactive dismissal, asked here so all
         // five presentation sites get it without being touched. The close button and the escape
         // action call `dismiss()` and are unaffected.
-        .interactiveDismissDisabled(dismissalHeldBy != nil)
+        .interactiveDismissDisabled(MediaViewerPager.stands(dismissalHeldBy, among: pages))
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -186,7 +186,7 @@ struct MediaViewerView: View {
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentPage)
         .scrollIndicators(.hidden)
-        .scrollDisabled(pagerHeldBy != nil)
+        .scrollDisabled(MediaViewerPager.stands(pagerHeldBy, among: pages))
         .ignoresSafeArea()
     }
 

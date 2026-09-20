@@ -697,6 +697,72 @@ struct MediaZoomTests {
         #expect(abs(pinchFirst.offset.height - dragFirst.offset.height) < 0.001)
     }
 
+    /// The same seam in the other direction. Every other pan-under-pinch vector here drags
+    /// sideways, so the rebasing of the VERTICAL translation is held by this one alone — and a
+    /// translation that is not rebased is multiplied twice by the pinch still under the fingers.
+    /// Inside the limits at both scales, so no clamp is part of the answer.
+    @Test("a vertical pan under a pinch is rebased the same way")
+    func verticalPanUnderPinchIsRebased() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let committed = MediaZoom.Transform(scale: 2, offset: .zero)
+        let pinch = MediaZoom.Pinch(magnification: 1.5, anchor: anchor(x: 100, y: 0))
+        let drag = CGSize(width: 0, height: 20)
+
+        let underTheFingers = MediaZoom.live(
+            committed,
+            pinch: pinch,
+            pannedBy: drag,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(underTheFingers.offset.height - 20) < 0.001)
+        #expect(abs(underTheFingers.offset.width + 50) < 0.001)
+
+        let afterTheDrag = MediaZoom.panned(
+            committed,
+            by: drag,
+            underPinch: pinch,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(afterTheDrag.offset.height - 20.0 / 1.5) < 0.001)
+        let acrossTheDragsEnd = MediaZoom.live(
+            afterTheDrag,
+            pinch: pinch,
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(acrossTheDragsEnd.offset.height - 20) < 0.001)
+        let dragFirst = MediaZoom.settled(
+            afterTheDrag,
+            magnifiedBy: pinch.magnification,
+            anchoredAt: pinch.anchor,
+            fitted: fitted,
+            viewport: viewport
+        )
+
+        // The pinch ends first, and the drag is still in screen points, so it adds the same 20.
+        let afterThePinch = MediaZoom.settled(
+            committed,
+            magnifiedBy: pinch.magnification,
+            anchoredAt: pinch.anchor,
+            fitted: fitted,
+            viewport: viewport
+        )
+        let pinchFirst = MediaZoom.panned(
+            afterThePinch,
+            by: drag,
+            underPinch: nil,
+            fitted: fitted,
+            viewport: viewport
+        )
+
+        #expect(abs(dragFirst.offset.height - 20) < 0.001)
+        #expect(abs(pinchFirst.offset.height - dragFirst.offset.height) < 0.001)
+        #expect(abs(pinchFirst.offset.width - dragFirst.offset.width) < 0.001)
+    }
+
     @Test("a picture at rest holds nothing back")
     func nothingHeldAtRest() {
         let holds = MediaZoom.holds(.identity, pinch: nil)

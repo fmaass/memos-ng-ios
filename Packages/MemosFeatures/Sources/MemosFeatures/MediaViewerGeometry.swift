@@ -186,7 +186,9 @@ public enum MediaZoom {
     /// picture pinched out after being panned stays stuck off-centre.
     ///
     /// The same arithmetic as the live frame, asked for the moment the fingers leave, so what was
-    /// drawn under them and what is kept cannot disagree.
+    /// drawn under them and what is kept cannot disagree — exactly so for the transform handed in
+    /// here. A drag that committed first went through `panned`, and where that commit's clamp
+    /// bound, the frame recomputed from it moves by the difference.
     public static func settled(
         _ transform: Transform,
         magnifiedBy magnification: Double,
@@ -207,7 +209,11 @@ public enum MediaZoom {
     ///
     /// A pinch may still be under the fingers when the drag ends, and its arithmetic will
     /// multiply whatever offset is stored here. What is stored is therefore the translation that
-    /// survives that multiplication unchanged, so the picture does not jump at the commit.
+    /// survives that multiplication unchanged, so the picture does not jump at the commit — while
+    /// that rebased offset stays inside the limits of the STORED scale, which are tighter than the
+    /// live one's. Where that clamp binds, the nearest allowed offset is what is kept and the
+    /// frame moves by the difference: an offset outside the limits of the scale it is stored with
+    /// is not something the callers that read a committed transform can be handed.
     public static func panned(
         _ transform: Transform,
         by translation: CGSize,
