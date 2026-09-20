@@ -390,6 +390,26 @@ struct ComposeAttachmentStateTests {
         // A refusal is about the memo, not about the photographs.
         #expect(ComposeFailurePresentation.tileCategory(for: .rejection) == nil)
     }
+
+    /// A server that broke on a save and a server that refused one are opposite facts about the
+    /// memo, so they may not share a sentence: one of them leaves the words possibly saved and the
+    /// other leaves them certainly not.
+    @Test("a server that broke on a save does not borrow the sentence for one it refused")
+    func aServerFaultHasASentenceOfItsOwn() {
+        let broke = ComposeFailurePresentation.sentence(for: .serverFailure)
+        #expect(broke != ComposeFailurePresentation.sentence(for: .rejection))
+        #expect(!broke.lowercased().contains("nothing was changed"))
+        // And it says the retry is safe, which is the part somebody can act on: the save goes out
+        // under the same edit key and the server replays it rather than applying it twice.
+        #expect(broke.lowercased().contains("try again"))
+    }
+
+    /// The files went up fine and so did the network; what broke was the server. Marking the
+    /// photographs would send somebody looking for a connection that was never the problem.
+    @Test("a server fault is not the photographs' business")
+    func aServerFaultLeavesTheTilesAlone() {
+        #expect(ComposeFailurePresentation.tileCategory(for: .serverFailure) == nil)
+    }
 }
 
 /// Lets whatever the released reads are doing run to completion.

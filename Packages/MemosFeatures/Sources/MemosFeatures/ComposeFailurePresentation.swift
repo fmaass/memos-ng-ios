@@ -29,6 +29,13 @@ nonisolated public enum ComposeFailurePresentation {
             // the new words. It names no server either: a memo this app already knows was deleted
             // is refused here without anything being sent.
             return "This save could not be confirmed. Check the memo before trying again."
+        case .serverFailure:
+            // Not the refusal's sentence: the server took this one and broke on it, and it commits
+            // an edit before it builds its answer — so the words may be on the memo. The retry is
+            // safe for the reason the lost answer's is, and saying so is the part somebody can act
+            // on.
+            return "The server failed on this save, so it is not known whether it went through."
+                + " Try again — the same save is repeated, never applied twice."
         }
     }
 
@@ -42,7 +49,7 @@ nonisolated public enum ComposeFailurePresentation {
         switch failure {
         case .transport: return .transport
         case .storage: return .storage
-        case .authorization, .rejection: return nil
+        case .authorization, .rejection, .serverFailure: return nil
         }
     }
 }
