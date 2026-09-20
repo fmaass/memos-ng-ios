@@ -144,10 +144,11 @@ enum MediaCacheClearing {
 /// rendered as a disabled row or a "coming soon" line is a promise the app has not kept, and it
 /// costs a reader a tap to find that out. They arrive when they work.
 ///
-/// This device's token is not a section either, and that is a decision rather than the same rule:
-/// it works (`DeviceTokenSection`), and it belongs to the account already named at the top of the
-/// screen rather than beside Appearance and Storage. A device may read, rename and renew ITSELF
-/// and nothing else, so there is no token LIST here to be a section of.
+/// Tokens are not a section either, and that is a decision rather than the same rule: both rows
+/// work, and both belong to the account already named at the top of the screen rather than beside
+/// Appearance and Storage. This device's row is what the phone may do to ITSELF
+/// (`DeviceTokenSection`); the account's whole list is a screen of its own behind a fresh sign-on
+/// (`ManageTokensRow`), because a device token may never mint or revoke a sibling (ADR-0015).
 enum SettingsScreen {
     enum Section: String, CaseIterable, Equatable {
         case account

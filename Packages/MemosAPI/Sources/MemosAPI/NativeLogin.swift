@@ -24,6 +24,25 @@ public enum NativeLogin {
     /// `native_auth.DEVICE_NAME_MAX` on the server, which answers 422 to anything longer.
     public static let deviceNameMaxLength = 64
 
+    /// Which credential a trip round the login lane is being made for.
+    ///
+    /// The two trips are byte-identical as far as Authelia is concerned — same client, same
+    /// redirect URI, same scopes — and differ only in what the BFF hands back at the end of them.
+    /// That is the whole reason the step-up needs no identity-provider change and no household SSO
+    /// restart: the purpose is the server's own state, carried in its encrypted transaction cookie
+    /// and never forwarded to the IdP.
+    ///
+    /// The server refuses a purpose it does not offer rather than degrading to a login, so this
+    /// enum has exactly the values it publishes — a value invented here would be a 422 the person
+    /// holding the phone cannot act on.
+    public enum Purpose: String, Sendable, Equatable, CaseIterable {
+        /// Trade the handoff code for a device token. The default, and named nowhere on the wire.
+        case login
+        /// Trade it for a short-lived management grant instead: a step-up credential that buys the
+        /// token list for one screen and expires on its own, rather than a second device token.
+        case manage
+    }
+
     /// What came back on the callback URL.
     public enum Callback: Sendable, Equatable {
         /// The one-shot handoff code, to be exchanged together with the PKCE verifier.
@@ -41,10 +60,15 @@ public enum NativeLogin {
     /// The validation mirrors the server's (`valid_code_challenge`, `valid_device_name`) on
     /// purpose: a request that cannot succeed should fail on the device, where the flow can say
     /// why, rather than inside a browser sheet that can only show an error page.
+    ///
+    /// The device name is required for BOTH purposes, because the server validates it for both:
+    /// `client=ios` is what turns on the device-handoff mode, and the name is part of that mode
+    /// whatever the trip is buying.
     public static func authorizeURL(
         configuration: ServerConfiguration,
         codeChallenge: String,
-        device: String
+        device: String,
+        purpose: Purpose = .login
     ) -> URL? {
         guard isValidCodeChallenge(codeChallenge) else { return nil }
         guard let device = normalizedDeviceName(device) else { return nil }
@@ -61,6 +85,11 @@ public enum NativeLogin {
             URLQueryItem(name: "code_challenge", value: codeChallenge),
             URLQueryItem(name: "device", value: device),
         ]
+        // An absent `purpose` IS a login on the server, so the sign-in's URL stays exactly the one
+        // it has always sent. Only the step-up names itself.
+        if purpose != .login {
+            components.queryItems?.append(URLQueryItem(name: "purpose", value: purpose.rawValue))
+        }
         return components.url
     }
 

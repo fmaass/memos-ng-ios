@@ -30,6 +30,30 @@ struct StubTransport: ClientTransport {
     }
 }
 
+/// What a stubbed answer is, so a handler written as a `switch` can return one line per case.
+///
+/// The `Stub` helpers hand back a tuple, and a `switch` whose arms are tuples of an
+/// `HTTPResponse` and an optional body is unreadable. This is the same answers with a name.
+enum HTTPResponseLike: Sendable {
+    case json(String)
+    /// A 201 with a body — what a create answers, and the one status where the body matters as
+    /// much as the code.
+    case created(String)
+    case status(HTTPResponse.Status)
+    case detail(String, status: HTTPResponse.Status)
+    case validation(String)
+
+    var parts: (HTTPResponse, HTTPBody?) {
+        switch self {
+        case .json(let payload): Stub.json(payload)
+        case .created(let payload): Stub.json(payload, status: .created)
+        case .status(let status): Stub.empty(status)
+        case .detail(let detail, let status): Stub.detail(detail, status: status)
+        case .validation(let message): Stub.validationError(message)
+        }
+    }
+}
+
 extension APIProtocol {
     /// The store seam, for a client with no session behind it.
     ///
@@ -115,6 +139,41 @@ enum Stub {
         )
     }
 
+    /// The management screen's client: a real generated client whose ONLY middleware is the grant
+    /// one, which is what the app builds. A test that reached for `client(token:)` here would be
+    /// exercising a client the management lane never has.
+    static func client(
+        grant: ManagementGrant,
+        licence: GrantSendLicence = GrantSendLicence { true },
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        APIClientFactory.make(
+            configuration: ServerConfiguration(baseURL: baseURL),
+            grant: grant,
+            licence: licence,
+            transport: StubTransport(handler: handler)
+        )
+    }
+
+    /// The management client with a middleware in FRONT of the grant one, so a test can hold a
+    /// request on its way OUT.
+    ///
+    /// Holding an answer exercises the store's fence; only holding the request itself reaches the
+    /// instant the licence is asked, which is after every main-actor check the store can make.
+    static func client(
+        grant: ManagementGrant,
+        licence: GrantSendLicence,
+        ahead: any ClientMiddleware,
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        Client(
+            serverURL: baseURL,
+            configuration: APIClientFactory.runtimeConfiguration,
+            transport: StubTransport(handler: handler),
+            middlewares: [ahead, GrantAuthMiddleware(grant: grant, licence: licence)]
+        )
+    }
+
     /// The error an upload against an INSTALLED credential actually throws for a 401.
     ///
     /// Made by performing the real request through `StubTransport` rather than by constructing a
@@ -172,6 +231,47 @@ enum Stub {
         {"subject":"fabian","display_name":"Fabian","email":"f@example.invalid",\
         "role":"admin","auth_kind":"oidc"}
         """
+
+    /// One row of `GET /api/pats`. Both nullable fields are written out as JSON `null` rather than
+    /// omitted, which is what the server sends and what the generated decoder has to survive.
+    static func pat(
+        id: Int,
+        name: String,
+        createdAt: String = "2026-08-01T09:00:00Z",
+        lastUsed: String? = "2026-08-27T09:00:00Z",
+        expiresAt: String? = "2027-08-01T09:00:00Z"
+    ) -> String {
+        let used = lastUsed.map { "\"\($0)\"" } ?? "null"
+        let expires = expiresAt.map { "\"\($0)\"" } ?? "null"
+        return """
+            {"id":\(id),"name":"\(jsonEscaped(name))","last_used":\(used),\
+            "created_at":"\(createdAt)","expires_at":\(expires)}
+            """
+    }
+
+    /// What `POST /api/pats` answers: the row, plus the plaintext that exists in this one response
+    /// and nowhere else, ever.
+    static func patCreated(
+        id: Int,
+        name: String,
+        token: String,
+        createdAt: String = "2026-08-28T09:00:00Z",
+        expiresAt: String? = nil
+    ) -> String {
+        let expires = expiresAt.map { "\"\($0)\"" } ?? "null"
+        return """
+            {"id":\(id),"name":"\(jsonEscaped(name))","last_used":null,\
+            "created_at":"\(createdAt)","expires_at":\(expires),"token":"\(token)"}
+            """
+    }
+
+    /// What `POST /api/auth/native/manage-grant` answers on the one successful mint.
+    static func manageGrant(
+        _ grant: String,
+        expiresAt: String = "2026-08-28T09:10:00Z"
+    ) -> String {
+        #"{"grant":"\#(grant)","expires_at":"\#(expiresAt)"}"#
+    }
 
     static func memo(
         uid: String,
