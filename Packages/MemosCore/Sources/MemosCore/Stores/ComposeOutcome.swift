@@ -4,12 +4,15 @@ import OpenAPIRuntime
 
 /// Why a compose did not go through.
 ///
-/// A compose answers with this rather than with a `Bool`, and says nothing into the store's global
-/// error line: that line belongs to the LIST, for the failures of its own reads. The Bool could
-/// only say "no", so every failure looked the same to the sheet that had to react to one: an
-/// unreachable server, an expired sign-in and a refusal by the server all produced the same red
-/// line and the same advice. The categories here are the ones a person can act on differently —
-/// wait, sign in, make room, or change what they wrote.
+/// A compose answers with this rather than with a `Bool`, and the sheet acts on this alone — it
+/// never reads the store's global error line. That line is the LIST's, and a compose does reach
+/// it: the store clears it when a save's request is answered well, and hands a request that failed
+/// to the same reporter its reads use (`TimelineStore.report`). A compose refused before anything
+/// was sent leaves that line as it was. The Bool could only say "no", so every failure looked the
+/// same to the sheet that had to react to one: an unreachable server, an expired sign-in and a
+/// refusal by the server all produced the same red line and the same advice. The categories here
+/// are the ones a person can act on differently — wait, sign in, make room, or change what they
+/// wrote.
 public enum ComposeFailure: Sendable, Equatable {
     /// The server was not reached, or its answer never came back.
     ///

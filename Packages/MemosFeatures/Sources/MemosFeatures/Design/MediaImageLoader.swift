@@ -131,8 +131,9 @@ enum MediaImageAnswer: Equatable {
     case picture(UIImage)
     /// Abandoned rather than answered, so nothing is known: the view keeps what it was showing.
     case interrupted
-    /// Answered, with no picture in the answer: a refused signature, bytes that are not an image,
-    /// or an answer that outlived the identity that asked for it.
+    /// Not abandoned, and no picture came of it: a refused signature, bytes that are not an image,
+    /// an answer that outlived the identity that asked for it — or a fetch that failed on the way
+    /// without having been cancelled, which is no answer either but is not the view's doing.
     case unavailable
 }
 
