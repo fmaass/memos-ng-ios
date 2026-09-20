@@ -506,14 +506,17 @@ struct ComposeFailureTests {
             ]
 
         for row in rows {
-            #expect(ComposeFailure.classify(row.error, sent: true) == row.failure, row.what)
-            #expect(MemoMutationEffect.of(row.error) == row.effect, row.what)
-            // The agreement itself, not merely two expectations that happen to sit together: a
-            // refusal is the one reading that says the memo is as it was, and it is exactly the
-            // one the row reading calls `changedNothing`. The 401 is left out because it is not a
-            // statement about the memo at all — it is about who asked.
-            if row.failure != .authorization {
-                #expect((row.failure == .rejection) == (row.effect == .changedNothing), row.what)
+            let failure = ComposeFailure.classify(row.error, sent: true)
+            let effect = MemoMutationEffect.of(row.error)
+            #expect(failure == row.failure, row.what)
+            #expect(effect == row.effect, row.what)
+            // The agreement itself, read off what the two readings ANSWERED rather than off what
+            // this table expects of them — otherwise it is the table agreeing with itself. A
+            // refusal is the one compose reading that says the memo is as it was, and it is
+            // exactly the one the row reading calls `changedNothing`. The 401 is left out because
+            // it is not a statement about the memo at all — it is about who asked.
+            if failure != .authorization {
+                #expect((failure == .rejection) == (effect == .changedNothing), row.what)
             }
         }
     }

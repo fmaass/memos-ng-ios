@@ -397,17 +397,22 @@ struct MediaLibraryStoreTests {
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         #expect(store.items.map(\.uid) == ["a"], "the premise: the outgoing account had rows")
 
+        let asked = paths.get().count
         store.sessionIdentityChanged()
+
+        // Asked to page on, the store must have nothing to page WITH. A refresh cannot show this
+        // — it sends no cursor whether or not one was kept — so the paging call is the question,
+        // and a request that goes out at all is the outgoing account's position being walked on
+        // under the incoming one.
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
+        #expect(
+            paths.get().count == asked,
+            "the outgoing account's cursor was still there to be paged on"
+        )
         #expect(store.items.isEmpty, "the outgoing account's files stayed under the incoming one")
         #expect(store.hasMore, "an account nobody has read yet cannot be at the end of its files")
         // Which end of the library is first is a choice about this screen, not about the account.
         #expect(store.order == .oldestFirst, "the swap turned the grid round under the person")
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        #expect(
-            !(paths.get().last ?? "").contains("cursor="),
-            "the outgoing account's cursor was carried into the incoming one's library"
-        )
     }
 
     @Test("a page that answers a direction nobody is reading any more is dropped, cursor and all")

@@ -24,10 +24,11 @@ nonisolated public enum ComposeFailurePresentation {
         case .storage:
             return "There was no room on this device to keep this."
         case .rejection:
-            // "Nothing was changed" is not this case's to say. A 5xx becomes a rejection too, and
-            // the server commits an edit before it builds its answer — so the memo may well carry
-            // the new words. It names no server either: a memo this app already knows was deleted
-            // is refused here without anything being sent.
+            // It names no server on purpose: a memo this app already knows was deleted is refused
+            // here without anything being sent. And "nothing was changed" is not this case's to
+            // say, because the one sentence has to serve that local refusal as well as a server's
+            // own decline — so it sends somebody to look rather than telling them what they will
+            // find.
             return "This save could not be confirmed. Check the memo before trying again."
         case .serverFailure:
             // Not the refusal's sentence: the server took this one and broke on it, and it commits

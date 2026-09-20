@@ -4,7 +4,8 @@ import OpenAPIRuntime
 
 /// Why a compose did not go through.
 ///
-/// It replaces a `Bool` and a sentence dropped into the store's global error line. The Bool could
+/// A compose answers with this rather than with a `Bool`, and says nothing into the store's global
+/// error line: that line belongs to the LIST, for the failures of its own reads. The Bool could
 /// only say "no", so every failure looked the same to the sheet that had to react to one: an
 /// unreachable server, an expired sign-in and a refusal by the server all produced the same red
 /// line and the same advice. The categories here are the ones a person can act on differently —

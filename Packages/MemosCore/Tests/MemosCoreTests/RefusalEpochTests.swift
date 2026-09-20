@@ -491,8 +491,8 @@ struct RefusalEpochTests {
     //
     // Each store has two rows, and the second is the one a question about what is ACTIVE gets
     // wrong: the replacement is withdrawn again before the store resumes, so nothing is active
-    // either way — the same reading an ordinary sign-out leaves, where the sentence is the whole
-    // point of the refusal (the rows above, which stay green and unedited).
+    // either way — the same reading an ordinary sign-out leaves, and the rows above assert that
+    // the sentence IS written there, which is the whole point of the refusal.
 
     /// The window, as a place the test can stand in: the session's rule runs to completion — the
     /// wipe happens, `.endedSession` is the truth — and the store is then HELD there, before the
