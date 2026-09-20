@@ -151,7 +151,7 @@ enum MemoMutationEffect: Sendable {
         // holds — it did not act on the request — so WHICH credential earned it does not enter into
         // it; that question belongs to the session and is asked there.
         if StoreFailure.refusal(error) != nil { return .changedNothing }
-        switch ComposeFailure.apiError(in: error) {
+        return switch ComposeFailure.apiError(in: error) {
         case .unauthorized, .forbidden, .notFound: .changedNothing
         case .server(let status) where (400..<500).contains(status): .changedNothing
         default: .outcomeUnknown
