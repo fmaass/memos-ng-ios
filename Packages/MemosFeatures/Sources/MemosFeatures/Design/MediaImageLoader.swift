@@ -120,13 +120,13 @@ nonisolated enum MediaImageDecoder {
     }
 }
 
-/// How a fetch for a picture ended — three answers where there was one.
+/// How a fetch for a picture ended.
 ///
-/// A single `nil` said "no picture" for two facts that are not the same fact at all. A fetch the
-/// server answered and refused is settled: asking again changes nothing until something else does.
-/// A fetch that was abandoned before any answer came is not settled at all — nothing was learnt
-/// about the picture, and a view that cannot tell the two apart paints a permanent failure over a
-/// photo the server was never even asked about. On a slow link that is most of them.
+/// The three are kept apart because a view acts differently on each. An answer that refuses is
+/// settled — asking again changes nothing until something else does — while a fetch abandoned
+/// before any answer came establishes nothing about the picture at all, and a view told only "no
+/// picture" would paint a permanent failure over a photo the server was never asked about. On a
+/// slow link, where a scrolled row cancels fetches by the dozen, that is most of them.
 enum MediaImageAnswer: Equatable {
     case picture(UIImage)
     /// Abandoned rather than answered, so nothing is known: the view keeps what it was showing.
@@ -247,10 +247,11 @@ public enum MediaImageLoader {
     /// that the session its picture arrives through holds the very `URLCache` it evicts from,
     /// rather than hoping two singletons happen to agree.
     ///
-    /// Two calls for one key while neither has answered still reach the transport twice, as they
-    /// always have: a view that holds a request of its own is where a repeated ask is refused
-    /// (`PictureLoad`), and two DIFFERENT views wanting one picture at one moment is a race the
-    /// store settles by the key they file under.
+    /// Two calls for one key while neither has answered both reach the transport. A repeated ask
+    /// is refused by the VIEW that already holds a request of its own (`PictureLoad`); two
+    /// DIFFERENT views wanting one picture at one moment is a race the store settles by the key
+    /// they file under, and refusing it here would leave whichever of them asked second waiting on
+    /// a fetch it cannot see.
     static func answer(
         for key: MediaImageKey,
         url: URL,
@@ -409,12 +410,27 @@ struct PictureLoad {
         if failedKey == key { failedKey = nil }
     }
 
-    /// What an answer does to what the view shows.
+    /// What an answer does to what the view shows, and the one fence that decides whether it is
+    /// this view's answer at all.
     ///
-    /// Only an answer fails a picture. An abandoned fetch leaves every piece of this untouched —
-    /// the view goes on waiting, and the next signal asks again — because a warning triangle for a
-    /// request nobody answered is a statement about the file that nothing has established.
-    mutating func settle(_ answer: MediaImageAnswer, for key: MediaImageKey) {
+    /// Only the load that still HOLDS the claim may settle anything. A changed link starts a new
+    /// load while the one it replaced can still be on the wire, and that late answer is about a
+    /// link this view has stopped asking about: applying its refusal would put a warning triangle
+    /// on a tile whose own fetch is still out, where no answer to the question the view is
+    /// currently asking has established anything. Nothing is lost by dropping a superseded
+    /// picture either — the decoded store keeps it, and `painted(captured:for:cached:)` reads it.
+    ///
+    /// Only an ANSWER fails a picture. An abandoned fetch leaves every piece of this untouched:
+    /// the view goes on waiting, and the next signal asks again.
+    ///
+    /// Answers whether it applied, so a caller can assert the fence rather than assume it.
+    @discardableResult
+    mutating func settle(
+        _ answer: MediaImageAnswer,
+        for key: MediaImageKey,
+        serial: Int
+    ) -> Bool {
+        guard fetching == serial else { return false }
         switch answer {
         case .picture(let image):
             painted(image, for: key)
@@ -423,6 +439,7 @@ struct PictureLoad {
         case .unavailable:
             failedKey = key
         }
+        return true
     }
 }
 

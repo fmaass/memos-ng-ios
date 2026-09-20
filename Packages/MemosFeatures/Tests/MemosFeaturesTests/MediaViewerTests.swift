@@ -1398,13 +1398,32 @@ extension MediaImageLoaderTests {
 
         // The list was read again. The page is the one already on screen, and its link has not
         // moved.
-        MediaRetrySignal.shared.publish()
+        //
+        // Published until the second ask is seen. A refused page has to have SETTLED and let its
+        // claim go before a signal can mean anything to it, and nothing says which of those two
+        // main-actor jobs runs first; a case that published once and waited would be asserting an
+        // ordering nobody promised, and would fail against code that behaves perfectly.
+        let askedAgain = await eventually {
+            MediaRetrySignal.shared.publish()
+            return await transport.asks(for: uid) == 2
+        }
+        #expect(askedAgain, "the full-screen picture kept its warning triangle")
 
         let painted = await eventually { MediaImageLoader.cachedUIImage(for: key) != nil }
+        #expect(painted, "the picture the second ask brought back never reached the page")
+
+        // And a page that HAS its picture stays off the wire, however often the list comes back.
+        // Each try publishes and then reads: an ask accepted in one try is in the array before the
+        // next one looks, because the transport records a request as it enters rather than when it
+        // answers.
+        let askedThrice = await eventually(tries: 8) {
+            MediaRetrySignal.shared.publish()
+            return await transport.asks(for: uid) > 2
+        }
         let asked = await transport.asked.filter { $0.path.contains(uid) }
         window.isHidden = true
 
-        #expect(painted, "the full-screen picture kept its warning triangle")
+        #expect(!askedThrice, "a page holding its picture was sent back to the network")
         #expect(asked.count == 2, "\(asked.count) asks for a still that was refused once")
         #expect(
             asked.first == asked.last,

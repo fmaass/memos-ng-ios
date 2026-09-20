@@ -190,7 +190,7 @@ struct AttachmentThumbnail: View {
         // in now. Nothing is assigned at all — not even a failure, which would put a warning
         // triangle on a tile whose memo is already being replaced.
         guard generation == MediaImageLoader.store.generation else { return }
-        picture.settle(answer, for: requested)
+        picture.settle(answer, for: requested, serial: serial)
     }
 }
 

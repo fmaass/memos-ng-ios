@@ -306,6 +306,18 @@ struct PictureLoadTests {
     private static let key = MediaImageKey(uid: "owed", tier: "thumb")
     private static let other = MediaImageKey(uid: "owed-other", tier: "thumb")
 
+    /// One whole load, exactly as a view runs it: claimed before anything is awaited, settled with
+    /// the serial it claimed, released however it left.
+    private func load(
+        _ answer: MediaImageAnswer,
+        for key: MediaImageKey,
+        into load: inout PictureLoad
+    ) {
+        let serial = load.claim()
+        load.settle(answer, for: key, serial: serial)
+        load.release(serial)
+    }
+
     /// The tile's projection of the state below, so these cases are about the glyph a person sees
     /// and not only about a field.
     private func tilePhase(_ load: PictureLoad, for key: MediaImageKey) -> ThumbnailPhase {
@@ -321,7 +333,7 @@ struct PictureLoadTests {
     @Test("a fetch nobody answered leaves the tile loading; a refused one fails it")
     func onlyAnAnswerFailsAPicture() {
         var abandoned = PictureLoad()
-        abandoned.settle(.interrupted, for: Self.key)
+        load(.interrupted, for: Self.key, into: &abandoned)
         #expect(abandoned.failedKey == nil, "a cancelled fetch was painted as a broken file")
         #expect(tilePhase(abandoned, for: Self.key) == .loading)
 
@@ -329,15 +341,15 @@ struct PictureLoadTests {
         // does fail the tile, so the line above is about the difference and not about the state
         // machine refusing to fail anything at all.
         var refused = PictureLoad()
-        refused.settle(.unavailable, for: Self.key)
+        load(.unavailable, for: Self.key, into: &refused)
         #expect(refused.failedKey == Self.key)
         #expect(tilePhase(refused, for: Self.key) == .failed)
 
         // And a picture clears the failure of the key it is for, and of no other.
         var recovered = refused
-        recovered.settle(.picture(UIImage()), for: Self.other)
+        load(.picture(UIImage()), for: Self.other, into: &recovered)
         #expect(recovered.failedKey == Self.key, "another picture's arrival cleared this failure")
-        recovered.settle(.picture(UIImage()), for: Self.key)
+        load(.picture(UIImage()), for: Self.key, into: &recovered)
         #expect(recovered.failedKey == nil)
         #expect(tilePhase(recovered, for: Self.key) == .loaded)
     }
@@ -346,14 +358,14 @@ struct PictureLoadTests {
     @Test("only a view showing nothing with nothing out is asked again")
     func theRuleRefusesEveryOtherView() {
         var owed = PictureLoad()
-        owed.settle(.unavailable, for: Self.key)
+        load(.unavailable, for: Self.key, into: &owed)
         #expect(owed.isOwedAPicture(showing: false))
         let askedForTheFailed = owed.askAgain(showing: false)
         #expect(askedForTheFailed, "a failed tile was left holding its failure")
         #expect(owed.attempt == 1, "the attempt is what the load hangs off, and it did not move")
 
         var showing = PictureLoad()
-        showing.settle(.picture(UIImage()), for: Self.key)
+        load(.picture(UIImage()), for: Self.key, into: &showing)
         #expect(!showing.isOwedAPicture(showing: true))
         let askedForTheShown = showing.askAgain(showing: true)
         #expect(!askedForTheShown, "a picture in hand was fetched again")
@@ -373,15 +385,41 @@ struct PictureLoadTests {
     /// picture.
     @Test("a second signal before the load has started is refused")
     func aSecondSignalInTheGapIsRefused() {
-        var load = PictureLoad()
-        load.settle(.unavailable, for: Self.key)
-        let first = load.askAgain(showing: false)
+        var failed = PictureLoad()
+        load(.unavailable, for: Self.key, into: &failed)
+        let first = failed.askAgain(showing: false)
         #expect(first)
-        let raised = load.attempt
+        let raised = failed.attempt
 
-        let second = load.askAgain(showing: false)
+        let second = failed.askAgain(showing: false)
         #expect(!second, "the gap before the load starts was unfenced")
-        #expect(load.attempt == raised, "two signals became two loads for one picture")
+        #expect(failed.attempt == raised, "two signals became two loads for one picture")
+    }
+
+    /// The other half of the same overlap. A changed link starts a load while the one it replaced
+    /// can still be on the wire — that is accepted, and the request out on the old link is the one
+    /// whose answer is about a question this view has stopped asking. Its refusal must not become
+    /// a warning triangle over a load that is still out.
+    @Test("an answer to a load that was superseded settles nothing")
+    func aSupersededAnswerSettlesNothing() {
+        var replaced = PictureLoad()
+        let superseded = replaced.claim()
+        let live = replaced.claim()
+
+        let refusalApplied = replaced.settle(.unavailable, for: Self.key, serial: superseded)
+        #expect(!refusalApplied)
+        #expect(
+            replaced.failedKey == nil,
+            "a link this view had stopped asking about failed the picture it is still loading"
+        )
+        let pictureApplied = replaced.settle(.picture(UIImage()), for: Self.key, serial: superseded)
+        #expect(!pictureApplied)
+        #expect(replaced.captured == nil)
+
+        // The control: the load that still holds the claim settles.
+        let liveApplied = replaced.settle(.unavailable, for: Self.key, serial: live)
+        #expect(liveApplied)
+        #expect(replaced.failedKey == Self.key)
     }
 
     /// A changed link is not a retry: it cancels this load and starts another, and the cancelled
@@ -390,19 +428,19 @@ struct PictureLoadTests {
     /// for one already coming.
     @Test("a claim is released only by the fetch that still holds it")
     func aClaimIsReleasedBySerial() {
-        var load = PictureLoad()
-        let cancelled = load.claim()
-        let live = load.claim()
+        var replaced = PictureLoad()
+        let cancelled = replaced.claim()
+        let live = replaced.claim()
         #expect(cancelled != live)
 
-        load.release(cancelled)
+        replaced.release(cancelled)
         #expect(
-            !load.isOwedAPicture(showing: false),
+            !replaced.isOwedAPicture(showing: false),
             "the view forgot the request it still has out"
         )
 
-        load.release(live)
-        #expect(load.isOwedAPicture(showing: false))
+        replaced.release(live)
+        #expect(replaced.isOwedAPicture(showing: false))
     }
 }
 
