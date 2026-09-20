@@ -73,6 +73,11 @@ struct MediaLibraryView: View {
             library?.reports(to: session)
             await load()
         }
+        // The rows on this grid belong to the account they were read as. If the session becomes
+        // somebody else's — or nobody's — while the tab is up, they go, the way the timeline's do.
+        .onChange(of: session.state.user?.subject) {
+            library?.sessionIdentityChanged()
+        }
         // The server is answering again, and this grid was read while it was not.
         .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
     }

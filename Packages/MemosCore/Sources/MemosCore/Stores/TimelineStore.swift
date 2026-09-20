@@ -782,7 +782,12 @@ public final class TimelineStore {
             // The SESSION owns the verdict; this store owns only what it says about it. A refusal
             // of a credential the device has already replaced is not this list's news, and "sign
             // in again" over a session that renewed a second ago is a false instruction.
-            if await onUnauthorized(refusal) == .endedSession {
+            //
+            // The second question is asked HERE, after that await and with nothing awaited before
+            // the write: the rule's own fences are taken before its awaits, and a sign-in can
+            // complete inside them. The verdict is about the session that issued this request,
+            // and so is the sentence — neither is the incoming identity's to carry.
+            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle) {
                 lastError = refusal.errorDescription
             }
             return
@@ -841,6 +846,16 @@ public final class TimelineStore {
         guard let session else { return true }
         guard let current = session.activeHandle?.generation else { return false }
         return current == handle.generation
+    }
+
+    /// The question asked AFTER the session has answered a refusal, with nothing awaited between
+    /// it and the sentence it guards (`SessionReporting.nothingEstablishedSince`). The fence
+    /// above cannot cover it: it is taken before the await, and the switch happens inside it.
+    ///
+    /// A store with no session named to it writes, for the reason it is current above.
+    private func nothingEstablishedSince(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        return session.nothingEstablishedSince(handle)
     }
 
     // MARK: - writes
@@ -1083,16 +1098,19 @@ public final class TimelineStore {
     ///
     /// Two conditions, and each closes a way of losing an edit somebody made.
     ///
-    /// The slot must still be THIS edit's. A save is not the only thing that can happen while a
-    /// save is in flight: a second one with different words can be submitted and mint its own key
-    /// into the slot first. Clearing then throws away the key of the edit still running, and if
-    /// that one's response is lost its retry mints a fresh key and applies the same edit twice.
+    /// The slot must still be THIS edit's. The slot is one for the whole store while the line each
+    /// memo's mutations stand in is per memo, so a save of a DIFFERENT memo can be submitted while
+    /// this one is in flight and mint its own key into the slot first. Clearing then throws away
+    /// the key of the edit still running, and if that one's response is lost its retry mints a
+    /// fresh key and applies the same edit twice.
     ///
-    /// And this must be the LAST invocation using the key. Two saves of identical fields share one
-    /// key — correctly, because they are one logical edit and the second is answered as a replay of
-    /// the first. But then the first one's answer arriving would release a key the second is still
-    /// presenting; if the second's response is then lost, its retry mints a fresh one and the same
-    /// files are attached a second time. Same harm as above, reached by the other door.
+    /// And this must be the LAST invocation using the key: releasing one another invocation is
+    /// still presenting leaves that one's lost response to mint a fresh key on retry and attach the
+    /// same files a second time — the same harm as above, reached by the other door. Two saves of
+    /// identical fields cannot reach that today, because the line joins them into ONE task
+    /// (`claimMutation`) and the key is taken once inside it, and no other pair of one memo's
+    /// mutations overlaps at all. The count is kept because it guards the slot itself rather than
+    /// depending on the line above staying the shape it is.
     ///
     /// A failure never releases: the retry is the whole point of the key. And once nothing is in
     /// flight and one of them landed, the key IS spent — a later tap on Save is a new edit by
@@ -1128,10 +1146,10 @@ public final class TimelineStore {
     /// The unfinished mutations of each memo, in arrival order: the one on the wire first, then
     /// everything queued behind it.
     ///
-    /// A screen is never the guard. The compose sheet, the detail view and the share extension all
-    /// reach the same memo through this store, and a request already on the wire cannot be recalled
-    /// by a view that has closed — so the order two saves of one memo reach the server is this
-    /// store's to decide, and nobody else's.
+    /// A screen is never the guard. The compose sheet and the detail view both reach the same memo
+    /// through this store, and a request already on the wire cannot be recalled by a view that has
+    /// closed — so the order two saves of one memo reach the server is this store's to decide, and
+    /// nobody else's.
     private var mutations: [String: [MemoMutation]] = [:]
 
     private var mutationClaim = 0
@@ -1274,7 +1292,9 @@ public final class TimelineStore {
     }
 
     /// Nothing vouches for what the server did with this mutation, so the row stays held against
-    /// every read already on its way: only a read issued after this moment can settle it.
+    /// every read that was already on its way when the mutation took its place in line: the claim
+    /// keeps the stamp it entered with, and only a read issued after THAT moment can settle it.
+    /// The failure is where the answer runs out, not where the boundary is.
     private func mutationOutcomeUnknown(_ claim: Int, on uid: String) {
         retireClaim(claim, on: uid) { $0.applied = max($0.applied, $0.claims[claim] ?? 0) }
     }

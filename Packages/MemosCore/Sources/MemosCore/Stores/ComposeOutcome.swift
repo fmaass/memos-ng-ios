@@ -4,7 +4,8 @@ import OpenAPIRuntime
 
 /// Why a compose did not go through.
 ///
-/// It replaces a `Bool` and a sentence dropped into the store's global error line. The Bool could
+/// A compose answers with this rather than with a `Bool`, and says nothing into the store's global
+/// error line: that line belongs to the LIST, for the failures of its own reads. The Bool could
 /// only say "no", so every failure looked the same to the sheet that had to react to one: an
 /// unreachable server, an expired sign-in and a refusal by the server all produced the same red
 /// line and the same advice. The categories here are the ones a person can act on differently —
@@ -27,6 +28,14 @@ public enum ComposeFailure: Sendable, Equatable {
     case storage
     /// The server answered, and its answer was no.
     case rejection
+    /// The server took the request and broke on it, so what it did with it is unknown.
+    ///
+    /// Separate from `rejection` because the two are opposite facts about the same memo: a refusal
+    /// is the server declining to act, and this is the server acting and then failing to say what
+    /// it did. It commits an edit before it builds the answer, so the words may well be on the
+    /// memo. The retry is safe for the reason `transport(sent: true)`'s is — the same edit key,
+    /// which the server replays rather than applying twice.
+    case serverFailure
 }
 
 /// What a compose attempt did.
@@ -61,7 +70,11 @@ extension ComposeFailure {
             // request went out and the server may well have applied it — see `.transport(sent:)`,
             // and the sentence that goes with it.
             case .decoding: return .transport(sent: sent)
-            default: return .rejection
+            default:
+                return switch serverAnswer(to: api) {
+                case .refused: .rejection
+                case .unconfirmed: .serverFailure
+                }
             }
         }
         // The same fact arriving as the raw decoding failure, which is what a 2xx body the client
@@ -69,6 +82,26 @@ extension ComposeFailure {
         if isDecodingFailure(error) { return .transport(sent: sent) }
         if let storage = storageFailure(in: error) { return storage }
         return .rejection
+    }
+
+    /// What an answer the server itself gave says about whether it acted on the request.
+    ///
+    /// The ONE reading of a status, so that what somebody is told and what the row is left knowing
+    /// cannot be edited apart: both consult this, neither decides for itself. A status inside the
+    /// 4xx class is the server declining to act, and the memo it holds is as it was; anything else
+    /// it answered with is the server having taken the request and broken on it, which is an open
+    /// question because it commits an edit before it builds the answer.
+    ///
+    /// A 502 or a 504 reaches this in the row reading and comes back an open question, which is
+    /// what it has always been there. The compose reading never gets this far with one: those two
+    /// are the proxy speaking for a server that is not there, and it takes them earlier as the
+    /// unreachable server they describe (`StoreFailure.transportFailure`).
+    static func serverAnswer(to api: APIError) -> ServerAnswer {
+        switch api {
+        case .unauthorized, .forbidden, .notFound: .refused
+        case .server(let status) where (400..<500).contains(status): .refused
+        default: .unconfirmed
+        }
     }
 
     /// The `APIError` anywhere in an error's chain, or nil.
@@ -135,7 +168,14 @@ extension ComposeFailure {
 /// — with the second copy free to drift. It sits beside `ComposeFailure` because both readings are
 /// of the same answer: what the person is told and what the row is left knowing must not be able to
 /// disagree about what the server did.
-enum MemoMutationEffect: Sendable {
+enum ServerAnswer: Sendable, Equatable {
+    /// The server considered the request and declined it. Nothing it holds moved.
+    case refused
+    /// The server took the request and did not say what became of it.
+    case unconfirmed
+}
+
+enum MemoMutationEffect: Sendable, Equatable {
     /// Nothing was sent, or the server refused the request in a way that leaves the memo as it was:
     /// a read already on its way knows that memo as well as this mutation does.
     case changedNothing
@@ -151,10 +191,12 @@ enum MemoMutationEffect: Sendable {
         // holds — it did not act on the request — so WHICH credential earned it does not enter into
         // it; that question belongs to the session and is asked there.
         if StoreFailure.refusal(error) != nil { return .changedNothing }
-        return switch ComposeFailure.apiError(in: error) {
-        case .unauthorized, .forbidden, .notFound: .changedNothing
-        case .server(let status) where (400..<500).contains(status): .changedNothing
-        default: .outcomeUnknown
+        // An error carrying no answer of the server's — a decode, a phone with no network — is an
+        // open question by the same rule, and there is no status to ask about.
+        guard let api = ComposeFailure.apiError(in: error) else { return .outcomeUnknown }
+        return switch ComposeFailure.serverAnswer(to: api) {
+        case .refused: .changedNothing
+        case .unconfirmed: .outcomeUnknown
         }
     }
 }

@@ -65,8 +65,8 @@ keyed on the signed-in subject), `PlacesMapView.swift` (the `UIViewRepresentable
 `MKAnnotationView` a pin and a cluster share, UIKit all the way down) and
 `PlacesPresentation.swift`, the seam between the two layers. The last three are also the only
 production sources in the tree that import MapKit; the screen itself needs none of it.
-`PlacesPresentation.swift` is where the seam's decisions are DEFINED and nowhere else — the
-region-to-box conversion, which member lends a cluster its photograph, what a tap opens and how
+`PlacesPresentation.swift` is where the seam's decisions are DEFINED and nowhere else — which
+region the map opens on, which member lends a cluster its photograph, what a tap opens and how
 close the camera may come — and the map view reaches for them by name rather than redefining any
 of them. What the map view does decide is its own lifecycle: when a replaced map has to start its
 annotations over, and that the first fit happens once. MapKit does not leave this package, but it
@@ -103,6 +103,9 @@ so the code is not on it. That delegate is log-only.
 - The API layer surfaces a typed **`APIError`** — never an untyped `Error` at a package boundary.
 - **`401` → signed out.** There is no refresh lifecycle to fall back on: the token IS the
   credential. There is no silent retry, because retrying a revoked token only produces a spinner.
+  The one exception is the step-up management lane: its credential is a short-lived grant rather
+  than the device's token, so a refusal there lapses the grant and the token screen asks for the
+  password again, and the device's session is not touched.
 - Sign-out revokes the presenting token (`POST /api/auth/native/logout`) and wipes the stored
   credential only once the server has said it is dead — a 204, or a 401 meaning it already was.
   **A failed revoke KEEPS the credential** and reports `revokeFailed`: a device that believes it

@@ -420,10 +420,11 @@ struct ComposeFailureTests {
         // the share extension's — not because it stands in for the one below.
         let refused = MediaUploadError.refused(.unauthorized)
         #expect(ComposeFailure.classify(refused, sent: false) == .authorization)
-        // And one that really IS a refusal stays a rejection.
+        // And one that is the server breaking on the upload keeps that reading through the
+        // wrapper, rather than becoming the server refusing somebody's words.
         #expect(
             ComposeFailure.classify(MediaUploadError.refused(.server(status: 500)), sent: false)
-                == .rejection)
+                == .serverFailure)
     }
 
     /// The two statuses this server never emits itself: something in front of it answered, and the
@@ -447,12 +448,77 @@ struct ComposeFailureTests {
     }
 
     /// The counterweight: a server that answers for itself keeps its own card, whatever the status
-    /// looks like. 503 is the one this server really does emit under load.
-    @Test("a status the server answered with is a rejection, and stays one")
-    func answeredStatusesStayRejections() {
-        #expect(ComposeFailure.classify(APIError.server(status: 503), sent: true) == .rejection)
-        #expect(ComposeFailure.classify(APIError.server(status: 500), sent: true) == .rejection)
+    /// looks like — and a card of its own, because a server that broke on the request is not a
+    /// server that refused it. 503 is the one this server really does emit under load.
+    @Test("a status the server answered with keeps its own card, and is not a transport failure")
+    func answeredStatusesKeepTheirOwnCard() {
+        #expect(ComposeFailure.classify(APIError.server(status: 503), sent: true) == .serverFailure)
+        #expect(ComposeFailure.classify(APIError.server(status: 500), sent: true) == .serverFailure)
         #expect(ComposeFailure.classify(APIError.unauthorized, sent: true) == .authorization)
+    }
+
+    /// The defect this case exists for: a 5xx told somebody their words were refused, when the
+    /// server commits an edit before it builds the answer and nobody knows which side of that it
+    /// broke on. A status the server chose to answer with is still a refusal.
+    @Test("a server that broke on a save is not read as a server that refused it")
+    func aServerFaultIsNotARefusal() {
+        #expect(ComposeFailure.classify(APIError.server(status: 500), sent: true) != .rejection)
+        #expect(ComposeFailure.classify(APIError.server(status: 503), sent: false) != .rejection)
+        #expect(ComposeFailure.classify(APIError.server(status: 422), sent: true) == .rejection)
+        #expect(ComposeFailure.classify(APIError.server(status: 409), sent: true) == .rejection)
+    }
+
+    /// One decision about what an answer says the server did, asked by both readings of it.
+    ///
+    /// What somebody is TOLD and what the row is left KNOWING are two readings of one answer, and
+    /// while each had its own switch a status could be moved in one of them alone. Every class
+    /// this app can meet is fed to both here, and the pair of answers is written down side by
+    /// side: a row that no longer holds is a pair that has come apart.
+    @Test("every class of answer reads the same way to both readings of it")
+    func theTwoReadingsCannotDisagree() {
+        // Hoisted so every row below fits on one line and the table reads as a table.
+        let unreadable = APIError.decoding(description: "not a memo")
+        let rawDecode = DecodingError.valueNotFound(
+            String.self, .init(codingPath: [], debugDescription: "")
+        )
+        let offline = URLError(.notConnectedToInternet)
+        let rows:
+            [(
+                what: Comment, error: any Error, failure: ComposeFailure,
+                effect: MemoMutationEffect
+            )] = [
+                ("a 2xx nobody could read", unreadable, .transport(sent: true), .outcomeUnknown),
+                ("the same, raw", rawDecode, .transport(sent: true), .outcomeUnknown),
+                ("401", APIError.unauthorized, .authorization, .changedNothing),
+                ("403", APIError.forbidden, .rejection, .changedNothing),
+                ("404", APIError.notFound, .rejection, .changedNothing),
+                ("409", APIError.server(status: 409), .rejection, .changedNothing),
+                ("422", APIError.server(status: 422), .rejection, .changedNothing),
+                ("500", APIError.server(status: 500), .serverFailure, .outcomeUnknown),
+                ("503", APIError.server(status: 503), .serverFailure, .outcomeUnknown),
+                // The proxy's own answers, which the compose reading takes before the switch on
+                // the answer ever sees them (`StoreFailure.transportFailure`). The row reading has
+                // no such fork and reads them as the open question they are — the same fact in the
+                // two vocabularies, which is what agreement means here.
+                ("502", APIError.server(status: 502), .transport(sent: true), .outcomeUnknown),
+                ("504", APIError.server(status: 504), .transport(sent: true), .outcomeUnknown),
+                ("no network", offline, .transport(sent: true), .outcomeUnknown),
+            ]
+
+        for row in rows {
+            let failure = ComposeFailure.classify(row.error, sent: true)
+            let effect = MemoMutationEffect.of(row.error)
+            #expect(failure == row.failure, row.what)
+            #expect(effect == row.effect, row.what)
+            // The agreement itself, read off what the two readings ANSWERED rather than off what
+            // this table expects of them — otherwise it is the table agreeing with itself. A
+            // refusal is the one compose reading that says the memo is as it was, and it is
+            // exactly the one the row reading calls `changedNothing`. The 401 is left out because
+            // it is not a statement about the memo at all — it is about who asked.
+            if failure != .authorization {
+                #expect((failure == .rejection) == (effect == .changedNothing), row.what)
+            }
+        }
     }
 
     @Test("the classification of an error is about the error, not about the message")
@@ -469,7 +535,8 @@ struct ComposeFailureTests {
             domain: "GeneratedClient", code: 1,
             userInfo: [NSUnderlyingErrorKey: APIError.unauthorized as NSError])
         #expect(ComposeFailure.classify(wrapped, sent: true) == .authorization)
-        #expect(ComposeFailure.classify(APIError.server(status: 500), sent: true) == .rejection)
+        #expect(
+            ComposeFailure.classify(APIError.server(status: 500), sent: true) == .serverFailure)
         #expect(
             ComposeFailure.classify(
                 NSError(domain: NSCocoaErrorDomain, code: NSFileWriteOutOfSpaceError), sent: false)

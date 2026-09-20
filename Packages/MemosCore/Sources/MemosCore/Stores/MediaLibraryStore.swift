@@ -117,6 +117,24 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         generation += 1
     }
 
+    /// Empties the grid because this device is signed in as somebody else.
+    ///
+    /// The tab's view is not torn down and rebuilt on a subject swap — the signed-in root keeps
+    /// its state — so a store that kept its rows would show the outgoing account's photographs to
+    /// the incoming one. It resets exactly what a tab change resets, and for the same reason: the
+    /// cursor is a position inside a list this store is no longer showing, and a page in flight
+    /// was asked for by somebody else, so the generation moves and those answers drop on arrival.
+    ///
+    /// The tab itself stays. Which slice of the library is open is a choice about this screen,
+    /// not about the account, and the grid reloads under it either way.
+    public func sessionIdentityChanged() {
+        items = []
+        nextCursor = nil
+        hasMore = true
+        lastError = nil
+        generation += 1
+    }
+
     /// Which list a page in flight belongs to — the generation, the filter AND the direction,
     /// because any of the three moving makes the answer a continuation of something nobody is
     /// reading any more.
@@ -305,7 +323,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         // The SESSION owns the verdict; this store owns only what it says about it — the same
         // rule, and the same reason, as `TimelineStore.report`.
         if let refusal = StoreFailure.refusal(error) {
-            if await onUnauthorized(refusal) == .endedSession {
+            // And asked again afterwards, with nothing awaited before the write — the same rule,
+            // and the same reason, as `TimelineStore.report`.
+            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle) {
                 lastError = refusal.errorDescription
             }
             return
@@ -323,6 +343,13 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         guard let session else { return true }
         guard let current = session.activeHandle?.generation else { return false }
         return current == handle.generation
+    }
+
+    /// The post-await half of the same question — the same rule, for the same reason, as
+    /// `TimelineStore.nothingEstablishedSince`.
+    private func nothingEstablishedSince(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        return session.nothingEstablishedSince(handle)
     }
 
     /// One page of the library.

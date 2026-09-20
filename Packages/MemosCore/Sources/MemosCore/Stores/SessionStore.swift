@@ -194,6 +194,15 @@ public final class SessionStore {
     /// arrive after someone has signed in as B, and anything that assigns it without checking
     /// would be telling B a fact about A.
     private var sessionGeneration = 0
+    /// The generation a client was last INSTALLED under. Moved by an establishment, and by
+    /// nothing else — a withdrawal leaves it exactly where it was.
+    ///
+    /// `sessionGeneration` cannot answer the question an effect that resumes after a wipe has to
+    /// ask. Its own sign-out moved that number, and so did a replacement that came and went, and
+    /// "no client now" reads the same in both — yet only one of them means the screen the effect
+    /// is about to write on has been through somebody else. Standing still across a withdrawal is
+    /// the whole of the difference (`SessionReporting.nothingEstablishedSince`).
+    private var establishedGeneration = 0
     /// The same number, in a box anything can read without hopping to this actor.
     ///
     /// It exists for the writers that commit from wherever their work finished. A hop to ask "is
@@ -1308,6 +1317,10 @@ public final class SessionStore {
         defaultVisibility = nil
         avatar = nil
         endIncarnation()
+        // AFTER the bump, so it names the incarnation the client above will be handed out under:
+        // this is one of the two places a non-nil client is installed, and therefore one of the
+        // two that may move it.
+        establishedGeneration = sessionGeneration
         // Same lifecycle, one layer over: whatever the previous account's photos were, they are
         // not this one's, and a uid is only unique within one server.
         identity.rotate()
@@ -1456,6 +1469,17 @@ public final class SessionStore {
     /// covers it is that each of them refuses to write anything once the number it started under
     /// has moved.
     private func owns(_ generation: Int) -> Bool { generation == sessionGeneration }
+
+    /// Whether this device has established a session since the one `generation` names.
+    ///
+    /// Deliberately not `owns`. `owns` asks whether the session is still the same one, which a
+    /// withdrawal answers no — and an effect that awaited the refusal rule has just CAUSED that
+    /// withdrawal, so asking it there would silence every ordinary refusal there is. What has to
+    /// silence one is an establishment in between, and that is a different number
+    /// (`establishedGeneration`).
+    private func nothingEstablishedSince(_ generation: Int) -> Bool {
+        generation == establishedGeneration
+    }
 
     /// Ends the incarnation the session is in — synchronously, and BEFORE the caller's first
     /// await.
@@ -1661,6 +1685,9 @@ public final class SessionStore {
         supersedeValidationInFlight()
         state = snapshot.state
         client = snapshot.client
+        // The other place a client can be installed. Conditional because this one may also put
+        // back nothing, and restoring an absence is a withdrawal however it is spelled.
+        if snapshot.client != nil { establishedGeneration = sessionGeneration }
         credential = snapshot.credential
         configuration = snapshot.configuration
         setVerification(snapshot.verification)
@@ -2390,7 +2417,16 @@ public final class SessionStore {
             // access was rejected, sign in again", which on a live session that has just renewed
             // is a false instruction that costs someone a working sign-in.
             case .superseded: throw OriginalMediaError.superseded
-            case .endedSession: throw OriginalMediaError.credentialRefused(refusal)
+            case .endedSession:
+                // The fourth effect that depends on that answer, and the same question the three
+                // reporting stores ask after the same await: a sign-in can complete inside the
+                // wipe, and "your access was rejected" is then about an account nobody is looking
+                // at. The supersede is not silence — the save flow says the sign-in changed,
+                // which is the true thing to say to whoever is holding the phone.
+                guard nothingEstablishedSince(generation) else {
+                    throw OriginalMediaError.superseded
+                }
+                throw OriginalMediaError.credentialRefused(refusal)
             }
         } catch OriginalMediaError.refused(let error) {
             // Every NON-refusal status, unchanged.
@@ -2529,5 +2565,11 @@ extension SessionStore: SessionReporting {
     /// a refusal rather than acting on one.
     public func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool {
         refusal.concernsCurrentCredential(of: credential)
+    }
+
+    /// The fence a store takes between the refusal rule's answer and the sentence it writes —
+    /// answered from the one retained number, never re-derived (`nothingEstablishedSince`).
+    public func nothingEstablishedSince(_ handle: SessionHandle) -> Bool {
+        nothingEstablishedSince(handle.generation)
     }
 }
