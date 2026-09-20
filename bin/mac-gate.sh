@@ -10,8 +10,8 @@
 #
 # The ordered checks are: the gate's own classifier test, generate the project, lint, test, rebuild
 # every package with warnings as errors, check the dependency rule, the share-link rule, the
-# refusal-sites rule and the openapi-coverage rule, read the SHIPPING bundles back, and count the
-# tests that actually ran.
+# text-selection rule, the refusal-sites rule and the openapi-coverage rule, read the SHIPPING
+# bundles back, and count the tests that actually ran.
 #
 # A change set of documentation and repository metadata only takes a FAST PATH. What the branch
 # changed against origin/main (merge-base, renames not followed, so a rename is judged by both of
@@ -50,8 +50,8 @@
 #   bin/mac-gate.sh --help            print this usage.
 #
 # What the quick mode SKIPS is the whole difference: the package rebuilds with warnings fatal, the
-# warnings canary, the pin check, the entitlement, dependency-rule, share-link, refusal-sites and
-# openapi-coverage rules, the
+# warnings canary, the pin check, the entitlement, dependency-rule, share-link, text-selection,
+# refusal-sites and openapi-coverage rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
 # lane lock, the load gate and the private simulator — and the lint, which costs seconds and which
@@ -1957,6 +1957,26 @@ s_sharelink() {
   return 1
 }
 
+s_textsel() {
+  # A minted token's plaintext is on screen once, and the Copy button hands it over as a pasteboard
+  # item that expires (MEMNG-138). SwiftUI's text-selection modifier reopens the lane it closes: the
+  # system's own Copy over the same Text, straight to the general pasteboard, past the expiring
+  # write, and over a fragment at that. No test in the Features bundle can see an ABSENT modifier —
+  # SwiftUI exposes no view tree and the accessibility probe reads the same label either way — so it
+  # is held the way the share-link control's absence is held, by a literal grep with a positive
+  # control in the same run. The arithmetic lives in a script of its own for the same reason: that
+  # script's text must carry the literal, and the files it checks may not.
+  echo "--- text-selection rule (the token management screen's secret is not selectable) ---"
+  local textsel_rule="$GATE_TARGET/scripts/textselection-rule.sh"
+  if [ -x "$textsel_rule" ]; then
+    "$textsel_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "TEXTSELECTION FAIL: $textsel_rule is missing or not executable, so the token management"
+  echo "                    screen was never checked and this step proves nothing"
+  return 1
+}
+
 s_refusal() {
   # A refusal is judged where the answer arrives and acted on one or more actor hops later, and in
   # between a renewal can replace the credential it was about. The fix is one typed value carrying
@@ -2210,6 +2230,7 @@ step warnaserr  s_warnings
 step deps       s_deps
 step refusal    s_refusal
 step sharelink  s_sharelink
+step textsel    s_textsel
 step apicover   s_apicover
 step testcount  s_testcount
 

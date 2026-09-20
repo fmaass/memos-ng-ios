@@ -29,6 +29,11 @@ macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality 
 manifest) → the dependency-rule greps → the share-link rule
 (`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
 `Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → the
+text-selection rule (`scripts/textselection-rule.sh`: the literal `textSelection` appears in no
+file matching `Packages/MemosFeatures/Sources/MemosFeatures/Settings/ManageTokens*.swift`, so the
+Copy button — which hands over a pasteboard item that expires — is the one way a minted token's
+plaintext leaves the screen, with the exact path `…/Settings/ManageTokensScreen.swift` naming
+`copySecret` as the control; memo text keeps its selection, it is not a credential) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
 exclusions, with the operation count it read as the control) → a
@@ -56,7 +61,8 @@ Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-g
 classification, the same lane lock and load gate, then rsyncs and — on the lane's private
 simulator, reusing its DerivedData — lints, generates, compiles for testing and runs the named
 bundle or suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the
-pins and the entitlement, dependency-rule and share-link greps and the generated-surface rule. The
+pins and the entitlement, dependency-rule, share-link and text-selection greps and the
+generated-surface rule. The
 lint is the same `swift format lint --strict --recursive .` the full gate runs, it comes first, and
 a lint error stops the run there: generate, build and tests are not invoked and the exit is the
 lint's own code. It prints its own

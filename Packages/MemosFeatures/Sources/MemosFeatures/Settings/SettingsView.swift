@@ -48,6 +48,11 @@ struct SettingsView: View {
     /// A rename or a renewal is on the wire. One flag for both: they are alternatives, and a
     /// renewal is not something to start twice (see `DeviceTokenSection`).
     @State private var tokenBusy = false
+    /// Whether token management is open. A sheet rather than a push, and that is the point rather
+    /// than a layout preference: the management grant behind that screen dies with it, so the
+    /// screen should read as a session somebody opens and closes — and dismissing a sheet is what
+    /// ends it.
+    @State private var managingTokens = false
 
     var body: some View {
         List {
@@ -77,6 +82,20 @@ struct SettingsView: View {
         // reinstalled app cannot say how long this device has left.
         .task { await session.loadDeviceToken() }
         .task { cache = MediaCacheClearing.usage() }
+        // Only openable while the app knows which server it is signed in to: the management
+        // sign-on is a round trip to that server, and there is nowhere to send it otherwise.
+        .sheet(isPresented: $managingTokens) {
+            if let baseURL = session.serverBaseURL {
+                // The same identifier the account row above shows: the display name if the server
+                // sent one, otherwise the address, otherwise the subject it issued. The screen
+                // says it out loud because only the browser knows whose tokens it will list.
+                ManageTokensView(
+                    serverBaseURL: baseURL,
+                    session: session,
+                    appAccountName: session.state.user?.name ?? ""
+                )
+            }
+        }
     }
 
     @ViewBuilder
@@ -124,6 +143,11 @@ struct SettingsView: View {
             rename: { name in Task { await renameToken(to: name) } },
             renew: { Task { await renewToken() } }
         )
+        Divider()
+        // Below this device's own row, because it is the wider thing: that row is what this phone
+        // may do to ITSELF, and this is the account's whole list — which costs a fresh sign-on to
+        // reach, because a device token may never mint or revoke a sibling (ADR-0015).
+        ManageTokensRow(open: { managingTokens = true })
     }
 
     @ViewBuilder
