@@ -77,6 +77,8 @@ struct TimelineRowFenceTests {
         let gets = Counter()
         let entered = LockedValue<Bool>(false)
         let release = LockedValue<Bool>(false)
+        let payingEntered = LockedValue<Bool>(false)
+        let payingRelease = LockedValue<Bool>(false)
         let client = Stub.client { _, _, operation in
             switch operation {
             case getMemoOperation:
@@ -93,7 +95,11 @@ struct TimelineRowFenceTests {
                     )
                 }
                 // The read that pays for the held one leaves after the server confirmed the save,
-                // so the server it asks answers with the words it confirmed.
+                // so the server it asks answers with the words it confirmed. It is held where the
+                // first one was, because it carries everything the refused read carried: what the
+                // row is asserted to hold has to be asserted before this answer can supply it.
+                payingEntered.set(true)
+                try await hold(until: payingRelease)
                 return Stub.json(
                     Stub.memo(
                         uid: "a", content: "new",
@@ -129,11 +135,24 @@ struct TimelineRowFenceTests {
         await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         _ = await reading.value
+        // Bounded: a store that pays no debt at all has to fail the row below rather than leave
+        // the suite spinning for an answer that is never coming.
+        let payingDue = Date().addingTimeInterval(2)
+        while !payingEntered.get() && Date() < payingDue {
+            await Task.yield()
+        }
+
+        // The row as the refused read left it: the payment is out and cannot have touched it.
+        #expect(store.memos.first?.content == "new")
+        #expect(store.memos.first?.attachments.map(\.uid) == ["p"])
+        // What the read is FOR still lands: the tiers it reports are the freshest fact about that
+        // file, and the save says nothing about them.
+        #expect(store.memos.first?.attachments.first?.status == .ready)
+
+        payingRelease.set(true)
         await store.owedReadsSettled()
 
         #expect(store.memos.first?.content == "new")
-        // What the read is FOR still lands: the tiers it reports are the freshest fact about that
-        // file, and the save says nothing about them.
         #expect(store.memos.first?.attachments.first?.status == .ready)
     }
 
@@ -143,6 +162,8 @@ struct TimelineRowFenceTests {
         let gets = Counter()
         let entered = LockedValue<Bool>(false)
         let release = LockedValue<Bool>(false)
+        let payingEntered = LockedValue<Bool>(false)
+        let payingRelease = LockedValue<Bool>(false)
         let client = Stub.client { _, _, operation in
             switch operation {
             case getMemoOperation:
@@ -159,7 +180,11 @@ struct TimelineRowFenceTests {
                     )
                 }
                 // The read that pays for the held one leaves after the server confirmed the save,
-                // so the tags it carries are the ones the save's own words project to.
+                // so the tags it carries are the ones the save's own words project to. It is held
+                // where the first one was: it would put right anything the refused read got wrong,
+                // so the row is asserted while it is still out.
+                payingEntered.set(true)
+                try await hold(until: payingRelease)
                 return Stub.json(
                     taggedMemo(
                         uid: "a", content: "#new", tags: ["new"],
@@ -201,6 +226,21 @@ struct TimelineRowFenceTests {
         await store.edit(uid: "a", content: "#new", using: client.handle, baseURL: Stub.baseURL)
         release.set(true)
         _ = await reading.value
+        // Bounded: a store that pays no debt at all has to fail the row below rather than leave
+        // the suite spinning for an answer that is never coming.
+        let payingDue = Date().addingTimeInterval(2)
+        while !payingEntered.get() && Date() < payingDue {
+            await Task.yield()
+        }
+
+        // The whole row as the refused read left it, payment still out: the words, the tags the
+        // save's words project to, both files — and the one tier the refused read did get to say.
+        #expect(store.memos.first?.content == "#new")
+        #expect(store.memos.first?.tags == ["new"])
+        #expect(store.memos.first?.attachments.map(\.uid) == ["p", "q"])
+        #expect(store.memos.first?.attachments.map(\.status) == [.ready, .pending])
+
+        payingRelease.set(true)
         await store.owedReadsSettled()
 
         #expect(store.memos.first?.tags == ["new"])
@@ -614,13 +654,21 @@ struct TimelineRowFenceTests {
 
     /// The row is stamped when the server's answer is APPLIED, not when the save's task ends, and
     /// the instant between the two is what tells those apart: `commit` has already put the row in
-    /// the list and is still writing the picture of it down, so a read issued before the save can
-    /// land there with the save unfinished.
+    /// the list and is still writing the picture of it down, and a read issued after the save took
+    /// its place in line lands there with the save unfinished.
+    ///
+    /// A place in line holds no read off on its own: a mutation that ends up changing nothing
+    /// must not cost a reader the answer it went to fetch, so a read issued while a claim stands is
+    /// judged against the claim's own instant and passes it. The stamp the confirmation takes is
+    /// the only thing that can refuse this read, which is why the instant it is taken at is the
+    /// whole of what this case is about.
     @Test("a read that lands while the row is being written down does not put the old words back")
     func aReadLandingWhileTheRowPersistsDoesNotRestoreTheOldText() async throws {
         let gets = Counter()
         let entered = LockedValue<Bool>(false)
         let release = LockedValue<Bool>(false)
+        let saveEntered = LockedValue<Bool>(false)
+        let saveRelease = LockedValue<Bool>(false)
         let persisting = LockedValue<Bool>(false)
         let persistRelease = LockedValue<Bool>(false)
         let client = Stub.client { _, _, operation in
@@ -631,15 +679,41 @@ struct TimelineRowFenceTests {
                 if index == 0 {
                     entered.set(true)
                     try await hold(until: release)
-                    return Stub.json(Stub.memo(uid: "a", content: "old"))
+                    return Stub.json(
+                        Stub.memo(
+                            uid: "a", content: "old",
+                            attachments: [Stub.attachment(uid: "p", status: "ready")]
+                        )
+                    )
                 }
                 // The read that pays for the held one leaves after the server confirmed the save,
                 // so the server it asks answers with the words it confirmed.
-                return Stub.json(Stub.memo(uid: "a", content: "new"))
+                return Stub.json(
+                    Stub.memo(
+                        uid: "a", content: "new",
+                        attachments: [Stub.attachment(uid: "p", status: "ready")]
+                    )
+                )
             case patchMemoOperation:
-                return Stub.json(Stub.memo(uid: "a", content: "new"))
+                // Held so that the read under test can be issued while this save's place in line
+                // is taken and nothing it asked for has been confirmed.
+                saveEntered.set(true)
+                try await hold(until: saveRelease)
+                return Stub.json(
+                    Stub.memo(
+                        uid: "a", content: "new",
+                        attachments: [Stub.attachment(uid: "p", status: "pending")]
+                    )
+                )
             default:
-                return Stub.json(Stub.page([Stub.memo(uid: "a", content: "old")]))
+                return Stub.json(
+                    Stub.page([
+                        Stub.memo(
+                            uid: "a", content: "old",
+                            attachments: [Stub.attachment(uid: "p", status: "pending")]
+                        )
+                    ])
+                )
             }
         }
         // The bytes-to-disk step is the one seam inside `commit` a test can stand in, and it is
@@ -667,24 +741,41 @@ struct TimelineRowFenceTests {
         )
 
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let saving = Task {
+            await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
+        }
+        while !saveEntered.get() {
+            await Task.yield()
+        }
         let reading = Task {
             await store.refreshMemo(uid: "a", using: client.handle, baseURL: Stub.baseURL)
         }
         while !entered.get() {
             await Task.yield()
         }
-        let saving = Task {
-            await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
-        }
+        saveRelease.set(true)
         while !persisting.get() {
             await Task.yield()
         }
         release.set(true)
-        _ = await reading.value
+        // The row this read is allowed to write reaches the list before the picture of it queues
+        // behind the held one, and the tier it carries lands whether the rest of it was refused or
+        // not — so it says the read has arrived without saying what it was allowed to say.
+        // Bounded for the reason the paying reads above are: an answer that never reaches the row
+        // is a failure of the expectation below, not a suite that never ends.
+        let landingDue = Date().addingTimeInterval(2)
+        while store.memos.first?.attachments.first?.status != .ready && Date() < landingDue {
+            await Task.yield()
+        }
+
+        #expect(store.memos.first?.content == "new")
+
         persistRelease.set(true)
+        _ = await reading.value
         _ = await saving.value
         await store.owedReadsSettled()
 
         #expect(store.memos.first?.content == "new")
+        #expect(store.memos.first?.attachments.first?.status == .ready)
     }
 }
