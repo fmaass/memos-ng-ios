@@ -153,6 +153,73 @@ actor HeldTransport: MediaTransport {
     }
 }
 
+/// A transport that is cancelled rather than answered. Both shapes of it: the structured error a
+/// cancelled task throws, and the one `URLSession` reports when the task it belongs to is torn
+/// down — which is what a scrolled row and a slow link actually produce.
+actor AbandoningTransport: MediaTransport {
+    enum Shape {
+        case structured
+        case session
+    }
+
+    private let shape: Shape
+    private(set) var calls = 0
+
+    init(shape: Shape = .structured) {
+        self.shape = shape
+    }
+
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
+        calls += 1
+        switch shape {
+        case .structured: throw CancellationError()
+        case .session: throw URLError(.cancelled)
+        }
+    }
+}
+
+/// A transport that refuses the FIRST ask for one named attachment — the lapsed signature, in the
+/// shape the server sends it — and answers everything else with a picture, remembering every URL
+/// it was asked for.
+///
+/// One transport for two tiles on screen is what lets a single case hold both halves of the rule:
+/// the tile that failed is asked again, and the tile that did not is left alone. Asserted by uid,
+/// because "how many times in all" cannot tell those two apart.
+actor LapsedSignatureTransport: MediaTransport {
+    private let payload: Data
+    private let lapsed: String
+    private(set) var asked: [URL] = []
+    private var refusals = 0
+
+    init(payload: Data, lapsedFor uid: String) {
+        self.payload = payload
+        self.lapsed = uid
+    }
+
+    /// How often this attachment was asked for, whatever the signature on the link.
+    func asks(for uid: String) -> Int {
+        asked.filter { $0.path.contains(uid) }.count
+    }
+
+    func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> (Data, URLResponse)
+    {
+        let url = request.url ?? URL(string: "https://memos.example.invalid/")!
+        asked.append(url)
+        let isLapsed = url.path.contains(lapsed) && refusals == 0
+        if isLapsed { refusals += 1 }
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: isLapsed ? 403 : 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": isLapsed ? "application/json" : "image/png"]
+        )!
+        return (isLapsed ? Data(#"{"detail":"Signature expired"}"#.utf8) : payload, response)
+    }
+}
+
 /// A transport that stops in the middle, so a test can act while a fetch is on the wire. The two
 /// gates are the whole point: `waitUntilStarted` says the request has begun, `release` lets it
 /// finish, and between them the test can change who the device is signed in as.
@@ -268,6 +335,33 @@ struct MediaImageLoaderTests {
         // Reset rather than restored afterwards: a test that fails part-way through still leaves
         // the next one a real transport, instead of whatever stub it was holding.
         MediaImageLoader.transport = MediaSession.shared
+        // This test's own signal, for the reason the store is this test's own: it is read by every
+        // mounted tile in the process, and a case that publishes on it must not be telling some
+        // other suite's view to fetch.
+        MediaRetrySignal.shared = MediaRetrySignal()
+    }
+
+    /// Waits for what a view on screen does on its own turn, and gives up rather than hanging: a
+    /// case that says "1 expected, 2" is worth more than one that times the bundle out.
+    func eventually(tries: Int = 80, _ condition: () async -> Bool) async -> Bool {
+        for _ in 0..<tries {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return await condition()
+    }
+
+    /// A tile in a window of its own, so its `.task` runs and what it does is what a person would
+    /// be looking at. `ImageRenderer` cannot be used here: it draws one frame and never runs a
+    /// task, which is the whole of what these cases are about.
+    func hostedTile(for attachment: MemoAttachment) -> UIWindow {
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 120, height: 120)))
+        window.rootViewController = UIHostingController(
+            rootView: AttachmentThumbnail(attachment: attachment, slot: MemoPresentation.gridSlot)
+        )
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+        return window
     }
 
     /// Not private because the Places pin view is a loader caller too, and its two cases belong in
@@ -486,6 +580,123 @@ struct MediaImageLoaderTests {
         let dead = MediaFixture.signed(uid: "policy", exp: 1)
         #expect(SignedMediaURL(url: live).cachePolicy(at: Date()) == .useProtocolCachePolicy)
         #expect(SignedMediaURL(url: dead).cachePolicy(at: Date()) == .reloadIgnoringLocalCacheData)
+    }
+
+    // MARK: - a picture nobody answered about
+
+    /// The distinction the whole enumeration exists for, taken from the loader's own call rather
+    /// than argued about: a fetch that was abandoned is not a word about the file, and a fetch the
+    /// server refused is.
+    @Test("a cancelled fetch is not an answer, and a refused one is")
+    func anAbandonedFetchIsNotAnAnswer() async {
+        let key = MediaImageKey(uid: "abandoned", tier: "thumb")
+        let url = MediaFixture.signed(uid: "abandoned")
+
+        // Both shapes a cancellation reaches this layer in.
+        for shape in [AbandoningTransport.Shape.structured, .session] {
+            let transport = AbandoningTransport(shape: shape)
+            await withTransport(transport) {
+                #expect(await MediaImageLoader.answer(for: key, url: url) == .interrupted)
+                #expect(await transport.calls == 1, "the fetch never reached the transport")
+            }
+        }
+
+        // The control: a refusal answered by the server is an answer, and the optional mapping
+        // every other caller still uses cannot tell the two apart — which is why it is the views
+        // that were given the difference.
+        let refusal = ScriptedTransport(payload: Data(#"{"detail":"Bad"}"#.utf8), status: 403)
+        await withTransport(refusal) {
+            #expect(await MediaImageLoader.answer(for: key, url: url) == .unavailable)
+            #expect(await MediaImageLoader.uiImage(for: key, url: url) == nil)
+        }
+
+        // And a picture is still a picture, so the two lines above are about the answers and not
+        // about a function that stopped producing one.
+        await withTransport(ScriptedTransport(payload: MediaFixture.png(.red))) {
+            #expect(await MediaImageLoader.answer(for: key, url: url) != .unavailable)
+            #expect(await MediaImageLoader.uiImage(for: key, url: url) != nil)
+        }
+
+        // Which errors mean "never answered", asserted rather than inferred from a fetch that
+        // happened to be cancelled at the right moment.
+        #expect(MediaImageLoader.wasAbandoned(CancellationError()))
+        #expect(MediaImageLoader.wasAbandoned(URLError(.cancelled)))
+        #expect(!MediaImageLoader.wasAbandoned(URLError(.notConnectedToInternet)))
+    }
+
+    /// The morning the owner reopened the app to a card of warning triangles: the links held from
+    /// the evening before had lapsed, every picture was refused, and nothing on the phone asked
+    /// again — the list came back with byte-identical URLs, so no tile saw anything change.
+    ///
+    /// Both halves of the rule in one case, because "one attempt per failed tile, none for the
+    /// loaded ones" is a statement about two tiles: the same signal, the same moment, and the
+    /// counts read per attachment.
+    @Test("the list coming back asks again for the tile that failed, and for no other")
+    func onlyTheFailedTileIsAskedAgain() async {
+        let lapsed = "tile-lapsed"
+        let held = "tile-held"
+        let transport = LapsedSignatureTransport(payload: MediaFixture.png(.red), lapsedFor: lapsed)
+        await withTransport(transport) {
+            let failing = MediaFixture.attachment(uid: lapsed)
+            let loaded = MediaFixture.attachment(uid: held)
+            let failedKey = MediaImageLoader.key(for: failing, tier: .thumb)
+            let loadedKey = MediaImageLoader.key(for: loaded, tier: .thumb)
+            let windows = [hostedTile(for: failing), hostedTile(for: loaded)]
+
+            let settled = await eventually {
+                await transport.asks(for: lapsed) == 1
+                    && MediaImageLoader.cachedUIImage(for: loadedKey) != nil
+            }
+            #expect(settled, "the two tiles never finished their first load")
+            #expect(
+                MediaImageLoader.cachedUIImage(for: failedKey) == nil,
+                "the refused tile was supposed to end its first load with nothing"
+            )
+
+            // The list was read again. Nothing else changed: the same window, the same tiles,
+            // the same links.
+            MediaRetrySignal.shared.publish()
+
+            let painted = await eventually { MediaImageLoader.cachedUIImage(for: failedKey) != nil }
+            let askedForFailed = await transport.asked.filter { $0.path.contains(lapsed) }
+            let askedForLoaded = await transport.asks(for: held)
+            for window in windows { window.isHidden = true }
+
+            #expect(painted, "the tile kept its warning triangle after the list came back")
+            #expect(askedForFailed.count == 2, "\(askedForFailed.count) asks for the failed tile")
+            #expect(
+                askedForFailed.first == askedForFailed.last,
+                "the retry only happened because the link had changed, which proves nothing"
+            )
+            #expect(askedForLoaded == 1, "a tile holding its picture was sent back to the network")
+        }
+    }
+
+    /// The refusal the rule is built on, on the wire rather than in a value: a tile whose request
+    /// is still out is showing nothing, which is exactly what a tile owed a picture looks like.
+    /// Asking again there would put the same bytes on the wire twice and blank the tile meanwhile.
+    @Test("a signal arriving while the tile's fetch is out puts nothing on the wire")
+    func aSignalIsRefusedWhileTheTilesFetchIsOut() async {
+        let transport = HeldTransport(payload: MediaFixture.png(.red))
+        await withTransport(transport) {
+            let attachment = MediaFixture.attachment(uid: "tile-in-flight")
+            let key = MediaImageLoader.key(for: attachment, tier: .thumb)
+            let window = hostedTile(for: attachment)
+            await transport.waitUntilStarted(1)
+
+            MediaRetrySignal.shared.publish()
+            MediaRetrySignal.shared.publish()
+            // A second request would have reached the transport well inside this wait, and the
+            // count is read after it rather than at the first opportunity.
+            _ = await eventually(tries: 8) { await transport.calls > 1 }
+            #expect(await transport.calls == 1, "a tile with a request already out asked again")
+
+            // And the tile is not stranded by the refusal: the fetch it was holding still paints.
+            await transport.releaseAll()
+            let painted = await eventually { MediaImageLoader.cachedUIImage(for: key) != nil }
+            window.isHidden = true
+            #expect(painted, "the fetch that was let through never reached the tile")
+        }
     }
 
     // MARK: - one freshness rule across both layers

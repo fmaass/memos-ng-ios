@@ -1353,3 +1353,62 @@ extension MediaImageLoaderTests {
         #expect(stamp != identity.generation, "the page's still was stamped when it landed")
     }
 }
+
+/// The full-screen picture's half of the same complaint. It draws the same glyph as a tile, from
+/// the same kind of latch, and a reader looking at a triangle where a photograph should be has the
+/// same recourse: none, until something rebuilds the page.
+///
+/// In THIS suite for the reason the suite exists: the decoded store is process-wide, the suite
+/// installs one of its own per test against its own identity clock and its own retry signal, and
+/// it is `.serialized`, so exactly one of each is in force while a hosted page reaches them.
+extension MediaImageLoaderTests {
+    @Test("a still that was refused is asked for again when the list is read again")
+    func aRefusedStillIsAskedAgain() async throws {
+        let uid = "still-retry"
+        let attachment = MediaViewerPageTests.image(uid)
+        let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
+        let key = page.stillKey
+        // A hit would be answered with no fetch at all, and this case would assert nothing.
+        #expect(
+            MediaImageLoader.cachedUIImage(for: key) == nil,
+            "something warmed this key — the refusal below would never happen"
+        )
+
+        let transport = LapsedSignatureTransport(payload: MediaFixture.png(.red), lapsedFor: uid)
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(
+            rootView: MediaViewerPage(
+                page: page,
+                onHoldsChange: { _ in },
+                player: nil,
+                play: {},
+                cache: URLCache(memoryCapacity: 4 * 1024 * 1024, diskCapacity: 0, directory: nil),
+                transport: transport
+            )
+        )
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+
+        let refused = await eventually { await transport.asks(for: uid) == 1 }
+        #expect(refused, "the page never asked for its still")
+        #expect(
+            MediaImageLoader.cachedUIImage(for: key) == nil,
+            "the refusal was supposed to leave the page with nothing"
+        )
+
+        // The list was read again. The page is the one already on screen, and its link has not
+        // moved.
+        MediaRetrySignal.shared.publish()
+
+        let painted = await eventually { MediaImageLoader.cachedUIImage(for: key) != nil }
+        let asked = await transport.asked.filter { $0.path.contains(uid) }
+        window.isHidden = true
+
+        #expect(painted, "the full-screen picture kept its warning triangle")
+        #expect(asked.count == 2, "\(asked.count) asks for a still that was refused once")
+        #expect(
+            asked.first == asked.last,
+            "the retry only happened because the link had changed, which proves nothing"
+        )
+    }
+}
