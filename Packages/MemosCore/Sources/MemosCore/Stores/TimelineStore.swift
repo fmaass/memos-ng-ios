@@ -782,7 +782,12 @@ public final class TimelineStore {
             // The SESSION owns the verdict; this store owns only what it says about it. A refusal
             // of a credential the device has already replaced is not this list's news, and "sign
             // in again" over a session that renewed a second ago is a false instruction.
-            if await onUnauthorized(refusal) == .endedSession {
+            //
+            // The second question is asked HERE, after that await and with nothing awaited before
+            // the write: the rule's own fences are taken before its awaits, and a sign-in can
+            // complete inside them. The verdict is about the session that issued this request,
+            // and so is the sentence — neither is the incoming identity's to carry.
+            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle) {
                 lastError = refusal.errorDescription
             }
             return
@@ -841,6 +846,16 @@ public final class TimelineStore {
         guard let session else { return true }
         guard let current = session.activeHandle?.generation else { return false }
         return current == handle.generation
+    }
+
+    /// The question asked AFTER the session has answered a refusal, with nothing awaited between
+    /// it and the sentence it guards (`SessionReporting.nothingEstablishedSince`). The fence
+    /// above cannot cover it: it is taken before the await, and the switch happens inside it.
+    ///
+    /// A store with no session named to it writes, for the reason it is current above.
+    private func nothingEstablishedSince(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        return session.nothingEstablishedSince(handle)
     }
 
     // MARK: - writes

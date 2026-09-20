@@ -184,6 +184,8 @@ private final class ReportingSink: SessionReporting {
 
     func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool { true }
 
+    func nothingEstablishedSince(_ handle: SessionHandle) -> Bool { true }
+
     func noteTransportFailure(
         _ failure: ServerReachability.Reason,
         issuedUnder generation: Int

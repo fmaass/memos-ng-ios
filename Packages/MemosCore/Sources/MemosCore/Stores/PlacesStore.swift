@@ -124,7 +124,9 @@ public final class PlacesStore {
         // the typed value it arrived as, the epoch it presented included; nothing here re-derives
         // it, filters it or turns it into a Bool.
         if let refusal = StoreFailure.refusal(error) {
-            if await onUnauthorized(refusal) == .endedSession {
+            // And asked again afterwards, with nothing awaited before the write — the same rule,
+            // and the same reason, as `MediaLibraryStore.report`.
+            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle) {
                 lastError = refusal.errorDescription
             }
             return
@@ -139,6 +141,13 @@ public final class PlacesStore {
         guard let session else { return true }
         guard let current = session.activeHandle?.generation else { return false }
         return current == handle.generation
+    }
+
+    /// The post-await half of the same question — the same rule, for the same reason, as
+    /// `MediaLibraryStore.nothingEstablishedSince`.
+    private func nothingEstablishedSince(_ handle: SessionHandle) -> Bool {
+        guard let session else { return true }
+        return session.nothingEstablishedSince(handle)
     }
 
     /// Every located file, as the map's own model.

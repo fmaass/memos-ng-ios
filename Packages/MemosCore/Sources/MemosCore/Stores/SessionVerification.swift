@@ -127,6 +127,24 @@ public protocol SessionReporting: AnyObject {
     /// between the question and the sentence is one more instant for the thing it exists to catch.
     func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool
 
+    /// Whether this device has established a session since the one a handle names.
+    ///
+    /// The question an effect asks the instant AFTER the refusal rule has answered it, and before
+    /// the sentence it is about to write. That rule takes its own fences before its awaits, and a
+    /// whole account switch can complete inside them — after which the sentence would land on
+    /// somebody else's screen.
+    ///
+    /// "Is a session active now" cannot answer it. A replacement that was itself withdrawn leaves
+    /// none, exactly as the effect's OWN sign-out does, and those two owe opposite answers: the
+    /// sign-out is where the sentence is the whole point. Only something that moves when a client
+    /// is INSTALLED, and stands still when one is withdrawn, tells them apart.
+    ///
+    /// Synchronous, on a `@MainActor` protocol, so the answer and the write share one instant —
+    /// an await between them is one more instant for the thing it exists to catch. There is
+    /// deliberately no default implementation: a fence that answers by default is one the next
+    /// conformer gets wrong with nothing to tell it.
+    func nothingEstablishedSince(_ handle: SessionHandle) -> Bool
+
     /// A failure that never reached the server, judged against the incarnation that ISSUED the
     /// request rather than the one running now.
     ///

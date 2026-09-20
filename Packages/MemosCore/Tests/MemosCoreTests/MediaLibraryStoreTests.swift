@@ -384,6 +384,32 @@ struct MediaLibraryStoreTests {
         )
     }
 
+    /// The tab is not torn down on a subject swap — the signed-in root keeps its state — so
+    /// without this the outgoing account's photographs stay on screen under the incoming one.
+    @Test("signing in as somebody else empties the grid and forgets the cursor")
+    func identityChangeResetsTheGrid() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            paths.set(paths.get() + [request.path ?? ""])
+            return Self.page(Self.uids(["a"]), nextCursor: "page-2")
+        }
+        let store = MediaLibraryStore(pageSize: 1, order: .oldestFirst)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.items.map(\.uid) == ["a"], "the premise: the outgoing account had rows")
+
+        store.sessionIdentityChanged()
+        #expect(store.items.isEmpty, "the outgoing account's files stayed under the incoming one")
+        #expect(store.hasMore, "an account nobody has read yet cannot be at the end of its files")
+        // Which end of the library is first is a choice about this screen, not about the account.
+        #expect(store.order == .oldestFirst, "the swap turned the grid round under the person")
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(
+            !(paths.get().last ?? "").contains("cursor="),
+            "the outgoing account's cursor was carried into the incoming one's library"
+        )
+    }
+
     @Test("a page that answers a direction nobody is reading any more is dropped, cursor and all")
     func supersededOrderPageIsDropped() async {
         let entered = Signal()
@@ -532,6 +558,8 @@ private final class ReportingSink: SessionReporting {
     init(for handle: SessionHandle) { activeHandle = handle }
 
     func stillNamesCurrentCredential(_ refusal: CredentialRefusal) -> Bool { true }
+
+    func nothingEstablishedSince(_ handle: SessionHandle) -> Bool { true }
 
     func noteTransportFailure(
         _ failure: ServerReachability.Reason,

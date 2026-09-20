@@ -483,6 +483,153 @@ struct RefusalEpochTests {
         }
     }
 
+    // MARK: - a refusal overtaken by an ESTABLISHMENT
+
+    // The fence every store takes before `onUnauthorized` cannot see this ordering: at the instant
+    // it is taken, nothing has happened yet. The account switch lands INSIDE the await, and the
+    // store then resumes and writes one identity's sentence onto another identity's screen.
+    //
+    // Each store has two rows, and the second is the one a question about what is ACTIVE gets
+    // wrong: the replacement is withdrawn again before the store resumes, so nothing is active
+    // either way — the same reading an ordinary sign-out leaves, where the sentence is the whole
+    // point of the refusal (the rows above, which stay green and unedited).
+
+    /// The window, as a place the test can stand in: the session's rule runs to completion — the
+    /// wipe happens, `.endedSession` is the truth — and the store is then HELD there, before the
+    /// line that writes the sentence. Whatever the test does next happens inside the store's own
+    /// await, which is exactly where the switch gets in.
+    private func heldRule(
+        of session: SessionStore,
+        reached: Latch,
+        release: Latch
+    ) -> @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome {
+        { refusal in
+            let outcome = await session.handle(refusal)
+            reached.signal()
+            await release.wait()
+            return outcome
+        }
+    }
+
+    /// A whole other session, established through the REAL sign-in path while a store is held —
+    /// and, in the second row, withdrawn again before it is let go.
+    private func overtake(_ signed: Signed, withdrawing: Bool) async {
+        await signed.session.signIn(serverAddress: storedAddress, token: successorToken)
+        #expect(signed.session.state.user != nil, "the premise: a session was established")
+        if withdrawing {
+            await signed.session.signOutWithoutRevoking()
+            #expect(signed.session.activeHandle == nil, "the premise: and it went again")
+        }
+    }
+
+    @Test("TimelineStore.report — a refusal overtaken by a sign-in leaves the list no sentence")
+    func timelineReportOvertaken() async throws {
+        for withdrawing in [false, true] {
+            let signed = await signedIn(renewing: false)
+            let reached = Latch()
+            let release = Latch()
+            let store = TimelineStore(
+                onUnauthorized: heldRule(of: signed.session, reached: reached, release: release)
+            )
+            store.reports(to: signed.session)
+            let handle = try #require(signed.session.activeHandle)
+            let refreshing = Task { await store.refresh(using: handle, baseURL: Stub.baseURL) }
+            await reached.wait()
+
+            await overtake(signed, withdrawing: withdrawing)
+            // What the screen itself does on a swap, done here too — hygiene, not the fence: a
+            // reset cannot stop a write that lands after it, which is what this asserts.
+            store.sessionIdentityChanged(
+                to: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "next")
+            )
+            release.signal()
+            await refreshing.value
+
+            #expect(store.lastError == nil, "one identity's sentence landed on another's list")
+        }
+    }
+
+    @Test("MediaLibraryStore.report — a refusal overtaken by a sign-in leaves the grid no sentence")
+    func mediaLibraryReportOvertaken() async throws {
+        for withdrawing in [false, true] {
+            let signed = await signedIn(renewing: false)
+            let reached = Latch()
+            let release = Latch()
+            let store = MediaLibraryStore(
+                onUnauthorized: heldRule(of: signed.session, reached: reached, release: release)
+            )
+            store.reports(to: signed.session)
+            let handle = try #require(signed.session.activeHandle)
+            let refreshing = Task { await store.refresh(using: handle, baseURL: Stub.baseURL) }
+            await reached.wait()
+
+            await overtake(signed, withdrawing: withdrawing)
+            store.sessionIdentityChanged()
+            release.signal()
+            await refreshing.value
+
+            #expect(store.lastError == nil, "one identity's sentence landed on another's grid")
+        }
+    }
+
+    @Test("PlacesStore.report — a refusal overtaken by a sign-in leaves the map no sentence")
+    func placesReportOvertaken() async throws {
+        for withdrawing in [false, true] {
+            let signed = await signedIn(renewing: false)
+            let reached = Latch()
+            let release = Latch()
+            let store = PlacesStore(
+                onUnauthorized: heldRule(of: signed.session, reached: reached, release: release)
+            )
+            store.reports(to: signed.session)
+            let handle = try #require(signed.session.activeHandle)
+            let loading = Task { await store.load(using: handle, baseURL: Stub.baseURL) }
+            await reached.wait()
+
+            // This store has no identity reset and needs none: the signed-in view creates it and
+            // drops it with itself, so the incoming identity gets a new one (`PlacesStore`).
+            await overtake(signed, withdrawing: withdrawing)
+            release.signal()
+            await loading.value
+
+            #expect(store.lastError == nil, "one identity's sentence landed on another's map")
+        }
+    }
+
+    /// The fourth effect, and the one that writes no sentence itself: `download` forwards the
+    /// session's answer and `MediaSaveFlow` turns it into the words on the save. Overtaken, what
+    /// it must forward is the supersede — not silence, but the true sentence about the sign-in
+    /// having changed, in place of a rejection the account now on screen never earned.
+    ///
+    /// The switch has to land inside the WIPE here, because this lane has no rule of its own to
+    /// hold: the credential store is what lets a sign-in in there.
+    @Test("download — a refusal overtaken by a sign-in is superseded, not a rejection")
+    func downloadOvertaken() async throws {
+        let box = LockedValue<SessionStore?>(nil)
+        let signingIn = LockedValue<Bool>(false)
+        let credentials = InterruptingCredentials {
+            guard let session = await box.get(), signingIn.get() else { return }
+            signingIn.set(false)
+            await session.signIn(serverAddress: storedAddress, token: successorToken)
+        }
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { _, _, _ in Stub.json(Stub.user) }
+            }
+        )
+        box.set(session)
+        await session.signIn(serverAddress: storedAddress, token: storedToken)
+        #expect(session.state.user != nil, "the premise: there is a session to refuse")
+
+        signingIn.set(true)
+        let thrown = await #expect(throws: OriginalMediaError.self) {
+            try await session.download(attachment(), transport: RenewingDownloads(status: 401) {})
+        }
+        #expect(session.state.user != nil, "the premise: the sign-in inside the wipe owns this")
+        #expect(thrown == OriginalMediaError.superseded, "the incoming account got the rejection")
+    }
+
     private func timeline(for signed: Signed) -> TimelineStore {
         let store = TimelineStore(
             onUnauthorized: { [session = signed.session] refusal in
