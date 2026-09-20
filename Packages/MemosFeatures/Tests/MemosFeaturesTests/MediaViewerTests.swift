@@ -621,6 +621,83 @@ struct MediaZoomTests {
         #expect(out.offset.height == 0)
     }
 
+    /// A first pinch out of rest, off centre, on a picture fitted to the width — the case no
+    /// offset vector here covers, because every other anchored one starts at a scale whose limits
+    /// are already wide. At 1.4 the vertical `panLimit` is still zero, the scale having to pass
+    /// 844/520 before that axis has any room at all, so the clamp inside `live` throws the
+    /// anchor's vertical share away and the picture is pinned to the middle of the screen while
+    /// the fingers are somewhere else entirely. Sideways it follows them, which is what makes the
+    /// half-right behaviour hard to see.
+    @Test("a first pinch in a corner of an upright picture keeps that corner under the fingers")
+    func firstPinchOnAnUprightPictureHoldsItsPoint() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.4, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 1.4) < 0.001)
+        // a - m*a at m = 1.4: two fifths of the anchor vector, the other way about.
+        #expect(abs(out.offset.width + 40) < 0.001)
+        #expect(abs(out.offset.height - 20) < 0.001)
+    }
+
+    /// The same first pinch on a wide shape, which is fitted far shorter still: nothing vertical
+    /// opens until the scale passes 844/292.5, so the vertical share is dropped here too. Two
+    /// shapes rather than one because this is a property of the clamp, not of an aspect ratio.
+    @Test("a first pinch in a corner of a wide picture keeps that corner under the fingers")
+    func firstPinchOnAWidePictureHoldsItsPoint() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.4, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 1.4) < 0.001)
+        #expect(abs(out.offset.width + 40) < 0.001)
+        #expect(abs(out.offset.height - 20) < 0.001)
+    }
+
+    /// The far side of that threshold on the upright shape. The vertical share survives whole only
+    /// from 372/210, well past where the limit stops being zero, so 2 is the first round number
+    /// that clears it: 195 and 98 of room against a target of 100 and 50, and the anchor is
+    /// honoured on both axes.
+    @Test("a pinch far enough out on an upright picture keeps its point on both axes")
+    func pinchPastTheVerticalThresholdOnAnUprightPicture() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 2, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 2) < 0.001)
+        #expect(abs(out.offset.width + 100) < 0.001)
+        #expect(abs(out.offset.height - 50) < 0.001)
+    }
+
+    /// And on the wide shape, whose threshold is 372/96.25 — so it takes a pinch to 4 before the
+    /// room, 585 and 163, holds a target of 300 and 150 whole.
+    @Test("a pinch far enough out on a wide picture keeps its point on both axes")
+    func pinchPastTheVerticalThresholdOnAWidePicture() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 4, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 4) < 0.001)
+        #expect(abs(out.offset.width + 300) < 0.001)
+        #expect(abs(out.offset.height - 150) < 0.001)
+    }
+
     /// The pinch and the drag are separate recognisers and nothing says which of them ends first.
     /// Either order has to leave the picture exactly where the fingers had it, and both orders
     /// have to end on the same committed transform — all of it inside the limits here, so a clamp
