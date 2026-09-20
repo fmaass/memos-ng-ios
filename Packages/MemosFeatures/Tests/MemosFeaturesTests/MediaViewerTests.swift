@@ -699,7 +699,8 @@ struct MediaZoomTests {
 
     /// The same seam in the other direction. Every other pan-under-pinch vector here drags
     /// sideways, so the rebasing of the VERTICAL translation is held by this one alone — and a
-    /// translation that is not rebased is multiplied twice by the pinch still under the fingers.
+    /// translation stored without it is magnified by the pinch still under the fingers: the 20
+    /// points dragged here would be redrawn as 30.
     /// Inside the limits at both scales, so no clamp is part of the answer.
     @Test("a vertical pan under a pinch is rebased the same way")
     func verticalPanUnderPinchIsRebased() {

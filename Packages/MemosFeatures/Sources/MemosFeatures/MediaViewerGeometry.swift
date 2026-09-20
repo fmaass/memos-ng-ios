@@ -210,10 +210,11 @@ public enum MediaZoom {
     /// A pinch may still be under the fingers when the drag ends, and its arithmetic will
     /// multiply whatever offset is stored here. What is stored is therefore the translation that
     /// survives that multiplication unchanged, so the picture does not jump at the commit — while
-    /// that rebased offset stays inside the limits of the STORED scale, which are tighter than the
-    /// live one's. Where that clamp binds, the nearest allowed offset is what is kept and the
-    /// frame moves by the difference: an offset outside the limits of the scale it is stored with
-    /// is not something the callers that read a committed transform can be handed.
+    /// that rebased offset stays inside the limits of the STORED scale. Those are not the live
+    /// scale's: never wider while the pinch zooms in, never tighter while it zooms out. Where that
+    /// clamp binds, the nearest allowed offset is what is kept and the frame moves by the
+    /// difference: an offset outside the limits of the scale it is stored with is not something
+    /// the callers that read a committed transform can be handed.
     public static func panned(
         _ transform: Transform,
         by translation: CGSize,
