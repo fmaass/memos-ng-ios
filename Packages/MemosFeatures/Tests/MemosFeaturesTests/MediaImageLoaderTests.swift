@@ -349,10 +349,10 @@ struct TileHost: View {
 /// Two tiles side by side in ONE window: the one under examination on the left, and on the right a
 /// tile that is MEANT to fail.
 ///
-/// One window because a single draw carries both of them. A glyph on the right is therefore not
-/// merely evidence that the pixel reading works — it is evidence that this draw would have shown a
-/// glyph on the left had the left tile been holding a failure, which is what makes "no triangle"
-/// an observation rather than a wait.
+/// One window so that both tiles are committed, drawn and read through the same path. A glyph on
+/// the right is therefore not merely evidence that the pixel reading works — it is evidence that a
+/// failure the left tile was holding would have been drawn and read too, which is what makes "no
+/// triangle" an observation rather than a wait.
 struct TilePairHost: View {
     let subject: TileSubject
     let control: MemoAttachment
@@ -896,8 +896,7 @@ struct MediaImageLoaderTests {
     /// does the first one come back refused.
     ///
     /// Nobody is waiting for that refusal, and a tile that paints it is putting a warning triangle
-    /// on a picture it is fetching at that very moment — the triangle the whole change is about,
-    /// re-earned by the fix for it.
+    /// on a picture it is fetching at that very moment.
     @Test("a refusal for a load that was superseded leaves the tile alone")
     func aSupersededRefusalDoesNotFailTheTile() async {
         let uid = "tile-superseded"
@@ -933,8 +932,10 @@ struct MediaImageLoaderTests {
             let drewIt = await eventually(tries: 10) {
                 glyphPixels(in: window, within: Self.rightTile) > 0
             }
-            // Read in the same breath as the line above and therefore from a draw that has already
-            // shown one triangle: a tile holding a failure would be showing it in that draw too.
+            // A second draw of the same window, taken after the one that showed a triangle. The
+            // abandoned request was refused FIRST, so a tile that took that refusal has held its
+            // failure for longer than the tile beside it, and a failure stays until something asks
+            // again — nothing here does. It would be in this draw.
             let examined = glyphPixels(in: window, within: Self.leftTile)
             #expect(drewIt, "the tile that really failed drew nothing — nothing is being read here")
             #expect(examined == 0, "a superseded refusal put the warning triangle back")
