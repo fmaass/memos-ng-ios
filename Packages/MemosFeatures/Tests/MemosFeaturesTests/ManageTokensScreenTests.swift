@@ -32,6 +32,7 @@ struct ManageTokensScreenTests {
         notice: String? = nil,
         isBusy: Bool = false,
         draft: Held<String>? = nil,
+        pending: Held<ManagedToken?>? = nil,
         signOn: @escaping () -> Void = {},
         reread: @escaping () -> Void = {},
         create: @escaping (String) -> Void = { _ in },
@@ -40,6 +41,7 @@ struct ManageTokensScreenTests {
         dismissSecret: @escaping () -> Void = {}
     ) -> ManageTokensScreen {
         let held = draft ?? Held("")
+        let asked = pending ?? Held(nil)
         return ManageTokensScreen(
             state: state,
             appAccountName: appAccountName,
@@ -49,6 +51,7 @@ struct ManageTokensScreenTests {
             isBusy: isBusy,
             now: now,
             draft: Binding(get: { held.value }, set: { held.value = $0 }),
+            pendingRevoke: Binding(get: { asked.value }, set: { asked.value = $0 }),
             signOn: signOn,
             reread: reread,
             create: create,
@@ -257,21 +260,122 @@ struct ManageTokensScreenTests {
     }
 
     /// The whole reason this screen exists: the grant is the authority here, so a token belonging
-    /// to another device can be taken away from the phone that is still holding it.
-    @Test("pressing a sibling's revoke asks for that token and no other")
+    /// to another device can be taken away from the phone that is still holding it. The press
+    /// takes nothing away by itself — it names the token the question is about, and the question's
+    /// own answer is what sends anything.
+    @Test("pressing a sibling's revoke asks about that token and sends nothing yet")
     func revokingASiblingSendsItsId() {
         let asked = Held<Int?>(nil)
+        let pending = Held<ManagedToken?>(nil)
 
         let pressed = PressProbe.withElement(
             labelled: "Revoke Laptop",
             in: screen(
                 state: .listed([token(id: 1, name: "Kitchen phone"), token(id: 7, name: "Laptop")]),
+                pending: pending,
                 revoke: { asked.value = $0 }
             )
         ) { $0?.accessibilityActivate() ?? false }
 
         #expect(pressed, "the revoke control did not accept an activation")
-        #expect(asked.value == 7)
+        #expect(asked.value == nil, "the press took the token away without asking first")
+        #expect(pending.value?.id == 7)
+    }
+
+    /// The busy guard is visible only through the pending binding. The case above watches the
+    /// revoke callback, and a press on this screen never calls that back at all — it raises a
+    /// question — so that case reads the same whether the control is quiet or not. This one reads
+    /// what a press would have written.
+    @Test("a revoke pressed while a call is in flight asks about nothing")
+    func busyPressSetsNoPendingToken() {
+        let asked = Held<Int?>(nil)
+        let pending = Held<ManagedToken?>(nil)
+
+        let onScreen = PressProbe.withElement(
+            labelled: "Revoke Laptop",
+            in: screen(
+                state: .listed([token(id: 7, name: "Laptop")]),
+                isBusy: true,
+                pending: pending,
+                revoke: { asked.value = $0 }
+            )
+        ) { element -> Bool in
+            let present = element != nil
+            element?.accessibilityActivate()
+            return present
+        }
+
+        #expect(onScreen, "the revoke control left the screen instead of going quiet")
+        #expect(pending.value == nil, "a busy press raised the question anyway")
+        #expect(asked.value == nil)
+    }
+
+    /// A management session that ended, or an app that was put away, takes the list with it —
+    /// and the question was about a row of that list.
+    @Test("a question does not outlive the list it was raised from")
+    func aPendingRevokeGoesWithItsList() {
+        let pending = Held<ManagedToken?>(token(id: 7, name: "Laptop"))
+
+        RedrawProbe.host(
+            screen(state: .listed([token(id: 7, name: "Laptop")]), pending: pending),
+            then: screen(state: .locked(.discarded), pending: pending)
+        )
+
+        #expect(pending.value == nil)
+    }
+
+    /// A list that came back without the token is the same thing said differently: the row the
+    /// question named is not on the screen any more.
+    @Test("a question about a token the list no longer names is withdrawn")
+    func aPendingRevokeGoesWhenItsRowDoes() {
+        let pending = Held<ManagedToken?>(token(id: 7, name: "Laptop"))
+
+        RedrawProbe.host(
+            screen(state: .listed([token(id: 7, name: "Laptop")]), pending: pending),
+            then: screen(state: .listed([token(id: 1, name: "Kitchen phone")]), pending: pending)
+        )
+
+        #expect(pending.value == nil)
+    }
+
+    /// The question's own two answers, rendered on their own. A presented dialog is drawn by the
+    /// system outside the hosted tree, so these are pressed where a test can watch them.
+    @Test("confirming asks for the token the question was raised about")
+    func confirmingRevokesThatToken() {
+        let asked = Held<[Int]>([])
+        let buttons = RevokeConfirmationButtons(
+            token: token(id: 7, name: "Laptop"),
+            confirm: { asked.value.append($0) },
+            cancel: {}
+        )
+
+        let pressed = PressProbe.withElement(
+            labelled: ManageTokensPresentation.revokeTitle,
+            in: buttons
+        ) { $0?.accessibilityActivate() ?? false }
+
+        #expect(pressed, "the confirming control did not accept an activation")
+        #expect(asked.value == [7])
+    }
+
+    @Test("cancelling the question asks for nothing")
+    func cancellingRevokesNothing() {
+        let asked = Held<[Int]>([])
+        let cancelled = Held(0)
+        let buttons = RevokeConfirmationButtons(
+            token: token(id: 7, name: "Laptop"),
+            confirm: { asked.value.append($0) },
+            cancel: { cancelled.value += 1 }
+        )
+
+        let pressed = PressProbe.withElement(
+            labelled: ManageTokensPresentation.cancelTitle,
+            in: buttons
+        ) { $0?.accessibilityActivate() ?? false }
+
+        #expect(pressed, "the cancelling control did not accept an activation")
+        #expect(asked.value.isEmpty)
+        #expect(cancelled.value == 1)
     }
 
     @Test("creating hands over the name that was typed")

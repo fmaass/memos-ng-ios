@@ -1977,6 +1977,27 @@ s_textsel() {
   return 1
 }
 
+s_buttonstyle() {
+  # A card on the token management screen is ONE row of a List, and SwiftUI presses a row's
+  # default-styled buttons on a tap anywhere in that row — with several in one row, not necessarily
+  # the one under the finger, so a tap on a token's name revoked a different token and a tap on a
+  # minted token's plaintext pressed Done and took the one look at it away (MEMNG-476, MEMNG-477).
+  # The rule is negative because every positive form of it is satisfied by a style that confines
+  # nothing: the screen may not name the plain control type at all, and the house component is the
+  # only way to put a control on it. The arithmetic lives in a script of its own for the reason the
+  # share-link rule's does: that script's text must carry the literal, and the file it checks may
+  # not.
+  echo "--- token-screen button rule (every control on that screen goes through the house component) ---"
+  local buttonstyle_rule="$GATE_TARGET/scripts/managetokens-buttonstyle-rule.sh"
+  if [ -x "$buttonstyle_rule" ]; then
+    "$buttonstyle_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "BUTTONSTYLE FAIL: $buttonstyle_rule is missing or not executable, so the token management"
+  echo "                  screen's controls were never checked and this step proves nothing"
+  return 1
+}
+
 s_refusal() {
   # A refusal is judged where the answer arrives and acted on one or more actor hops later, and in
   # between a renewal can replace the credential it was about. The fix is one typed value carrying
@@ -2231,6 +2252,7 @@ step deps       s_deps
 step refusal    s_refusal
 step sharelink  s_sharelink
 step textsel    s_textsel
+step buttonstyle s_buttonstyle
 step apicover   s_apicover
 step testcount  s_testcount
 

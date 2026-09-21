@@ -1827,3 +1827,57 @@ private final class OccupiedPresenter: NativeLoginPresenter {
         throw NativeLoginError.cancelled
     }
 }
+
+/// How many deletes a revoke is worth. The case above reads the FIRST matching request and
+/// asserts its method and path, which is the shape of the request and not how many of them there
+/// were — two would pass it unchanged.
+extension ManageTokensStoreTests {
+    @Test("a revoke puts exactly one delete on the wire")
+    func revokeSendsExactlyOneDelete() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let store = makeStore(seen: seen) { operation in
+            switch operation {
+            case mintOperation: .json(liveGrant)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            case revokeOperation: .status(.noContent)
+            default: .status(.internalServerError)
+            }
+        }
+
+        await signOn(store)
+        await store.revoke(7)
+
+        #expect(seen.get().filter { $0.operation == revokeOperation }.count == 1)
+    }
+
+    /// Two presses that overlap. The question in front of the control is an affordance and never
+    /// the guard: it can be answered twice, and what makes that one delete is the store's own gate,
+    /// which REFUSES the second rather than joining it.
+    @Test("two overlapping revokes send one delete, not two")
+    func revokeIsSerialised() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = makeStore(seen: seen) { operation in
+            if operation == revokeOperation {
+                await gate.hold()
+                return .status(.noContent)
+            }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[\(Stub.pat(id: 7, name: "Lost phone"))]")
+            default: return .status(.internalServerError)
+            }
+        }
+        await signOn(store)
+
+        async let first = store.revoke(7)
+        await gate.waitForArrival()
+        let second = await store.revoke(7)
+        await gate.release()
+        let firstFinished = await first
+
+        #expect(firstFinished)
+        #expect(!second, "the second press should have been refused rather than sent")
+        #expect(seen.get().filter { $0.operation == revokeOperation }.count == 1)
+    }
+}

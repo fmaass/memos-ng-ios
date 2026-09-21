@@ -36,6 +36,9 @@ struct ManageTokensView: View {
     /// attempt at a time, and sharing one would let a sign-in and a step-up cancel each other.
     @State private var presenter = SafariLoginPresenter()
     @State private var draft = ""
+    /// The question a revoke raises lives here, above the screen that raises it, because the
+    /// screen is a function of what it is given and holds no state of its own.
+    @State private var pendingRevoke: ManagedToken?
 
     /// Takes the server's base URL rather than a configuration: `ServerConfiguration` belongs to
     /// the API layer, which this one reaches through `MemosCore` and never directly.
@@ -60,6 +63,7 @@ struct ManageTokensView: View {
                 isBusy: store.isBusy,
                 now: .now,
                 draft: $draft,
+                pendingRevoke: $pendingRevoke,
                 signOn: { Task { await signOn() } },
                 reread: { Task { await store.refresh() } },
                 create: { name in Task { await create(name) } },

@@ -34,6 +34,11 @@ file matching `Packages/MemosFeatures/Sources/MemosFeatures/Settings/ManageToken
 Copy button — which hands over a pasteboard item that expires — is the one way a minted token's
 plaintext leaves the screen, with the exact path `…/Settings/ManageTokensScreen.swift` naming
 `copySecret` as the control; memo text keeps its selection, it is not a credential) → the
+token-screen button rule (`scripts/managetokens-buttonstyle-rule.sh`: the word-bounded literal
+`Button` appears nowhere in `…/Settings/ManageTokensScreen.swift`, because a card there is one
+List row and a default-styled control in it is pressed by a tap anywhere in that row, with
+`CardButton(` at least six times outside any comment in the same file as the control and one uncommented
+`.buttonStyle(.borderless)` line in `Design/CardButton.swift` as a hint that is not a fence) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
 exclusions, with the operation count it read as the control) → a
@@ -61,8 +66,8 @@ Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-g
 classification, the same lane lock and load gate, then rsyncs and — on the lane's private
 simulator, reusing its DerivedData — lints, generates, compiles for testing and runs the named
 bundle or suite (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the
-pins and the entitlement, dependency-rule, share-link and text-selection greps and the
-generated-surface rule. The
+pins and the entitlement, dependency-rule, share-link, text-selection and token-screen button
+greps and the generated-surface rule. The
 lint is the same `swift format lint --strict --recursive .` the full gate runs, it comes first, and
 a lint error stops the run there: generate, build and tests are not invoked and the exit is the
 lint's own code. It prints its own
