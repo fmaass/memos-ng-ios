@@ -509,10 +509,11 @@ struct MemoDeleteWiringTests {
 
     /// The sheet the TIMELINE opens, built the way the timeline builds it.
     ///
-    /// A hand-made `ComposeView` handed a delete would prove only that the sheet can draw the row.
-    /// What is worth holding is that the screen somebody actually long-presses on hands it one —
-    /// the affordance lived on the memo's own screen and nowhere else, and the sheet the timeline
-    /// opens is the one that gets opened.
+    /// `editSheet` is where the destructive row is decided: it hands the sheet a `ComposeDelete` on
+    /// an edit and nothing on a new capture, and `ComposeView` draws no row without one. A
+    /// hand-made `ComposeView` given a delete would hold only that the sheet CAN draw the row, and
+    /// a nil `delete:` out of this factory would then be invisible — so the probe goes through the
+    /// factory, where a missing argument is a missing row.
     @Test("the timeline's edit sheet really shows the delete row, and its new-memo sheet does not")
     func theTimelineSheetShowsTheDeleteRow() {
         let mode = TimelineView.editMode(
