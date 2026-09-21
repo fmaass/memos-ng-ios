@@ -30,9 +30,11 @@ public enum APIClientFactory {
     /// The session every client built here fetches through, in place of `URLSession.shared`.
     ///
     /// `.shared` cannot be given this bound: a session COPIES its configuration when it is made
-    /// and never reads it again, so reconfiguring the shared one afterwards changes nothing, and
-    /// the only way to put a limit on a request this app sends is to own the session it goes out
-    /// on. Owning one also keeps the limit off every other user of the shared session.
+    /// and never reads it again, so reconfiguring the shared one afterwards changes nothing. A
+    /// `URLRequest` carries a timeout of its own, but the requests here are built inside the
+    /// generated client's transport and never pass through this app's hands — so the session is
+    /// where the bound can be stated once and hold for every request the client sends. Owning one
+    /// also keeps it off every other user of the shared session.
     public static var urlSession: URLSession { bounded.session }
 
     /// `@unchecked Sendable` for the reason `MediaSession` is one: the single stored property is a

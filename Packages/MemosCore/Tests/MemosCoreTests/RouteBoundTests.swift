@@ -21,8 +21,9 @@ struct RouteBoundTests {
         #expect(configuration.timeoutIntervalForRequest == 15)
     }
 
-    /// The generated client's session, which is the app's own and not `URLSession.shared` — a
-    /// shared session copies its configuration when it is made and can never be bounded at all.
+    /// The generated client's session, which is the app's own and not `URLSession.shared`: a
+    /// shared session copies its configuration when it is made and never reads it again, and the
+    /// requests are built inside the transport, so this is where the bound is stated.
     @Test("the generated client's session gives up on a request nothing is answering")
     func theAPISessionIsBounded() {
         let configuration = APIClientFactory.urlSession.configuration

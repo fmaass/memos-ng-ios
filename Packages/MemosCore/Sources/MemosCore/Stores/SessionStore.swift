@@ -259,8 +259,11 @@ public final class SessionStore {
     /// that loss under.
     ///
     /// Written at the two places that ASK for the reload and nowhere else: beside the increment in
-    /// `enterVerified`, inside `wasUnconfirmed`, and beside the increment in `routeRegained`'s
-    /// branch for a session that is already confirmed. Each sits on the line that raises
+    /// `enterVerified`, inside `wasUnconfirmed`, and beside the increment in the branch
+    /// `routeRegained` takes when NOTHING is awaiting confirmation. That second predicate is not
+    /// "confirmed": a signed-out session awaits nothing either, and a regain delivered after a
+    /// sign-out goes down the same branch — the screens are told, and the reload they perform
+    /// finds no handle and returns without a request. Each sits on the line that raises
     /// `reachabilityRecoveries`, which is what entitles it to record that the outage has had its
     /// reload asked for. A confirmation that incremented nothing asked for no reload and cannot
     /// stand in for one, however successful it was: what is recorded is "the reload this outage
