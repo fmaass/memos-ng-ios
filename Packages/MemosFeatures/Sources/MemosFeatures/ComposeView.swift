@@ -401,14 +401,17 @@ public struct ComposeView: View {
                 // Only what this sheet picked. The memo's own pictures are drawn by the same row
                 // and are not this sheet's to take away (`ComposeRowItem`).
                 //
-                // And only while nothing is on the wire. The submission is built when Save is
-                // pressed, so a tile that leaves the row after that is a picture the upload still
-                // carries: it goes up, the sheet closes, and the memo keeps the very thing
-                // somebody had just taken off it. So the removal is REFUSED for as long as a save
-                // is running — pressing it again once the save has come back is the way to make
-                // it stick — and the refusal is here, on the same flag the save claims
-                // synchronously (`post()`), because a control that has gone grey is a hint and
-                // the tap that beat the redraw is the one that does the damage.
+                // And only while this sheet is taking changes at all. The submission is built
+                // when Save is pressed, so a tile that leaves the row after that is a picture the
+                // upload still carries: it goes up, the sheet closes, and the memo keeps the very
+                // thing somebody had just taken off it. So the removal is REFUSED while a save is
+                // running, and goes on being refused when that save came back without saying what
+                // the server did — the set it carried is the set its retry has to carry
+                // (`ComposeImports.mayHaveLanded`). Where the save came back having changed
+                // nothing, pressing this again is what makes it stick. The refusal is here, on the
+                // same object the save claims synchronously (`post()`), because a control that has
+                // gone grey is a hint and the tap that beat the redraw is the one that does the
+                // damage.
                 remove: { id in
                     guard mayChangeAttachments else { return }
                     imports.remove(id: id)

@@ -335,7 +335,7 @@ struct ComposeFailureTests {
         #expect(
             sentKeys[1] != sentKeys[2],
             "the save that left a picture out went out under the key of the save that carried it")
-        // What the new key costs on a server that had already taken the first attempt: the patch
+        // What that key costs on a server that had already taken the first attempt: the patch
         // is nothing it has seen, so it is applied AGAIN beside an edit it already holds. The
         // sheet is what has to make this unreachable — what is attached may not change while the
         // answer to the save carrying it is unknown (`ComposeImports.mayHaveLanded`).

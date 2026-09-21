@@ -433,11 +433,12 @@ public final class TimelineStore {
     private var loadingLineage: Lineage?
     /// The one read a refusal above leaves owed, with the handle and the address it arrived with.
     ///
-    /// A refresh of the lineage already being read is refused, and the refusal used to be the end
-    /// of it — which is right for a second pull of a list that is coming anyway, and wrong for a
-    /// trigger that means the list may have MOVED: a route regain delivered while a read is in
-    /// flight is answered by that older read, and nothing asks again. So the refusal is remembered
-    /// and spent once, from the tail of the read it was refused for. At most one, whatever number
+    /// A refresh of the lineage already being read is refused. For a second pull of a list that
+    /// is coming anyway the refusal is the whole answer; for a trigger meaning the list may have
+    /// MOVED it is not, because the read in flight left BEFORE that trigger and cannot carry it —
+    /// a route regain delivered mid-read is exactly that, and nothing else asks again. So the
+    /// refusal is remembered and spent once, from the tail of the read it was refused for. At most
+    /// one, whatever number
     /// were refused — they all ask the same question — and a refusal recorded for a DIFFERENT
     /// lineage is left where it is, because the read that is finishing is not the one it was owed.
     private var refreshAgain: (lineage: Lineage, handle: SessionHandle, baseURL: URL)?

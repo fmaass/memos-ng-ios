@@ -217,16 +217,20 @@ struct ComposeMediaEditTests {
         await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
         await settleTasks()
 
-        let (saved, pressed) = await PressProbe.withScreen(
+        let (saved, marked, pressed) = await PressProbe.withScreen(
             ComposeView(mode: mode(), imports: imports) { _ in .failed(.transport(sent: true)) },
             height: 852
         ) { screen in
             let saved = screen.press("Save")
-            // Pressed against a save that has really come back, or the case is not the case.
-            await screen.settle(turns: 100, until: { imports.items.first?.uploadFailed != nil })
+            // Read against the save's ANSWER, not against the save: `isSubmitting` is already
+            // true the instant Save is pressed, and settling on that reads the tiles before the
+            // failure has landed on them — a case that passes whatever the marking does.
+            await screen.settle(turns: 100, until: { imports.mayHaveLanded })
+            // Read before the x, while the tiles are still there to be read.
+            let marked = imports.items.contains { $0.uploadFailed != nil }
             let pressed = screen.press("Remove")
             await screen.settle()
-            return (saved, pressed)
+            return (saved, marked, pressed)
         }
 
         #expect(saved, "the sheet's own Save could not be pressed")
@@ -234,6 +238,9 @@ struct ComposeMediaEditTests {
         #expect(
             imports.ordered.map(\.label) == ["a.jpg"],
             "the picture left a list the server may already be holding")
+        // And the tiles say nothing, because there is nothing they could offer: a marked tile
+        // carries a "Try again" that this very freeze refuses.
+        #expect(!marked, "a tile was marked failed by a save whose files may have gone up fine")
     }
 
     /// The control the case above is worth nothing without: an answer that never left the device
@@ -244,15 +251,16 @@ struct ComposeMediaEditTests {
         await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
         await settleTasks()
 
-        let (saved, pressed) = await PressProbe.withScreen(
+        let (saved, marked, pressed) = await PressProbe.withScreen(
             ComposeView(mode: mode(), imports: imports) { _ in .failed(.transport(sent: false)) },
             height: 852
         ) { screen in
             let saved = screen.press("Save")
             await screen.settle(turns: 100, until: { imports.items.first?.uploadFailed != nil })
+            let marked = imports.items.contains { $0.uploadFailed != nil }
             let pressed = screen.press("Remove")
             await screen.settle()
-            return (saved, pressed)
+            return (saved, marked, pressed)
         }
 
         #expect(saved, "the sheet's own Save could not be pressed")
@@ -260,5 +268,8 @@ struct ComposeMediaEditTests {
         #expect(
             imports.ordered.isEmpty,
             "the x is dead after a save that never left: \(imports.ordered.map(\.label))")
+        // The control for the case above: a save that reached nothing left the files unsent, and
+        // the tile that says so carries a "Try again" the sheet really takes.
+        #expect(marked, "nothing on the row said the files had not gone up")
     }
 }

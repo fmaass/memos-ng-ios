@@ -180,7 +180,7 @@ struct ComposeAttachmentStateTests {
         // Read HERE, with the discarded export still suspended. That is the moment somebody is
         // looking at: a flag that settles only when a file nobody is waiting for finally arrives
         // is a Post refused for as long as that takes — and the file may never arrive at all.
-        #expect(!imports.isImporting, "the composer is importing a pick that is no longer there")
+        #expect(!imports.isImporting, "the composer is importing a pick that has gone")
         #expect(
             ComposeAttachments.canPost(
                 text: "just the words then", imported: imports.attachments.count,
@@ -531,7 +531,14 @@ struct ComposeAttachmentStateTests {
                 .lowercased().contains("nothing was changed"),
             "a rejection can be a server fault AFTER the edit was committed"
         )
-        #expect(ComposeFailurePresentation.tileCategory(for: .transport(sent: true)) == .transport)
+        // A lost answer is not the photographs' business: they may be on the memo already, and
+        // what is attached is held until the save is settled — so a tile marked here would carry a
+        // "Try again" that is refused wherever it is pressed.
+        #expect(ComposeFailurePresentation.tileCategory(for: .transport(sent: true)) == nil)
+        // The control: a request that never left the device left the files unsent, and the tile
+        // saying so is the one thing on the sheet that names them.
+        #expect(
+            ComposeFailurePresentation.tileCategory(for: .transport(sent: false)) == .transport)
         // A refusal is about the memo, not about the photographs.
         #expect(ComposeFailurePresentation.tileCategory(for: .rejection) == nil)
     }
@@ -554,6 +561,86 @@ struct ComposeAttachmentStateTests {
     @Test("a server fault is not the photographs' business")
     func aServerFaultLeavesTheTilesAlone() {
         #expect(ComposeFailurePresentation.tileCategory(for: .serverFailure) == nil)
+    }
+
+    /// A tile asked for again is a tile loading, and the composer is importing for exactly as long
+    /// as one of them is — whatever else leaves the row while that ask is out.
+    ///
+    /// The row is not still between the two: the picture that arrived first can be taken off while
+    /// the failed one is being fetched again, and the ask that is still out is then the only thing
+    /// holding Post. A flag left standing after it lands is a Post refused for the rest of the
+    /// sheet's life, with nothing on the screen to say why.
+    @Test("a retry still out keeps the composer importing until it lands")
+    func aHeldRetryKeepsTheComposerImporting() async {
+        let imports = Self.imports()
+        let gate = RetryGate(Self.media("a.heic"))
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            item == "a" ? await gate.answer() : .file(Self.media("b.heic"))
+        }
+        await settleTasks()
+
+        let failed = imports.items[0].id
+        let arrived = imports.items[1].id
+        #expect(imports.items[0].isFailed, "the first file was supposed to be the one that failed")
+        #expect(!imports.isImporting, "the pick is all in and the composer is still importing")
+
+        let retry = Task { await imports.retry(id: failed) }
+        await gate.waitUntilRetryStarted()
+        await settleTasks()
+        #expect(imports.isImporting, "a tile is on its spinner and the composer is not importing")
+
+        imports.remove(id: arrived)
+        #expect(imports.isImporting, "the retry is still out and the composer stopped importing")
+
+        await gate.release()
+        await retry.value
+        await settleTasks()
+
+        #expect(!imports.isImporting, "the retry landed and the composer is importing still")
+        #expect(
+            ComposeAttachments.canPost(
+                text: "", imported: imports.attachments.count, isBusy: imports.isImporting),
+            "the picture is here and the memo cannot be posted")
+    }
+}
+
+/// A picker export that fails the first time it is asked and holds the second.
+///
+/// The second ask is the retry, and holding it open is what lets a test change the row while one
+/// tile is loading and the others are not.
+actor RetryGate {
+    private let media: PickedMedia
+    private var asks = 0
+    private var retryStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(_ media: PickedMedia) { self.media = media }
+
+    func waitUntilRetryStarted() async {
+        if retryStarted { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        let waiting = releaseWaiters
+        releaseWaiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func answer() async -> ComposePickerAnswer {
+        asks += 1
+        if asks == 1 { return .failed(.transport) }
+        retryStarted = true
+        let waiting = startWaiters
+        startWaiters = []
+        for waiter in waiting { waiter.resume() }
+        if !isReleased {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return .file(media)
     }
 }
 

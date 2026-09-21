@@ -42,13 +42,21 @@ nonisolated public enum ComposeFailurePresentation {
 
     /// What the failure means for the tiles of the files that were going up with it.
     ///
-    /// Only a transport failure is the FILES' business — the file is fine and the network is not,
-    /// which is exactly what "needs connection" says. A refusal or an expired session is about the
-    /// memo, and marking the photographs for it would send somebody looking for a network that
-    /// would not have helped.
+    /// A transport failure that never left the device is the FILES' business — the file is fine
+    /// and the network is not, which is exactly what "needs connection" says. A refusal or an
+    /// expired session is about the memo, and marking the photographs for it would send somebody
+    /// looking for a network that would not have helped.
+    ///
+    /// A request that WENT and lost its answer is not their business either, for a sharper reason
+    /// than that: it says nothing about the files — they may be on the memo already — and what is
+    /// attached is held where it is until that save is settled (`ComposeImports.mayHaveLanded`),
+    /// so the
+    /// "Try again" a marked tile carries is refused wherever it is pressed. The sentence across
+    /// the sheet and the Save above it are what somebody acts on there; a control that cannot act
+    /// is worse than no control.
     public static func tileCategory(for failure: ComposeFailure) -> ComposeLoadFailure? {
         switch failure {
-        case .transport: return .transport
+        case .transport(let sent): return sent ? nil : .transport
         case .storage: return .storage
         case .authorization, .rejection, .serverFailure: return nil
         }

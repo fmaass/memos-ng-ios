@@ -8,9 +8,9 @@ import Testing
 /// What the token-management screen says in each of the states it can be in.
 ///
 /// Drawn rather than reasoned about, for the reason `DeviceTokenSectionTests` exists: the view
-/// that owns the store puts it through the real token flow — a management sign-on in a browser
-/// sheet, and a grant — so a screen written inline in that body would be a surface no case could
-/// see. Every state here is handed to the screen as a value,
+/// that owns the store puts it through the whole token flow — a management sign-on in a browser
+/// sheet, and a grant — and a screen written inline in that body could only be reached by running
+/// it. Every state here is handed to the screen as a value,
 /// which is also the only way three of them can be reached at all — a server without these routes
 /// and a management session that has just run out are not things a rendered screen can arrange.
 @MainActor

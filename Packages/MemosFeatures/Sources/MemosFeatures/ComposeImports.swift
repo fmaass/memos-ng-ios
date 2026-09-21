@@ -33,7 +33,13 @@ final class ComposeImports {
     /// a person actually put them in.
     private(set) var items: [ComposeAttachment] = []
     /// Whether a selection is still loading.
-    private(set) var isImporting = false
+    var isImporting: Bool { awaitingPick || items.contains(where: \.isLoading) }
+    /// Whether a pick has landed whose tiles are not on the row yet.
+    ///
+    /// The spinner belongs to the person who just chose photographs, and it has to start at the
+    /// moment they did — before `load` has installed a single placeholder there is nothing in the
+    /// list to read it from, so this is what carries it across that gap.
+    private var awaitingPick = false
     /// Whether a submission built from this list is on the wire.
     ///
     /// What a save carries is fixed when Save is pressed — the submission takes the list as it then
@@ -53,7 +59,8 @@ final class ComposeImports {
     /// well have applied. The retry that follows is safe only because it goes out under the same
     /// edit key — and that key is minted from the files the attempt carried
     /// (`TimelineStore.editKey(for:)`). Change the set in between and the key changes with it: the
-    /// server's replay lookup misses, the patch is read as a new edit, and its files are APPENDED
+    /// server's replay lookup misses, the patch is read as an edit it has never seen, and its
+    /// files are APPENDED
     /// to the ones the first attempt had already committed. So from that answer onwards the set is
     /// frozen, exactly as it is frozen while a save is on the wire. One-way, because what ends it
     /// is the draft ending: a save that succeeds closes the sheet, and a dismissal takes the list
@@ -104,7 +111,7 @@ final class ComposeImports {
     private var readGeneration: [UUID: Int] = [:]
     /// Which items came from this app's camera. A pick replaces the picked files and keeps these.
     private var cameraIDs: Set<UUID> = []
-    /// Which picked item each attachment was made from, for the selection now on screen.
+    /// Which picked item each attachment was made from, for the selection on screen.
     private var pickIdentity: [UUID: AnyHashable] = [:]
     /// The picked items an x has taken off the row while the picker still holds them selected.
     ///
@@ -159,7 +166,7 @@ final class ComposeImports {
     /// task is started, and hand the stamp it returns to `load`.
     func selected() -> Int {
         current += 1
-        isImporting = true
+        awaitingPick = true
         return current
     }
 
@@ -187,11 +194,11 @@ final class ComposeImports {
         guard acceptsChanges else {
             // The stamp was taken as the selection landed, and taking it turned the busy flag on.
             // A refusal that walked away from here would leave the composer importing for ever.
-            if stamp == current { isImporting = false }
+            if stamp == current { awaitingPick = false }
             return false
         }
         guard stamp == current else { return false }
-        // A selection that no longer carries a removed item is where that removal is forgotten:
+        // A selection arriving without a removed item is where that removal is forgotten:
         // choosing it in the picker again is somebody asking for it again.
         removedPicks.formIntersection(items.map(AnyHashable.init))
         var placeholders: [ComposeAttachment] = []
@@ -226,7 +233,7 @@ final class ComposeImports {
         // Everything the replaced pick was reading is fenced out here: its items are gone from the
         // list above, and their generations go with them.
         readGeneration = readGeneration.filter { cameraIDs.contains($0.key) }
-        isImporting = !placeholders.isEmpty
+        awaitingPick = false
 
         for placeholder in placeholders {
             guard let handle = handles[placeholder.id] else { continue }
@@ -239,7 +246,7 @@ final class ComposeImports {
             // This ITEM, though, is one item. Taken off the row while its file was coming, it is
             // the only thing this answer is dropped for — the rest of the pick is still on its
             // way, and a loop that returned here would leave every one of them on its spinner
-            // with nothing left to settle them or the busy flag.
+            // with nothing left to settle them.
             guard let index = self.items.firstIndex(where: { $0.id == placeholder.id }) else {
                 continue
             }
@@ -247,7 +254,6 @@ final class ComposeImports {
             if self.items[index].media != nil { beginCaptureRead(for: placeholder.id) }
         }
         guard stamp == current else { return false }
-        isImporting = false
         return true
     }
 
@@ -291,13 +297,14 @@ final class ComposeImports {
         pickIdentity = [:]
         // A list dropped whole is not a set of removals to hold against the next selection.
         removedPicks = []
-        isImporting = false
+        awaitingPick = false
     }
 
     /// "Remove them": the items that could not be read, and only those.
     ///
     /// The successful imports and the camera captures stay. Removing them too is how somebody loses
     /// four photographs because a fifth would not download.
+    ///
     /// Refused while a save is on the wire, and while one that may have reached the server is
     /// unanswered for: the tiles this offers to clear are part of the set that save carried.
     func removeFailed() {
@@ -305,7 +312,6 @@ final class ComposeImports {
         let removed = items.filter(\.isFailed).map(\.id)
         items.removeAll(where: \.isFailed)
         for id in removed { forget(id) }
-        settleImporting()
     }
 
     /// One item only, refused on the same question for the same reason.
@@ -313,17 +319,6 @@ final class ComposeImports {
         guard acceptsChanges else { return }
         items.removeAll { $0.id == id }
         forget(id)
-        settleImporting()
-    }
-
-    /// What is left of the busy flag once something has been taken off the row.
-    ///
-    /// The removed item's own answer is dropped where it lands (`load`), and the loop only lowers
-    /// the flag when it reaches the end — so the LAST loading item leaving the row would otherwise
-    /// leave the composer busy until a file nobody is waiting for arrives, with Post refused all
-    /// the while.
-    private func settleImporting() {
-        isImporting = items.contains(where: \.isLoading)
     }
 
     /// Asks for one failed item again, under the identity it was picked with.
@@ -410,8 +405,10 @@ final class ComposeImports {
     }
 
     /// The save has come back. What was refused while it ran is not replayed: a change applied a
-    /// moment later to a sheet that has already closed is no change at all, and applied to one
-    /// still open it is a tap away.
+    /// moment later to a sheet that has already closed is no change at all. Whether it is a tap
+    /// away on a sheet still open is the answer's to decide — a save that may have reached the
+    /// server holds the list where it is (`mayHaveLanded`), and one that changed nothing frees
+    /// it.
     func endSubmission() {
         isSubmitting = false
     }

@@ -9,9 +9,10 @@ import UIKit
 /// It is deliberately thin, and everything it does that could be wrong lives somewhere a test can
 /// reach — the states in `ManageTokensStore`, the drawing in `ManageTokensScreen`. What is left
 /// here is the wiring a case is deliberately not asked to stand up: this view holds a
-/// `ManageTokensStore` and puts it through the real token flow — a management sign-on in a browser
-/// sheet, and a grant — which is not something a rendered screen can be asked to arrange (the same
-/// reason `SettingsView` is not hosted either).
+/// `ManageTokensStore` and puts it through the whole token flow — a management sign-on in a
+/// browser sheet, and a grant — which is a great deal to run for a question about a screen. The
+/// questions are put to the store and the screen directly instead (the same choice `SettingsView`
+/// gets).
 ///
 /// The grant lives for exactly as long as this view does. It goes when the sheet is dismissed and
 /// when the app is backgrounded, and it was never written anywhere that could outlive either.

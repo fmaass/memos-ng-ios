@@ -24,7 +24,7 @@ public protocol MediaTransport: Sendable {
 /// An app cannot GUARANTEE it wins that race: `URLSession.shared` is materialised by whichever
 /// code path touches it first, and in this app one such path is a one-line default out of sight of
 /// the composition root — `URLSessionHTTPPerformer()` inside `Outbox.live`, whose session argument
-/// defaults to `.shared`. The generated client is no longer another: its factory fetches through a
+/// defaults to `.shared`. The generated client is not one of them: its factory fetches through a
 /// session of its own (`APIClientFactory.urlSession`). As it happens this app does
 /// win it — `sharedSessionHolds` reports `true` on launch, which is what establishes that
 /// `App.init()` runs before the delegate's `didFinishLaunchingWithOptions` here. That is exactly
