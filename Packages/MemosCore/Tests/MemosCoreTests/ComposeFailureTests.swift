@@ -273,6 +273,8 @@ struct ComposeFailureTests {
 
         let store = TimelineStore()
         let keys = LockedValue<[String]>([])
+        let committed = LockedValue<Set<String>>([])
+        let applies = LockedValue<Int>(0)
         let answer = LockedValue<Bool>(false)
         let client = Stub.client { _, body, operation in
             switch operation {
@@ -287,7 +289,17 @@ struct ComposeFailureTests {
                     """)
             case patchMemoOperation:
                 let sent = try await Stub.body(body)
-                keys.set(keys.get() + [(sent["edit_key"] as? String) ?? ""])
+                let key = (sent["edit_key"] as? String) ?? ""
+                keys.set(keys.get() + [key])
+                // The server the retry is safe against: it COMMITS the edit before it builds its
+                // answer, and a key it has already committed is answered as a replay rather than
+                // applied a second time. Modelled here because that is the whole reason a lost
+                // answer may be sent again — and the whole reason it stops being safe once the
+                // files the key is minted from have changed under it.
+                if !committed.get().contains(key) {
+                    committed.set(committed.get().union([key]))
+                    applies.set(applies.get() + 1)
+                }
                 guard answer.get() else { throw URLError(.networkConnectionLost) }
                 return Stub.json(Stub.memo(uid: "a", content: "edited"))
             default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
@@ -323,6 +335,13 @@ struct ComposeFailureTests {
         #expect(
             sentKeys[1] != sentKeys[2],
             "the save that left a picture out went out under the key of the save that carried it")
+        // What that key costs on a server that had already taken the first attempt: the patch
+        // is nothing it has seen, so it is applied AGAIN beside an edit it already holds. The
+        // sheet is what has to make this unreachable — what is attached may not change while the
+        // answer to the save carrying it is unknown (`ComposeImports.mayHaveLanded`).
+        #expect(
+            applies.get() == 2,
+            "the server applied \(applies.get()) edits, not one apply and one replay")
     }
 
     /// The other half of the edit key, and the dangerous one: two DIFFERENT files must never share

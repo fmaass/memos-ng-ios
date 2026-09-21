@@ -20,11 +20,13 @@ public enum APIClientFactory {
     ///
     /// Measured rather than preferred: against a destination that is routed and answers nothing, a
     /// request on the framework's defaults took the full 60 seconds to fail. This is the idle
-    /// bound between bytes, and it is the only one set here. No TOTAL deadline stands beside it —
-    /// the same call the media session makes about its own long transfer, for the mirror-image
-    /// reason: this client carries the binary chunks of a foreground edit's upload as well as
-    /// small JSON, and a deadline on the whole transfer would kill an upload that is still making
-    /// progress on a slow link, failing the edit before its patch is ever sent.
+    /// bound between bytes, and it is the only bound this app sets: nothing here touches
+    /// `timeoutIntervalForResource`, so the transfer as a whole keeps Foundation's own default of
+    /// seven days. That is the same call the media session makes about its own long transfer, for
+    /// the mirror-image reason: this client carries the binary chunks of a foreground edit's
+    /// upload as well as small JSON, and a short deadline on the whole transfer would kill an
+    /// upload that is still making progress on a slow link, failing the edit before its patch is
+    /// ever sent.
     public static let requestTimeout: TimeInterval = 15
 
     /// The session every client built here fetches through, in place of `URLSession.shared`.

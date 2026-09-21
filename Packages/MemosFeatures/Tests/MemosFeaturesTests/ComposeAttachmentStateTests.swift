@@ -176,6 +176,17 @@ struct ComposeAttachmentStateTests {
         await held.waitUntilStarted()
 
         imports.remove(id: imports.items[0].id)
+
+        // Read HERE, with the discarded export still suspended. That is the moment somebody is
+        // looking at: a flag that settles only when a file nobody is waiting for finally arrives
+        // is a Post refused for as long as that takes — and the file may never arrive at all.
+        #expect(!imports.isImporting, "the composer is importing a pick that has gone")
+        #expect(
+            ComposeAttachments.canPost(
+                text: "just the words then", imported: imports.attachments.count,
+                isBusy: imports.isImporting),
+            "the words alone could not be posted while the removed picture's export was still out")
+
         await held.release()
         await run.value
         await settleTasks()
@@ -186,6 +197,32 @@ struct ComposeAttachmentStateTests {
                 text: "just the words then", imported: imports.attachments.count,
                 isBusy: imports.isImporting),
             "the words alone could not be posted after the one picture was taken off")
+    }
+
+    /// A picture taken off the row must not come back through the picker's own binding.
+    ///
+    /// A selection lands as the WHOLE array, and the item that was removed is still selected in
+    /// the picker — so a list rebuilt from that array alone puts the removal straight back the
+    /// next time anything is added. Everything else in the selection is imported again, as it
+    /// always is: a pick replaces the picked files.
+    @Test("a picked file taken off the row does not return with the next selection")
+    func aRemovedPickDoesNotReturnWithTheNextSelection() async {
+        let imports = Self.imports()
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+        #expect(imports.items.map(\.label) == ["a.heic", "b.heic"], "precondition: both landed")
+
+        imports.remove(id: imports.items[1].id)
+        await imports.load(["a", "b", "c"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+
+        #expect(
+            imports.items.map(\.label) == ["a.heic", "c.heic"],
+            "the removed picture came back with the next pick: \(imports.items.map(\.label))")
     }
 
     /// The fence the loop change must NARROW and never widen: the answer for a removed item is
@@ -517,6 +554,86 @@ struct ComposeAttachmentStateTests {
     @Test("a server fault is not the photographs' business")
     func aServerFaultLeavesTheTilesAlone() {
         #expect(ComposeFailurePresentation.tileCategory(for: .serverFailure) == nil)
+    }
+
+    /// A tile asked for again is a tile loading, and the composer is importing for exactly as long
+    /// as one of them is — whatever else leaves the row while that ask is out.
+    ///
+    /// The row is not still between the two: the picture that arrived first can be taken off while
+    /// the failed one is being fetched again, and the ask that is still out is then the only thing
+    /// holding Post. A flag left standing after it lands is a Post refused for the rest of the
+    /// sheet's life, with nothing on the screen to say why.
+    @Test("a retry still out keeps the composer importing until it lands")
+    func aHeldRetryKeepsTheComposerImporting() async {
+        let imports = Self.imports()
+        let gate = RetryGate(Self.media("a.heic"))
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            item == "a" ? await gate.answer() : .file(Self.media("b.heic"))
+        }
+        await settleTasks()
+
+        let failed = imports.items[0].id
+        let arrived = imports.items[1].id
+        #expect(imports.items[0].isFailed, "the first file was supposed to be the one that failed")
+        #expect(!imports.isImporting, "the pick is all in and the composer is still importing")
+
+        let retry = Task { await imports.retry(id: failed) }
+        await gate.waitUntilRetryStarted()
+        await settleTasks()
+        #expect(imports.isImporting, "a tile is on its spinner and the composer is not importing")
+
+        imports.remove(id: arrived)
+        #expect(imports.isImporting, "the retry is still out and the composer stopped importing")
+
+        await gate.release()
+        await retry.value
+        await settleTasks()
+
+        #expect(!imports.isImporting, "the retry landed and the composer is importing still")
+        #expect(
+            ComposeAttachments.canPost(
+                text: "", imported: imports.attachments.count, isBusy: imports.isImporting),
+            "the picture is here and the memo cannot be posted")
+    }
+}
+
+/// A picker export that fails the first time it is asked and holds the second.
+///
+/// The second ask is the retry, and holding it open is what lets a test change the row while one
+/// tile is loading and the others are not.
+actor RetryGate {
+    private let media: PickedMedia
+    private var asks = 0
+    private var retryStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(_ media: PickedMedia) { self.media = media }
+
+    func waitUntilRetryStarted() async {
+        if retryStarted { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        let waiting = releaseWaiters
+        releaseWaiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func answer() async -> ComposePickerAnswer {
+        asks += 1
+        if asks == 1 { return .failed(.transport) }
+        retryStarted = true
+        let waiting = startWaiters
+        startWaiters = []
+        for waiter in waiting { waiter.resume() }
+        if !isReleased {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return .file(media)
     }
 }
 

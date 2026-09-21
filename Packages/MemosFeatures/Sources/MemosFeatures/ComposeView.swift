@@ -42,9 +42,10 @@ public struct ComposeSubmission: Sendable, Equatable {
 /// belongs to `MemoEditFlow`; this carries only what the sheet needs to draw — whether the question
 /// is up — and where to send the answer.
 ///
-/// Mine-gating is inherent rather than re-checked here: the only thing that hands one of these over
-/// is the memo's own screen, which opens the sheet solely for `MemoDetailPresentation.editMode`,
-/// and that is nil for a memo that is not mine.
+/// Mine-gating is inherent rather than re-checked here: both screens that hand one of these over
+/// reach an edit sheet only for a memo that is mine — the memo's own screen opens the sheet solely
+/// for `MemoDetailPresentation.editMode`, which is nil otherwise, and the timeline offers Edit
+/// inside its `memo.mine` branch alone.
 public struct ComposeDelete {
     public var isAsking: Bool
     /// `@MainActor` spelled out: the sink is a method on the screen that presented the sheet, and a
@@ -192,10 +193,11 @@ public struct ComposeView: View {
     /// One rule, asked synchronously wherever such input lands — a picker answering, a camera
     /// handing over a file, a control being pressed — because the list a save carries was fixed
     /// when Save was pressed and a change taken afterwards would be shown on the row and left out
-    /// of the upload. It is asked of `imports` rather than of this sheet's own state: input that
-    /// was already on its way when the save began arrives through a closure holding the sheet as
-    /// it stood BEFORE it, and the list itself is the one thing all of them hold live.
-    private var mayChangeAttachments: Bool { !imports.isSubmitting }
+    /// of the upload. It is asked of `imports` rather than of this sheet's own state because that
+    /// object is what every one of those changes is about: the question and the change that
+    /// follows it are then one synchronous pair on the same object, and every closure that can
+    /// bring such input in holds that object itself.
+    private var mayChangeAttachments: Bool { imports.acceptsChanges }
 
     /// The date this memo will carry: the one that was chosen, or — while the control is on Auto —
     /// the earliest capture instant among what is attached. Nil is "whenever this is", which the
@@ -330,7 +332,14 @@ public struct ComposeView: View {
             // Which of the three things an answer here can be is decided on the stage, because
             // the emptying this sheet does to refuse one is itself an answer and arrives later —
             // possibly after the save it was refused for has ended (`ComposeStage`).
-            switch stage.selectionLanded(count: items.count, submitting: imports.isSubmitting) {
+            // The stage is told whether this sheet is taking changes to what is attached at all.
+            // It is not, while a save is on the wire and afterwards while one that may have
+            // reached the server is unanswered for — and a selection that lands then is refused
+            // and emptied rather than loaded, which is what leaves the sentence about that save on
+            // the screen (`ComposeImports.acceptsChanges`).
+            switch stage.selectionLanded(
+                count: items.count, submitting: !imports.acceptsChanges
+            ) {
             case .swallowReset:
                 return
             case .refuseAndReset:
@@ -392,14 +401,19 @@ public struct ComposeView: View {
                 // Only what this sheet picked. The memo's own pictures are drawn by the same row
                 // and are not this sheet's to take away (`ComposeRowItem`).
                 //
-                // And only while nothing is on the wire. The submission is built when Save is
-                // pressed, so a tile that leaves the row after that is a picture the upload still
-                // carries: it goes up, the sheet closes, and the memo keeps the very thing
-                // somebody had just taken off it. So the removal is REFUSED for as long as a save
-                // is running — pressing it again once the save has come back is the way to make
-                // it stick — and the refusal is here, on the same flag the save claims
-                // synchronously (`post()`), because a control that has gone grey is a hint and
-                // the tap that beat the redraw is the one that does the damage.
+                // And only while this sheet is taking changes at all. The submission is built
+                // when Save is pressed, so a tile that leaves the row after that is a picture the
+                // upload still carries: it goes up, the sheet closes, and the memo keeps the very
+                // thing somebody had just taken off it. So the removal is REFUSED while a save is
+                // running, and goes on being refused when that save came back without saying what
+                // the server did — the set it carried is the set its retry has to carry
+                // (`ComposeImports.mayHaveLanded`), for the rest of this sheet's life: nothing
+                // about the pictures changes again, and what a frozen row is acted on through is
+                // the sentence across it and Save. Where no save has left this device unanswered
+                // for, pressing this again is what makes it stick. The refusal is here, on the
+                // same object the save claims synchronously (`post()`), because a control that has
+                // gone grey is a hint and the tap that beat the redraw is the one that does the
+                // damage.
                 remove: { id in
                     guard mayChangeAttachments else { return }
                     imports.remove(id: id)
@@ -574,7 +588,29 @@ public struct ComposeView: View {
                 // files and their identities. That is the whole of what "preserved" means here: it
                 // is THIS compose session, not survival across a dismissal or a force-quit, which
                 // would need the outbox and is MEMNG-124's line.
-                problem = ComposeFailurePresentation.sentence(for: failure)
+                // These two are the answers that left a request the server may have applied, and
+                // from here what is attached may not change: a different set mints a different
+                // edit key, the server's replay lookup misses, and the files go up a second time
+                // beside the ones it already holds (`ComposeImports.mayHaveLanded`). Taken from
+                // the failure VALUE, because that is what says whether the request left the
+                // device.
+                switch failure {
+                case .transport(sent: true), .serverFailure:
+                    imports.mayHaveLandedOnServer(failure)
+                case .transport(sent: false), .authorization, .storage, .rejection:
+                    break
+                }
+                // One exception, and it is about a single sentence: an answer that never left the
+                // device says "nothing has been changed yet", which nobody can promise about a set
+                // an earlier attempt may already have committed. So while the set is frozen, that
+                // one answer shows the sentence it was frozen ON instead. Every other failure says
+                // what it has always said — a refusal, an expired session and a full disk are all
+                // facts of their own, and the two uncertain answers already say what this is.
+                if case .transport(sent: false) = failure, let frozen = imports.freezingSentence {
+                    problem = frozen
+                } else {
+                    problem = ComposeFailurePresentation.sentence(for: failure)
+                }
                 if let category = ComposeFailurePresentation.tileCategory(for: failure) {
                     imports.markUploadFailed(category)
                 }

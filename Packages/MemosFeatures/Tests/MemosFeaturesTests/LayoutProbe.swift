@@ -399,6 +399,16 @@ enum PressProbe {
             element(labelled: label)?.accessibilityActivate() ?? false
         }
 
+        /// Whether anything on the screen READS as this sentence.
+        ///
+        /// A line of text carries no button trait, so it is not a control and `element(labelled:)`
+        /// will not find it. This is the other half: what the screen SAYS, which for a sentence
+        /// somebody has to act on is the part that matters.
+        func says(_ sentence: String) -> Bool {
+            layOut()
+            return PressProbe.reads(sentence, in: window)
+        }
+
         /// Gives the screen its turns: what a press started runs, and what it writes comes back
         /// round to the layout. Each turn SUSPENDS — the task the press made is isolated to this
         /// actor, so it runs only while the caller is not holding it, and no amount of spinning a
@@ -421,6 +431,21 @@ enum PressProbe {
             host.view.setNeedsLayout()
             host.view.layoutIfNeeded()
         }
+    }
+
+    /// Walks the same hierarchy `element(labelled:)` does, asking what each node says rather than
+    /// whether it can be pressed.
+    static func reads(_ sentence: String, in node: Any) -> Bool {
+        guard let object = node as? NSObject else { return false }
+        if let label = object.accessibilityLabel, label.contains(sentence) { return true }
+        if let value = object.accessibilityValue, value.contains(sentence) { return true }
+        for child in object.accessibilityElements ?? [] where reads(sentence, in: child) {
+            return true
+        }
+        if let view = object as? UIView {
+            for subview in view.subviews where reads(sentence, in: subview) { return true }
+        }
+        return false
     }
 
     private static func element(labelled label: String, in node: Any) -> NSObject? {

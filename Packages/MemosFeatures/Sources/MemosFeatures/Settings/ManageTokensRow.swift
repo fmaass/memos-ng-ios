@@ -2,10 +2,11 @@ import SwiftUI
 
 /// The row in Settings that opens token management.
 ///
-/// A view of its own taking a closure, for the reason `DeviceTokenSection` is one: `SettingsView`
-/// reads a `SessionStore` and so cannot be hosted in the Features test bundle, and a row written
-/// inline in that body would be the app's only way to reach this screen with no test able to press
-/// it.
+/// A view of its own taking a closure, for the reason `DeviceTokenSection` is one: pressing this
+/// row inside `SettingsView` means standing up that screen's `SessionStore` and, behind the tap,
+/// the whole token flow — a sign-on in a browser sheet, a grant, a keychain — for a case whose
+/// subject is one row and where it leads. Extracted, the row is pressed as itself and the closure
+/// says what the tap reached.
 struct ManageTokensRow: View {
     let open: () -> Void
 

@@ -82,8 +82,9 @@ struct MemoEditWiringTests {
     private let created = Date(timeIntervalSince1970: 1_750_000_000)
 
     /// No `SessionStore` in the environment on purpose: the detail view reads it only when a task
-    /// is ticked or an edit is saved, and this bundle cannot build one — `SessionStore`'s default
-    /// arguments reach into MemosAPI, which Features does not link (Features -> Core -> API).
+    /// is ticked or an edit is saved, and a session asked for by default reaches the device's
+    /// keychain (`DeviceCredentials.keychain()`) and the real sign-on behind it — which is not
+    /// what the Edit affordance is being asked about.
     private func detail(_ memo: Memo) -> some View {
         MemoDetailView(uid: memo.uid, initial: memo, timeline: TimelineStore())
     }
