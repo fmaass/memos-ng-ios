@@ -208,6 +208,37 @@ enum MemoFixture {
     }
 }
 
+/// Hosting a screen and then handing it a different set of inputs.
+///
+/// What a view does when what it was given CHANGES is a behaviour of its own, and a probe that
+/// renders one state and takes the window down again can never ask for it: the change modifiers
+/// fire on an update, and a screen that only ever existed once was never updated.
+@MainActor
+enum RedrawProbe {
+    static func host<V: View>(_ first: V, then second: V) {
+        let host = UIHostingController(rootView: first)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        window.rootViewController = host
+        window.isHidden = false
+
+        settle(host, in: window)
+        host.rootView = second
+        settle(host, in: window)
+
+        window.isHidden = true
+        window.rootViewController = nil
+    }
+
+    private static func settle(_ host: UIViewController, in window: UIWindow) {
+        for _ in 0..<50 {
+            window.layoutIfNeeded()
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            RunLoop.current.run(mode: .default, before: Date())
+        }
+    }
+}
+
 /// Hosting a view on a real screen and pressing a control in it, by the label VoiceOver reads.
 ///
 /// Separate from `ScreenProbe` because that one spins the run loop for four tenths of a second: a

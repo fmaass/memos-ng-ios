@@ -27,9 +27,17 @@
 # fatal warnings stands: no positive grep can prove an EXECUTABLE style. A commented-out line keeps
 # a naive count at one, and a style that confines nothing satisfies a looser pattern. Matching only
 # an UNCOMMENTED line whose first non-blank text is the house style closes the first hole and
-# narrows the second; it closes neither completely. What witnesses the style is the behavioural
-# case in the Features bundle, which activates a List row's own element and requires that nothing
-# fires.
+# narrows the second; it closes neither completely.
+#
+# No test in this repository witnesses the style either, and the reason is worth writing down: a
+# row hosted outside a real List cell does not merge its controls, so the tree a unit test reads
+# holds each control separately whatever style they were given. The witness is the check on a
+# device — a tap on a token's NAME does nothing and the list is unchanged.
+#
+# Both counts below read UNCOMMENTED lines only, because a screen whose controls were all replaced
+# by a sentence, with the calls left behind as comments, would otherwise pass every part of this
+# script. `//` is this repo's comment, and it is the only one excluded: a `/* … */` block holding a
+# call would still be counted, which is a hole this rule does not close.
 #
 # Usage: managetokens-buttonstyle-rule.sh [<repo-root>]   (default: the current directory)
 # Exit:  0 = the rule holds and both controls answered
@@ -85,14 +93,15 @@ if [ -n "$hits" ]; then
   rc=1
 fi
 
-component_calls="$(grep -caF 'CardButton(' "$screen" 2>/dev/null)"
+uncommented="$(grep -av '^[[:space:]]*//' "$screen" 2>/dev/null)"
 grep_rc=$?
 if [ "$grep_rc" -ge 2 ]; then
   echo "BUTTONSTYLE FAIL: the control-1 grep over $screen ended with exit $grep_rc, so the rule was"
   echo "                  never checked"
   exit 2
 fi
-echo "BUTTONSTYLE (control 1): the house component is called $component_calls time(s) in ManageTokensScreen.swift, 6 wanted"
+component_calls="$(printf '%s\n' "$uncommented" | grep -caF 'CardButton(')"
+echo "BUTTONSTYLE (control 1): the house component is called $component_calls uncommented time(s) in ManageTokensScreen.swift, 6 wanted"
 if [ "$component_calls" -lt 6 ]; then
   echo "BUTTONSTYLE FAIL: positive control 1 — fewer than the screen's six controls go through the"
   echo "                  house component, so the clean grep above may only mean the controls went"
@@ -110,8 +119,10 @@ if [ "$grep_rc" -ge 2 ]; then
   exit 2
 fi
 echo "BUTTONSTYLE (control 2): $style_lines uncommented line(s) in Design/CardButton.swift begin with the house style, 1 wanted"
-echo "BUTTONSTYLE: control 2 is a hint, not a fence — no grep can prove a style EXECUTES, and what"
-echo "             witnesses this one is the row-activation case in the Features bundle."
+echo "BUTTONSTYLE: control 2 is a hint, not a fence — no grep can prove a style EXECUTES, and no"
+echo "             test here does either: a row hosted outside a real List cell does not merge its"
+echo "             controls. The witness is the check on a device — a tap on a token's name does"
+echo "             nothing and the list is unchanged."
 if [ "$style_lines" -ne 1 ]; then
   echo "BUTTONSTYLE FAIL: control 2 — the house component does not apply the house style on exactly"
   echo "                  one uncommented line of its own file"

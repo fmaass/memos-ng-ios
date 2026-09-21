@@ -62,6 +62,20 @@ struct ManageTokensScreen: View {
         .navigationTitle(ManageTokensPresentation.title)
         .navigationBarTitleDisplayMode(.inline)
         .revokeConfirmation(item: $pendingRevoke, confirm: revoke)
+        .onChange(of: state) { _, current in
+            // A question raised about a row may not outlive the list it was raised from. A
+            // session that ended, an app that was put away and a re-read that no longer names
+            // the token all leave a question about a row nobody is looking at, and an answer to
+            // it would revoke a token off a screen that is not showing one. Decided here because
+            // this is the only place that is handed both the list and the question: the view
+            // above holds the question without being told what the list says, and the store says
+            // what the list is without knowing a question was asked.
+            guard let pending = pendingRevoke else { return }
+            if case .listed(let tokens) = current, tokens.contains(where: { $0.id == pending.id }) {
+                return
+            }
+            pendingRevoke = nil
+        }
     }
 
     @ViewBuilder

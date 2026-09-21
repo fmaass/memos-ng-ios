@@ -282,9 +282,10 @@ struct ManageTokensScreenTests {
         #expect(pending.value?.id == 7)
     }
 
-    /// The control is quiet while a call is in flight, and the existing case above cannot see it:
-    /// it watches the revoke callback, and after a question was put in front of the revoke a press
-    /// never calls that back whether the control was disabled or not.
+    /// The busy guard is visible only through the pending binding. The case above watches the
+    /// revoke callback, and a press on this screen never calls that back at all — it raises a
+    /// question — so that case reads the same whether the control is quiet or not. This one reads
+    /// what a press would have written.
     @Test("a revoke pressed while a call is in flight asks about nothing")
     func busyPressSetsNoPendingToken() {
         let asked = Held<Int?>(nil)
@@ -307,6 +308,34 @@ struct ManageTokensScreenTests {
         #expect(onScreen, "the revoke control left the screen instead of going quiet")
         #expect(pending.value == nil, "a busy press raised the question anyway")
         #expect(asked.value == nil)
+    }
+
+    /// A management session that ended, or an app that was put away, takes the list with it —
+    /// and the question was about a row of that list.
+    @Test("a question does not outlive the list it was raised from")
+    func aPendingRevokeGoesWithItsList() {
+        let pending = Held<ManagedToken?>(token(id: 7, name: "Laptop"))
+
+        RedrawProbe.host(
+            screen(state: .listed([token(id: 7, name: "Laptop")]), pending: pending),
+            then: screen(state: .locked(.discarded), pending: pending)
+        )
+
+        #expect(pending.value == nil)
+    }
+
+    /// A list that came back without the token is the same thing said differently: the row the
+    /// question named is not on the screen any more.
+    @Test("a question about a token the list no longer names is withdrawn")
+    func aPendingRevokeGoesWhenItsRowDoes() {
+        let pending = Held<ManagedToken?>(token(id: 7, name: "Laptop"))
+
+        RedrawProbe.host(
+            screen(state: .listed([token(id: 7, name: "Laptop")]), pending: pending),
+            then: screen(state: .listed([token(id: 1, name: "Kitchen phone")]), pending: pending)
+        )
+
+        #expect(pending.value == nil)
     }
 
     /// The question's own two answers, rendered on their own. A presented dialog is drawn by the
