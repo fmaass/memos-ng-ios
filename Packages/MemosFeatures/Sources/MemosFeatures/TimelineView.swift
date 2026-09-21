@@ -46,6 +46,10 @@ public struct TimelineView: View {
     /// replaces the whole list, and the scroll it was read at belongs to a list that is gone.
     @State private var jumps = 0
     @State private var composing: ComposeView.Mode?
+    /// The delete conversation the edit sheet can start, and the one thing that decides what its
+    /// answer may write. The SAME coordinator the memo's own screen uses — a second delete path
+    /// would be a second set of rules about when a memo may be removed.
+    @State private var memoDelete = MemoEditFlow()
     /// One conversation for the whole screen, shared with the Settings screen pushed from it —
     /// two stages would be two machines and, between them, two revokes.
     @State private var signOut = SignOutConversation()
@@ -194,12 +198,29 @@ public struct TimelineView: View {
         }
         .tint(DesignTokens.accent)
         .sensoryFeedback(trigger: feedback) { _, latest in latest.act?.feedback }
-        .sheet(item: $composing) { mode in
+        .sheet(item: $composing, onDismiss: { memoDelete.dismiss() }) { mode in
             if let timeline {
-                ComposeView(mode: mode) { submission in
+                Self.editSheet(
+                    mode: mode,
+                    isAsking: memoDelete.deleteStage == .asking,
+                    send: { event in
+                        memoDelete.sendDelete(event) { uid in
+                            await delete(uid: uid, in: timeline)
+                        }
+                    }
+                ) { submission in
                     await submit(mode, submission: submission, to: timeline)
                 }
             }
+        }
+        // The coordinator opens and closes WITH the sheet. The timeline keeps its own state for
+        // the save it already does; what the delete needs from here is which memo is being edited
+        // and which opening of the sheet is the current one.
+        .onChange(of: composing) { _, mode in memoDelete.begin(mode) }
+        .onChange(of: memoDelete.memoDeleted) { _, gone in
+            // A memo that is gone has no sheet to be edited in. The memo's own screen leaves
+            // instead; here there is nothing to leave, so the sheet is what goes.
+            if gone { composing = nil }
         }
         .signOutAlerts(signOut, session: session)
         // Decoded once, here, because the toolbar shows it on every frame of the timeline and the
@@ -547,6 +568,26 @@ public struct TimelineView: View {
         )
     }
 
+    /// What the long press opens: the compose screen a new capture uses, with the destructive row
+    /// on an EDIT and nothing on a new memo, which has nothing to delete.
+    ///
+    /// Named rather than written inside `.sheet` for the reason `editMode(for:)` is: a sheet never
+    /// presents under a test, so the only honest way to hold "the sheet this screen opens really
+    /// offers Delete" is to build its content the way this screen builds it and put THAT up.
+    static func editSheet(
+        mode: ComposeView.Mode,
+        isAsking: Bool,
+        send: @escaping @MainActor (MemoEditFlow.DeleteEvent) -> Void,
+        submit: @escaping (ComposeSubmission) async -> ComposeOutcome
+    ) -> ComposeView {
+        guard case .edit = mode else { return ComposeView(mode: mode, submit: submit) }
+        return ComposeView(
+            mode: mode,
+            delete: ComposeDelete(isAsking: isAsking, send: send),
+            submit: submit
+        )
+    }
+
     @ViewBuilder
     private func visibilityMenu(for memo: Memo, in timeline: TimelineStore) -> some View {
         Menu {
@@ -699,6 +740,16 @@ public struct TimelineView: View {
         if await timeline.delete(uid: memo.uid, using: handle) {
             feedback.fire(.deleted)
         }
+    }
+
+    /// The request the edit sheet's Delete sends. WHEN it runs — once, for the memo whose sheet
+    /// confirmed it, and only after a question was answered — is `MemoEditFlow`'s decision, and
+    /// the store is what makes two of them one request on the wire.
+    private func delete(uid: String, in timeline: TimelineStore) async -> Bool {
+        guard let handle = session.activeHandle else { return false }
+        let deleted = await timeline.delete(uid: uid, using: handle)
+        feedback.fire(deleted ? .deleted : .postFailed)
+        return deleted
     }
 
     private func setPinned(_ pinned: Bool, on memo: Memo, in timeline: TimelineStore) async {
