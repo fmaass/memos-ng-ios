@@ -327,14 +327,17 @@ public struct ComposeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DesignTokens.Space.regular)
         .onChange(of: picked) { _, items in
-            guard mayChangeAttachments else {
-                // Cleared rather than left standing: this binding is what the picker judges its
-                // NEXT answer against, and a selection kept here would make choosing the same
-                // photographs again a change of nothing — the second answer would land on no
-                // `onChange` at all and be lost in silence. Emptying it arrives here once more,
-                // where the same refusal meets a value that is already empty and stops.
+            // Which of the three things an answer here can be is decided on the stage, because
+            // the emptying this sheet does to refuse one is itself an answer and arrives later —
+            // possibly after the save it was refused for has ended (`ComposeStage`).
+            switch stage.selectionLanded(count: items.count, submitting: imports.isSubmitting) {
+            case .swallowReset:
+                return
+            case .refuseAndReset:
                 picked = []
                 return
+            case .load:
+                break
             }
             // Stamped HERE, synchronously, as the selection lands — not inside the task, where
             // the number would order the loads' start times instead. See `ComposeImports`.
@@ -378,8 +381,10 @@ public struct ComposeView: View {
                 // A tile offering "Try again" is still on screen in the frame Save is pressed:
                 // the marks the last attempt left are cleared as the submission is claimed
                 // (`ComposeImports.beginPostAttempt`) and the row redraws a frame later, so the
-                // tap that beat the redraw reaches this. A re-import would put a different file
-                // under an identity the upload is already carrying.
+                // tap that beat the redraw reaches this. This is only a hint — it saves starting
+                // work that would be refused. The fence is in `ComposeImports.retry`, where the
+                // writing happens, because what is asked here is asked at the tap and what it
+                // asks about is true at the tap: a retry can wait behind a Save pressed after it.
                 retry: { id in
                     guard mayChangeAttachments else { return }
                     Task { await imports.retry(id: id) }

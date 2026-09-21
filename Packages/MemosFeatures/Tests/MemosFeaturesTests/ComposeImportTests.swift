@@ -258,10 +258,10 @@ struct ComposeImportTests {
         #expect(imports.attachments.map(\.filename) == ["second.heic"])
     }
 
-    /// The camera's answer is the one that can arrive on its own: the cover closes when the
-    /// shutter is pressed, the file is written afterwards, and Save can be pressed in between. The
-    /// photograph is not attached — it is the one refusal here that costs something nobody can
-    /// take again, and attaching it would be worse: it would sit on a row that is about to close
+    /// The camera can be opened over a sheet that is already saving — nothing takes the pill
+    /// away — and the shutter pressed then stages the file and hands it straight over. The
+    /// photograph is not attached: it is the one refusal here that costs something nobody can take
+    /// again, and attaching it would be worse, since it would sit on a row that is about to close
     /// while the save it is not part of finishes.
     @Test("a capture handed over while a save is on the wire is refused, not attached")
     func aCaptureLandingDuringASaveIsRefused() async {

@@ -389,6 +389,38 @@ struct ComposeAttachmentStateTests {
         #expect(calls.count == 3)
     }
 
+    /// A retry is asked at a tap and does its writing afterwards, so it can still be waiting when
+    /// the save is claimed. Landing then, it would put a different file under an identity the
+    /// upload is already carrying — or settle the tile failed, which would also put "Remove them"
+    /// back on a sheet whose list is fixed. So the refusal is where the writing is, not at the
+    /// tap: what a tap knows is true at the tap.
+    @Test("a retry asked while a save is on the wire writes nothing and asks for nothing")
+    func aRetryDuringASaveIsRefused() async {
+        let imports = Self.imports()
+        let calls = Counted()
+        let loader: @MainActor (String) async -> ComposePickerAnswer = { _ in
+            calls.increment()
+            return calls.count == 1 ? .failed(.transport) : .file(Self.media("arrived.heic"))
+        }
+        await imports.load(["one"], stamp: imports.selected(), using: loader)
+        let id = imports.items[0].id
+        #expect(imports.items[0].isFailed, "the item this is about did not fail")
+
+        imports.beginSubmission()
+        await imports.retry(id: id)
+
+        #expect(calls.count == 1, "the refused retry asked the picker for the file again")
+        #expect(imports.items[0].isFailed, "the refused retry moved the tile out of its failure")
+        #expect(imports.items[0].media == nil, "the refused retry put a file under the identity")
+
+        // And nothing is left claimed by the refusal: the same tap works once the save is back.
+        imports.endSubmission()
+        await imports.retry(id: id)
+
+        #expect(calls.count == 2, "the refusal outlived the save it was made for")
+        #expect(imports.items[0].media?.filename == "arrived.heic")
+    }
+
     /// R8: the tile's own load is keyed on the FILE, because the identity deliberately survives a
     /// retry — keyed on that, a recovered item would keep the placeholder it had while it failed.
     @Test("a recovered item's tile reloads, because the key is the file and not the identity")

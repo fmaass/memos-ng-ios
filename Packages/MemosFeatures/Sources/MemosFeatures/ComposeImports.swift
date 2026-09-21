@@ -216,11 +216,13 @@ final class ComposeImports {
     /// and a photo taken here and dropped because somebody afterwards chose two from the library is
     /// a photo nobody can take again.
     func captured(_ media: PickedMedia) {
-        // The camera answers on its own timing — the cover closes as the shutter is pressed and
-        // the file is written after it — so a photograph can be handed over with a save already on
-        // the wire. This is the one refusal here that costs something nobody can take again, and
-        // it is still the lesser cost: attached, it would sit on a row that is about to close,
-        // left out of the memo that closed it.
+        // The camera stages the file and hands it over in the same breath, and the cover closes
+        // on the count that hand-over moves (`CameraCapture.keep`, `CameraView`). What is on its
+        // own timing is the camera itself: it can be opened over a sheet whose save is already
+        // running, and a shutter pressed then delivers into a list the submission was built from.
+        // This is the one refusal here that costs something nobody can take again, and it is still
+        // the lesser cost: attached, it would sit on a row that is about to close, left out of the
+        // memo that closed it.
         guard !isSubmitting else { return }
         sequence += 1
         let attachment = ComposeAttachment(
@@ -274,6 +276,12 @@ final class ComposeImports {
     /// one tile; two overlapping imports would race to write it, and the older answer landing last
     /// would put a failure back over a success.
     func retry(id: UUID) async {
+        // A retry is asked at a tap and written here, and a Save pressed in between claims the
+        // list first: what the tap knew was true at the tap. Landing afterwards, a re-import puts
+        // a different file under an identity the upload is already carrying, and a retry that
+        // fails puts "Remove them" back on a sheet whose list is fixed. Refused before anything
+        // here is claimed or written.
+        guard !isSubmitting else { return }
         guard !retryInFlight.contains(id),
             let index = items.firstIndex(where: { $0.id == id })
         else { return }
