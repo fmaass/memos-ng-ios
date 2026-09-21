@@ -258,10 +258,13 @@ public final class SessionStore {
     /// Which route outage has already had its reload ASKED FOR, by the ordinal the monitor counted
     /// that loss under.
     ///
-    /// Written on the one line that does the recovery work — beside the increment in
-    /// `enterVerified`, inside `wasUnconfirmed` — and nowhere else. A confirmation that incremented
-    /// nothing asked for no reload and cannot stand in for one, however successful it was: what is
-    /// recorded is "the reload this outage owed has been requested", not "a validation succeeded".
+    /// Written at the two places that ASK for the reload and nowhere else: beside the increment in
+    /// `enterVerified`, inside `wasUnconfirmed`, and beside the increment in `routeRegained`'s
+    /// branch for a session that is already confirmed. Each sits on the line that raises
+    /// `reachabilityRecoveries`, which is what entitles it to record that the outage has had its
+    /// reload asked for. A confirmation that incremented nothing asked for no reload and cannot
+    /// stand in for one, however successful it was: what is recorded is "the reload this outage
+    /// owed has been requested", not "a validation succeeded".
     private var lossesSeenAtRecovery = 0
     /// Whether the credential this session is running on was ever written down successfully.
     ///

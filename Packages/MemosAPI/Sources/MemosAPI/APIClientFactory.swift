@@ -16,21 +16,23 @@ public enum APIClientFactory {
         Configuration(dateTranscoder: RFC3339DateTranscoder())
     }
 
-    /// How long a request may go without a byte, and how long it may take in all.
+    /// How long a request may go without a single byte before it is given up on.
     ///
     /// Measured rather than preferred: against a destination that is routed and answers nothing, a
-    /// request on the framework's defaults took the full 60 seconds to fail. The first is the idle
-    /// bound between bytes, which cannot by itself cap a trickle; the second is the total deadline
-    /// that can, and every request built here carries small JSON, so a minute is already generous.
+    /// request on the framework's defaults took the full 60 seconds to fail. This is the idle
+    /// bound between bytes, and it is the only one set here. No TOTAL deadline stands beside it —
+    /// the same call the media session makes about its own long transfer, for the mirror-image
+    /// reason: this client carries the binary chunks of a foreground edit's upload as well as
+    /// small JSON, and a deadline on the whole transfer would kill an upload that is still making
+    /// progress on a slow link, failing the edit before its patch is ever sent.
     public static let requestTimeout: TimeInterval = 15
-    public static let resourceTimeout: TimeInterval = 60
 
     /// The session every client built here fetches through, in place of `URLSession.shared`.
     ///
-    /// `.shared` cannot be bounded at all: a session COPIES its configuration when it is made and
-    /// never reads it again, so the only way to put a limit on a request this app sends is to own
-    /// the session it goes out on. Owning one also keeps the limit off every other user of the
-    /// shared session — the outbox's uploads among them, whose waits are its own business.
+    /// `.shared` cannot be given this bound: a session COPIES its configuration when it is made
+    /// and never reads it again, so reconfiguring the shared one afterwards changes nothing, and
+    /// the only way to put a limit on a request this app sends is to own the session it goes out
+    /// on. Owning one also keeps the limit off every other user of the shared session.
     public static var urlSession: URLSession { bounded.session }
 
     /// `@unchecked Sendable` for the reason `MediaSession` is one: the single stored property is a
@@ -41,7 +43,6 @@ public enum APIClientFactory {
         init() {
             let configuration = URLSessionConfiguration.default
             configuration.timeoutIntervalForRequest = APIClientFactory.requestTimeout
-            configuration.timeoutIntervalForResource = APIClientFactory.resourceTimeout
             session = URLSession(configuration: configuration)
         }
     }

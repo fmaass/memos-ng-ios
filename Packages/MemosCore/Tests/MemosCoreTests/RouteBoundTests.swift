@@ -28,6 +28,5 @@ struct RouteBoundTests {
         let configuration = APIClientFactory.urlSession.configuration
 
         #expect(configuration.timeoutIntervalForRequest == 15)
-        #expect(configuration.timeoutIntervalForResource == 60)
     }
 }

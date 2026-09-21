@@ -47,6 +47,36 @@ final class RouteMonitorDouble: RouteStatusMonitoring, @unchecked Sendable {
     }
 }
 
+/// The REAL ledger behind the monitoring protocol, fed one path status at a time.
+///
+/// Where `RouteMonitorDouble` scripts what a monitor decided, this one decides it: a status goes
+/// through `RouteStatusLedger.adopt` under the lock and reaches the store only if the ledger
+/// makes a regain of it, exactly as `NetworkRouteMonitor` passes its callbacks on. A case about
+/// what the two do TOGETHER has to be composed this way, or it proves the halves and not the path.
+final class LedgerBackedRoutes: RouteStatusMonitoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var ledger = RouteStatusLedger(routed: false)
+    private let events: AsyncStream<RouteRegain>.Continuation
+    let regains: AsyncStream<RouteRegain>
+
+    init() {
+        var events: AsyncStream<RouteRegain>.Continuation!
+        regains = AsyncStream<RouteRegain> { events = $0 }
+        self.events = events
+    }
+
+    func lossesSeen() -> Int {
+        lock.withLock { ledger.losses }
+    }
+
+    /// One path callback, adopted where the monitor adopts it and delivered only if it was a
+    /// regain.
+    func report(satisfied: Bool) {
+        guard let regain = lock.withLock({ ledger.adopt(satisfied: satisfied) }) else { return }
+        events.yield(regain)
+    }
+}
+
 /// What a change of status means, with no framework in the way.
 @Suite("Counting route losses and the regains that close them")
 struct RouteStatusLedgerTests {
@@ -104,7 +134,10 @@ struct RouteRecoveryTests {
     /// `countingALossOnWhoami` is the one seam a single case needs: the whoami of that number
     /// counts a route loss as it ANSWERS, which is the only way to stage a loss falling between a
     /// check being issued and its confirmation being recorded.
-    private func makeSession(countingALossOnWhoami: Int? = nil) -> SessionStore {
+    private func makeSession(
+        countingALossOnWhoami: Int? = nil,
+        monitoring: (any RouteStatusMonitoring)? = nil
+    ) -> SessionStore {
         SessionStore(
             credentials: InMemoryCredentials(),
             makeClient: { [whoamis, pages, routes] _, token in
@@ -121,7 +154,7 @@ struct RouteRecoveryTests {
             sleeper: { [ladder] in await ladder.sleep($0) },
             noticeSleeper: { [notice] in await notice.sleep($0) },
             now: { [clock] in clock.now },
-            routes: routes
+            routes: monitoring ?? routes
         )
     }
 
@@ -131,8 +164,14 @@ struct RouteRecoveryTests {
         for _ in 0..<turns where !condition() { await Task.yield() }
     }
 
-    private func signedIn(countingALossOnWhoami: Int? = nil) async -> SessionStore {
-        let session = makeSession(countingALossOnWhoami: countingALossOnWhoami)
+    private func signedIn(
+        countingALossOnWhoami: Int? = nil,
+        monitoring: (any RouteStatusMonitoring)? = nil
+    ) async -> SessionStore {
+        let session = makeSession(
+            countingALossOnWhoami: countingALossOnWhoami,
+            monitoring: monitoring
+        )
         await session.enteredForeground()
         await session.signIn(serverAddress: routeAddress, token: routeToken)
         return session
@@ -306,7 +345,36 @@ struct RouteRecoveryTests {
         #expect(pages.count == before.pages + 2, "one read per outage, and no more")
     }
 
-    // MARK: - (e): an unmatched regain
+    // MARK: - (e): an up that closed no outage
+
+    /// The status this process STARTED on, and then a second up with no loss between them. The
+    /// ledger is the real one here, so what the store is told is what the callbacks really make:
+    /// nothing. Nothing is asked, nothing is read, and the screens are told nothing to reload for.
+    @Test("an up with no loss before it asks nothing, reads nothing and recovers nothing")
+    func anUpThatClosedNoOutageIsNothing() async {
+        defer {
+            ladder.releaseAll()
+            notice.releaseAll()
+        }
+        let paths = LedgerBackedRoutes()
+        let session = await signedIn(monitoring: paths)
+        let list = timeline(reporting: session)
+        let whoamisBefore = whoamis.count
+        let pagesBefore = pages.count
+        var reloaded = 0
+
+        paths.report(satisfied: true)
+        paths.report(satisfied: true)
+        await settle(until: { session.reachabilityRecoveries > 0 }, turns: 60)
+        await reloadsOwed(session, list, seen: &reloaded)
+
+        #expect(paths.lossesSeen() == 0, "precondition: the route never went down")
+        #expect(session.reachabilityRecoveries == 0, "a route that never went down recovered")
+        #expect(whoamis.count == whoamisBefore, "an up that closed nothing asked to confirm")
+        #expect(pages.count == pagesBefore, "an up that closed nothing read the list")
+    }
+
+    // MARK: - one outage, a regain delivered for it twice
 
     @Test("a regain whose outage has already recovered changes nothing at all")
     func anUnmatchedRegainIsNothing() async {
