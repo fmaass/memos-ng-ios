@@ -181,7 +181,12 @@ public enum MemoDetailPresentation {
     /// the server would refuse the write, and an affordance that leads to a 403 is worse than none.
     public static func editMode(for memo: Memo) -> ComposeView.Mode? {
         guard memo.mine else { return nil }
-        return .edit(uid: memo.uid, content: memo.content, createdAt: memo.createdAt)
+        return .edit(
+            uid: memo.uid,
+            content: memo.content,
+            createdAt: memo.createdAt,
+            attachments: memo.attachments
+        )
     }
 
     /// What is left of the memo's own screen once its editor has closed.

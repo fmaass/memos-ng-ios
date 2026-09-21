@@ -28,7 +28,7 @@ struct ComposeMediaEditTests {
     private let created = Date(timeIntervalSince1970: 1_750_000_000)
 
     private func mode() -> ComposeView.Mode {
-        .edit(uid: "m1", content: "the boiler man", createdAt: created)
+        .edit(uid: "m1", content: "the boiler man", createdAt: created, attachments: [])
     }
 
     private func picked(_ name: String) -> PickedMedia {

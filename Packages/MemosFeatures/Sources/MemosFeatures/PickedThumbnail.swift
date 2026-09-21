@@ -68,15 +68,17 @@ nonisolated enum PickedThumbnailSource {
     }
 }
 
-/// The photos and videos about to be posted, as pictures — in the order they will be sent.
+/// The memo's pictures, as pictures — what it already has, and what is about to be posted, in the
+/// order they will be in.
 ///
 /// It replaces the line that read "3 files attached". A count is not a check: the one thing
 /// somebody wants to know before posting is WHICH three, and only the pictures can say that. The
 /// ORDER is the second half of the same idea — the row is the order the memo will carry, so the
 /// order is something a person can see rather than something they find out afterwards.
 struct PickedThumbnailRow: View {
-    let attachments: [ComposeAttachment]
-    /// What "Try again" on a failed tile asks for.
+    let items: [ComposeRowItem]
+    /// What "Try again" on a failed tile asks for. Only a picked file has one: nothing here can
+    /// fail for a picture the memo already has, and nothing here removes one either.
     var retry: (UUID) -> Void = { _ in }
 
     @ScaledMetric(relativeTo: .body) private var tile = DesignTokens.Metric.pickedThumbnail
@@ -84,15 +86,36 @@ struct PickedThumbnailRow: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: DesignTokens.Space.snug) {
-                ForEach(attachments) { attachment in
-                    PickedThumbnail(attachment: attachment, size: tile) { retry(attachment.id) }
+                ForEach(items) { item in
+                    switch item {
+                    case .existing(let existing):
+                        ExistingThumbnail(attachment: existing.attachment, size: tile)
+                    case .picked(let attachment):
+                        PickedThumbnail(attachment: attachment, size: tile) { retry(attachment.id) }
+                    }
                 }
             }
         }
         .frame(height: tile)
         .accessibilityLabel(
-            attachments.count == 1 ? "1 file attached" : "\(attachments.count) files attached"
+            items.count == 1 ? "1 file attached" : "\(items.count) files attached"
         )
+    }
+}
+
+/// One picture the memo already has.
+///
+/// It goes through `AttachmentThumbnail`, the same remote path every other picture in the app is
+/// drawn by, so it rides that view's fetch generation fence rather than opening a second way to a
+/// photograph. The tile clips itself to the same radius the picked ones use; all this adds is the
+/// square the row is built from.
+struct ExistingThumbnail: View {
+    let attachment: MemoAttachment
+    let size: CGFloat
+
+    var body: some View {
+        AttachmentThumbnail(attachment: attachment, tier: .thumb, slot: MemoPresentation.gridSlot)
+            .frame(width: size, height: size)
     }
 }
 

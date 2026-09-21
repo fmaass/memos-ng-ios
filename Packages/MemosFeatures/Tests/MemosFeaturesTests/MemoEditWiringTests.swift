@@ -125,7 +125,12 @@ struct MemoEditWiringTests {
                     uid: "m3", content: "ring the plumber", createdAt: created
                 )))
 
-        #expect(flow.editing == .edit(uid: "m3", content: "ring the plumber", createdAt: created))
+        #expect(
+            flow.editing
+                == ComposeView.Mode.edit(
+                    uid: "m3", content: "ring the plumber", createdAt: created, attachments: []
+                )
+        )
     }
 
     @Test("a memo that is not mine opens nothing, even asked directly")
@@ -139,7 +144,7 @@ struct MemoEditWiringTests {
     func submitSavesAndCloses() async {
         let flow = MemoEditFlow()
         let recorder = SubmissionRecorder(result: true)
-        flow.begin(.edit(uid: "m5", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m5", content: "before", createdAt: created, attachments: []))
 
         let closed = await flow.submit(
             ComposeSubmission(content: "after", visibility: nil), save: recorder.save
@@ -148,7 +153,12 @@ struct MemoEditWiringTests {
         #expect(closed.isSaved)
         #expect(recorder.count == 1, "the sheet's Save did not reach the save at all")
         #expect(recorder.lastSubmission?.content == "after")
-        #expect(recorder.lastMode == .edit(uid: "m5", content: "before", createdAt: created))
+        #expect(
+            recorder.lastMode
+                == ComposeView.Mode.edit(
+                    uid: "m5", content: "before", createdAt: created, attachments: []
+                )
+        )
         #expect(flow.editing == nil, "a saved edit closes the sheet")
         #expect(flow.lastError == nil)
     }
@@ -157,7 +167,7 @@ struct MemoEditWiringTests {
     func submitKeepsTheSheetOnFailure() async {
         let flow = MemoEditFlow()
         let recorder = SubmissionRecorder(result: false)
-        flow.begin(.edit(uid: "m6", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m6", content: "before", createdAt: created, attachments: []))
 
         let closed = await flow.submit(
             ComposeSubmission(content: "after", visibility: nil), save: recorder.save
@@ -173,14 +183,14 @@ struct MemoEditWiringTests {
     @Test("opening the sheet again clears the last failure")
     func beginClearsTheFailure() async {
         let flow = MemoEditFlow()
-        flow.begin(.edit(uid: "m7", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m7", content: "before", createdAt: created, attachments: []))
         _ = await flow.submit(
             ComposeSubmission(content: "after", visibility: nil),
             save: SubmissionRecorder(result: false).save
         )
         #expect(flow.lastError != nil)
 
-        flow.begin(.edit(uid: "m7", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m7", content: "before", createdAt: created, attachments: []))
         #expect(flow.lastError == nil)
     }
 
@@ -188,7 +198,7 @@ struct MemoEditWiringTests {
     func dismissDoesNotSave() async {
         let flow = MemoEditFlow()
         let recorder = SubmissionRecorder(result: true)
-        flow.begin(.edit(uid: "m8", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m8", content: "before", createdAt: created, attachments: []))
 
         flow.sheet.wrappedValue = nil
 
@@ -219,7 +229,7 @@ struct MemoDeleteWiringTests {
 
     private func opened() -> MemoEditFlow {
         let flow = MemoEditFlow()
-        flow.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         return flow
     }
 
@@ -343,7 +353,7 @@ struct MemoDeleteWiringTests {
     @Test("the request carries the uid of the memo the sheet is open on")
     func theRequestCarriesTheSheetsUid() async {
         let flow = MemoEditFlow()
-        flow.begin(.edit(uid: "m9", content: "x", createdAt: created))
+        flow.begin(.edit(uid: "m9", content: "x", createdAt: created, attachments: []))
         let store = DeleteRecorder(result: true)
 
         await flow.advanceDelete(.tapped, delete: store.delete)
@@ -405,7 +415,7 @@ struct MemoDeleteWiringTests {
         typealias Exit = MemoDetailPresentation.EditorExit
 
         let saved = MemoEditFlow()
-        saved.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        saved.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         _ = await saved.submit(
             ComposeSubmission(content: "after", visibility: nil),
             save: SubmissionRecorder(result: true).save
@@ -416,7 +426,7 @@ struct MemoDeleteWiringTests {
         #expect(afterSaved == Exit.stay)
 
         let cancelled = MemoEditFlow()
-        cancelled.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        cancelled.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         cancelled.sheet.wrappedValue = nil
         let afterCancel = MemoDetailPresentation.popDecision(
             memoDeleted: cancelled.memoDeleted, sheetClosed: true
@@ -425,7 +435,7 @@ struct MemoDeleteWiringTests {
 
         let deleted = MemoEditFlow()
         let store = DeleteRecorder(result: true)
-        deleted.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        deleted.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         await deleted.advanceDelete(.tapped, delete: store.delete)
         await deleted.advanceDelete(.confirmed, delete: store.delete)
         #expect(store.uids == ["m1"], "the delete never reached the store")
@@ -437,7 +447,7 @@ struct MemoDeleteWiringTests {
         // A delete that failed is not a delete: the memo is still there and so is its screen.
         let failed = MemoEditFlow()
         let refuser = DeleteRecorder(result: false)
-        failed.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        failed.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         await failed.advanceDelete(.tapped, delete: refuser.delete)
         await failed.advanceDelete(.confirmed, delete: refuser.delete)
         #expect(refuser.uids == ["m1"], "the delete never reached the store")
@@ -455,7 +465,7 @@ struct MemoDeleteWiringTests {
         await flow.advanceDelete(.confirmed, delete: store.delete)
         #expect(flow.lastError != nil)
 
-        flow.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         #expect(flow.deleteStage == .idle)
         #expect(!flow.memoDeleted)
         #expect(flow.lastError == nil)
@@ -468,7 +478,9 @@ struct MemoDeleteWiringTests {
     /// if this cannot see the sheet's own Save, its silence about Delete would prove nothing.
     @Test("an edit sheet with a delete really shows it, and one without does not")
     func theDeleteRowIsOnTheSheet() {
-        let mode = ComposeView.Mode.edit(uid: "m1", content: "the boiler man", createdAt: created)
+        let mode = ComposeView.Mode.edit(
+            uid: "m1", content: "the boiler man", createdAt: created, attachments: []
+        )
         let withDelete = ScreenProbe.labels(
             of: ComposeView(
                 mode: mode,
@@ -521,7 +533,7 @@ struct MemoDetailExitTests {
     private func editorOpened(_ exit: MemoDetailExit) -> MemoEditFlow {
         exit.editorOpened()
         let flow = MemoEditFlow()
-        flow.begin(.edit(uid: "m1", content: "before", createdAt: created))
+        flow.begin(.edit(uid: "m1", content: "before", createdAt: created, attachments: []))
         return flow
     }
 

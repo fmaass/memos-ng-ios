@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import MemosOutbox
 
 /// Why one picked item could not be read, in the four categories a person can act on.
@@ -152,6 +153,50 @@ nonisolated public struct ComposeAttachment: Identifiable, Equatable, CaptureCar
     public var failure: ComposeLoadFailure? {
         if case .failed(let category) = load { return category }
         return uploadFailed
+    }
+}
+
+/// One picture the memo already has.
+///
+/// A struct rather than the bare `MemoAttachment` it wraps: what a later release adds here — a
+/// mark that this one is to be removed, the capture instant the server will start sending — is
+/// then a field rather than a new type through every call site.
+nonisolated struct ComposeExisting: Identifiable, Equatable, Sendable {
+    let attachment: MemoAttachment
+
+    var id: String { attachment.uid }
+}
+
+/// One thing in the compose row: a picture the memo already has, or a file about to be posted.
+///
+/// The two never became one shape because they are not one thing. A picked item is a copy on
+/// disk this sheet is holding; an existing one is a file on the server with no local copy at all,
+/// and the only honest way to draw it is the remote path the rest of the app draws pictures with.
+nonisolated enum ComposeRowItem: Identifiable, Equatable, Sendable {
+    case existing(ComposeExisting)
+    case picked(ComposeAttachment)
+
+    /// Prefixed, because a uid and a picked item's UUID are drawn from different namespaces and
+    /// `ForEach` is entitled to assume that two items with one id are one item.
+    var id: String {
+        switch self {
+        case .existing(let existing): "existing-\(existing.id)"
+        case .picked(let attachment): "picked-\(attachment.id)"
+        }
+    }
+}
+
+/// What the compose row shows, in order.
+///
+/// A function rather than a concatenation at the call site: the day old and new pictures share
+/// one order — when the existing ones carry a capture instant of their own — there is one place
+/// that changes, and it is a place a test can hold today.
+nonisolated enum ComposeRow {
+    /// Existing pictures first, in the order the server holds them; then what has been picked, in
+    /// the order it will be sent (`ComposeImports.ordered`).
+    static func items(existing: [ComposeExisting], picked: [ComposeAttachment]) -> [ComposeRowItem]
+    {
+        existing.map(ComposeRowItem.existing) + picked.map(ComposeRowItem.picked)
     }
 }
 

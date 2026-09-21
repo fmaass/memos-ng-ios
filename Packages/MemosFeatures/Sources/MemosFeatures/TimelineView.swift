@@ -489,11 +489,7 @@ public struct TimelineView: View {
                         .contextMenu {
                             if memo.mine {
                                 Button {
-                                    composing = .edit(
-                                        uid: memo.uid,
-                                        content: memo.content,
-                                        createdAt: memo.createdAt
-                                    )
+                                    composing = Self.editMode(for: memo)
                                 } label: {
                                     Label("Edit", systemImage: "pencil")
                                 }
@@ -535,6 +531,20 @@ public struct TimelineView: View {
                 ContentUnavailableView("No memos yet", systemImage: "note.text")
             }
         }
+    }
+
+    /// What the long-press Edit opens on: the memo as it stands, its pictures included.
+    ///
+    /// Named rather than written inside the menu because a context menu never opens under a test,
+    /// and what this carries — the memo's own attachments, not an empty list — is the whole of
+    /// what the sheet has to show.
+    static func editMode(for memo: Memo) -> ComposeView.Mode {
+        .edit(
+            uid: memo.uid,
+            content: memo.content,
+            createdAt: memo.createdAt,
+            attachments: memo.attachments
+        )
     }
 
     @ViewBuilder
@@ -725,7 +735,7 @@ public struct TimelineView: View {
                 ? .saved
                 : .failed(
                     outbox.lastEnqueueFailure == .notSignedIn ? .authorization : .storage)
-        case .edit(let uid, _, let createdAt):
+        case .edit(let uid, _, let createdAt, _):
             guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return .failed(.authorization)
             }
@@ -925,7 +935,7 @@ extension ComposeView.Mode: Identifiable {
     public var id: String {
         switch self {
         case .create: "create"
-        case .edit(let uid, _, _): "edit-\(uid)"
+        case .edit(let uid, _, _, _): "edit-\(uid)"
         }
     }
 }
