@@ -126,9 +126,18 @@ struct ComposeStage: Equatable {
     /// everything that was picked. So the echo is told apart from a person's answer HERE, by what
     /// this value knows it did, and not by a flag that will have moved on by then.
     ///
-    /// An empty answer that arrives while an emptying is outstanding is read as that echo. A real
-    /// one landing in the same gap is therefore swallowed once — the cost of that is a row that
-    /// keeps the pictures somebody had just deselected, and a second tap says it again.
+    /// An empty answer that arrives while an emptying is outstanding is read as that echo, and
+    /// only the FIRST answer after it is: whatever comes next accounts for the emptying, whether
+    /// it is empty or not. Nothing real is lost to that. By the time the marker is up the binding
+    /// is already empty, so a person answering "none" would be writing the value it already
+    /// holds — no change, and a change is what is delivered here at all. The gap is one update
+    /// wide anyway, and the picker that would have to answer into it is the one being dismissed
+    /// by the answer just refused (`photosPickerClosed`).
+    ///
+    /// Which is also the limit of it: were an empty answer ever swallowed, saying it again could
+    /// not undo it, for the same reason — an empty binding emptied again is no change. What
+    /// recovers is an answer that IS one: picking anything, or taking the pictures off the row
+    /// with the control on each of them.
     mutating func selectionLanded(count: Int, submitting: Bool) -> SelectionAnswer {
         if count == 0 {
             let wasEmptiedHere = awaitingResetEcho

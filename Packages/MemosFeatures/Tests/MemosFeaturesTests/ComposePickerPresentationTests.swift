@@ -274,15 +274,21 @@ struct ComposePickerPresentationTests {
     }
 
     /// A real selection can also land BEFORE the emptying's answer does, and it is still a
-    /// selection — and it accounts for the emptying, so the one that follows is swallowed once.
+    /// selection — and it ACCOUNTS for the emptying: the marker is spent on it, so an empty
+    /// answer after it is taken at face value, as a person's "none". That is the trade this makes
+    /// deliberately, and in the direction of the reachable case: somebody deselecting everything
+    /// is something they can do at any time, and it is the thing that would be lost by holding the
+    /// marker back for an answer that may never come.
     @Test("a real selection landing before the emptying's answer is still a selection")
     func aSelectionBeforeTheEchoIsASelection() {
         var stage = ComposeStage()
         _ = stage.selectionLanded(count: 2, submitting: true)
 
         let answer = stage.selectionLanded(count: 3, submitting: false)
+        let afterwards = stage.selectionLanded(count: 0, submitting: false)
 
         #expect(answer == .load)
+        #expect(afterwards == .load, "the emptying was still being waited for after a real answer")
     }
 
     /// Nothing in the binding and a save running: there is nothing to take and nothing to give
@@ -295,5 +301,4 @@ struct ComposePickerPresentationTests {
 
         #expect(answer == .swallowReset)
     }
-
 }
