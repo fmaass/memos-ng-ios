@@ -255,6 +255,14 @@ public final class SessionStore {
     /// will ever see the end of. False until a scene says otherwise, because a headless launch is
     /// the state this app is in more often than not.
     private var isForegrounded = false
+    /// Which route outage has already had its reload ASKED FOR, by the ordinal the monitor counted
+    /// that loss under.
+    ///
+    /// Written on the one line that does the recovery work — beside the increment in
+    /// `enterVerified`, inside `wasUnconfirmed` — and nowhere else. A confirmation that incremented
+    /// nothing asked for no reload and cannot stand in for one, however successful it was: what is
+    /// recorded is "the reload this outage owed has been requested", not "a validation succeeded".
+    private var lossesSeenAtRecovery = 0
     /// Whether the credential this session is running on was ever written down successfully.
     ///
     /// Not the same question as "is the credential in memory the current one". A sign-in whose
@@ -318,6 +326,10 @@ public final class SessionStore {
     /// itself: a line that interpolated the error's own text here would leave it green, and the
     /// error's own text is precisely what may not be written.
     private let diagnostics: @Sendable (String) -> Void
+    /// Where "the route came back" arrives from, and where the loss count a check is issued under
+    /// is read synchronously. Nil in a process that has no route to recover — a suite, and the
+    /// share extension.
+    private let routes: (any RouteStatusMonitoring)?
 
     // Nonisolated: these name the two keychain items, and the outbox reads them from its own
     // isolation. They are immutable strings, so there is nothing here for the main actor to guard.
@@ -345,6 +357,7 @@ public final class SessionStore {
         // The DIRECTORY, not a writer over it. The writer is built below, against this
         // store's own epoch, so nothing can hand it a counter this session does not move.
         snapshots: TimelineSnapshotStore? = nil,
+        routes: (any RouteStatusMonitoring)? = nil,
         onVerified: (@MainActor @Sendable () -> Void)? = nil,
         // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
         // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
@@ -367,6 +380,17 @@ public final class SessionStore {
         self.onVerified = onVerified
         self.diagnostics =
             diagnostics ?? { line in MemosLog.session.error("\(line, privacy: .public)") }
+        self.routes = routes
+        guard let routes else { return }
+        // ONE consuming task, so regains reach the rule in the order the monitor's callback saw
+        // them. A task per callback orders nothing — which is the right shape for a decision that
+        // does not care, and the wrong one here.
+        Task { @MainActor [weak self] in
+            for await regain in routes.regains {
+                guard let self else { return }
+                await self.routeRegained(regain)
+            }
+        }
     }
 
     /// The client every feature talks through, or `nil` while signed out.
@@ -922,6 +946,10 @@ public final class SessionStore {
         let generation = sessionGeneration
         let presented = credential.presented()
         let admitted = state.user != nil
+        // The route as it was when this question was ASKED, read with nothing awaited around it. A
+        // loss counted while this is on the wire belongs to the outage AFTER the one this answer
+        // can close, and recording it at the answer would silence that outage's own regain.
+        let issuedAtLosses = lossesSeen()
         // Read before the request, because after it the only thing in hand is an error whose text
         // may not be read.
         let host = configuration.baseURL.host() ?? configuration.baseURL.absoluteString
@@ -960,7 +988,7 @@ public final class SessionStore {
             } else {
                 MemosLog.session.info("a check answered for a credential this device replaced")
             }
-            enterVerified()
+            enterVerified(confirming: issuedAtLosses)
         } catch let error as APIError {
             // The server answered and refused. Its own sentence is built from a status code and
             // nothing the request carried, so it is the better one. It is never terminal: a
@@ -1131,6 +1159,40 @@ public final class SessionStore {
     /// it cannot: a join never runs this body, and a check in flight owns the rung it was asked
     /// under.
     public func retryNow() async {
+        retryInFlight?.cancel()
+        retryInFlight = nil
+        await revalidate(attempt: 0)
+    }
+
+    /// The route-loss count as it stands NOW, with nothing awaited around the read — the ordinal a
+    /// check is ISSUED under.
+    private func lossesSeen() -> Int { routes?.lossesSeen() ?? 0 }
+
+    /// A route came back, and the one rule that says what that means — asked on the actor that
+    /// performs the effect, with nothing awaited between the question and the write.
+    ///
+    /// What associates this regain with the recovery it belongs to is the ORDINAL it carries,
+    /// taken under the monitor's lock at the callback, against `lossesSeenAtRecovery`. Delivery
+    /// order enters nothing: a verification already in flight can confirm — counter moved, screens
+    /// reloaded — before this runs, and the loss itself can be delivered later still, so a rule
+    /// that read the session's current state alone would count a second recovery for an outage
+    /// that has already had one.
+    ///
+    /// The one window it leaves: a check issued BEFORE a loss whose answer still arrives counts as
+    /// a recovery from an outage it predates, and the regain then reloads once more. One extra
+    /// read, never a lost one.
+    func routeRegained(_ regain: RouteRegain) async {
+        guard regain.lossOrdinal > lossesSeenAtRecovery else { return }
+        guard awaitingConfirmation else {
+            // Nothing is owed an answer, so there is no question worth sending: the screens are
+            // told directly, exactly as a confirmation tells them.
+            reachabilityRecoveries += 1
+            lossesSeenAtRecovery = regain.lossOrdinal
+            return
+        }
+        // What is cancelled is the WAIT and never a check in flight, which `revalidate` joins —
+        // the same thing the notice's own button does. The confirmation that check earns records
+        // the ordinal it was issued under, so this outage's reload is asked for exactly once.
         retryInFlight?.cancel()
         retryInFlight = nil
         await revalidate(attempt: 0)
@@ -1440,15 +1502,25 @@ public final class SessionStore {
 
     /// The session is confirmed — and the outbox is told, exactly once per transition.
     ///
+    /// `losses` is the route-loss count the check that earned this confirmation was ISSUED under.
+    /// A sign-in carries none: it is not a recovery from an outage, so a regain that is still owed
+    /// a reload gets one.
+    ///
     /// The claim is made HERE, synchronously, rather than by whoever noticed the answer: a capture
     /// parked while the phone was off the network is drained by a handler that must run once, and
     /// two paths into `.verified` firing it twice is two drains of the same queue.
-    private func enterVerified() {
+    private func enterVerified(confirming losses: Int = 0) {
         let wasUnconfirmed = verification != .verified
         // Counted HERE rather than under the guard below, because that guard also wants an
         // `onVerified` handler and most sessions have none — and the screens' reason to reload is
         // the transition itself, whoever is or is not listening for the drain.
-        if wasUnconfirmed { reachabilityRecoveries += 1 }
+        if wasUnconfirmed {
+            reachabilityRecoveries += 1
+            // Beside the increment and nowhere else: THIS is the line that asks the screens to
+            // read again, so this is the line entitled to say that the outage the check was issued
+            // under has had its reload asked for.
+            lossesSeenAtRecovery = losses
+        }
         setVerification(.verified)
         retryInFlight?.cancel()
         retryInFlight = nil

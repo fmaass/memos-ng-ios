@@ -16,10 +16,42 @@ public enum APIClientFactory {
         Configuration(dateTranscoder: RFC3339DateTranscoder())
     }
 
+    /// How long a request may go without a byte, and how long it may take in all.
+    ///
+    /// Measured rather than preferred: against a destination that is routed and answers nothing, a
+    /// request on the framework's defaults took the full 60 seconds to fail. The first is the idle
+    /// bound between bytes, which cannot by itself cap a trickle; the second is the total deadline
+    /// that can, and every request built here carries small JSON, so a minute is already generous.
+    public static let requestTimeout: TimeInterval = 15
+    public static let resourceTimeout: TimeInterval = 60
+
+    /// The session every client built here fetches through, in place of `URLSession.shared`.
+    ///
+    /// `.shared` cannot be bounded at all: a session COPIES its configuration when it is made and
+    /// never reads it again, so the only way to put a limit on a request this app sends is to own
+    /// the session it goes out on. Owning one also keeps the limit off every other user of the
+    /// shared session — the outbox's uploads among them, whose waits are its own business.
+    public static var urlSession: URLSession { bounded.session }
+
+    /// `@unchecked Sendable` for the reason `MediaSession` is one: the single stored property is a
+    /// `let`, and `URLSession` is documented as safe to use from several threads at once.
+    private final class BoundedSession: @unchecked Sendable {
+        let session: URLSession
+
+        init() {
+            let configuration = URLSessionConfiguration.default
+            configuration.timeoutIntervalForRequest = APIClientFactory.requestTimeout
+            configuration.timeoutIntervalForResource = APIClientFactory.resourceTimeout
+            session = URLSession(configuration: configuration)
+        }
+    }
+
+    private static let bounded = BoundedSession()
+
     public static func make(
         configuration: ServerConfiguration,
         token: @escaping @Sendable () async -> String?,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = APIClientFactory.urlSession
     ) -> any APIProtocol {
         make(
             configuration: configuration,
@@ -50,7 +82,7 @@ public enum APIClientFactory {
     public static func make(
         configuration: ServerConfiguration,
         credential: PresentedCredential,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = APIClientFactory.urlSession
     ) -> any APIProtocol {
         make(
             configuration: configuration,
@@ -88,7 +120,7 @@ public enum APIClientFactory {
         configuration: ServerConfiguration,
         grant: ManagementGrant,
         licence: GrantSendLicence,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = APIClientFactory.urlSession
     ) -> any APIProtocol {
         make(
             configuration: configuration,
