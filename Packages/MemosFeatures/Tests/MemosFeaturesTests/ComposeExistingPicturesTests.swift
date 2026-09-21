@@ -9,9 +9,12 @@ import UIKit
 
 /// The pictures a memo already has, on the screen that edits it.
 ///
-/// Until now an edit sheet showed the words, the date and whatever was picked in the sheet
-/// itself — a memo with three photographs opened on a screen that said nothing about them, so
-/// the one thing anybody opening Edit wanted to see was the one thing missing.
+/// The row shows what the memo holds at the moment the sheet opens, ahead of anything picked in
+/// the sheet itself: the picture somebody is about to describe or correct is the thing that has
+/// to be in front of them while they do it. What the sheet may not do is ACT on that list —
+/// nothing here removes a picture and a save names none of them — so these cases hold both
+/// halves: that the row shows the memo's own pictures, and that it offers nothing that would
+/// change them.
 @MainActor
 @Suite("The compose row on an edit")
 struct ComposeExistingPicturesTests {
