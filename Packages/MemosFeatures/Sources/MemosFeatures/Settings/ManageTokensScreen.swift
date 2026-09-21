@@ -1,30 +1,6 @@
 import MemosCore
 import SwiftUI
 
-/// The row in Settings that opens token management.
-///
-/// A view of its own taking a closure, for the reason `DeviceTokenSection` is one: `SettingsView`
-/// reads a `SessionStore` and so cannot be hosted in the Features test bundle, and a row written
-/// inline in that body would be the app's only way to reach this screen with no test able to press
-/// it.
-struct ManageTokensRow: View {
-    let open: () -> Void
-
-    var body: some View {
-        Button(action: open) {
-            VStack(alignment: .leading, spacing: DesignTokens.Space.hair) {
-                Text(ManageTokensPresentation.rowTitle)
-                Text(ManageTokensPresentation.rowCaption)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(ManageTokensPresentation.rowLabel)
-    }
-}
-
 /// Token management itself: everything the screen can show, as a function of what it is given.
 ///
 /// Nothing here reaches for a store, a session or a clock. The screen has four quite different
@@ -48,6 +24,9 @@ struct ManageTokensScreen: View {
     /// screen's inputs and a test does not have to wait for time to pass.
     let now: Date
     @Binding var draft: String
+    /// The token a revoke has been asked about and not yet answered for. Held by the view above
+    /// rather than here, because this screen is what it is given and reaches for nothing.
+    @Binding var pendingRevoke: ManagedToken?
     let signOn: () -> Void
     /// Asks for the list again, under the grant this screen already holds.
     let reread: () -> Void
@@ -82,6 +61,7 @@ struct ManageTokensScreen: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle(ManageTokensPresentation.title)
         .navigationBarTitleDisplayMode(.inline)
+        .revokeConfirmation(item: $pendingRevoke, confirm: revoke)
     }
 
     @ViewBuilder
@@ -96,7 +76,7 @@ struct ManageTokensScreen: View {
                 Text(ManageTokensPresentation.lockLine(lock))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Button(ManageTokensPresentation.signOnTitle, action: signOn)
+                CardButton(ManageTokensPresentation.signOnTitle, action: signOn)
                     .accessibilityLabel(ManageTokensPresentation.signOnLabel)
                     .disabled(isBusy)
             case .authenticating:
@@ -110,7 +90,7 @@ struct ManageTokensScreen: View {
                 Text(ManageTokensPresentation.unlisted)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Button(ManageTokensPresentation.rereadTitle, action: reread)
+                CardButton(ManageTokensPresentation.rereadTitle, action: reread)
                     .accessibilityLabel(ManageTokensPresentation.rereadLabel)
                     .disabled(isBusy)
             case .listed(let tokens):
@@ -146,7 +126,7 @@ struct ManageTokensScreen: View {
         HStack(spacing: DesignTokens.Space.roomy) {
             // Handed over as typed. What may be sent is the session's decision, made once where
             // the request is built — a second copy of the rule here would be a second answer.
-            Button(ManageTokensPresentation.createTitle) { create(draft) }
+            CardButton(ManageTokensPresentation.createTitle) { create(draft) }
                 .accessibilityLabel(ManageTokensPresentation.createLabel)
                 .disabled(
                     ManageTokensPresentation.createIsDisabled(
@@ -171,13 +151,13 @@ struct ManageTokensScreen: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
-            // Stated red rather than left to the destructive role: inside these hand-built cards a
-            // button takes the app's accent, and the control that takes something away must not
-            // read like the rest of the screen.
-            Button(ManageTokensPresentation.revokeTitle) { revoke(token.id) }
-                .foregroundStyle(.red)
-                .accessibilityLabel(ManageTokensPresentation.revokeLabel(for: token.name))
-                .disabled(isBusy)
+            // Names the token rather than revoking it: what is sent is decided by the answer to
+            // the question this raises, about the token the question itself names.
+            CardButton(ManageTokensPresentation.revokeTitle, tone: .removing) {
+                pendingRevoke = token
+            }
+            .accessibilityLabel(ManageTokensPresentation.revokeLabel(for: token.name))
+            .disabled(isBusy)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -200,10 +180,21 @@ struct ManageTokensScreen: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             HStack(spacing: DesignTokens.Space.roomy) {
-                Button(ManageTokensPresentation.copyTitle, action: copySecret)
-                    .accessibilityLabel(ManageTokensPresentation.copyLabel)
-                Button(ManageTokensPresentation.doneTitle, action: dismissSecret)
-                    .accessibilityLabel(ManageTokensPresentation.doneLabel)
+                // Copy first and prominent, Done quiet beside it: the panel is up so that the
+                // text can be got out of it, and the control that ends it is not the one the eye
+                // should land on.
+                CardButton(
+                    ManageTokensPresentation.copyTitle,
+                    tone: .prominent,
+                    action: copySecret
+                )
+                .accessibilityLabel(ManageTokensPresentation.copyLabel)
+                CardButton(
+                    ManageTokensPresentation.doneTitle,
+                    tone: .secondary,
+                    action: dismissSecret
+                )
+                .accessibilityLabel(ManageTokensPresentation.doneLabel)
             }
         }
     }

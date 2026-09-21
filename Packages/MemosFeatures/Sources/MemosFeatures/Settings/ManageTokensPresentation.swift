@@ -140,6 +140,16 @@ enum ManageTokensPresentation {
     /// which token it is about to destroy.
     static func revokeLabel(for name: String) -> String { "Revoke \(name)" }
     static let revokeTitle = "Revoke"
+    static let cancelTitle = "Cancel"
+
+    /// Asked before a token goes, and it names the token: the press that answers it is often not
+    /// the press that was meant, and this is the last moment at which that can still be said.
+    static func revokeQuestion(for name: String) -> String { "Revoke \(name)?" }
+    /// Both halves of what a revoke costs, because neither of them is obvious from a list of
+    /// names: what the token was doing stops, and nothing brings it back.
+    static let revokeWarning =
+        "Anything still using this token stops working straight away, and it cannot be undone. A "
+        + "device signed in with it has to be signed in again."
 
     /// The two lines under a token's name. The same arithmetic the device row uses, because it is
     /// the same question about the same kind of row — two answers to "when does this expire" would
