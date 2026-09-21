@@ -407,18 +407,18 @@ struct PictureLoadTests {
         let live = replaced.claim()
 
         let refusalApplied = replaced.settle(.unavailable, for: Self.key, serial: superseded)
-        #expect(!refusalApplied)
+        #expect(!refusalApplied.applied)
         #expect(
             replaced.failedKey == nil,
             "a link this view had stopped asking about failed the picture it is still loading"
         )
         let pictureApplied = replaced.settle(.picture(UIImage()), for: Self.key, serial: superseded)
-        #expect(!pictureApplied)
+        #expect(!pictureApplied.applied)
         #expect(replaced.captured == nil)
 
         // The control: the load that still holds the claim settles.
         let liveApplied = replaced.settle(.unavailable, for: Self.key, serial: live)
-        #expect(liveApplied)
+        #expect(liveApplied.applied)
         #expect(replaced.failedKey == Self.key)
     }
 

@@ -1,8 +1,11 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// The top layer of the dependency rule (Features -> Core -> API): screens only. It reaches the API
-// through MemosCore, never directly, and nothing imports it back.
+// The top layer of the dependency rule (Features -> Core -> API): screens only. The LIBRARY
+// reaches the API through MemosCore, never directly, and nothing imports it back. Its test target
+// does link the API layer and the runtime's own modules: a composed witness hands the real
+// generated client a scripted transport, which is the seam these suites substitute — mocking the
+// store instead would prove nothing about the composition.
 let package = Package(
     name: "MemosFeatures",
     platforms: [.iOS(.v26)],
@@ -12,6 +15,11 @@ let package = Package(
     dependencies: [
         .package(path: "../MemosCore"),
         .package(path: "../MemosOutbox"),
+        // For the TEST target alone, and declared at the same versions the other manifests pin —
+        // SwiftPM resolves one graph and refuses a conflict.
+        .package(path: "../MemosAPI"),
+        .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.12.0"),
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.6.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0"),
     ],
     targets: [
@@ -50,6 +58,12 @@ let package = Package(
             dependencies: [
                 "MemosFeatures",
                 .product(name: "MemosOutbox", package: "MemosOutbox"),
+                // The composed witness builds the app's own client over a scripted transport, so
+                // this bundle names the API layer and the runtime types that transport is written
+                // in. The library above still reaches the API only through MemosCore.
+                .product(name: "MemosAPI", package: "MemosAPI"),
+                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
                 // The parity suite projects what the RENDERER parsed rather than re-parsing the
                 // markdown itself, so it builds a `MarkdownContent` and links MarkdownUI directly.
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),

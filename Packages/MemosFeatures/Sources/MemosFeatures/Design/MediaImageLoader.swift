@@ -372,6 +372,13 @@ struct PictureLoad {
     private(set) var fetching: Int?
     /// Raised where an attempt is DECIDED. Part of the load's id, so the view's task runs again.
     private(set) var attempt = 0
+    /// A signal that arrived while this view's fetch was out, kept until that fetch answers.
+    ///
+    /// The refusal below is the right one while the fetch is in the air — that fetch already IS
+    /// the attempt — but only until it comes back with no picture, and then nothing is left on the
+    /// wire carrying the signal this view was given. Held HERE rather than counted outside,
+    /// because the only load entitled to consume it is the one whose claim the answer belongs to.
+    private(set) var heldAsk = false
     private var serials = 0
 
     /// Claimed synchronously, before anything is awaited: the replacement task enters the load a
@@ -387,7 +394,12 @@ struct PictureLoad {
     /// retry: it cancels this load and starts another, and the cancelled request may still be out
     /// when the new one goes — so the one that ends last must not clear a claim it no longer owns.
     mutating func release(_ serial: Int) {
-        if fetching == serial { fetching = nil }
+        guard fetching == serial else { return }
+        fetching = nil
+        // A claim that ends with no answer at all — an abandoned fetch, or a view that returned
+        // before it settled anything — leaves nothing to consume the signal it was holding. The
+        // load is over, and the next trigger asks from scratch.
+        heldAsk = false
     }
 
     /// Whether this view is still owed a picture: nothing painted, and nothing on the wire.
@@ -399,7 +411,13 @@ struct PictureLoad {
     /// a caller can assert the refusal rather than assume it.
     @discardableResult
     mutating func askAgain(showing: Bool) -> Bool {
-        guard isOwedAPicture(showing: showing) else { return false }
+        guard isOwedAPicture(showing: showing) else {
+            // Refused because a fetch is already out is the one refusal that can LOSE a signal, so
+            // it is the one that is remembered. A view that is showing its picture is owed
+            // nothing and remembers nothing.
+            if !showing, fetching != nil { heldAsk = true }
+            return false
+        }
         _ = claim()
         attempt += 1
         return true
@@ -424,24 +442,53 @@ struct PictureLoad {
     /// Only an ANSWER fails a picture. An abandoned fetch leaves every piece of this untouched:
     /// the view goes on waiting, and the next signal asks again.
     ///
-    /// Answers whether it applied, so a caller can assert the fence rather than assume it.
+    /// It is also where a signal held through this fetch is CONSUMED, and the only place it can
+    /// be: `askAgain` never learns how the fetch it refused for ended, and an answer that is no
+    /// picture is exactly the case the refusal was wrong about.
+    ///
+    /// Answers what it applied and what it leaves the view to do, so a caller can assert the fence
+    /// rather than assume it.
     @discardableResult
     mutating func settle(
         _ answer: MediaImageAnswer,
         for key: MediaImageKey,
         serial: Int
-    ) -> Bool {
-        guard fetching == serial else { return false }
+    ) -> PictureSettlement {
+        guard fetching == serial else { return .ignored }
         switch answer {
         case .picture(let image):
             painted(image, for: key)
+            // The signal held during this fetch has been answered BY it: the picture it was
+            // asking for is here.
+            heldAsk = false
         case .interrupted:
             break
         case .unavailable:
             failedKey = key
+            guard heldAsk else { break }
+            heldAsk = false
+            // The claim ends HERE rather than in the caller's `defer`, so the ask the view is
+            // about to make has nothing in its way. That `defer` then releases a serial this load
+            // no longer holds, which `release` already refuses to act on.
+            fetching = nil
+            return PictureSettlement(applied: true, asksAgain: true)
         }
-        return true
+        return PictureSettlement(applied: true, asksAgain: false)
     }
+}
+
+/// What a settled answer leaves the view to do.
+///
+/// Two separate things to say, and only a consumer can act on the second: whether the answer was
+/// this load's to apply at all, and whether a signal that arrived while the fetch was out is still
+/// owed an attempt. A consumer that discards it changes nothing on screen — the tile's
+/// `.task(id:)` never restarts and the triangle stays.
+struct PictureSettlement: Equatable {
+    let applied: Bool
+    let asksAgain: Bool
+
+    /// The answer was not this load's to apply: a superseded fetch, answering late.
+    static let ignored = PictureSettlement(applied: false, asksAgain: false)
 }
 
 /// The moments that give a picture a reason to be asked for again.
