@@ -16,6 +16,31 @@ private final class MediaSubmissionRecorder {
     }
 }
 
+/// A save the test holds open: it records what it was handed and does not answer until released.
+///
+/// The suspension is the point. What the sheet carries up was decided when Save was pressed, so
+/// everything the row does AFTERWARDS happens against a submission that is already fixed.
+@MainActor
+private final class HeldSave {
+    private(set) var submission: ComposeSubmission?
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var isReleased = false
+
+    func take(_ submission: ComposeSubmission) async -> ComposeOutcome {
+        self.submission = submission
+        if !isReleased {
+            await withCheckedContinuation { waiter = $0 }
+        }
+        return .saved
+    }
+
+    func release() {
+        isReleased = true
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
 /// Attaching a photograph to a memo that already exists.
 ///
 /// Until now an edit could change the words and the date and nothing else: the sheet showed only
@@ -118,6 +143,48 @@ struct ComposeMediaEditTests {
             imports.ordered.isEmpty,
             "the picture is still attached after its x was pressed: \(imports.ordered.map(\.label))"
         )
+    }
+
+    /// The other half of the same wiring: what the x must NOT do.
+    ///
+    /// The submission is built when Save is pressed and the upload is already on its way, so a
+    /// picture taken off the row after that is a picture the save still carries — it goes up, and
+    /// the sheet closes on a memo holding the very thing somebody had just removed. The refusal
+    /// lives in the closure, not in a disabled control: a control that is grey is a hint, and the
+    /// tap that beat the redraw is the one that does the damage.
+    @Test("a picture cannot be taken off while the save that carries it is on the wire")
+    func theXIsRefusedWhileASaveIsOnTheWire() async {
+        // A capture read that answers at once: a file still being read refuses the Save itself
+        // (`ComposeAttachments.postRefusal`), and this case is about a save that really went.
+        let imports = ComposeImports(readCapture: { _ in .empty })
+        await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
+        await settleTasks()
+        let save = HeldSave()
+
+        let (saved, onTheWire, pressed) = await PressProbe.withScreen(
+            ComposeView(mode: mode(), imports: imports) { await save.take($0) },
+            height: 852
+        ) { screen in
+            let saved = screen.press("Save")
+            // Pressed against a save that is really in flight, or the case is not the case.
+            await screen.settle(turns: 100, until: { save.submission != nil })
+            let onTheWire = save.submission != nil
+            let pressed = screen.press("Remove")
+            await screen.settle()
+            return (saved, onTheWire, pressed)
+        }
+
+        #expect(saved, "the sheet's own Save could not be pressed")
+        #expect(onTheWire, "the save never reached the wire, so the x was pressed against nothing")
+        #expect(pressed, "the x was not on the row to be pressed while the save was running")
+        #expect(
+            imports.ordered.map(\.label) == ["a.jpg"],
+            "the picture left the row while the save carrying it was still on the wire")
+        save.release()
+        await settleTasks()
+        #expect(
+            save.submission?.attachments.map(\.filename) == ["a.jpg"],
+            "what went up and what the row showed had come apart")
     }
 
     @Test("what the save sends up is the picked file, in the shape an upload takes")

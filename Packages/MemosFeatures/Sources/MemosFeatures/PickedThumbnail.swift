@@ -193,10 +193,12 @@ struct PickedThumbnail: View {
 
     /// Taking this picture off the memo again, before it is posted.
     ///
-    /// Nothing is asked first and nothing is lost: the file has not gone anywhere, and picking it
-    /// again is the same two taps that put it here. It is offered on every picked tile, whatever
-    /// state it is in — an item that is still loading or that failed to load is exactly the one
-    /// somebody wants rid of.
+    /// Nothing is asked first, and what that costs depends on where the picture came from. One
+    /// picked from the library is still in the library and can be picked again. A photograph taken
+    /// in this app is not: the only copy is the one this sheet is holding, so removing it is the
+    /// end of it, and its staged bytes sit in the temporary directory until iOS reclaims them.
+    /// It is offered on every picked tile whatever state it is in — an item that is still loading
+    /// or that failed to load is exactly the one somebody wants rid of.
     private var dropControl: some View {
         Button("Remove", systemImage: "xmark.circle.fill", action: remove)
             .labelStyle(.iconOnly)

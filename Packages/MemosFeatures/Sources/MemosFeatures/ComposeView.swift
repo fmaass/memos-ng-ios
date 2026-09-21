@@ -360,7 +360,19 @@ public struct ComposeView: View {
                 retry: { id in Task { await imports.retry(id: id) } },
                 // Only what this sheet picked. The memo's own pictures are drawn by the same row
                 // and are not this sheet's to take away (`ComposeRowItem`).
-                remove: { imports.remove(id: $0) })
+                //
+                // And only while nothing is on the wire. The submission is built when Save is
+                // pressed, so a tile that leaves the row after that is a picture the upload still
+                // carries: it goes up, the sheet closes, and the memo keeps the very thing
+                // somebody had just taken off it. So the removal is REFUSED for as long as a save
+                // is running — pressing it again once the save has come back is the way to make
+                // it stick — and the refusal is here, on the same flag the save claims
+                // synchronously (`post()`), because a control that has gone grey is a hint and
+                // the tap that beat the redraw is the one that does the damage.
+                remove: { id in
+                    guard !isSaving else { return }
+                    imports.remove(id: id)
+                })
         }
         if imports.failed > 0,
             let summary = ComposeAttachments.summary(
