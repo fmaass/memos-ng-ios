@@ -255,6 +255,76 @@ struct ComposeFailureTests {
             "the re-imported file minted a new key, so the retry would apply the edit twice")
     }
 
+    /// A picture taken off the sheet between two saves is a DIFFERENT edit, and the key has to say
+    /// so: sent under the first attempt's key, the second save would be answered as a replay and
+    /// the memo would keep the picture somebody had just removed, with a 200 to say it went fine.
+    ///
+    /// The control is in this test rather than inferred from another: the UNCHANGED retry in the
+    /// middle keeps the key the first attempt minted, so the new key at the end is the removal's
+    /// doing and not a key that is simply fresh every time.
+    @Test("a save that leaves one picture out is a different edit from the save that carried it")
+    func aRemovedFileMintsANewEditKey() async throws {
+        let kept = try stagedFile(named: "kept.jpg")
+        let dropped = try stagedFile(named: "dropped.jpg")
+        defer {
+            try? FileManager.default.removeItem(at: kept.url)
+            try? FileManager.default.removeItem(at: dropped.url)
+        }
+
+        let store = TimelineStore()
+        let keys = LockedValue<[String]>([])
+        let answer = LockedValue<Bool>(false)
+        let client = Stub.client { _, body, operation in
+            switch operation {
+            case startUploadOperation:
+                return Stub.json(
+                    #"{"upload_uid":"u1","chunk_size":64,"bytes_received":0}"#, status: .created)
+            case appendChunkOperation:
+                let data = try await Stub.bytes(body)
+                return Stub.json(
+                    """
+                    {"upload_uid":"u1","chunk_size":64,"bytes_received":\(data.count)}
+                    """)
+            case patchMemoOperation:
+                let sent = try await Stub.body(body)
+                keys.set(keys.get() + [(sent["edit_key"] as? String) ?? ""])
+                guard answer.get() else { throw URLError(.networkConnectionLost) }
+                return Stub.json(Stub.memo(uid: "a", content: "edited"))
+            default: return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        // Both pictures, and the answer is lost. Then the very same save again.
+        let lost = await store.edit(
+            uid: "a", content: "edited", attaching: [kept, dropped],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+        let unchanged = await store.edit(
+            uid: "a", content: "edited", attaching: [kept, dropped],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+        // Then one of them is taken off the sheet and it is saved again.
+        answer.set(true)
+        let without = await store.edit(
+            uid: "a", content: "edited", attaching: [kept],
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(lost == .failed(.transport(sent: true)))
+        #expect(unchanged == .failed(.transport(sent: true)))
+        #expect(without == .saved)
+        let sentKeys = keys.get()
+        try #require(sentKeys.count == 3, "the patch was not reached three times: \(sentKeys)")
+        #expect(
+            sentKeys[0] == sentKeys[1],
+            "control: the same save submitted twice minted two keys, so the key below says nothing"
+        )
+        #expect(
+            sentKeys[1] != sentKeys[2],
+            "the save that left a picture out went out under the key of the save that carried it")
+    }
+
     /// The other half of the edit key, and the dangerous one: two DIFFERENT files must never share
     /// an identity. Two photographs called the same thing in two directories — which is what
     /// "replace the picture with the other one" produces — keyed the same would let the second save

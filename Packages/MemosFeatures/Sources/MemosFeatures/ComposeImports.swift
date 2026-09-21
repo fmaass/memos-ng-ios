@@ -34,6 +34,18 @@ final class ComposeImports {
     private(set) var items: [ComposeAttachment] = []
     /// Whether a selection is still loading.
     private(set) var isImporting = false
+    /// Whether a submission built from this list is on the wire.
+    ///
+    /// What a save carries is fixed when Save is pressed — the submission takes the list as it then
+    /// stands (`ComposeView.post()`) — so anything that changes the list afterwards changes the row
+    /// and not the upload: the memo is saved with one set of pictures and the sheet closes on
+    /// another, a divergence nobody is shown. It lives HERE, on the object each of those changes is
+    /// about to be made to, rather than in the sheet's own state, because every one of them arrives
+    /// in a callback and one of those — the camera's, kept for the life of the cover it was handed
+    /// to (`CameraView`) — carries the sheet as it stood when the camera was opened, which can be
+    /// before the save began. A flag read out of that copy answers about an instant that has
+    /// passed.
+    private(set) var isSubmitting = false
 
     /// Where the zone comes from, asked ONCE PER PICK rather than once per composer.
     ///
@@ -138,6 +150,15 @@ final class ComposeImports {
         stamp: Int,
         using loader: @escaping @MainActor (Item) async -> ComposePickerAnswer
     ) async -> Bool {
+        // A selection that lands once a submission has been built is not this memo's selection any
+        // more: a pick REPLACES what was picked, and what was picked is what the save is carrying
+        // up while this sheet waits to close on it. Refused, not queued.
+        guard !isSubmitting else {
+            // The stamp was taken as the selection landed, and taking it turned the busy flag on.
+            // A refusal that walked away from here would leave the composer importing for ever.
+            if stamp == current { isImporting = false }
+            return false
+        }
         guard stamp == current else { return false }
         var placeholders: [ComposeAttachment] = []
         var handles: [UUID: @MainActor () async -> ComposePickerAnswer] = [:]
@@ -169,10 +190,17 @@ final class ComposeImports {
             guard let handle = handles[placeholder.id] else { continue }
             // AWAIT 1, once per item.
             let answer = await handle()
-            // The selection must still be the one on screen, and this item must still be in it.
-            guard stamp == current,
-                let index = self.items.firstIndex(where: { $0.id == placeholder.id })
-            else { return false }
+            // The selection must still be the one on screen. A pick that has been replaced is
+            // finished with: everything after this item belongs to it too, and the pick that took
+            // its place is owed the list.
+            guard stamp == current else { return false }
+            // This ITEM, though, is one item. Taken off the row while its file was coming, it is
+            // the only thing this answer is dropped for — the rest of the pick is still on its
+            // way, and a loop that returned here would leave every one of them on its spinner
+            // with nothing left to settle them or the busy flag.
+            guard let index = self.items.firstIndex(where: { $0.id == placeholder.id }) else {
+                continue
+            }
             self.items[index] = Self.settle(self.items[index], with: answer)
             if self.items[index].media != nil { beginCaptureRead(for: placeholder.id) }
         }
@@ -188,6 +216,14 @@ final class ComposeImports {
     /// and a photo taken here and dropped because somebody afterwards chose two from the library is
     /// a photo nobody can take again.
     func captured(_ media: PickedMedia) {
+        // The camera stages the file and hands it over in the same breath, and the cover closes
+        // on the count that hand-over moves (`CameraCapture.keep`, `CameraView`). What is on its
+        // own timing is the camera itself: it can be opened over a sheet whose save is already
+        // running, and a shutter pressed then delivers into a list the submission was built from.
+        // This is the one refusal here that costs something nobody can take again, and it is still
+        // the lesser cost: attached, it would sit on a row that is about to close, left out of the
+        // memo that closed it.
+        guard !isSubmitting else { return }
         sequence += 1
         let attachment = ComposeAttachment(
             id: media.id, media: media, load: .ready, capture: .pending, label: media.filename,
@@ -240,6 +276,12 @@ final class ComposeImports {
     /// one tile; two overlapping imports would race to write it, and the older answer landing last
     /// would put a failure back over a success.
     func retry(id: UUID) async {
+        // A retry is asked at a tap and written here, and a Save pressed in between claims the
+        // list first: what the tap knew was true at the tap. Landing afterwards, a re-import puts
+        // a different file under an identity the upload is already carrying, and a retry that
+        // fails puts "Remove them" back on a sheet whose list is fixed. Refused before anything
+        // here is claimed or written.
+        guard !isSubmitting else { return }
         guard !retryInFlight.contains(id),
             let index = items.firstIndex(where: { $0.id == id })
         else { return }
@@ -294,6 +336,21 @@ final class ComposeImports {
     func beginPostAttempt() -> String? {
         clearUploadFailures()
         return ComposeAttachments.postRefusal(items: items)
+    }
+
+    /// Claimed as the submission is taken, and released when the save has come back
+    /// (`ComposeView.post()`). Both are synchronous, and nothing is awaited between the claim and
+    /// the building of the submission, so a change that lands in the same frame falls on one side
+    /// of it or the other and never in between.
+    func beginSubmission() {
+        isSubmitting = true
+    }
+
+    /// The save has come back. What was refused while it ran is not replayed: a change applied a
+    /// moment later to a sheet that has already closed is no change at all, and applied to one
+    /// still open it is a tap away.
+    func endSubmission() {
+        isSubmitting = false
     }
 
     // MARK: - capture reads

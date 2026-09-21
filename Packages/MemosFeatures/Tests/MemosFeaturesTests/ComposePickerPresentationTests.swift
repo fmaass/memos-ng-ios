@@ -215,4 +215,90 @@ struct ComposePickerPresentationTests {
         // menu upside down — see `ComposeMetaRow.photoChoicesOrder` for the screen this bit.
         #expect(ComposeMetaRow.photoChoicesOrder == .fixed)
     }
+    /// What a picker answer means while a save is carrying the list it would replace.
+    ///
+    /// The refusal has to empty the binding — the same photographs chosen again must stay a
+    /// change — and that emptying comes back as an answer of its own, on whatever update follows.
+    /// A save that FAILS releases its flag with the sheet still open, so that echo can arrive with
+    /// nothing running and be read as somebody deselecting everything, which would take the
+    /// retained pictures off a row the save never touched.
+    @Test("a selection landing while a save runs is refused, and the binding emptied with it")
+    func aSelectionDuringASaveIsRefused() {
+        var stage = ComposeStage()
+
+        let answer = stage.selectionLanded(count: 2, submitting: true)
+
+        #expect(answer == .refuseAndReset)
+    }
+
+    @Test("the emptying's own answer is swallowed while the save is still running")
+    func theEchoIsSwallowedDuringTheSave() {
+        var stage = ComposeStage()
+        _ = stage.selectionLanded(count: 2, submitting: true)
+
+        let answer = stage.selectionLanded(count: 0, submitting: true)
+
+        #expect(answer == .swallowReset)
+    }
+
+    /// The case the save's ending makes: released on a failure with the sheet still open, or on a
+    /// success a moment before it closes, the flag says nothing about where this answer came from.
+    @Test("the emptying's own answer is swallowed after the save has ended")
+    func theEchoIsSwallowedAfterTheSaveEnds() {
+        var stage = ComposeStage()
+        _ = stage.selectionLanded(count: 2, submitting: true)
+
+        let answer = stage.selectionLanded(count: 0, submitting: false)
+
+        #expect(answer == .swallowReset)
+    }
+
+    @Test("an empty answer with no emptying outstanding is somebody deselecting everything")
+    func aGenuineEmptyAnswerIsASelection() {
+        var stage = ComposeStage()
+
+        let answer = stage.selectionLanded(count: 0, submitting: false)
+
+        #expect(answer == .load)
+    }
+
+    @Test("an answer after the emptying has been accounted for is an ordinary selection")
+    func aSelectionAfterTheEchoIsASelection() {
+        var stage = ComposeStage()
+        _ = stage.selectionLanded(count: 2, submitting: true)
+        _ = stage.selectionLanded(count: 0, submitting: false)
+
+        let answer = stage.selectionLanded(count: 3, submitting: false)
+
+        #expect(answer == .load)
+    }
+
+    /// A real selection can also land BEFORE the emptying's answer does, and it is still a
+    /// selection — and it ACCOUNTS for the emptying: the marker is spent on it, so an empty
+    /// answer after it is taken at face value, as a person's "none". That is the trade this makes
+    /// deliberately, and in the direction of the reachable case: somebody deselecting everything
+    /// is something they can do at any time, and it is the thing that would be lost by holding the
+    /// marker back for an answer that may never come.
+    @Test("a real selection landing before the emptying's answer is still a selection")
+    func aSelectionBeforeTheEchoIsASelection() {
+        var stage = ComposeStage()
+        _ = stage.selectionLanded(count: 2, submitting: true)
+
+        let answer = stage.selectionLanded(count: 3, submitting: false)
+        let afterwards = stage.selectionLanded(count: 0, submitting: false)
+
+        #expect(answer == .load)
+        #expect(afterwards == .load, "the emptying was still being waited for after a real answer")
+    }
+
+    /// Nothing in the binding and a save running: there is nothing to take and nothing to give
+    /// back, so the answer is left alone rather than emptied a second time.
+    @Test("an empty answer during a save is refused without an emptying of its own")
+    func anEmptyAnswerDuringASaveIsSwallowed() {
+        var stage = ComposeStage()
+
+        let answer = stage.selectionLanded(count: 0, submitting: true)
+
+        #expect(answer == .swallowReset)
+    }
 }

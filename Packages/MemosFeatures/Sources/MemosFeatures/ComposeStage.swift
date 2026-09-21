@@ -46,6 +46,23 @@ struct ComposeStage: Equatable {
     /// sheet whose height is still following the keyboard down.
     private(set) var presented: Source = .photos
 
+    /// What an answer from the photo picker means for what is attached.
+    enum SelectionAnswer: Equatable {
+        /// A selection to act on.
+        case load
+        /// Not onto a list a submission has already been built from. The binding is emptied with
+        /// the refusal, so that choosing the same photographs again is a CHANGE the picker can
+        /// deliver — left standing, the second choice would equal the first and land nowhere.
+        case refuseAndReset
+        /// Nothing to do: the empty answer that this sheet's own emptying lands on, or an answer
+        /// that arrives with a submission running and nothing in the binding to give back.
+        case swallowReset
+    }
+
+    /// Whether this sheet emptied the picker's binding itself and is still owed the answer that
+    /// write will land on.
+    private(set) var awaitingResetEcho = false
+
     /// Whether the photo picker should be on screen.
     var pickingPhotos: Bool { phase == .presenting && presented == .photos }
 
@@ -98,6 +115,37 @@ struct ComposeStage: Equatable {
     /// Neither brings the keyboard back, for the reason the picker does not.
     mutating func cameraClosed() {
         if phase == .presenting, presented == .camera { phase = .idle }
+    }
+
+    /// A selection landed on the sheet, and what it means depends on what this sheet did last.
+    ///
+    /// Refusing a selection while a submission runs has to empty the binding, or the same
+    /// photographs chosen again are no change at all and never reach the sheet. That emptying is
+    /// itself an answer, delivered on whatever update comes next — which can be after the
+    /// save has ended and released the flag, and an empty selection taken seriously removes
+    /// everything that was picked. So the echo is told apart from a person's answer HERE, by what
+    /// this value knows it did, and not by a flag that will have moved on by then.
+    ///
+    /// An empty answer that arrives while an emptying is outstanding is read as that echo, and
+    /// only the FIRST answer after it is: whatever comes next accounts for the emptying, whether
+    /// it is empty or not. Nothing real is lost to that. By the time the marker is up the binding
+    /// is already empty, so a person answering "none" would be writing the value it already
+    /// holds — no change, and a change is what is delivered here at all. The gap is one update
+    /// wide anyway, and the picker that would have to answer into it is the one being dismissed
+    /// by the answer just refused (`photosPickerClosed`).
+    ///
+    /// Which is also the limit of it: were an empty answer ever swallowed, saying it again could
+    /// not undo it, for the same reason — an empty binding emptied again is no change. What
+    /// recovers is an answer that IS one: picking anything, or taking the pictures off the row
+    /// with the control on each of them.
+    mutating func selectionLanded(count: Int, submitting: Bool) -> SelectionAnswer {
+        if count == 0 {
+            let wasEmptiedHere = awaitingResetEcho
+            awaitingResetEcho = false
+            return wasEmptiedHere || submitting ? .swallowReset : .load
+        }
+        awaitingResetEcho = submitting
+        return submitting ? .refuseAndReset : .load
     }
 
     /// Focus moved without this value being asked — somebody tapped into the editor, or dragged

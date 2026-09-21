@@ -135,6 +135,82 @@ struct ComposeAttachmentStateTests {
         #expect(imports.items.isEmpty, "a removed item came back through its own retry")
     }
 
+    // MARK: - taking one item off while the pick is still loading
+
+    /// The pick is a loop over the selection, one await per item, and taking one of them off
+    /// happens while it is running. What is left has to arrive anyway: an item removed from a
+    /// selection that is still coming down is a pick that never finishes otherwise — every later
+    /// photograph stuck on its spinner, and a Post the sheet will not let anybody make.
+    @Test("removing an item whose file is still coming lets the rest of the pick arrive")
+    func aRemovalMidImportLetsTheRestArrive() async {
+        let imports = Self.imports()
+        let held = GatedExport(Self.media("a.heic"))
+        let run = Task {
+            await imports.load(["a", "b"], stamp: imports.selected()) { item in
+                item == "a" ? await held.load() : .file(Self.media("b.heic"))
+            }
+        }
+        await held.waitUntilStarted()
+
+        // The placeholders are in pick order, so this is the one whose file is suspended.
+        imports.remove(id: imports.items[0].id)
+        await held.release()
+        await run.value
+        await settleTasks()
+
+        #expect(
+            imports.attachments.map(\.filename) == ["b.heic"],
+            "the rest of the pick never arrived: \(imports.items.map(\.label))")
+        #expect(!imports.isImporting, "the sheet is still importing a pick that is all here")
+    }
+
+    /// The same thing with nothing behind it: the loop's last item is the removed one, and the
+    /// spinner it leaves behind is what decides whether the words alone can still be posted.
+    @Test("removing the only loading item leaves a memo that can still be posted")
+    func removingTheOnlyLoadingItemLeavesAPostableMemo() async {
+        let imports = Self.imports()
+        let held = GatedExport(Self.media("only.heic"))
+        let run = Task {
+            await imports.load(["only"], stamp: imports.selected()) { _ in await held.load() }
+        }
+        await held.waitUntilStarted()
+
+        imports.remove(id: imports.items[0].id)
+        await held.release()
+        await run.value
+        await settleTasks()
+
+        #expect(!imports.isImporting)
+        #expect(
+            ComposeAttachments.canPost(
+                text: "just the words then", imported: imports.attachments.count,
+                isBusy: imports.isImporting),
+            "the words alone could not be posted after the one picture was taken off")
+    }
+
+    /// The fence the loop change must NARROW and never widen: the answer for a removed item is
+    /// dropped, not applied somewhere else and not put back under its own identity.
+    @Test("a file that arrives after its item was taken off does not come back")
+    func aLateImportForARemovedItemLandsNowhere() async {
+        let imports = Self.imports()
+        let held = GatedExport(Self.media("gone.heic"))
+        let run = Task {
+            await imports.load(["gone"], stamp: imports.selected()) { _ in await held.load() }
+        }
+        await held.waitUntilStarted()
+        let removed = imports.items[0].id
+
+        imports.remove(id: removed)
+        await held.release()
+        await run.value
+        await settleTasks()
+
+        #expect(
+            !imports.items.contains { $0.id == removed },
+            "a removed item came back when its own file arrived")
+        #expect(imports.attachments.isEmpty, "a removed item's file was sent anyway")
+    }
+
     // MARK: - the identity fence on the capture read
 
     /// The fence M1 removes. A read is issued for ONE item; if that item is gone when the answer
@@ -311,6 +387,38 @@ struct ComposeAttachmentStateTests {
         // Once it is over, the item can be asked for again.
         await imports.retry(id: id)
         #expect(calls.count == 3)
+    }
+
+    /// A retry is asked at a tap and does its writing afterwards, so it can still be waiting when
+    /// the save is claimed. Landing then, it would put a different file under an identity the
+    /// upload is already carrying — or settle the tile failed, which would also put "Remove them"
+    /// back on a sheet whose list is fixed. So the refusal is where the writing is, not at the
+    /// tap: what a tap knows is true at the tap.
+    @Test("a retry asked while a save is on the wire writes nothing and asks for nothing")
+    func aRetryDuringASaveIsRefused() async {
+        let imports = Self.imports()
+        let calls = Counted()
+        let loader: @MainActor (String) async -> ComposePickerAnswer = { _ in
+            calls.increment()
+            return calls.count == 1 ? .failed(.transport) : .file(Self.media("arrived.heic"))
+        }
+        await imports.load(["one"], stamp: imports.selected(), using: loader)
+        let id = imports.items[0].id
+        #expect(imports.items[0].isFailed, "the item this is about did not fail")
+
+        imports.beginSubmission()
+        await imports.retry(id: id)
+
+        #expect(calls.count == 1, "the refused retry asked the picker for the file again")
+        #expect(imports.items[0].isFailed, "the refused retry moved the tile out of its failure")
+        #expect(imports.items[0].media == nil, "the refused retry put a file under the identity")
+
+        // And nothing is left claimed by the refusal: the same tap works once the save is back.
+        imports.endSubmission()
+        await imports.retry(id: id)
+
+        #expect(calls.count == 2, "the refusal outlived the save it was made for")
+        #expect(imports.items[0].media?.filename == "arrived.heic")
     }
 
     /// R8: the tile's own load is keyed on the FILE, because the identity deliberately survives a

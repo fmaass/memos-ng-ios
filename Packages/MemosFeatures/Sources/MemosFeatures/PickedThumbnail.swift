@@ -78,8 +78,12 @@ nonisolated enum PickedThumbnailSource {
 struct PickedThumbnailRow: View {
     let items: [ComposeRowItem]
     /// What "Try again" on a failed tile asks for. Only a picked file has one: nothing here can
-    /// fail for a picture the memo already has, and nothing here removes one either.
+    /// fail for a picture the memo already has.
     var retry: (UUID) -> Void = { _ in }
+    /// What the x on a picked tile asks for. A picked file has not been posted yet, so taking it
+    /// off is this sheet's business alone; a picture the memo already has is the server's, and the
+    /// existing tiles are not given one.
+    var remove: (UUID) -> Void = { _ in }
 
     @ScaledMetric(relativeTo: .body) private var tile = DesignTokens.Metric.pickedThumbnail
 
@@ -91,7 +95,10 @@ struct PickedThumbnailRow: View {
                     case .existing(let existing):
                         ExistingThumbnail(attachment: existing.attachment, size: tile)
                     case .picked(let attachment):
-                        PickedThumbnail(attachment: attachment, size: tile) { retry(attachment.id) }
+                        PickedThumbnail(
+                            attachment: attachment, size: tile,
+                            retry: { retry(attachment.id) },
+                            remove: { remove(attachment.id) })
                     }
                 }
             }
@@ -130,6 +137,7 @@ struct PickedThumbnail: View {
     let attachment: ComposeAttachment
     let size: CGFloat
     var retry: () -> Void = {}
+    var remove: () -> Void = {}
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: Image?
@@ -160,6 +168,10 @@ struct PickedThumbnail: View {
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Self.accessibilityLabel(for: attachment))
+        // Over the merged element rather than inside it. A control the tile has already folded
+        // into its one element is no longer a control: it is an action on the picture, which is
+        // not what a thing you press in the corner of it is.
+        .overlay(alignment: .topTrailing) { dropControl }
         .task(id: Self.thumbnailKey(for: attachment)) {
             guard let media = attachment.media else { return }
             let budget = PickedThumbnailSource.maxPixelSize(
@@ -177,6 +189,23 @@ struct PickedThumbnail: View {
             guard !Task.isCancelled else { return }
             if let loaded { image = Image(uiImage: loaded) }
         }
+    }
+
+    /// Taking this picture off the memo again, before it is posted.
+    ///
+    /// Nothing is asked first, and what that costs depends on where the picture came from. One
+    /// picked from the library is still in the library and can be picked again. A photograph taken
+    /// in this app is not: the only copy is the one this sheet is holding, so removing it is the
+    /// end of it, and its staged bytes sit in the temporary directory until iOS reclaims them.
+    /// It is offered on every picked tile whatever state it is in — an item that is still loading
+    /// or that failed to load is exactly the one somebody wants rid of.
+    private var dropControl: some View {
+        Button("Remove", systemImage: "xmark.circle.fill", action: remove)
+            .labelStyle(.iconOnly)
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .shadow(radius: 4)
+            .padding(2)
     }
 
     /// The badge in the corner, or the caption across the bottom: whichever this item's state calls

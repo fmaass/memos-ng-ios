@@ -347,6 +347,82 @@ enum PressProbe {
         return result
     }
 
+    /// One window, pressed more than once, with what the presses START allowed to run in between.
+    ///
+    /// Hosting a screen twice is two screens: the second is a fresh view with its own state, in
+    /// which nothing the first one started is running. So what a screen refuses WHILE one of its
+    /// own operations is in flight can only be asked inside a single window.
+    ///
+    /// The body is ASYNC for the other half of the same reason. What a press starts is a task on
+    /// this actor, and a body that never suspends never lets it run — however long it spins the
+    /// run loop, because the actor it is waiting for is the one it is holding.
+    static func withScreen<T>(
+        _ view: some View,
+        height: CGFloat = 200,
+        _ body: (Screen) async -> T
+    ) async -> T {
+        let host = UIHostingController(rootView: view)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: height))
+        window.rootViewController = host
+        window.isHidden = false
+
+        let result = await body(Screen(host: host, window: window))
+        window.isHidden = true
+        window.rootViewController = nil
+        return result
+    }
+
+    /// A window that is still up: what is on it, and what pressing it starts.
+    @MainActor
+    struct Screen {
+        let host: UIViewController
+        let window: UIWindow
+
+        /// The control by the label VoiceOver reads.
+        ///
+        /// A deadline rather than a fixed number of turns, because this one can be asked for a
+        /// TOOLBAR item, which SwiftUI installs on a later turn of the run loop than the first
+        /// layout — and it gives up the moment the element exists, so a control that is already
+        /// there costs nothing to find.
+        func element(labelled label: String) -> NSObject? {
+            let deadline = Date().addingTimeInterval(0.4)
+            repeat {
+                layOut()
+                if let found = PressProbe.element(labelled: label, in: window) { return found }
+                RunLoop.current.run(until: Date().addingTimeInterval(slice))
+            } while Date() < deadline
+            return nil
+        }
+
+        /// Presses it, and says whether there was anything there that took the press.
+        func press(_ label: String) -> Bool {
+            element(labelled: label)?.accessibilityActivate() ?? false
+        }
+
+        /// Gives the screen its turns: what a press started runs, and what it writes comes back
+        /// round to the layout. Each turn SUSPENDS — the task the press made is isolated to this
+        /// actor, so it runs only while the caller is not holding it, and no amount of spinning a
+        /// run loop will do instead. It gives up the moment the caller has what it waited for.
+        func settle(turns: Int = 20, until ready: () -> Bool = { false }) async {
+            for _ in 0..<turns {
+                if ready() { return }
+                layOut()
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+
+        /// How long one turn gives the run loop. `run(until:)` rather than draining what is merely
+        /// ready: a toolbar item is installed on a turn of its own.
+        private var slice: TimeInterval { 0.01 }
+
+        private func layOut() {
+            window.layoutIfNeeded()
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+        }
+    }
+
     private static func element(labelled label: String, in node: Any) -> NSObject? {
         guard let object = node as? NSObject else { return nil }
         if object.accessibilityLabel == label, object.accessibilityTraits.contains(.button) {
