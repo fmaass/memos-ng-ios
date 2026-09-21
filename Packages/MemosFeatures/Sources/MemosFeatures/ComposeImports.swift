@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import MemosOutbox
 import Observation
 
@@ -66,6 +67,14 @@ final class ComposeImports {
     /// is the draft ending: a save that succeeds closes the sheet, and a dismissal takes the list
     /// with it.
     private(set) var mayHaveLanded = false
+
+    /// The sentence of the answer that froze the set, and nil for as long as nothing has.
+    ///
+    /// Written in the same synchronous step as the freeze and kept from then on, because it is the
+    /// one sentence the sheet can still show truthfully about this list: a later answer may say
+    /// that nothing was changed, and about a set an earlier attempt may already have committed
+    /// that is not something anybody here knows.
+    private(set) var freezingSentence: String?
 
     /// Whether a change to what is attached may be taken at this instant.
     ///
@@ -373,6 +382,14 @@ final class ComposeImports {
     /// The sheet stays open when an edit fails, and these are the tiles that say why. Only what is
     /// attached right now is marked: an item removed in between is not part of this attempt.
     func markUploadFailed(_ category: ComposeLoadFailure) {
+        // Nothing is marked on a frozen set. A mark puts "Try again" on the tile, and every
+        // per-tile answer — the retry and the x alike — is refused while the freeze holds
+        // (`acceptsChanges`), so the mark would be a control that cannot act for the rest of this
+        // sheet's life. What a frozen row is acted on through is the sentence across it and Save.
+        // Asked of `mayHaveLanded` alone rather than of `acceptsChanges`: this runs inside the
+        // save's own task, where the submission claim is still held and has not been released yet
+        // (`ComposeView.post()`), so `acceptsChanges` here would be false for every save.
+        guard !mayHaveLanded else { return }
         for index in items.indices where items[index].media != nil {
             items[index].uploadFailed = category
         }
@@ -406,20 +423,28 @@ final class ComposeImports {
 
     /// The save has come back. What was refused while it ran is not replayed: a change applied a
     /// moment later to a sheet that has already closed is no change at all. Whether it is a tap
-    /// away on a sheet still open is the answer's to decide — a save that may have reached the
-    /// server holds the list where it is (`mayHaveLanded`), and one that changed nothing frees
-    /// it.
+    /// away on a sheet still open is the answer's to decide — an answer that may have reached the
+    /// server holds the list where it is for the rest of this sheet's life (`mayHaveLanded`), and
+    /// while no answer has, a save that is back leaves every change free to be made again.
     func endSubmission() {
         isSubmitting = false
     }
 
     /// The save came back with no answer about what the server did with it.
     ///
-    /// Claimed from the failure VALUE rather than from what that failure does to the tiles: a
-    /// transport failure that never left the device and a file this device could not keep share a
-    /// tile category with answers that did leave, and neither of those reached the server.
-    func mayHaveLandedOnServer() {
+    /// Taken from the failure VALUE, because only two values mean the request left this device:
+    /// `.transport(sent: true)` and `.serverFailure`. The tile category is a different question —
+    /// what a tile can say about a file — and answers that never left share one with answers that
+    /// did, so it can decide nothing here.
+    ///
+    /// The freeze and the sentence that comes with it are written together and only once. A first
+    /// answer of this kind is what the set is frozen ON; anything after it is about a set that was
+    /// already frozen, and overwriting the sentence would replace what somebody has to act on with
+    /// a later, narrower account of the same uncertainty.
+    func mayHaveLandedOnServer(_ failure: ComposeFailure) {
+        guard !mayHaveLanded else { return }
         mayHaveLanded = true
+        freezingSentence = ComposeFailurePresentation.sentence(for: failure)
     }
 
     // MARK: - capture reads

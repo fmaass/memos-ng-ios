@@ -407,8 +407,10 @@ public struct ComposeView: View {
                 // thing somebody had just taken off it. So the removal is REFUSED while a save is
                 // running, and goes on being refused when that save came back without saying what
                 // the server did — the set it carried is the set its retry has to carry
-                // (`ComposeImports.mayHaveLanded`). Where the save came back having changed
-                // nothing, pressing this again is what makes it stick. The refusal is here, on the
+                // (`ComposeImports.mayHaveLanded`), for the rest of this sheet's life: nothing
+                // about the pictures changes again, and what a frozen row is acted on through is
+                // the sentence across it and Save. Where no save has left this device unanswered
+                // for, pressing this again is what makes it stick. The refusal is here, on the
                 // same object the save claims synchronously (`post()`), because a control that has
                 // gone grey is a hint and the tap that beat the redraw is the one that does the
                 // damage.
@@ -586,16 +588,28 @@ public struct ComposeView: View {
                 // files and their identities. That is the whole of what "preserved" means here: it
                 // is THIS compose session, not survival across a dismissal or a force-quit, which
                 // would need the outbox and is MEMNG-124's line.
-                problem = ComposeFailurePresentation.sentence(for: failure)
                 // These two are the answers that left a request the server may have applied, and
                 // from here what is attached may not change: a different set mints a different
                 // edit key, the server's replay lookup misses, and the files go up a second time
-                // beside the ones it already holds (`ComposeImports.mayHaveLanded`). Read off the
-                // failure itself, never off the tile category, which the answers that reached
-                // nothing share.
+                // beside the ones it already holds (`ComposeImports.mayHaveLanded`). Taken from
+                // the failure VALUE, because that is what says whether the request left the
+                // device.
                 switch failure {
-                case .transport(sent: true), .serverFailure: imports.mayHaveLandedOnServer()
-                case .transport(sent: false), .authorization, .storage, .rejection: break
+                case .transport(sent: true), .serverFailure:
+                    imports.mayHaveLandedOnServer(failure)
+                case .transport(sent: false), .authorization, .storage, .rejection:
+                    break
+                }
+                // One exception, and it is about a single sentence: an answer that never left the
+                // device says "nothing has been changed yet", which nobody can promise about a set
+                // an earlier attempt may already have committed. So while the set is frozen, that
+                // one answer shows the sentence it was frozen ON instead. Every other failure says
+                // what it has always said — a refusal, an expired session and a full disk are all
+                // facts of their own, and the two uncertain answers already say what this is.
+                if case .transport(sent: false) = failure, let frozen = imports.freezingSentence {
+                    problem = frozen
+                } else {
+                    problem = ComposeFailurePresentation.sentence(for: failure)
                 }
                 if let category = ComposeFailurePresentation.tileCategory(for: failure) {
                     imports.markUploadFailed(category)

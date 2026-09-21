@@ -41,6 +41,25 @@ private final class HeldSave {
     }
 }
 
+/// A save that answers each attempt in turn, and counts what it has answered.
+///
+/// The second attempt is the case: what a sheet does with an answer depends on what it was told
+/// before it, so the two have to arrive through one screen in order.
+@MainActor
+private final class FailureSequence {
+    private var remaining: [ComposeFailure]
+    private(set) var answered = 0
+
+    init(_ failures: [ComposeFailure]) { remaining = failures }
+
+    func answer() -> ComposeOutcome {
+        let failure =
+            remaining.isEmpty ? ComposeFailure.transport(sent: false) : remaining.removeFirst()
+        answered += 1
+        return .failed(failure)
+    }
+}
+
 /// Attaching a photograph to a memo that already exists.
 ///
 /// Until now an edit could change the words and the date and nothing else: the sheet showed only
@@ -251,25 +270,74 @@ struct ComposeMediaEditTests {
         await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
         await settleTasks()
 
-        let (saved, marked, pressed) = await PressProbe.withScreen(
+        let (saved, marked, said, pressed) = await PressProbe.withScreen(
             ComposeView(mode: mode(), imports: imports) { _ in .failed(.transport(sent: false)) },
             height: 852
         ) { screen in
             let saved = screen.press("Save")
             await screen.settle(turns: 100, until: { imports.items.first?.uploadFailed != nil })
             let marked = imports.items.contains { $0.uploadFailed != nil }
+            let said = screen.says(
+                ComposeFailurePresentation.sentence(for: .transport(sent: false)))
             let pressed = screen.press("Remove")
             await screen.settle()
-            return (saved, marked, pressed)
+            return (saved, marked, said, pressed)
         }
 
         #expect(saved, "the sheet's own Save could not be pressed")
         #expect(pressed, "the x was not on the row to be pressed after the save came back")
+        // The control for the sentence too: nothing has frozen this row, so the answer speaks for
+        // itself and says the one thing only an unsent request may say.
+        #expect(said, "the sheet did not say that nothing had been changed")
         #expect(
             imports.ordered.isEmpty,
             "the x is dead after a save that never left: \(imports.ordered.map(\.label))")
         // The control for the case above: a save that reached nothing left the files unsent, and
         // the tile that says so carries a "Try again" the sheet really takes.
         #expect(marked, "nothing on the row said the files had not gone up")
+    }
+
+    /// The freeze lasts for the rest of the sheet's life, and so does the sentence that bought it.
+    ///
+    /// A second attempt can come back saying it never left the device. About THIS set that is not
+    /// something anybody knows — an earlier attempt may already have committed it — so the row is
+    /// held exactly as it was, no tile is marked, and the sheet goes on saying what it said.
+    @Test("a later failure changes neither the row nor the sentence once a save may have landed")
+    func aFrozenRowKeepsItsSentenceAndItsTiles() async {
+        let imports = ComposeImports(readCapture: { _ in .empty })
+        await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
+        await settleTasks()
+
+        let answers = FailureSequence([.transport(sent: true), .transport(sent: false)])
+        let lost = ComposeFailurePresentation.sentence(for: .transport(sent: true))
+        let never = ComposeFailurePresentation.sentence(for: .transport(sent: false))
+
+        let read = await PressProbe.withScreen(
+            ComposeView(mode: mode(), imports: imports) { _ in await answers.answer() },
+            height: 852
+        ) { screen in
+            _ = screen.press("Save")
+            await screen.settle(turns: 100, until: { imports.mayHaveLanded })
+            // The probe's own control: the first answer's sentence is there to be read.
+            let saidFirst = screen.says(lost)
+            let markedFirst = imports.items.contains { $0.uploadFailed != nil }
+
+            _ = screen.press("Save")
+            await screen.settle(turns: 200, until: { answers.answered == 2 })
+            await screen.settle()
+            return (
+                saidFirst: saidFirst, markedFirst: markedFirst, answered: answers.answered,
+                saysLost: screen.says(lost), saysNever: screen.says(never),
+                marked: imports.items.contains { $0.uploadFailed != nil }
+            )
+        }
+
+        #expect(read.saidFirst, "the first answer's sentence was not on the sheet to be read")
+        #expect(!read.markedFirst, "a tile was marked by a save whose files may have gone up fine")
+        #expect(read.answered == 2, "the second save was never made")
+        #expect(read.saysLost, "the sheet stopped saying what the row is being held for")
+        #expect(!read.saysNever, "the sheet said nothing had changed about a set that may be up")
+        #expect(!read.marked, "a tile was marked on a row nothing can be done to")
+        #expect(imports.mayHaveLanded, "a later answer lifted the freeze")
     }
 }

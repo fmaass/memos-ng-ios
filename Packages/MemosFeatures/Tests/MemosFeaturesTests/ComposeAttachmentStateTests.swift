@@ -531,14 +531,7 @@ struct ComposeAttachmentStateTests {
                 .lowercased().contains("nothing was changed"),
             "a rejection can be a server fault AFTER the edit was committed"
         )
-        // A lost answer is not the photographs' business: they may be on the memo already, and
-        // what is attached is held until the save is settled — so a tile marked here would carry a
-        // "Try again" that is refused wherever it is pressed.
-        #expect(ComposeFailurePresentation.tileCategory(for: .transport(sent: true)) == nil)
-        // The control: a request that never left the device left the files unsent, and the tile
-        // saying so is the one thing on the sheet that names them.
-        #expect(
-            ComposeFailurePresentation.tileCategory(for: .transport(sent: false)) == .transport)
+        #expect(ComposeFailurePresentation.tileCategory(for: .transport(sent: true)) == .transport)
         // A refusal is about the memo, not about the photographs.
         #expect(ComposeFailurePresentation.tileCategory(for: .rejection) == nil)
     }
