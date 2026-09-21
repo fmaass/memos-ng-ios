@@ -81,9 +81,10 @@ public struct ComposeDelete {
 public struct ComposeView: View {
     public enum Mode: Equatable {
         case create
-        /// An edit opens on the memo as it stands, its display date included — the date row is a
-        /// change to something that already has one, not a blank to fill in.
-        case edit(uid: String, content: String, createdAt: Date)
+        /// An edit opens on the memo as it stands, its display date and its pictures included —
+        /// the date row is a change to something that already has one, not a blank to fill in,
+        /// and the pictures are what the memo has rather than what this sheet has been given.
+        case edit(uid: String, content: String, createdAt: Date, attachments: [MemoAttachment])
     }
 
     let mode: Mode
@@ -127,12 +128,12 @@ public struct ComposeView: View {
         self.submit = submit
         _content = State(
             initialValue: {
-                if case .edit(_, let content, _) = mode { return content }
+                if case .edit(_, let content, _, _) = mode { return content }
                 return ""
             }())
         _date = State(
             initialValue: {
-                if case .edit(_, _, let createdAt) = mode { return createdAt }
+                if case .edit(_, _, let createdAt, _) = mode { return createdAt }
                 return nil
             }())
     }
@@ -140,6 +141,21 @@ public struct ComposeView: View {
     private var isEdit: Bool {
         if case .edit = mode { return true }
         return false
+    }
+
+    /// The pictures the memo already has, as the sheet was handed them when it opened.
+    ///
+    /// A value captured at presentation, like the words and the date beside it: a picture deleted
+    /// elsewhere while this sheet is open stays in the row, and saving neither restores it nor
+    /// sends anything about it.
+    private var existing: [ComposeExisting] {
+        guard case .edit(_, _, _, let attachments) = mode else { return [] }
+        return attachments.map(ComposeExisting.init(attachment:))
+    }
+
+    /// What the row draws, in order — the memo's own pictures first, then what has been picked.
+    private var rowItems: [ComposeRowItem] {
+        ComposeRow.items(existing: existing, picked: imports.ordered)
     }
 
     /// A memo with photos and no words is a memo. Only an empty capture is nothing to post.
@@ -318,13 +334,13 @@ public struct ComposeView: View {
         }
     }
 
-    /// What has been picked, and what would not read. Shared by both modes: a file the picker
+    /// The memo's pictures and what would not read. Shared by both modes: a file the picker
     /// cannot export is the one thing that must never pass quietly, whether it was picked for a
     /// new memo or added to one that already exists.
     @ViewBuilder
     private var attachedRow: some View {
-        if !imports.items.isEmpty {
-            PickedThumbnailRow(attachments: imports.ordered) { id in
+        if !rowItems.isEmpty {
+            PickedThumbnailRow(items: rowItems) { id in
                 Task { await imports.retry(id: id) }
             }
         }

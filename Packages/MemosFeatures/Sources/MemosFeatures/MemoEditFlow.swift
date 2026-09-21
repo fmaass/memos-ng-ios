@@ -32,7 +32,7 @@ public final class MemoEditFlow {
     /// The memo the sheet is open on. The delete acts on THIS uid rather than on one the caller
     /// carries separately, so the sheet and the request cannot come to be about different memos.
     public var editingUID: String? {
-        guard case .edit(let uid, _, _) = editing else { return nil }
+        guard case .edit(let uid, _, _, _) = editing else { return nil }
         return uid
     }
 

@@ -95,6 +95,70 @@ enum PixelProbe {
         let offset = ((height / 2) * width + (width / 2)) * 4
         return (bytes[offset], bytes[offset + 1], bytes[offset + 2])
     }
+
+    /// The same reading, taken off a view that is really on a screen.
+    ///
+    /// `ImageRenderer` draws a `ScrollView` as nothing whatsoever, so a row that scrolls reads as
+    /// an empty tile however well it paints — and a row of pictures is exactly the thing worth
+    /// asserting. The capture follows the one the loader's suite takes: the run loop is given a
+    /// turn before the hierarchy is drawn, because what a state change queued has not been
+    /// committed yet.
+    static func centreOnScreen(
+        of view: some View,
+        size: CGSize
+    ) -> (r: UInt8, g: UInt8, b: UInt8)? {
+        let host = UIHostingController(
+            rootView: view.frame(width: size.width, height: size.height)
+        )
+        let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(bounds: host.view.bounds, format: format)
+        let shot = renderer.image { _ in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        }
+        window.isHidden = true
+        window.rootViewController = nil
+        guard let cgImage = shot.cgImage else { return nil }
+        return centre(of: cgImage)
+    }
+
+    /// The middle pixel of a drawn image, in sRGB.
+    private static func centre(of cgImage: CGImage) -> (r: UInt8, g: UInt8, b: UInt8)? {
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return nil
+        }
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 4,
+                    space: space,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                )
+            else { return false }
+            context.draw(
+                cgImage,
+                in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+            )
+            return true
+        }
+        guard drawn else { return nil }
+        let offset = ((height / 2) * width + (width / 2)) * 4
+        return (bytes[offset], bytes[offset + 1], bytes[offset + 2])
+    }
 }
 
 /// A flat image of a known colour, for asserting which layer of a tile ended up where.

@@ -302,7 +302,7 @@ public struct MemoDetailView: View {
     private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async
         -> ComposeOutcome
     {
-        guard case .edit(let uid, _, let createdAt) = mode,
+        guard case .edit(let uid, _, let createdAt, _) = mode,
             let handle = session?.activeHandle,
             let baseURL = session?.serverBaseURL
         else { return .failed(.authorization) }

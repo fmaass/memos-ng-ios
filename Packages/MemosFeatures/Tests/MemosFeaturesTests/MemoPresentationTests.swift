@@ -274,7 +274,13 @@ struct AttachmentSlotTests {
         )
 
         let mode = try #require(MemoDetailPresentation.editMode(for: memo))
-        #expect(mode == .edit(uid: "m7", content: "- [ ] ring the plumber", createdAt: created))
+        #expect(
+            mode
+                == ComposeView.Mode.edit(
+                    uid: "m7", content: "- [ ] ring the plumber", createdAt: created,
+                    attachments: []
+                )
+        )
     }
 
     @Test("someone else's memo offers no Edit at all")
