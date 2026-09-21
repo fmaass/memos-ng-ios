@@ -703,7 +703,11 @@ struct MediaViewerPage: View {
         // the account that was signed in when this started must not be painted for the one signed
         // in now — not even as a failure.
         guard generation == MediaImageLoader.store.generation else { return }
-        picture.settle(answer, for: requested, serial: serial)
+        // The same read a tile takes of the same handoff: a signal that arrived while this fetch
+        // was out is answered by how the fetch ended.
+        if picture.settle(answer, for: requested, serial: serial).asksAgain {
+            picture.askAgain(showing: painted != nil)
+        }
     }
 
     /// A real control rather than a tap on the poster, so it is reachable with VoiceOver.

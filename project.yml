@@ -391,6 +391,14 @@ targets:
       - package: MemosFeatures
       - package: MemosCore
       - package: MemosOutbox
+      # The composed witness hands the app's own generated client a scripted transport, so this
+      # bundle links the API layer and the two runtime modules that transport is written in — the
+      # same pair MemosCoreTests links, at the same versions.
+      - package: MemosAPI
+      - package: swift-openapi-runtime
+        product: OpenAPIRuntime
+      - package: swift-http-types
+        product: HTTPTypes
       - package: swift-markdown-ui
         product: MarkdownUI
       - target: MemosNG

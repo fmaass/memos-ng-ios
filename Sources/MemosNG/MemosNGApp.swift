@@ -60,6 +60,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         account: OutboxAccountStore.live(),
         lastKnownUser: LastKnownUserFile.live(),
         snapshots: TimelineSnapshotStore.live(),
+        // A route coming back is the one recovery trigger the app has that nobody has to be
+        // looking at the screen for.
+        routes: NetworkRouteMonitor(),
         // Synchronous, because that is when the transition happens. What it starts is its own
         // task, and that task re-reads the authority before it drains — a confirmation is not a
         // promise that the session still exists by the time a drain gets a turn.

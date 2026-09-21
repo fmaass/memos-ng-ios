@@ -16,10 +16,45 @@ public enum APIClientFactory {
         Configuration(dateTranscoder: RFC3339DateTranscoder())
     }
 
+    /// How long a request may go without a single byte before it is given up on.
+    ///
+    /// Measured rather than preferred: against a destination that is routed and answers nothing, a
+    /// request on the framework's defaults took the full 60 seconds to fail. This is the idle
+    /// bound between bytes, and it is the only one set here. No TOTAL deadline stands beside it —
+    /// the same call the media session makes about its own long transfer, for the mirror-image
+    /// reason: this client carries the binary chunks of a foreground edit's upload as well as
+    /// small JSON, and a deadline on the whole transfer would kill an upload that is still making
+    /// progress on a slow link, failing the edit before its patch is ever sent.
+    public static let requestTimeout: TimeInterval = 15
+
+    /// The session every client built here fetches through, in place of `URLSession.shared`.
+    ///
+    /// `.shared` cannot be given this bound: a session COPIES its configuration when it is made
+    /// and never reads it again, so reconfiguring the shared one afterwards changes nothing. A
+    /// `URLRequest` carries a timeout of its own, but the requests here are built inside the
+    /// generated client's transport and never pass through this app's hands — so the session is
+    /// where the bound can be stated once and hold for every request the client sends. Owning one
+    /// also keeps it off every other user of the shared session.
+    public static var urlSession: URLSession { bounded.session }
+
+    /// `@unchecked Sendable` for the reason `MediaSession` is one: the single stored property is a
+    /// `let`, and `URLSession` is documented as safe to use from several threads at once.
+    private final class BoundedSession: @unchecked Sendable {
+        let session: URLSession
+
+        init() {
+            let configuration = URLSessionConfiguration.default
+            configuration.timeoutIntervalForRequest = APIClientFactory.requestTimeout
+            session = URLSession(configuration: configuration)
+        }
+    }
+
+    private static let bounded = BoundedSession()
+
     public static func make(
         configuration: ServerConfiguration,
         token: @escaping @Sendable () async -> String?,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = APIClientFactory.urlSession
     ) -> any APIProtocol {
         make(
             configuration: configuration,
@@ -50,7 +85,7 @@ public enum APIClientFactory {
     public static func make(
         configuration: ServerConfiguration,
         credential: PresentedCredential,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = APIClientFactory.urlSession
     ) -> any APIProtocol {
         make(
             configuration: configuration,
@@ -88,7 +123,7 @@ public enum APIClientFactory {
         configuration: ServerConfiguration,
         grant: ManagementGrant,
         licence: GrantSendLicence,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = APIClientFactory.urlSession
     ) -> any APIProtocol {
         make(
             configuration: configuration,

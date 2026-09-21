@@ -158,6 +158,18 @@ public enum MediaCache {
         return true
     }
 
+    /// How long a fetch may go without a single byte before it is given up on.
+    ///
+    /// The framework's own default is 60 seconds, and against a destination that is ROUTED and
+    /// answers nothing that is exactly what a picture waits: measured at 60 s on this session and
+    /// on the generated client's alike, ending in `URLError.timedOut`. A photograph nobody can
+    /// fetch is worth its triangle in seconds rather than a minute.
+    ///
+    /// No TOTAL deadline is set beside it, and that is a decision rather than an omission: this
+    /// session also carries the original-file download, where a long transfer is legitimate and a
+    /// deadline would truncate it. The idle bound is the one that fits both.
+    public static let requestTimeout: TimeInterval = 15
+
     /// The configuration `MediaSession` is built from. `useProtocolCachePolicy` is named rather
     /// than left implicit: it is the policy that makes the server's `max-age`/`ETag` decide, which
     /// is the whole reason the tiers carry those headers.
@@ -165,6 +177,7 @@ public enum MediaCache {
         let configuration = URLSessionConfiguration.default
         configuration.urlCache = cache
         configuration.requestCachePolicy = .useProtocolCachePolicy
+        configuration.timeoutIntervalForRequest = requestTimeout
         return configuration
     }
 }

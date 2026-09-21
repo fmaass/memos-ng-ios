@@ -190,7 +190,12 @@ struct AttachmentThumbnail: View {
         // in now. Nothing is assigned at all — not even a failure, which would put a warning
         // triangle on a tile whose memo is already being replaced.
         guard generation == MediaImageLoader.store.generation else { return }
-        picture.settle(answer, for: requested, serial: serial)
+        // A signal that arrived while this fetch was out is answered by how the fetch ENDED, not
+        // by the moment it arrived in: what was refused then is asked for now, once, by the load
+        // that held the claim.
+        if picture.settle(answer, for: requested, serial: serial).asksAgain {
+            picture.askAgain(showing: image != nil)
+        }
     }
 }
 
