@@ -34,10 +34,13 @@
 # holds each control separately whatever style they were given. The witness is the check on a
 # device — a tap on a token's NAME does nothing and the list is unchanged.
 #
-# Both counts below read UNCOMMENTED lines only, because a screen whose controls were all replaced
+# Both counts below read UNCOMMENTED text only, because a screen whose controls were all replaced
 # by a sentence, with the calls left behind as comments, would otherwise pass every part of this
-# script. `//` is this repo's comment, and it is the only one excluded: a `/* … */` block holding a
-# call would still be counted, which is a hole this rule does not close.
+# script. Swift has two comment forms and both are removed before control 1 counts: every
+# `/* … */` block first, nesting honoured because Swift nests them (a naive first-to-last strip
+# would leave the tail of a nested block standing as live text), then every `//` line. The order
+# matters: a `//` inside a block must not swallow that block's closing `*/`. A `/*` inside a
+# string literal is the case this leaves open, and the screen has no such string.
 #
 # Usage: managetokens-buttonstyle-rule.sh [<repo-root>]   (default: the current directory)
 # Exit:  0 = the rule holds and both controls answered
@@ -93,11 +96,11 @@ if [ -n "$hits" ]; then
   rc=1
 fi
 
-uncommented="$(grep -av '^[[:space:]]*//' "$screen" 2>/dev/null)"
-grep_rc=$?
-if [ "$grep_rc" -ge 2 ]; then
-  echo "BUTTONSTYLE FAIL: the control-1 grep over $screen ended with exit $grep_rc, so the rule was"
-  echo "                  never checked"
+uncommented="$(perl -0777 -pe 's{ ( /\* (?: [^/*]+ | /(?!\*) | \*(?!/) | (?1) )* \*/ ) }{}gsx; s{//[^\n]*}{}g' "$screen" 2>/dev/null)"
+strip_rc=$?
+if [ "$strip_rc" -ne 0 ] || [ -z "$uncommented" ]; then
+  echo "BUTTONSTYLE FAIL: stripping the comments from $screen ended with exit $strip_rc or left"
+  echo "                  nothing, so control 1 was never checked"
   exit 2
 fi
 component_calls="$(printf '%s\n' "$uncommented" | grep -caF 'CardButton(')"

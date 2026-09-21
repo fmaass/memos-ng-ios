@@ -37,7 +37,7 @@ plaintext leaves the screen, with the exact path `…/Settings/ManageTokensScree
 token-screen button rule (`scripts/managetokens-buttonstyle-rule.sh`: the word-bounded literal
 `Button` appears nowhere in `…/Settings/ManageTokensScreen.swift`, because a card there is one
 List row and a default-styled control in it is pressed by a tap anywhere in that row, with
-`CardButton(` at least six times in the same file as the control and one uncommented
+`CardButton(` at least six times outside any comment in the same file as the control and one uncommented
 `.buttonStyle(.borderless)` line in `Design/CardButton.swift` as a hint that is not a fence) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
