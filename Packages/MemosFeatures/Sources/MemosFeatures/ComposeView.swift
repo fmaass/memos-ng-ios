@@ -107,7 +107,7 @@ public struct ComposeView: View {
     /// What the picker has produced, and which pick it belongs to. Choosing again before the
     /// first load has finished is ordinary behaviour, and the older, slower result must not
     /// overwrite the newer — see `ComposeImports`.
-    @State private var imports = ComposeImports()
+    @State private var imports: ComposeImports
     @State private var isSaving = false
     /// The one sentence the sheet has to say: why a Post was refused, or why a Save did not go
     /// through. Never a raw error, and never two at once.
@@ -123,9 +123,24 @@ public struct ComposeView: View {
         delete: ComposeDelete? = nil,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) {
+        self.init(mode: mode, delete: delete, imports: ComposeImports(), submit: submit)
+    }
+
+    /// The same sheet with its import list handed in from outside.
+    ///
+    /// Internal, and for one reason: what the row does to what is attached can only be asked of
+    /// the list the sheet is really holding. A test that built its own beside it would be asking a
+    /// different object than the one the row was drawn from.
+    init(
+        mode: Mode,
+        delete: ComposeDelete? = nil,
+        imports: ComposeImports,
+        submit: @escaping (ComposeSubmission) async -> ComposeOutcome
+    ) {
         self.mode = mode
         self.delete = delete
         self.submit = submit
+        _imports = State(initialValue: imports)
         _content = State(
             initialValue: {
                 if case .edit(_, let content, _, _) = mode { return content }
@@ -340,9 +355,12 @@ public struct ComposeView: View {
     @ViewBuilder
     private var attachedRow: some View {
         if !rowItems.isEmpty {
-            PickedThumbnailRow(items: rowItems) { id in
-                Task { await imports.retry(id: id) }
-            }
+            PickedThumbnailRow(
+                items: rowItems,
+                retry: { id in Task { await imports.retry(id: id) } },
+                // Only what this sheet picked. The memo's own pictures are drawn by the same row
+                // and are not this sheet's to take away (`ComposeRowItem`).
+                remove: { imports.remove(id: $0) })
         }
         if imports.failed > 0,
             let summary = ComposeAttachments.summary(

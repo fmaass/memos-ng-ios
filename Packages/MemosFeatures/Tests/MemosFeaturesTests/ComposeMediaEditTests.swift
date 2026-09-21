@@ -96,6 +96,30 @@ struct ComposeMediaEditTests {
         #expect(recorder.last?.attachments.map(\.filename) == ["a.jpg", "b.jpg"])
     }
 
+    /// The whole wiring, pressed: the row `ComposeView` builds, the closure it really hands that
+    /// row, the forwarding on to each picked tile, and the control itself. Every link is a place
+    /// the x can be dead while a test of `ComposeImports.remove(id:)` alone stays green — and a
+    /// dead x is a picture somebody thinks they took off a memo they are about to post.
+    @Test("pressing the x on a picked picture takes it off the sheet")
+    func theXOnAPickedPictureTakesItOff() async {
+        let imports = ComposeImports()
+        await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
+
+        // The sheet's own height: the row sits under the words, and a viewport shorter than the
+        // sheet is a control that was never drawn rather than one that is not wired.
+        let pressed = PressProbe.withElement(
+            labelled: "Remove",
+            in: ComposeView(mode: mode(), imports: imports) { _ in .saved },
+            height: 852
+        ) { $0?.accessibilityActivate() ?? false }
+
+        #expect(pressed, "the x on a picked tile did not accept an activation")
+        #expect(
+            imports.ordered.isEmpty,
+            "the picture is still attached after its x was pressed: \(imports.ordered.map(\.label))"
+        )
+    }
+
     @Test("what the save sends up is the picked file, in the shape an upload takes")
     func stagedSourcesCarryTheFile() {
         let staged = picked("holiday.jpg").stagedSource

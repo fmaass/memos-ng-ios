@@ -238,6 +238,57 @@ struct ComposeAutoDateTests {
         #expect(imports.attachments.map(\.filename) == ["b.heic", "c.heic"])
     }
 
+    /// The date the sheet would actually carry, which is where taking a picture off it is felt.
+    /// Only a NEW memo has an Auto side at all (`ComposeDate.auto(isEdit:from:)`), so this is the
+    /// mode the removal moves a date in.
+    @Test("taking the earliest picture off a new memo re-dates it from what is left")
+    func removingTheEarliestRedatesANewMemo() async {
+        let imports = Self.imports([
+            "a.heic": Self.exact("2026-01-01T13:00:00Z"),
+            "b.heic": Self.exact("2026-01-01T14:00:00Z"),
+        ])
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+        #expect(Self.resolvedOnAuto(imports) == Self.instant("2026-01-01T13:00:00Z"))
+
+        imports.remove(id: imports.items.first { $0.label == "a.heic" }!.id)
+
+        #expect(
+            Self.resolvedOnAuto(imports) == Self.instant("2026-01-01T14:00:00Z"),
+            "the memo kept the instant of a photograph that is no longer attached")
+    }
+
+    /// And the other half, which is what MANUAL means: once a date has been chosen, what is
+    /// attached — or taken off — may not move it.
+    @Test("taking the earliest picture off does not move a date that was chosen")
+    func removingTheEarliestLeavesAChosenDateAlone() async {
+        let chosen = Self.instant("2025-06-01T09:00:00Z")
+        let imports = Self.imports([
+            "a.heic": Self.exact("2026-01-01T13:00:00Z"),
+            "b.heic": Self.exact("2026-01-01T14:00:00Z"),
+        ])
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+
+        imports.remove(id: imports.items.first { $0.label == "a.heic" }!.id)
+
+        #expect(
+            ComposeDate.resolved(
+                chosen: chosen, auto: ComposeDate.auto(isEdit: false, from: imports.autoDate)
+            ) == chosen,
+            "a removal moved a date somebody had chosen")
+    }
+
+    /// What a new memo's date control resolves to with nothing chosen.
+    private static func resolvedOnAuto(_ imports: ComposeImports) -> Date? {
+        ComposeDate.resolved(
+            chosen: nil, auto: ComposeDate.auto(isEdit: false, from: imports.autoDate))
+    }
+
     /// F1b's tie-break is PICK order, and pick order is one order for the whole list. A photograph
     /// taken before two were picked comes first — grouping the camera's items after the library's
     /// would put it last among the undated ones, which is not the order anybody made.

@@ -169,10 +169,17 @@ final class ComposeImports {
             guard let handle = handles[placeholder.id] else { continue }
             // AWAIT 1, once per item.
             let answer = await handle()
-            // The selection must still be the one on screen, and this item must still be in it.
-            guard stamp == current,
-                let index = self.items.firstIndex(where: { $0.id == placeholder.id })
-            else { return false }
+            // The selection must still be the one on screen. A pick that has been replaced is
+            // finished with: everything after this item belongs to it too, and the pick that took
+            // its place is owed the list.
+            guard stamp == current else { return false }
+            // This ITEM, though, is one item. Taken off the row while its file was coming, it is
+            // the only thing this answer is dropped for — the rest of the pick is still on its
+            // way, and a loop that returned here would leave every one of them on its spinner
+            // with nothing left to settle them or the busy flag.
+            guard let index = self.items.firstIndex(where: { $0.id == placeholder.id }) else {
+                continue
+            }
             self.items[index] = Self.settle(self.items[index], with: answer)
             if self.items[index].media != nil { beginCaptureRead(for: placeholder.id) }
         }
