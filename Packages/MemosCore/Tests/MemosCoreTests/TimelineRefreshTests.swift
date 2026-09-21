@@ -3,6 +3,38 @@ import MemosAPI
 import MemosCore
 import Testing
 
+/// Holds the FIRST list read at the transport until the case lets it through, and announces its
+/// arrival — there is no "while a read is in flight" without a read that can be made to wait.
+private actor RefreshGate {
+    private var arrived = false
+    private var released = false
+    private var arrivals: [CheckedContinuation<Void, Never>] = []
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    /// Called from inside the scripted transport: announces the request, then holds it.
+    func enter() async {
+        arrived = true
+        let waiting = arrivals
+        arrivals = []
+        for waiter in waiting { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    /// Called from the case: returns once the request has reached the gate.
+    func entered() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrivals.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiting = parked
+        parked = []
+        for waiter in waiting { waiter.resume() }
+    }
+}
+
 /// The reconciling re-read, and the projection both it and the live channel move.
 ///
 /// The poll these tests grew up around is gone — `MediaChannel` consumes `GET /api/events` instead
@@ -30,6 +62,56 @@ struct TimelineRefreshTests {
         let store = TimelineStore()
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         return store
+    }
+
+    // MARK: - a refresh asked for while one is in flight
+
+    /// A refresh refused because the same list was already being read must not simply be lost.
+    ///
+    /// The read in flight left BEFORE the refusal, so its answer cannot carry whatever made
+    /// somebody ask again — a route regain arriving mid-read is exactly that, and the list it
+    /// leaves on the screen is the one from before the outage. Refused and remembered: one more
+    /// read after the one in flight, however many were refused, because they all ask the same
+    /// question.
+    @Test("a refresh refused while the list is being read is taken once that read answers")
+    func aRefusedRefreshIsTakenOnceAfterwards() async {
+        let gate = RefreshGate()
+        let pages = LockedValue<Int>(0)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case "list_memos_api_memos_get":
+                let ordinal = pages.get() + 1
+                pages.set(ordinal)
+                if ordinal == 1 { await gate.enter() }
+                return Stub.json(Stub.page([Stub.memo(uid: Self.uid)]))
+            default:
+                return Stub.empty(.notFound)
+            }
+        }
+        let store = TimelineStore()
+        let first = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
+        await gate.entered()
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(pages.get() == 1, "a second read went out beside the one already in flight")
+
+        await gate.release()
+        await first.value
+        #expect(await Self.settles(until: { pages.get() >= 2 }), "the refused refresh was dropped")
+        // And only one, for two refusals: they asked the same question of the same list.
+        _ = await Self.settles(until: { pages.get() > 2 })
+        #expect(pages.get() == 2, "two refusals were answered with two reads rather than one")
+    }
+
+    /// Gives the store's own tail its turns, and gives up rather than hanging.
+    private static func settles(tries: Int = 60, until ready: () -> Bool) async -> Bool {
+        for _ in 0..<tries {
+            if ready() { return true }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return ready()
     }
 
     // MARK: - the re-read itself

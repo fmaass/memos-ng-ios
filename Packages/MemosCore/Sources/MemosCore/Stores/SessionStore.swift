@@ -103,13 +103,16 @@ public final class SessionStore {
     /// `UnreachableNotice.shows(…)` taken at a moment the store can name — the instant a
     /// verification was written, or the instant a wake armed for this outage came due.
     public private(set) var showsUnreachableNotice = false
-    /// How many times an unconfirmed session has been confirmed again.
+    /// How many times the screens have been asked to read again because the server came back.
     ///
     /// A number rather than a flag, because what a screen does with it is notice that it CHANGED:
     /// a screen that was showing whatever it had while the server was away reloads once per
-    /// recovery, and nothing reloads on a first appearance. Only a transition is counted — a
-    /// confirmed session that is confirmed again is not a recovery, and a sign-out, which writes
-    /// `.verified` because nothing is owed an answer any more, is not one either.
+    /// recovery, and nothing reloads on a first appearance. Two lines raise it, and each is one
+    /// outage ending: a session that was owed a confirmation getting one (`enterVerified`), and a
+    /// route regain delivered to a session that is owed none (`routeRegained`), which asks the
+    /// server nothing because there is nothing worth asking. A confirmed session confirmed again
+    /// is not a recovery, and a sign-out is not one either — it writes `.verified` through
+    /// `setVerification` directly, past both of those lines.
     public private(set) var reachabilityRecoveries = 0
     /// How long the app stays quiet about an unconfirmed session before it says anything.
     ///

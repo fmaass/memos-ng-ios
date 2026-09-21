@@ -176,6 +176,17 @@ struct ComposeAttachmentStateTests {
         await held.waitUntilStarted()
 
         imports.remove(id: imports.items[0].id)
+
+        // Read HERE, with the discarded export still suspended. That is the moment somebody is
+        // looking at: a flag that settles only when a file nobody is waiting for finally arrives
+        // is a Post refused for as long as that takes — and the file may never arrive at all.
+        #expect(!imports.isImporting, "the composer is importing a pick that is no longer there")
+        #expect(
+            ComposeAttachments.canPost(
+                text: "just the words then", imported: imports.attachments.count,
+                isBusy: imports.isImporting),
+            "the words alone could not be posted while the removed picture's export was still out")
+
         await held.release()
         await run.value
         await settleTasks()
@@ -186,6 +197,32 @@ struct ComposeAttachmentStateTests {
                 text: "just the words then", imported: imports.attachments.count,
                 isBusy: imports.isImporting),
             "the words alone could not be posted after the one picture was taken off")
+    }
+
+    /// A picture taken off the row must not come back through the picker's own binding.
+    ///
+    /// A selection lands as the WHOLE array, and the item that was removed is still selected in
+    /// the picker — so a list rebuilt from that array alone puts the removal straight back the
+    /// next time anything is added. Everything else in the selection is imported again, as it
+    /// always is: a pick replaces the picked files.
+    @Test("a picked file taken off the row does not return with the next selection")
+    func aRemovedPickDoesNotReturnWithTheNextSelection() async {
+        let imports = Self.imports()
+        await imports.load(["a", "b"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+        #expect(imports.items.map(\.label) == ["a.heic", "b.heic"], "precondition: both landed")
+
+        imports.remove(id: imports.items[1].id)
+        await imports.load(["a", "b", "c"], stamp: imports.selected()) { item in
+            .file(Self.media("\(item).heic"))
+        }
+        await settleTasks()
+
+        #expect(
+            imports.items.map(\.label) == ["a.heic", "c.heic"],
+            "the removed picture came back with the next pick: \(imports.items.map(\.label))")
     }
 
     /// The fence the loop change must NARROW and never widen: the answer for a removed item is

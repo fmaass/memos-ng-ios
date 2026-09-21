@@ -42,9 +42,10 @@ public struct ComposeSubmission: Sendable, Equatable {
 /// belongs to `MemoEditFlow`; this carries only what the sheet needs to draw — whether the question
 /// is up — and where to send the answer.
 ///
-/// Mine-gating is inherent rather than re-checked here: the only thing that hands one of these over
-/// is the memo's own screen, which opens the sheet solely for `MemoDetailPresentation.editMode`,
-/// and that is nil for a memo that is not mine.
+/// Mine-gating is inherent rather than re-checked here: both screens that hand one of these over
+/// reach an edit sheet only for a memo that is mine — the memo's own screen opens the sheet solely
+/// for `MemoDetailPresentation.editMode`, which is nil otherwise, and the timeline offers Edit
+/// inside its `memo.mine` branch alone.
 public struct ComposeDelete {
     public var isAsking: Bool
     /// `@MainActor` spelled out: the sink is a method on the screen that presented the sheet, and a
@@ -192,10 +193,11 @@ public struct ComposeView: View {
     /// One rule, asked synchronously wherever such input lands — a picker answering, a camera
     /// handing over a file, a control being pressed — because the list a save carries was fixed
     /// when Save was pressed and a change taken afterwards would be shown on the row and left out
-    /// of the upload. It is asked of `imports` rather than of this sheet's own state: input that
-    /// was already on its way when the save began arrives through a closure holding the sheet as
-    /// it stood BEFORE it, and the list itself is the one thing all of them hold live.
-    private var mayChangeAttachments: Bool { !imports.isSubmitting }
+    /// of the upload. It is asked of `imports` rather than of this sheet's own state because that
+    /// object is what every one of those changes is about: the question and the change that
+    /// follows it are then one synchronous pair on the same object, and every closure that can
+    /// bring such input in holds that object itself.
+    private var mayChangeAttachments: Bool { imports.acceptsChanges }
 
     /// The date this memo will carry: the one that was chosen, or — while the control is on Auto —
     /// the earliest capture instant among what is attached. Nil is "whenever this is", which the
@@ -330,7 +332,14 @@ public struct ComposeView: View {
             // Which of the three things an answer here can be is decided on the stage, because
             // the emptying this sheet does to refuse one is itself an answer and arrives later —
             // possibly after the save it was refused for has ended (`ComposeStage`).
-            switch stage.selectionLanded(count: items.count, submitting: imports.isSubmitting) {
+            // The stage is told whether this sheet is taking changes to what is attached at all.
+            // It is not, while a save is on the wire and afterwards while one that may have
+            // reached the server is unanswered for — and a selection that lands then is refused
+            // and emptied rather than loaded, which is what leaves the sentence about that save on
+            // the screen (`ComposeImports.acceptsChanges`).
+            switch stage.selectionLanded(
+                count: items.count, submitting: !imports.acceptsChanges
+            ) {
             case .swallowReset:
                 return
             case .refuseAndReset:
@@ -575,6 +584,16 @@ public struct ComposeView: View {
                 // is THIS compose session, not survival across a dismissal or a force-quit, which
                 // would need the outbox and is MEMNG-124's line.
                 problem = ComposeFailurePresentation.sentence(for: failure)
+                // These two are the answers that left a request the server may have applied, and
+                // from here what is attached may not change: a different set mints a different
+                // edit key, the server's replay lookup misses, and the files go up a second time
+                // beside the ones it already holds (`ComposeImports.mayHaveLanded`). Read off the
+                // failure itself, never off the tile category, which the answers that reached
+                // nothing share.
+                switch failure {
+                case .transport(sent: true), .serverFailure: imports.mayHaveLandedOnServer()
+                case .transport(sent: false), .authorization, .storage, .rejection: break
+                }
                 if let category = ComposeFailurePresentation.tileCategory(for: failure) {
                     imports.markUploadFailed(category)
                 }

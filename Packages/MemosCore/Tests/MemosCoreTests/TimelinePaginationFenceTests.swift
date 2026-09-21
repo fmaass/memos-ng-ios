@@ -111,6 +111,16 @@ struct TimelinePaginationFenceTests {
         #expect(store.lastError == nil)
     }
 
+    /// Gives the store's own tail its turns, and gives up rather than hanging.
+    private static func settles(tries: Int = 60, until ready: () -> Bool) async -> Bool {
+        for _ in 0..<tries {
+            if ready() { return true }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return ready()
+    }
+
     @Test("a refresh that arrives while one is running does not open a second lineage")
     func refreshDuringRefreshLeavesOneList() async {
         let entered = LockedValue<Bool>(false)
@@ -132,12 +142,18 @@ struct TimelinePaginationFenceTests {
         while !entered.get() {
             await Task.yield()
         }
-        // A second pull, mid-first. The store turns it away rather than reading page one twice.
+        // A second pull, mid-first. The store turns it away rather than reading page one BESIDE
+        // the read already out — and takes it once afterwards, because that read left before the
+        // pull was asked for and so cannot be the answer to it.
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(firstPages.count == 1, "the second pull read page one beside the one in flight")
         release.set(true)
         await first.value
 
-        #expect(firstPages.count == 1, "the second pull read page one a second time")
+        #expect(
+            await Self.settles(until: { firstPages.count == 2 }),
+            "the turned-away pull was dropped rather than taken after the read it waited on")
+        #expect(firstPages.count == 2, "page one was read \(firstPages.count) times, not twice")
         #expect(store.memos.map(\.uid) == ["a"])
         // And the generation is not left ahead of the list: the page that follows the refresh that
         // DID run still belongs to it, so it still lands.

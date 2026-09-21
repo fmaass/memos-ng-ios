@@ -431,6 +431,16 @@ public final class TimelineStore {
     /// the new query was never read, and no trigger is left to try again. What is redundant is a
     /// refresh of the lineage ALREADY being read; a refresh of a different one is the whole point.
     private var loadingLineage: Lineage?
+    /// The one read a refusal above leaves owed, with the handle and the address it arrived with.
+    ///
+    /// A refresh of the lineage already being read is refused, and the refusal used to be the end
+    /// of it — which is right for a second pull of a list that is coming anyway, and wrong for a
+    /// trigger that means the list may have MOVED: a route regain delivered while a read is in
+    /// flight is answered by that older read, and nothing asks again. So the refusal is remembered
+    /// and spent once, from the tail of the read it was refused for. At most one, whatever number
+    /// were refused — they all ask the same question — and a refusal recorded for a DIFFERENT
+    /// lineage is left where it is, because the read that is finishing is not the one it was owed.
+    private var refreshAgain: (lineage: Lineage, handle: SessionHandle, baseURL: URL)?
 
     public func refresh(using handle: SessionHandle, baseURL: URL) async {
         // The client and the incarnation it belongs to arrive as ONE value and are carried
@@ -442,7 +452,12 @@ public final class TimelineStore {
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
         let lineage = self.lineage
-        guard loadingLineage != lineage else { return }
+        guard loadingLineage != lineage else {
+            // Refused, and REMEMBERED: the read in flight left before this was asked for, so its
+            // answer cannot carry whatever made somebody ask (`refreshAgain`).
+            refreshAgain = (lineage, handle, baseURL)
+            return
+        }
         loadingLineage = lineage
         isLoading = true
         // Only the newest reader clears the flag. A superseded request finishing while the current
@@ -451,6 +466,9 @@ public final class TimelineStore {
             if loadingLineage == lineage {
                 loadingLineage = nil
                 isLoading = false
+                // Whatever was refused while this read was out is owed one read, taken from here
+                // — the earliest instant at which it would not simply be refused again.
+                if refreshAgain?.lineage == lineage { Task { await self.refreshOnceMore() } }
             }
         }
         do {
@@ -514,6 +532,18 @@ public final class TimelineStore {
             }
             await report(error, issuedUnder: handle)
         }
+    }
+
+    /// The single read every refresh refused while the last one was in flight is owed.
+    ///
+    /// Read out of the box rather than handed in, so that however many were refused, this asks
+    /// once. It is taken with the handle the refusal arrived with, and a session that has ended in
+    /// between stops it where every other read of a dead session stops
+    /// (`sessionStillCurrent`).
+    private func refreshOnceMore() async {
+        guard let owed = refreshAgain else { return }
+        refreshAgain = nil
+        await refresh(using: owed.handle, baseURL: owed.baseURL)
     }
 
     /// Reads the page that follows the loaded ones — and reads it AGAIN, itself, when the list it

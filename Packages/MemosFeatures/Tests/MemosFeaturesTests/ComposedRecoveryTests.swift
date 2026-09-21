@@ -124,6 +124,14 @@ final class ComposedRoutes: RouteStatusMonitoring, @unchecked Sendable {
 struct ComposedRecoveryTests {
     private let transport = ScriptedWireTransport()
     private let routes = ComposedRoutes()
+    /// This suite's own signal, for the reason `MediaImageLoaderTests` holds one: it is read by
+    /// every mounted tile in the process, and counting publications on the one every other suite
+    /// publishes on would be counting somebody else's work as this regain's.
+    private let signal = MediaRetrySignal()
+
+    init() {
+        MediaRetrySignal.shared = signal
+    }
 
     private func makeSession() -> SessionStore {
         SessionStore(
@@ -194,7 +202,7 @@ struct ComposedRecoveryTests {
         session.noteTransportFailure(.offline, issuedUnder: session.activeHandle!.generation)
         let whoamisBefore = transport.whoamis
         let pagesBefore = transport.pages
-        let signalsBefore = MediaRetrySignal.shared.publications
+        let signalsBefore = signal.publications
         let ordinal = routes.countLoss()
 
         routes.deliverRegain(closing: ordinal)
@@ -206,7 +214,7 @@ struct ComposedRecoveryTests {
         #expect(transport.whoamis == whoamisBefore + 1, "the regain asked more than once")
         #expect(transport.pages == pagesBefore + 1, "the recovery read the list more than once")
         #expect(
-            MediaRetrySignal.shared.publications == signalsBefore + 1,
+            signal.publications == signalsBefore + 1,
             "the pictures were signalled a number of times that is not one"
         )
     }
@@ -219,7 +227,7 @@ struct ComposedRecoveryTests {
 
         let whoamisBefore = transport.whoamis
         let pagesBefore = transport.pages
-        let signalsBefore = MediaRetrySignal.shared.publications
+        let signalsBefore = signal.publications
         let ordinal = routes.countLoss()
 
         routes.deliverRegain(closing: ordinal)
@@ -233,7 +241,7 @@ struct ComposedRecoveryTests {
         )
         #expect(transport.pages == pagesBefore + 1, "the recovery read the list more than once")
         #expect(
-            MediaRetrySignal.shared.publications == signalsBefore + 1,
+            signal.publications == signalsBefore + 1,
             "the pictures were signalled a number of times that is not one"
         )
     }

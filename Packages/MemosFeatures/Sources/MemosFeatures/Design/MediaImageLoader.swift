@@ -353,7 +353,9 @@ nonisolated struct PictureTrigger: Equatable, Sendable {
 /// and a network.
 ///
 /// The claim REFUSES; it neither joins nor queues. A signal to ask again that arrives while this
-/// view's own fetch is out is dropped, because that fetch already IS the attempt. What two
+/// view's own fetch is out sends nothing then — that fetch already IS the attempt — and it is not
+/// thrown away either: it is held (`heldAsk`) for the settlement of that very fetch to spend, so a
+/// fetch that comes back with no picture still leaves the signal something to do. What two
 /// DIFFERENT views do when they want one picture at the same moment is not this claim's question:
 /// each reaches the transport, as it always has, and the store settles which decode survives.
 struct PictureLoad {

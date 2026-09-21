@@ -75,8 +75,8 @@ private func awaitUntil(tries: Int = 80, _ condition: () async -> Bool) async ->
 }
 
 extension MediaImageLoaderTests {
-    /// The tile half of the owner's second sentence: the route came back while the tile was still
-    /// waiting on a fetch that was never going to answer, and nothing asked again afterwards.
+    /// The tile half of the contract: a route regain arriving while a tile still waits on a fetch
+    /// that will never answer must make that tile ask again once that fetch fails.
     @Test("a signal that arrives while a tile is fetching is answered when that fetch fails")
     func aTileAsksAgainWhenTheFetchASignalArrivedDuringFails() async {
         let transport = RegainTransport()

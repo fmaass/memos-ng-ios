@@ -201,4 +201,64 @@ struct ComposeMediaEditTests {
         #expect(staged.mime == "image/jpeg")
         #expect(staged.url.lastPathComponent == "holiday.jpg")
     }
+
+    /// A save whose answer says nothing about what the server did fixes the list as firmly as a
+    /// save still on the wire does.
+    ///
+    /// The retry that follows one of those is safe only because it goes out under the same edit
+    /// key — and that key is minted from the files the attempt carried
+    /// (`TimelineStore.editKey(for:)`). Take one off in between and the key changes with it: the
+    /// server's replay lookup misses, the patch is read as an edit it has never seen, and its
+    /// files are added to the ones the first attempt may already have committed. The row would
+    /// show one picture and the memo would end up with two.
+    @Test("a picture cannot be taken off after a save the server may have applied")
+    func theXIsRefusedAfterASaveThatMayHaveLanded() async {
+        let imports = ComposeImports(readCapture: { _ in .empty })
+        await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
+        await settleTasks()
+
+        let (saved, pressed) = await PressProbe.withScreen(
+            ComposeView(mode: mode(), imports: imports) { _ in .failed(.transport(sent: true)) },
+            height: 852
+        ) { screen in
+            let saved = screen.press("Save")
+            // Pressed against a save that has really come back, or the case is not the case.
+            await screen.settle(turns: 100, until: { imports.items.first?.uploadFailed != nil })
+            let pressed = screen.press("Remove")
+            await screen.settle()
+            return (saved, pressed)
+        }
+
+        #expect(saved, "the sheet's own Save could not be pressed")
+        #expect(pressed, "the x was not on the row to be pressed after the save came back")
+        #expect(
+            imports.ordered.map(\.label) == ["a.jpg"],
+            "the picture left a list the server may already be holding")
+    }
+
+    /// The control the case above is worth nothing without: an answer that never left the device
+    /// took nothing to the server, so there is nothing to keep the list still for.
+    @Test("a picture can still be taken off after a save that never reached the server")
+    func theXStillWorksAfterASaveThatNeverLeft() async {
+        let imports = ComposeImports(readCapture: { _ in .empty })
+        await imports.load(["a"], stamp: imports.selected()) { _ in .file(picked("a.jpg")) }
+        await settleTasks()
+
+        let (saved, pressed) = await PressProbe.withScreen(
+            ComposeView(mode: mode(), imports: imports) { _ in .failed(.transport(sent: false)) },
+            height: 852
+        ) { screen in
+            let saved = screen.press("Save")
+            await screen.settle(turns: 100, until: { imports.items.first?.uploadFailed != nil })
+            let pressed = screen.press("Remove")
+            await screen.settle()
+            return (saved, pressed)
+        }
+
+        #expect(saved, "the sheet's own Save could not be pressed")
+        #expect(pressed, "the x was not on the row to be pressed after the save came back")
+        #expect(
+            imports.ordered.isEmpty,
+            "the x is dead after a save that never left: \(imports.ordered.map(\.label))")
+    }
 }

@@ -8,9 +8,10 @@ import UIKit
 ///
 /// It is deliberately thin, and everything it does that could be wrong lives somewhere a test can
 /// reach — the states in `ManageTokensStore`, the drawing in `ManageTokensScreen`. What is left
-/// here is the wiring this layer cannot have both ways: this view holds a `ManageTokensStore`,
-/// which inlines the API layer the Features test bundle does not link, so it cannot be hosted in
-/// a test at all (the same reason `SettingsView` cannot).
+/// here is the wiring a case is deliberately not asked to stand up: this view holds a
+/// `ManageTokensStore` and puts it through the real token flow — a management sign-on in a browser
+/// sheet, and a grant — which is not something a rendered screen can be asked to arrange (the same
+/// reason `SettingsView` is not hosted either).
 ///
 /// The grant lives for exactly as long as this view does. It goes when the sheet is dismissed and
 /// when the app is backgrounded, and it was never written anywhere that could outlive either.

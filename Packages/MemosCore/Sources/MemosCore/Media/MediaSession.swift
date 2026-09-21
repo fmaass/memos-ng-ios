@@ -22,9 +22,10 @@ public protocol MediaTransport: Sendable {
 /// `MediaSessionTests`.
 ///
 /// An app cannot GUARANTEE it wins that race: `URLSession.shared` is materialised by whichever
-/// code path touches it first, and in this app two of them are one-line defaults out of sight of
-/// the composition root (`APIClientFactory.make(urlSession: .shared)` and
-/// `URLSessionHTTPPerformer(session: .shared)` inside `Outbox.live`). As it happens this app does
+/// code path touches it first, and in this app one such path is a one-line default out of sight of
+/// the composition root — `URLSessionHTTPPerformer()` inside `Outbox.live`, whose session argument
+/// defaults to `.shared`. The generated client is no longer another: its factory fetches through a
+/// session of its own (`APIClientFactory.urlSession`). As it happens this app does
 /// win it — `sharedSessionHolds` reports `true` on launch, which is what establishes that
 /// `App.init()` runs before the delegate's `didFinishLaunchingWithOptions` here. That is exactly
 /// why the probe is worth logging rather than reasoning about: the answer is a property of a
