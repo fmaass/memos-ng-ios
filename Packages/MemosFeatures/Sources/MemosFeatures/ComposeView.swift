@@ -108,7 +108,6 @@ public struct ComposeView: View {
     /// first load has finished is ordinary behaviour, and the older, slower result must not
     /// overwrite the newer — see `ComposeImports`.
     @State private var imports: ComposeImports
-    @State private var isSaving = false
     /// The one sentence the sheet has to say: why a Post was refused, or why a Save did not go
     /// through. Never a raw error, and never two at once.
     @State private var problem: String?
@@ -184,9 +183,19 @@ public struct ComposeView: View {
         ComposeAttachments.canPost(
             text: content,
             imported: imports.attachments.count,
-            isBusy: isSaving || imports.isImporting
+            isBusy: imports.isSubmitting || imports.isImporting
         )
     }
+
+    /// Whether input that changes what is attached may be taken at this instant.
+    ///
+    /// One rule, asked synchronously wherever such input lands — a picker answering, a camera
+    /// handing over a file, a control being pressed — because the list a save carries was fixed
+    /// when Save was pressed and a change taken afterwards would be shown on the row and left out
+    /// of the upload. It is asked of `imports` rather than of this sheet's own state: input that
+    /// was already on its way when the save began arrives through a closure holding the sheet as
+    /// it stood BEFORE it, and the list itself is the one thing all of them hold live.
+    private var mayChangeAttachments: Bool { !imports.isSubmitting }
 
     /// The date this memo will carry: the one that was chosen, or — while the control is on Auto —
     /// the earliest capture instant among what is attached. Nil is "whenever this is", which the
@@ -318,6 +327,15 @@ public struct ComposeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DesignTokens.Space.regular)
         .onChange(of: picked) { _, items in
+            guard mayChangeAttachments else {
+                // Cleared rather than left standing: this binding is what the picker judges its
+                // NEXT answer against, and a selection kept here would make choosing the same
+                // photographs again a change of nothing — the second answer would land on no
+                // `onChange` at all and be lost in silence. Emptying it arrives here once more,
+                // where the same refusal meets a value that is already empty and stops.
+                picked = []
+                return
+            }
             // Stamped HERE, synchronously, as the selection lands — not inside the task, where
             // the number would order the loads' start times instead. See `ComposeImports`.
             let stamp = imports.selected()
@@ -357,7 +375,15 @@ public struct ComposeView: View {
         if !rowItems.isEmpty {
             PickedThumbnailRow(
                 items: rowItems,
-                retry: { id in Task { await imports.retry(id: id) } },
+                // A tile offering "Try again" is still on screen in the frame Save is pressed:
+                // the marks the last attempt left are cleared as the submission is claimed
+                // (`ComposeImports.beginPostAttempt`) and the row redraws a frame later, so the
+                // tap that beat the redraw reaches this. A re-import would put a different file
+                // under an identity the upload is already carrying.
+                retry: { id in
+                    guard mayChangeAttachments else { return }
+                    Task { await imports.retry(id: id) }
+                },
                 // Only what this sheet picked. The memo's own pictures are drawn by the same row
                 // and are not this sheet's to take away (`ComposeRowItem`).
                 //
@@ -370,7 +396,7 @@ public struct ComposeView: View {
                 // synchronously (`post()`), because a control that has gone grey is a hint and
                 // the tap that beat the redraw is the one that does the damage.
                 remove: { id in
-                    guard !isSaving else { return }
+                    guard mayChangeAttachments else { return }
                     imports.remove(id: id)
                 })
         }
@@ -512,11 +538,12 @@ public struct ComposeView: View {
     ///
     /// The refusal is checked HERE rather than in the button's `disabled`, and it is checked again
     /// on every tap: an item can settle, fail or be removed between two taps, and the answer to
-    /// "may this go now" is only ever about the list as it stands. `isSaving` is claimed
+    /// "may this go now" is only ever about the list as it stands. The submission is claimed
     /// synchronously, before any await, so two taps in one frame are one submission — a disabled
-    /// button is not the guard for that either.
+    /// button is not the guard for that either — and the same claim is what every attachment
+    /// control is then refused on (`mayChangeAttachments`).
     private func post() {
-        guard !isSaving else { return }
+        guard !imports.isSubmitting else { return }
         // The marks the LAST attempt left are cleared before this attempt is judged — otherwise a
         // save that failed on transport can never be tried again (`ComposeImports.beginPostAttempt`).
         if let refusal = imports.beginPostAttempt() {
@@ -524,9 +551,9 @@ public struct ComposeView: View {
             return
         }
         problem = nil
-        isSaving = true
+        imports.beginSubmission()
         Task {
-            defer { isSaving = false }
+            defer { imports.endSubmission() }
             let submission = ComposeSubmission(
                 content: content,
                 visibility: visibility,

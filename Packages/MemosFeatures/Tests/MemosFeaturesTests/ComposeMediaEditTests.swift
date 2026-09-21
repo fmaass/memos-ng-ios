@@ -161,7 +161,7 @@ struct ComposeMediaEditTests {
         await settleTasks()
         let save = HeldSave()
 
-        let (saved, onTheWire, pressed) = await PressProbe.withScreen(
+        let (saved, onTheWire, claimed, pressed) = await PressProbe.withScreen(
             ComposeView(mode: mode(), imports: imports) { await save.take($0) },
             height: 852
         ) { screen in
@@ -169,13 +169,19 @@ struct ComposeMediaEditTests {
             // Pressed against a save that is really in flight, or the case is not the case.
             await screen.settle(turns: 100, until: { save.submission != nil })
             let onTheWire = save.submission != nil
+            // The claim the sheet makes on the list itself, which is what everything else that
+            // could change the attachments is refused on — the picker and the camera included,
+            // neither of which can be answered from here.
+            let claimed = imports.isSubmitting
             let pressed = screen.press("Remove")
             await screen.settle()
-            return (saved, onTheWire, pressed)
+            return (saved, onTheWire, claimed, pressed)
         }
 
         #expect(saved, "the sheet's own Save could not be pressed")
         #expect(onTheWire, "the save never reached the wire, so the x was pressed against nothing")
+        #expect(
+            claimed, "the sheet sent the submission without claiming the list it was built from")
         #expect(pressed, "the x was not on the row to be pressed while the save was running")
         #expect(
             imports.ordered.map(\.label) == ["a.jpg"],

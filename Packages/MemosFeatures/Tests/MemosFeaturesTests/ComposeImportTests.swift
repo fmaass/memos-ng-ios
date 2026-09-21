@@ -228,4 +228,58 @@ struct ComposeImportTests {
         imports.clear()
         #expect(imports.attachments.isEmpty, "the capture outlived the removal")
     }
+
+    /// A selection can land after Save has been pressed. Nothing takes the photo menu away, and a
+    /// picker opened before the save answers whenever it answers — and a pick REPLACES what was
+    /// picked, which is precisely what the save is carrying. Letting it through would leave the
+    /// memo saved with one set of pictures and the sheet closing on another.
+    @Test("a selection landing while a save is on the wire is refused, not applied")
+    func aPickLandingDuringASaveIsRefused() async {
+        let imports = ComposeImports()
+        await imports.load(["first"], stamp: imports.selected()) { _ in
+            .file(Self.media("first.heic"))
+        }
+        imports.beginSubmission()
+
+        let kept = await imports.load(["second"], stamp: imports.selected()) { _ in
+            .file(Self.media("second.heic"))
+        }
+
+        #expect(kept == false, "the pick was written onto a list a submission had been built from")
+        #expect(imports.attachments.map(\.filename) == ["first.heic"])
+        #expect(!imports.isImporting, "the refused pick left the composer importing for ever")
+
+        // And it is a refusal, not a ban: the same selection is an ordinary selection again the
+        // moment the save is back.
+        imports.endSubmission()
+        await imports.load(["second"], stamp: imports.selected()) { _ in
+            .file(Self.media("second.heic"))
+        }
+        #expect(imports.attachments.map(\.filename) == ["second.heic"])
+    }
+
+    /// The camera's answer is the one that can arrive on its own: the cover closes when the
+    /// shutter is pressed, the file is written afterwards, and Save can be pressed in between. The
+    /// photograph is not attached — it is the one refusal here that costs something nobody can
+    /// take again, and attaching it would be worse: it would sit on a row that is about to close
+    /// while the save it is not part of finishes.
+    @Test("a capture handed over while a save is on the wire is refused, not attached")
+    func aCaptureLandingDuringASaveIsRefused() async {
+        let imports = ComposeImports()
+        await imports.load(["first"], stamp: imports.selected()) { _ in
+            .file(Self.media("first.heic"))
+        }
+        imports.beginSubmission()
+
+        imports.captured(Self.media("IMG_20260921-101500.heic"))
+
+        #expect(
+            imports.attachments.map(\.filename) == ["first.heic"],
+            "the capture joined a list the save had already been built from")
+
+        imports.endSubmission()
+        imports.captured(Self.media("IMG_20260921-101500.heic"))
+        #expect(
+            imports.attachments.map(\.filename) == ["first.heic", "IMG_20260921-101500.heic"])
+    }
 }
