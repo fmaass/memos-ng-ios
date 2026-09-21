@@ -150,9 +150,10 @@ public struct MemoDetailView: View {
                 mode: mode,
                 delete: ComposeDelete(
                     isAsking: edit.deleteStage == .asking,
-                    send: { event in
-                        Task { await edit.advanceDelete(event, delete: performDelete) }
-                    }
+                    // The transition is claimed synchronously, inside `sendDelete`, and only the
+                    // request is a task: the alert's Delete and its binding's dismissal arrive in
+                    // the same turn, and two tasks have no order between them (`MemoEditFlow`).
+                    send: { event in edit.sendDelete(event, delete: performDelete) }
                 )
             ) { submission in
                 await edit.submit(submission, save: save)
