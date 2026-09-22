@@ -141,6 +141,42 @@ struct ContractTests {
         #expect(withVisibility.isSubset(of: Set(declared.keys)))
     }
 
+    @Test("every key the outbox sends on a memo edit exists in MemoPatch", .tags(.contract))
+    func memoPatchKeys() throws {
+        var job = Fixture.job(files: [Fixture.file(uploadUID: "u1")])
+        job.visibility = "PRIVATE"
+        job.resolvedMemoUID = "m1"
+        job.editKey = UUID().uuidString
+        job.resolvedAttachmentUIDs = ["att-u1"]
+        job.pendingEdit = PendingEdit(
+            content: "the pier, the day after",
+            visibility: "PUBLIC",
+            capturedAt: Date(timeIntervalSince1970: 1_751_111_111),
+            fileIDs: job.files.map(\.id)
+        )
+        let request = try OutboxRequests.patchMemo(
+            baseURL: Fixture.server, token: "pat-token", job: job
+        )
+        let sent = try sentKeys(request)
+        let declared = try properties("MemoPatch")
+        for key in sent {
+            #expect(declared[key] != nil, "MemoPatch has no '\(key)'")
+        }
+
+        // The four fields a compose screen lets a create change, plus the key the server answers a
+        // second transmission from: an edit missing any of them is a silent loss of what the
+        // person changed, and one missing the key is a second edit rather than a replay.
+        #expect(sent.isSuperset(of: ["content", "created_at", "visibility", "edit_key"]))
+        #expect(sent.contains("attachment_uids"))
+
+        // The other direction, which key existence alone cannot see: a field the server newly
+        // requires and the outbox never sends fails here rather than on every restored draft.
+        let mandatory = try requiredKeys("MemoPatch")
+        #expect(
+            mandatory.isSubset(of: sent),
+            "required but never sent: \(mandatory.subtracting(sent))")
+    }
+
     @Test("a UUID satisfies the idempotency key's own rules", .tags(.contract))
     func idempotencyKeyShape() throws {
         let key = try #require(try properties("MemoCreate")["idempotency_key"] as? [String: Any])

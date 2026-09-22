@@ -311,7 +311,7 @@ pin "'PresentedCredential(' in SessionStore.swift" 3 \
 pin "'self.credential = ' in SessionStore.swift" 1 \
   "$(grep -caF 'self.credential = ' "$session_store")" \
   "A second assignment is a second moment a credential becomes this device's."
-pin "'OutboxRepository(' constructions" 32 \
+pin "'OutboxRepository(' constructions" 33 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the
