@@ -314,6 +314,7 @@ public struct MemoDetailView: View {
                 chosen: submission.createdAt, original: createdAt
             ),
             attaching: submission.attachments.map(\.stagedSource),
+            listing: submission.pictures,
             using: handle,
             baseURL: baseURL
         )

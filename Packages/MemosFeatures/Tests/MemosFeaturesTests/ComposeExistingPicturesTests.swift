@@ -11,10 +11,10 @@ import UIKit
 ///
 /// The row shows what the memo holds at the moment the sheet opens, ahead of anything picked in
 /// the sheet itself: the picture somebody is about to describe or correct is the thing that has
-/// to be in front of them while they do it. What the sheet may not do is ACT on that list —
-/// nothing here removes a picture and a save names none of them — so these cases hold both
-/// halves: that the row shows the memo's own pictures, and that it offers nothing that would
-/// change them.
+/// to be in front of them while they do it. These cases hold that half — that the memo's own
+/// pictures are on the row, in front of what was picked — and the one thing a row drawn OUTSIDE
+/// an edit sheet must not offer: an x, which only a sheet with a save behind it can honour
+/// (`PickedThumbnailRow.removeExisting`).
 @MainActor
 @Suite("The compose row on an edit")
 struct ComposeExistingPicturesTests {
