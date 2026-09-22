@@ -2083,10 +2083,12 @@ for root in data.get("testNodes", []) or []:
     walk(root, None, ran, idle)
 print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(ran.items())) or "(none)"))
 print("skipped or not run: " + (", ".join(f"{k}={v}" for k, v in sorted(idle.items())) or "(none)"))
-# Written before anything is judged, so a run that FAILS still hands back the file a deliberate
-# reduction is re-recorded from — the shape the pins step's Package.resolved copy already has. One
-# row per bundle the gate wanted, in that order, because the comparison is per bundle and the
-# baseline is required to name exactly this set.
+# Written as soon as the counts are read and before any of them is judged, so a run they or the
+# comparison FAIL still hands back the file a deliberate reduction is re-recorded from — the shape
+# the pins step's Package.resolved copy already has. A run that never got counts at all returned
+# above this line and leaves no candidate behind at all. One row per bundle the gate wanted, in
+# that order, because the comparison is per bundle and the baseline is required to name exactly
+# this set.
 with open(".gate-artifacts/testcount-baseline.tsv", "w") as candidate:
     for bundle in wanted:
         candidate.write("%s\t%d\n" % (bundle, ran.get(bundle, 0)))
