@@ -109,7 +109,7 @@ struct LiveWriteTests {
         #expect(!store.memos.contains { $0.uid == uid })
     }
 
-    /// The new contract, against the real server: `attachment_uids` REPLACES a memo's picture
+    /// The contract, against the real server: `attachment_uids` REPLACES a memo's picture
     /// list, so a list that names only the second attachment must leave the first one off the
     /// memo. A unit test can only prove what the client SENT; this proves what the server kept.
     ///
