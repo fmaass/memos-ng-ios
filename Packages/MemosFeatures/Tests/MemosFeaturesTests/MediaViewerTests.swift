@@ -621,6 +621,145 @@ struct MediaZoomTests {
         #expect(out.offset.height == 0)
     }
 
+    /// A first pinch out of rest, off centre, on a picture fitted to the width. At 1.4 the
+    /// vertical `panLimit` is still zero — the scale has to pass 844/520 before that axis has any
+    /// room at all — so an offset held to those limits would keep nothing of the anchor's
+    /// vertical share: the picture would stay centred instead of moving 20 points down, and the
+    /// point under the fingers would ride that far up the screen while still following them
+    /// sideways, which is what makes a half-right pinch hard to see. The whole share is asserted
+    /// here, because a pinch is allowed past the limits for as long as it is under the fingers.
+    @Test("a first pinch in a corner of an upright picture keeps that corner under the fingers")
+    func firstPinchOnAnUprightPictureHoldsItsPoint() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.4, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 1.4) < 0.001)
+        // a - m*a at m = 1.4: two fifths of the anchor vector, the other way about.
+        #expect(abs(out.offset.width + 40) < 0.001)
+        #expect(abs(out.offset.height - 20) < 0.001)
+    }
+
+    /// The same first pinch on a wide shape, which is fitted far shorter still: nothing vertical
+    /// opens until the scale passes 844/292.5, so the same trimming would drop the same share.
+    /// Two shapes rather than one because this is a property of the live frame, not of a ratio.
+    @Test("a first pinch in a corner of a wide picture keeps that corner under the fingers")
+    func firstPinchOnAWidePictureHoldsItsPoint() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.4, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 1.4) < 0.001)
+        #expect(abs(out.offset.width + 40) < 0.001)
+        #expect(abs(out.offset.height - 20) < 0.001)
+    }
+
+    /// The far side of that threshold on the upright shape, where the limits alone would hold the
+    /// anchor: the room covers the whole vertical share only from 372/210, well past where it
+    /// stops being zero, so 2 is the first round number that clears it — 195 and 98 of it against
+    /// a target of 100 and 50, and nothing on either axis that a trim would reach.
+    @Test("a pinch far enough out on an upright picture keeps its point on both axes")
+    func pinchPastTheVerticalThresholdOnAnUprightPicture() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 2, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 2) < 0.001)
+        #expect(abs(out.offset.width + 100) < 0.001)
+        #expect(abs(out.offset.height - 50) < 0.001)
+    }
+
+    /// And on the wide shape, where the room reaches the whole share only from 372/96.25 — so it
+    /// takes a pinch to 4 before 585 and 163 of it hold a target of 300 and 150 whole.
+    @Test("a pinch far enough out on a wide picture keeps its point on both axes")
+    func pinchPastTheVerticalThresholdOnAWidePicture() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 4, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 4) < 0.001)
+        #expect(abs(out.offset.width + 300) < 0.001)
+        #expect(abs(out.offset.height - 150) < 0.001)
+    }
+
+    /// Between the two thresholds. Past 844/520 the upright picture does overflow vertically, so
+    /// the limit is no longer zero — but at 1.7 it is 20 against an anchored share of 35, and an
+    /// offset trimmed to it would carry the point under the fingers 15 points UP the screen.
+    /// Letting go of the anchor only where the limit is exactly zero would leave that in place.
+    @Test("an upright picture with too little vertical room still keeps its point")
+    func firstPinchWhereTheVerticalRoomIsShortOfTheAnchor() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let room = MediaZoom.panLimit(scale: 1.7, fitted: fitted, viewport: viewport)
+        #expect(abs(room.height - 20) < 0.001, "the fixture proves nothing if the room is zero")
+
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.7, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 1.7) < 0.001)
+        #expect(abs(out.offset.width + 70) < 0.001)
+        #expect(abs(out.offset.height - 35) < 0.001)
+    }
+
+    /// The same shortfall on the wide shape, where it opens later and closes slower: at 3 the
+    /// vertical room is 16.75 against an anchored share of 100. Two shapes again, because what is
+    /// asserted is a property of the live transform and not of an aspect ratio.
+    @Test("a wide picture with too little vertical room still keeps its point")
+    func firstPinchOnAWidePictureWhereTheVerticalRoomIsShortOfTheAnchor() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+        let room = MediaZoom.panLimit(scale: 3, fitted: fitted, viewport: viewport)
+        #expect(abs(room.height - 16.75) < 0.001, "the fixture proves nothing if the room is zero")
+
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 3, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 3) < 0.001)
+        #expect(abs(out.offset.width + 200) < 0.001)
+        #expect(abs(out.offset.height - 100) < 0.001)
+    }
+
+    /// The other side of that: a drag with no pinch under it has no point to keep still, so it
+    /// still stops at the edge. Carried 500 points sideways at twice its fitted width the picture
+    /// would be drawn as a sliver against the far edge while the finger is down.
+    @Test("a drag with no pinch under it still stops at the edge")
+    func dragWithNoPinchStopsAtTheEdge() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.live(
+            MediaZoom.Transform(scale: 2, offset: .zero),
+            pinch: nil,
+            pannedBy: CGSize(width: 500, height: 0),
+            fitted: fitted,
+            viewport: viewport
+        )
+        let limit = MediaZoom.panLimit(scale: 2, fitted: fitted, viewport: viewport)
+        #expect(abs(limit.width - 195) < 0.001)
+        #expect(abs(out.offset.width - 195) < 0.001)
+        #expect(abs(out.offset.height) < 0.001)
+    }
+
     /// The pinch and the drag are separate recognisers and nothing says which of them ends first.
     /// Either order has to leave the picture exactly where the fingers had it, and both orders
     /// have to end on the same committed transform — all of it inside the limits here, so a clamp
