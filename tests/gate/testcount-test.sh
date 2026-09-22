@@ -160,9 +160,11 @@ $verdict_out"
 has() { printf '%s\n' "$OUT" | grep -qF "$1"; }
 show() { printf '%s\n' "$OUT" | sed 's/^/     | /'; }
 
-# Every case below is given a baseline of its own, whose rows are the counts that case's fixture
-# executes, so what it asserts is still the thing it was written to assert and not an incidental
-# disagreement with a number recorded somewhere else.
+# The cases in (a) to (c) are about the counter, and each of them is given a baseline of its own
+# whose rows are the counts that case's fixture executes, so what it asserts is still the thing it
+# was written to assert and not an incidental disagreement with a number recorded somewhere else.
+# The cases from (d) on are about the comparison, and each one's baseline disagrees with its
+# fixture in exactly the one way that case exists to pin down.
 if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   # --- (a) a bundle mixing every outcome ----------------------------------------------------------
   # Three cases ran (one passed, one failed, one failed as it was expected to) and two skipped.
@@ -301,8 +303,10 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   fi
 
   # Each bundle is judged on its own row and nothing else. Here the two bundles sum to the same
-  # total as their baselines, and one of them has still lost a case: any aggregate — a total, an
-  # average, a count of bundles at or above — passes this and would have hidden the loss.
+  # total as their baselines, and one of them has still lost a case: a condition on the total —
+  # or on the average, which over the same two bundles is that total — passes this and would have
+  # hidden the loss. That no other aggregate may decide it either is the rule, not something this
+  # fixture shows: a count of bundles at or above their row is 1 of 2 here, and rejects it.
   write_pair_fixture "$tmp/mixed-direction.json" MemosCoreTests 9 MemosAPITests 11
   run_step "$tmp/mixed-direction.json" "MemosCoreTests MemosAPITests" \
     "$(baseline mixed-direction MemosCoreTests 10 MemosAPITests 10)"
