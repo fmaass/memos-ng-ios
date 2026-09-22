@@ -12,9 +12,9 @@
 # tracked file rather than a number somebody typed.
 #
 # A baseline that cannot answer is never a pass: absent, unreadable, holding a byte that is not
-# printable ASCII, TAB or LF, cut off without its final newline, a row that is not that shape, a
-# count too long to be a count, a bundle named twice, a bundle the run measured and the baseline
-# does not name, or a row naming a bundle the run did not measure. A count that is missing is not
+# printable ASCII, TAB or LF, ending on a byte that is not the LF every row is required to end on,
+# a row that is not that shape, a count too long to be a count, a bundle named twice, a bundle the
+# run measured and the baseline does not name, or a row naming a bundle the run did not measure. A count that is missing is not
 # a zero — a zero is a claim, and in those cases nobody made it. The counts the run itself wrote
 # are held to the same shape, because a comparison is only as good as the worse of its two files.
 #
@@ -41,8 +41,9 @@ validate() { # $1 = file, $2 = what to call it in a failure
     return 2
   fi
   # The bytes before the rows. `read` drops a NUL without a word, so a file holding one hands back
-  # a row that validates while the file itself says something else, and a file whose last byte is
-  # not LF was cut off mid-write, which makes its last count a number nobody finished writing.
+  # a row that validates while the file itself says something else. And every row of this format
+  # ends in LF, so a file whose last byte is not one is not in the format, whatever happened to it:
+  # its bytes say the shape is wrong, they do not say why.
   #
   # The NUL is COUNTED, never matched. `grep -q` stops at its first hit and closes the pipe under
   # its producer, `od` then dies of SIGPIPE, and `pipefail` hands the pipeline 141 instead of the
@@ -67,7 +68,7 @@ validate() { # $1 = file, $2 = what to call it in a failure
     return 2
   fi
   if [ -s "$file" ] && [ "$(tail -c1 "$file" | od -An -tx1 | tr -d '[:space:]')" != "0a" ]; then
-    echo "TESTCOUNT FAIL: the $what $file does not end in a newline, so its last row was cut off" >&2
+    echo "TESTCOUNT FAIL: the $what $file does not end in a newline, which every row of this format does" >&2
     return 2
   fi
   while IFS= read -r line || [ -n "$line" ]; do

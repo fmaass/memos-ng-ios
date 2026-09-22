@@ -406,8 +406,9 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   fi
 
   # Bytes that never survive being read as rows. `read` drops a NUL without a word, so the row it
-  # hands back validates while the file it came from holds something else; and a file whose last
-  # byte is not LF was cut off mid-write, which makes its last count a number nobody finished.
+  # hands back validates while the file it came from holds something else; and every row of this
+  # format ends in LF, so a file whose last byte is not one is refused for lacking it — which is
+  # all its bytes establish, and all the fixture below claims.
   printf 'MemosCoreTests\t3\000\n' > "$tmp/baseline-nul.tsv"
   run_step "$tmp/mixed.json" "MemosCoreTests" "$tmp/baseline-nul.tsv"
   if [ "$RC" -eq 2 ] && has "TESTCOUNT FAIL" && ! has "TESTCOUNT ok"; then
