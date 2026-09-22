@@ -35,7 +35,7 @@ baseline="$2"
 # Prints the rows it accepted; every row it refuses is named on stderr, and one refusal is enough
 # to make the whole file unusable.
 validate() { # $1 = file, $2 = what to call it in a failure
-  local file="$1" what="$2" line name count rc=0 n=0 bytes kept
+  local file="$1" what="$2" line name count rc=0 n=0
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     echo "TESTCOUNT FAIL: the $what $file is missing or unreadable, so the counts were never compared" >&2
     return 2
@@ -43,9 +43,7 @@ validate() { # $1 = file, $2 = what to call it in a failure
   # The bytes before the rows. `read` drops a NUL without a word, so a file holding one hands back
   # a row that validates while the file itself says something else, and a file whose last byte is
   # not LF was cut off mid-write, which makes its last count a number nobody finished writing.
-  bytes="$(wc -c < "$file")"
-  kept="$(LC_ALL=C tr -d '\0' < "$file" | wc -c)"
-  if [ "$((bytes))" -ne "$((kept))" ]; then
+  if LC_ALL=C od -An -tx1 "$file" | grep -q ' 00'; then
     echo "TESTCOUNT FAIL: the $what $file holds a NUL byte, so its rows are not its bytes" >&2
     return 2
   fi

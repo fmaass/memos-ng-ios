@@ -427,7 +427,7 @@ fi
 # leave every case above green and lose exactly what the comparison was added for. So the step's own
 # text is read out of the gate and held to both, by the line numbers it holds them in.
 step="$tmp/s_testcount.sh"
-awk '/^s_testcount\(\) \{/ { f = 1 } f { print } f && /^\}/ { exit }' "$GATE" > "$step"
+awk '/^s_testcount\(\) [{]/ { f = 1 } f { print } f && /^[}]/ { exit }' "$GATE" > "$step"
 if [ -s "$step" ] && grep -q 'GATE_TEST_BUNDLES' "$step"; then
   ok "the gate's testcount step was read out of $GATE (control)"
   verdict_call="$(grep -n '^[[:space:]]*"\$verdict"' "$step" | head -n1 | cut -d: -f1)"
