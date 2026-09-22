@@ -81,6 +81,10 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     public var bytesConfirmed: Int64
     /// The chunk size the server asked for when the session was created.
     public var chunkSize: Int
+    /// Which retry of this file the current upload belongs to. Optional and last, so a manifest
+    /// written before retries were counted decodes unchanged and reads as nil — which is what an
+    /// equally attempt-less task description says, and the two have to agree to be adopted.
+    public var uploadAttempt: Int?
 
     public init(
         id: UUID = UUID(),
@@ -91,7 +95,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         lastModified: Date? = nil,
         uploadUID: String? = nil,
         bytesConfirmed: Int64 = 0,
-        chunkSize: Int = OutboxDefaults.chunkSize
+        chunkSize: Int = OutboxDefaults.chunkSize,
+        uploadAttempt: Int? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -102,6 +107,7 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.uploadUID = uploadUID
         self.bytesConfirmed = bytesConfirmed
         self.chunkSize = chunkSize
+        self.uploadAttempt = uploadAttempt
     }
 
     public var isComplete: Bool { uploadUID != nil && bytesConfirmed >= byteSize }

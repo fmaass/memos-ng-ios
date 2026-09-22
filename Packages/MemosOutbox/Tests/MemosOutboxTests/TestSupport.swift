@@ -294,15 +294,17 @@ actor FaultyPersistence: OutboxPersisting {
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
 }
 
@@ -388,15 +390,17 @@ actor GatedPersistence: OutboxPersisting {
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
 }
 
@@ -454,15 +458,17 @@ actor SupersedingPersister: OutboxPersisting {
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
 }
 
@@ -563,15 +569,17 @@ actor FailingThenInterferingPersister: OutboxPersisting {
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
 }
 
@@ -646,15 +654,17 @@ actor InterferingPersistence: OutboxPersisting {
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
 }
 

@@ -456,7 +456,10 @@ struct AttemptAdoptionTests {
         let current = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: 0, attempt: 1)
         world.scheduler.pretend(inFlight: [obsolete, current])
 
-        await world.outbox.adopt()
+        // Through a DRAIN, because that is the only path reconciliation is on: `adopt()` awaits
+        // the scheduler attachment, and a job whose live task was adopted is not drainable, so
+        // this pass cancels and does nothing else.
+        await world.outbox.drain()
 
         #expect(world.scheduler.cancellations == [obsolete], "the obsolete attempt was adopted")
         try await world.handler.handle(
@@ -482,7 +485,7 @@ struct AttemptAdoptionTests {
         let named = OutboxTaskIdentity(jobID: legacy.jobID, fileID: legacy.fileID, offset: 0)
         world.scheduler.pretend(inFlight: [later, named])
 
-        await world.outbox.adopt()
+        await world.outbox.drain()
 
         #expect(world.scheduler.cancellations == [later], "a task the manifest does not name")
         try await world.handler.handle(

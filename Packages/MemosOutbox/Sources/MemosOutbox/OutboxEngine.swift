@@ -166,7 +166,25 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
         guard let job = await repository.job(jobID) else { return }
-        await save(job.released(at: clock()), matching: job)
+        // A stalled upload is retried by moving the file to a NEW attempt: the task still holding
+        // the old one is then distinguishable from its replacement, which is what lets a late
+        // answer from it be ignored instead of rewinding the cursor its successor is moving.
+        let released = job.released(at: clock()).with { next in
+            for index in next.files.indices where !next.files[index].isComplete {
+                next.files[index].uploadAttempt = (next.files[index].uploadAttempt ?? 0) + 1
+            }
+        }
+        // Fenced, and BEFORE anything is cancelled: nothing is torn down on a state nobody wrote.
+        // The other order would leave a job whose only live task was cancelled and whose manifest
+        // still names the attempt that task was sent under.
+        guard await save(released, matching: job) != nil else {
+            await onChange()
+            return
+        }
+        let live = await scheduler.inFlight().filter { $0.jobID == jobID }
+        if !live.isEmpty {
+            await scheduler.cancel(live)
+        }
         await onChange()
     }
 
@@ -337,7 +355,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         let chunk: URL
         do {
             chunk = try await repository.sliceChunk(
-                job: job, file: file, offset: offset, length: length
+                job: job, file: file, offset: offset, length: length, attempt: file.uploadAttempt
             )
         } catch {
             await save(
@@ -351,7 +369,9 @@ public actor OutboxEngine: OutboxChunkHandling {
             uploadUID: uploadUID,
             offset: offset
         )
-        let identity = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: offset)
+        let identity = OutboxTaskIdentity(
+            jobID: job.id, fileID: fileID, offset: offset, attempt: file.uploadAttempt
+        )
         // Written down BEFORE the hand-off, and the hand-off does not happen if it was not.
         //
         // The other order — send first, record afterwards — is the one overtake this queue makes
@@ -476,20 +496,29 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// and needs a credential only for the parts that talk to the server again. A byte count
     /// thrown away because nobody was signed in yet is a chunk re-uploaded for no reason.
     public func handle(_ result: ChunkResult) async {
-        await repository.removeChunk(
-            at: repository.chunkURL(
-                jobID: result.identity.jobID,
-                fileID: result.identity.fileID,
-                offset: result.identity.offset
-            )
-        )
         guard let job = await repository.job(result.identity.jobID) else { return }
         // An answer from a superseded attempt — a task a reconcile cancelled, or a duplicate that
         // outlived the one whose answer already landed. The job has moved on, and applying this
         // would rewind the cursor and re-send bytes the server already holds.
+        //
+        // The offset alone cannot tell the two apart after a retry: the replacement starts at the
+        // very offset the task it replaced was sent at, so the attempt the task PRESENTED is what
+        // says which of them this answer belongs to.
         guard let file = job.file(result.identity.fileID),
-            file.bytesConfirmed == result.identity.offset
+            file.bytesConfirmed == result.identity.offset,
+            file.uploadAttempt == result.identity.attempt
         else { return }
+        // Dropped only once the answer is this file's to act on, and only the chunk this task was
+        // sent FROM. A predecessor answering late would otherwise take the replacement's slice out
+        // from under a transfer that is still running.
+        await repository.removeChunk(
+            at: repository.chunkURL(
+                jobID: result.identity.jobID,
+                fileID: result.identity.fileID,
+                offset: result.identity.offset,
+                attempt: result.identity.attempt
+            )
+        )
 
         let fileID = result.identity.fileID
         let credentials = await credentials.currentCredentials()

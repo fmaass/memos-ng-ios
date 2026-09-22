@@ -164,11 +164,13 @@ public protocol OutboxPersisting: Sendable {
     @discardableResult
     func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool
     func sweepOrphans() async throws -> SweepOutcome
+    // `attempt` carries no default here: a protocol requirement may not have one. The concrete
+    // queue below defaults it to nil, which is what keeps every caller that predates the term.
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL
     func removeChunk(at url: URL) async
-    func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL
+    func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL
 }
 
 /// The outbox on disk.
@@ -689,7 +691,8 @@ public actor OutboxRepository {
         job: UploadJob,
         file: OutboxFile,
         offset: Int64,
-        length: Int
+        length: Int,
+        attempt: Int? = nil
     ) throws -> URL {
         let source = mediaURL(job: job, file: file)
         guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)) else {
@@ -702,13 +705,20 @@ public actor OutboxRepository {
         guard data.count == length else {
             throw OutboxStorageError.shortRead(expected: length, got: data.count)
         }
-        let url = chunkURL(jobID: job.id, fileID: file.id, offset: offset)
+        let url = chunkURL(jobID: job.id, fileID: file.id, offset: offset, attempt: attempt)
         try data.write(to: url, options: .atomic)
         return url
     }
 
-    public nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        chunksRoot.appending(path: "\(jobID.uuidString)-\(fileID.uuidString)-\(offset).part")
+    public nonisolated func chunkURL(
+        jobID: UUID, fileID: UUID, offset: Int64, attempt: Int? = nil
+    ) -> URL {
+        // The attempt is APPENDED. The orphan sweep names a chunk's owner by the first 36
+        // characters of the file name, so the job UUID has to stay at the head of it — a chunk a
+        // retry sliced would otherwise read as belonging to no job and be swept while live.
+        let stem = "\(jobID.uuidString)-\(fileID.uuidString)-\(offset)"
+        guard let attempt else { return chunksRoot.appending(path: "\(stem).part") }
+        return chunksRoot.appending(path: "\(stem)-a\(attempt).part")
     }
 
     public func removeChunk(at url: URL) {
