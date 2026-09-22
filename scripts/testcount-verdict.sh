@@ -35,7 +35,7 @@ baseline="$2"
 # Prints the rows it accepted; every row it refuses is named on stderr, and one refusal is enough
 # to make the whole file unusable.
 validate() { # $1 = file, $2 = what to call it in a failure
-  local file="$1" what="$2" line name count rc=0 n=0
+  local file="$1" what="$2" line name count nul_lines rc=0 n=0
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     echo "TESTCOUNT FAIL: the $what $file is missing or unreadable, so the counts were never compared" >&2
     return 2
@@ -43,7 +43,22 @@ validate() { # $1 = file, $2 = what to call it in a failure
   # The bytes before the rows. `read` drops a NUL without a word, so a file holding one hands back
   # a row that validates while the file itself says something else, and a file whose last byte is
   # not LF was cut off mid-write, which makes its last count a number nobody finished writing.
-  if LC_ALL=C od -An -tx1 "$file" | grep -q ' 00'; then
+  #
+  # The NUL is COUNTED, never matched. `grep -q` stops at its first hit and closes the pipe under
+  # its producer, `od` then dies of SIGPIPE, and `pipefail` hands the pipeline 141 instead of the
+  # match — which this `if` reads as "no NUL", the one answer that lets the file through. It is a
+  # race the file has to be long enough to lose, which is why a short fixture never showed it.
+  # `grep -c` reads to the end, so od always finishes writing and the status is about the bytes.
+  # Every other pipeline here ends in a consumer that reads its whole input (`wc`, `cut`, `awk`,
+  # `sort`, `tr`, `uniq`); the `grep -q` below is handed a FILE, not a pipe, and closes nothing.
+  nul_lines="$(LC_ALL=C od -An -tx1 "$file" | LC_ALL=C grep -c ' 00')"
+  case "$nul_lines" in
+    ''|*[!0-9]*)
+      echo "TESTCOUNT FAIL: the $what $file could not be scanned for NUL bytes, so nothing here" >&2
+      echo "                knows what it holds" >&2
+      return 2 ;;
+  esac
+  if [ "$nul_lines" -ne 0 ]; then
     echo "TESTCOUNT FAIL: the $what $file holds a NUL byte, so its rows are not its bytes" >&2
     return 2
   fi

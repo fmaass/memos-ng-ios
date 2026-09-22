@@ -412,6 +412,34 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
     bad "a baseline with a NUL byte in it was accepted (exit $RC)"; show
   fi
 
+  # The same NUL, in a file long enough to lose the race a short one always wins. A scanner that
+  # stops at its first hit closes the pipe under its producer; the producer dies of SIGPIPE and
+  # `pipefail` hands back 141, which an `if` reads as "clean", and the file is let through. One row
+  # of padding is 40 000 characters, past every pipe buffer either machine has, so the producer is
+  # still writing when the hit is found. The verdict script is called directly: the counter cannot
+  # be made to write a NUL, and it is the scan that is on trial. The same file without the NUL is
+  # the control — the refusal has to be about the byte and not about the size.
+  long_name="AbCdEfGhIjKlMnOpQrStUvWxYz"
+  while [ "${#long_name}" -lt 40000 ]; do long_name="$long_name$long_name"; done
+  long_name="${long_name:0:40000}"
+  printf 'MemosCoreTests\t7\n%s\t7\n' "$long_name" > "$tmp/observed-long.tsv"
+  printf 'MemosCoreTests\t7\000\n%s\t7\n' "$long_name" > "$tmp/baseline-long-nul.tsv"
+  printf 'MemosCoreTests\t7\n%s\t7\n' "$long_name" > "$tmp/baseline-long-clean.tsv"
+  long_out="$("$VERDICT" "$tmp/observed-long.tsv" "$tmp/baseline-long-nul.tsv" 2>&1)"; long_rc=$?
+  clean_out="$("$VERDICT" "$tmp/observed-long.tsv" "$tmp/baseline-long-clean.tsv" 2>&1)"; clean_rc=$?
+  if [ "$clean_rc" -eq 0 ]; then
+    ok "a 40 000-character row with no NUL in it passes (control)"
+  else
+    bad "the long fixture was refused with no NUL in it (exit $clean_rc), so the case below proves nothing"
+    printf '%s\n' "$clean_out" | cut -c1-120 | sed 's/^/     | /'
+  fi
+  if [ "$long_rc" -eq 2 ] && printf '%s\n' "$long_out" | grep -qF "holds a NUL byte"; then
+    ok "a NUL in a file too long to be scanned in one buffer still fails"
+  else
+    bad "a NUL was let through a long file (exit $long_rc) — the scan was answered by a broken pipe, not by the bytes"
+    printf '%s\n' "$long_out" | cut -c1-120 | sed 's/^/     | /'
+  fi
+
   printf 'MemosCoreTests\t3' > "$tmp/baseline-unterminated.tsv"
   run_step "$tmp/mixed.json" "MemosCoreTests" "$tmp/baseline-unterminated.tsv"
   if [ "$RC" -eq 2 ] && has "TESTCOUNT FAIL" && ! has "TESTCOUNT ok"; then
