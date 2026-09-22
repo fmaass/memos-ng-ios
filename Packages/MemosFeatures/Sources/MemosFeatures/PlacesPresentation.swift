@@ -78,7 +78,7 @@ nonisolated enum PlacesPresentation {
     /// Which of a lead's tiers a pin can actually draw: the thumb-tier rule of
     /// `MemoPresentation.url(for:tier:)`, read for a marker. A video has no thumb of its own — its
     /// still is the poster — so a pin that asks a video for a thumb asks for a file the server
-    /// never generates, and a video whose poster is not signed yet has only its thumbnail left.
+    /// never generates; when the poster URL is absent the thumbnail is used, if there is one.
     private static func imageURL(of lead: PlaceMarker) -> URL? {
         guard lead.mime.hasPrefix("video/") else { return lead.thumbnailURL }
         return lead.posterURL ?? lead.thumbnailURL
