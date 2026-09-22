@@ -101,8 +101,10 @@ struct TimelineSheetRefusalTests {
                 "the sheet said a delete had failed before one had been asked for"
             )
 
-            // Both events in one turn, as the alert delivers them: the question is never drawn,
-            // and the request goes out on the transition the second one makes.
+            // The row's tap and the alert's Delete, back to back. Production sends them from two
+            // controls, with the question drawn between; sending both in one turn is allowed here
+            // because `claimDelete` takes each transition synchronously, so the second one still
+            // finds the first's `asking` and the request goes out on the transition it makes.
             flow.sendDelete(.tapped, delete: host.delete)
             flow.sendDelete(.confirmed, delete: host.delete)
             await screen.settle(turns: 400, until: { flow.lastError != nil })
