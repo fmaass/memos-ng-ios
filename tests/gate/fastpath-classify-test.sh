@@ -110,6 +110,17 @@ printf 'let two = 2\n' >> "$w/Sources/App.swift"
 git -C "$w" commit --quiet -am "docs and code"
 check "docs plus one Swift file" full "$w"
 
+# The per-bundle test-count baseline is data, not documentation: it decides whether the gate's
+# testcount step passes, and a change to it alone must still be measured by a run that produces
+# the counts it claims.
+w="$(new_repo testcount-baseline)" || exit 1
+git -C "$w" checkout --quiet -b fix/baseline
+mkdir -p "$w/tests/gate"
+printf 'MemosCoreTests\t1\n' > "$w/tests/gate/testcount-baseline.tsv"
+git -C "$w" add -A >/dev/null
+git -C "$w" commit --quiet -m "a test-count baseline"
+check "the test-count baseline alone" full "$w"
+
 # The version file is the release-number authority; it never fast-paths.
 w="$(new_repo project-yml)" || exit 1
 git -C "$w" checkout --quiet -b fix/bump

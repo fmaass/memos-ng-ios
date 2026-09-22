@@ -83,10 +83,13 @@
 #                        run's own log, mac-gate-<branch>-<run token>.log — one file per run, so
 #                        two runs cannot write over each other and a caller's redirect cannot
 #                        truncate either (default: <repo>/.gate-artifacts)
-#   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The three
-#                        bundles below are always enforced and cannot be removed by setting
-#                        this — an override that could shrink the list would let a suite stop
-#                        being built without the gate noticing.
+#   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The bundles
+#                        below are always enforced and cannot be removed by setting this — an
+#                        override that could shrink the list would let a suite stop being built
+#                        without the gate noticing. Adding one is not a verdict either: the
+#                        tracked test-count baseline must name exactly the bundles a run wanted,
+#                        so a run with a different list fails at testcount by design, until the
+#                        baseline is re-recorded from a run that wanted the same list.
 #
 # Two gates for the SAME branch are a different matter: they share the gate directory, the work
 # directory, the DerivedData and the result bundle, so the second one's `rsync --delete` rewrites
@@ -556,7 +559,7 @@ selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
 # directory. These two must be there.
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh; do
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 | tee -a "$log"
@@ -569,7 +572,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 | tee -a "$log"
@@ -2080,6 +2083,14 @@ for root in data.get("testNodes", []) or []:
     walk(root, None, ran, idle)
 print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(ran.items())) or "(none)"))
 print("skipped or not run: " + (", ".join(f"{k}={v}" for k, v in sorted(idle.items())) or "(none)"))
+# Written before anything is judged, so a run that FAILS still hands back the file a deliberate
+# reduction is re-recorded from — the shape the pins step's Package.resolved copy already has. One
+# row per bundle the gate wanted, in that order, because the comparison is per bundle and the
+# baseline is required to name exactly this set.
+with open(".gate-artifacts/testcount-baseline.tsv", "w") as candidate:
+    for bundle in wanted:
+        candidate.write("%s\t%d\n" % (bundle, ran.get(bundle, 0)))
+
 rc = 0
 for bundle in wanted:
     n = ran.get(bundle, 0)
@@ -2090,6 +2101,22 @@ for bundle in wanted:
         rc = 1
 sys.exit(rc)
 PY
+  local count_rc=$? compare_rc verdict baseline
+  verdict="$GATE_TARGET/scripts/testcount-verdict.sh"
+  baseline="$GATE_TARGET/tests/gate/testcount-baseline.tsv"
+  # Running at all is a floor, not a count: a bundle that lost cases still runs something. The
+  # counts just written are judged against the tracked baseline, and both halves are reported
+  # before either one decides the step, so a failing count never hides what the comparison said.
+  if [ -x "$verdict" ]; then
+    "$verdict" .gate-artifacts/testcount-baseline.tsv "$baseline"
+    compare_rc=$?
+  else
+    echo "TESTCOUNT FAIL: $verdict is missing or not executable, so the per-bundle counts were"
+    echo "                never compared with the tracked baseline and this step proves nothing"
+    compare_rc=1
+  fi
+  [ "$count_rc" -eq 0 ] || return "$count_rc"
+  return "$compare_rc"
 }
 
 # --- the quick mode's own sequence ----------------------------------------------------------------
