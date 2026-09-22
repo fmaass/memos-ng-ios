@@ -417,6 +417,31 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   fi
 fi
 
+# --- (f) the step the gate actually runs ------------------------------------------------------------
+# Everything above takes the step apart and runs the halves, which proves the halves. A gate that
+# stopped invoking the comparison, or invoked it before the counts it judges were written, would
+# leave every case above green and lose exactly what the comparison was added for. So the step's own
+# text is read out of the gate and held to both, by the line numbers it holds them in.
+step="$tmp/s_testcount.sh"
+awk '/^s_testcount\(\) \{/ { f = 1 } f { print } f && /^\}/ { exit }' "$GATE" > "$step"
+if [ -s "$step" ] && grep -q 'GATE_TEST_BUNDLES' "$step"; then
+  ok "the gate's testcount step was read out of $GATE (control)"
+  verdict_call="$(grep -n '^[[:space:]]*"\$verdict"' "$step" | head -n1 | cut -d: -f1)"
+  candidate_write="$(grep -n 'testcount-baseline.tsv", "w"' "$step" | head -n1 | cut -d: -f1)"
+  if grep -q 'scripts/testcount-verdict.sh' "$step" && [ -n "$verdict_call" ]; then
+    ok "the gate's testcount step invokes the baseline comparison"
+  else
+    bad "the gate's testcount step does not invoke scripts/testcount-verdict.sh — the cases above judge a step the gate does not run"
+  fi
+  if [ -n "$candidate_write" ] && [ -n "$verdict_call" ] && [ "$candidate_write" -lt "$verdict_call" ]; then
+    ok "the candidate counts are written before the comparison is asked to judge them"
+  else
+    bad "the candidate is not written above the comparison call (write ${candidate_write:-none}, call ${verdict_call:-none}) — a refused run would hand back nothing to re-record from"
+  fi
+else
+  bad "no s_testcount function could be read out of $GATE — the two checks it carries proved nothing"
+fi
+
 # --- verdict ----------------------------------------------------------------------------------------
 if [ "$counter_control" -ne 1 ]; then
   echo "FAIL: the per-bundle test counter was never extracted, so no case above exercised it"
