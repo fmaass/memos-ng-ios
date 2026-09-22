@@ -158,13 +158,29 @@ nonisolated public struct ComposeAttachment: Identifiable, Equatable, CaptureCar
 
 /// One picture the memo already has.
 ///
-/// A struct rather than the bare `MemoAttachment` it wraps: what a later release adds here — a
-/// mark that this one is to be removed, the capture instant the server will start sending — is
-/// then a field rather than a new type through every call site.
+/// A struct rather than the bare `MemoAttachment` it wraps: what a later release adds about a
+/// picture ON THIS ROW — something the sheet knows and the server does not — is then a field
+/// rather than a new type through every call site.
 nonisolated struct ComposeExisting: Identifiable, Equatable, Sendable {
     let attachment: MemoAttachment
 
     var id: String { attachment.uid }
+}
+
+/// The pictures this sheet has been told to take off the memo, by attachment uid.
+///
+/// State of its own rather than a filtered copy of the list, because the list is DERIVED from the
+/// mode the sheet was opened with and is rebuilt on every redraw: a removal kept anywhere else
+/// would be undone by the next one. Nothing here sends anything — the memo is unchanged until the
+/// save states the list that is left.
+nonisolated struct ComposeRemovals: Equatable, Sendable {
+    private(set) var uids: Set<String> = []
+
+    mutating func remove(_ uid: String) { uids.insert(uid) }
+
+    func keeping(_ existing: [ComposeExisting]) -> [ComposeExisting] {
+        existing.filter { !uids.contains($0.id) }
+    }
 }
 
 /// One thing in the compose row: a picture the memo already has, or a file about to be posted.
@@ -188,15 +204,70 @@ nonisolated enum ComposeRowItem: Identifiable, Equatable, Sendable {
 
 /// What the compose row shows, in order.
 ///
-/// A function rather than a concatenation at the call site: the day old and new pictures share
-/// one order — when the existing ones carry a capture instant of their own — there is one place
-/// that changes, and it is a place a test can hold today.
+/// A function rather than a concatenation at the call site: the two halves are ordered by
+/// different things — one by when the pictures were taken, the other by the order the files will
+/// be sent in — so there is one place that says how they meet, and it is a place a test can hold.
 nonisolated enum ComposeRow {
-    /// Existing pictures first, in the order the server holds them; then what has been picked, in
+    /// The memo's own pictures first, in the order they were taken; then what has been picked, in
     /// the order it will be sent (`ComposeImports.ordered`).
     static func items(existing: [ComposeExisting], picked: [ComposeAttachment]) -> [ComposeRowItem]
     {
-        existing.map(ComposeRowItem.existing) + picked.map(ComposeRowItem.picked)
+        byCaptureInstant(existing).map(ComposeRowItem.existing)
+            + picked.map(ComposeRowItem.picked)
+    }
+
+    /// The memo's own pictures in the order they were TAKEN, oldest first.
+    ///
+    /// The server serves them by their saved position and then by id, which for a batch out of a
+    /// library starts as the order they were uploaded in rather than the order they happened in —
+    /// and a save from this sheet replaces that order outright. The row is the order
+    /// the memo will carry, so it has to be the one somebody would recognise. A picture whose file
+    /// said nothing about when it was taken keeps its place at the END, in the order it arrived
+    /// in: an unknown date is not a date, and putting it among the dated ones would be inventing
+    /// one. The index tie-break is not there to make `sorted(by:)` stable — it is, and has been
+    /// since Swift 5.8 (SE-0372). It stays because two files out of one burst carry the same
+    /// instant to the second, and it is what states their order HERE, in this file, instead of
+    /// leaving the row's order inherited from a guarantee made somewhere else.
+    ///
+    /// It is applied to this group alone, never across the row: a picked file has no instant here,
+    /// and one sorted to the front would put a picture that is not on the memo yet ahead of the
+    /// ones somebody opened the sheet to look at.
+    static func byCaptureInstant(_ existing: [ComposeExisting]) -> [ComposeExisting] {
+        let dated = existing.enumerated().filter { $0.element.attachment.captureInstant != nil }
+        let sorted = dated.sorted { first, second in
+            guard let a = first.element.attachment.captureInstant,
+                let b = second.element.attachment.captureInstant
+            else { return false }
+            return a == b ? first.offset < second.offset : a < b
+        }
+        return sorted.map(\.element) + existing.filter { $0.attachment.captureInstant == nil }
+    }
+}
+
+/// What a save STATES about the memo's pictures: the whole row, in the order it is shown.
+///
+/// Pure, and apart from the row itself, because the two halves are named differently on the wire.
+/// A picture the memo holds travels as its attachment uid; one picked in this sheet has no uid
+/// until the upload answers, so it travels as its PLACE among the files the same save sends. That
+/// place is counted over the items that actually carry a file, which is exactly what
+/// `ComposeImports.attachments` hands to `attaching:` — so the index is right by construction and
+/// nothing has to match ids after the answer comes back. A tile that is still loading or that
+/// failed carries no file, takes no place, and would shift every later picture along if it did.
+nonisolated enum ComposePictureList {
+    static func entries(items: [ComposeRowItem]) -> [MemoPictureEntry] {
+        var uploads = 0
+        var entries: [MemoPictureEntry] = []
+        for item in items {
+            switch item {
+            case .existing(let existing):
+                entries.append(.kept(existing.id))
+            case .picked(let attachment):
+                guard attachment.media != nil else { continue }
+                entries.append(.uploading(uploads))
+                uploads += 1
+            }
+        }
+        return entries
     }
 }
 

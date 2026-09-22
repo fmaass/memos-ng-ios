@@ -820,6 +820,7 @@ public struct TimelineView: View {
                 // new captures, and an edit that failed is answered honestly on the sheet that is
                 // still open rather than queued (outbox-backed edits are MEMNG-124's line).
                 attaching: submission.attachments.map(\.stagedSource),
+                listing: submission.pictures,
                 using: handle,
                 baseURL: baseURL
             )

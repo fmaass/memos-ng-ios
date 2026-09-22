@@ -81,9 +81,13 @@ struct PickedThumbnailRow: View {
     /// fail for a picture the memo already has.
     var retry: (UUID) -> Void = { _ in }
     /// What the x on a picked tile asks for. A picked file has not been posted yet, so taking it
-    /// off is this sheet's business alone; a picture the memo already has is the server's, and the
-    /// existing tiles are not given one.
+    /// off is this sheet's business alone.
     var remove: (UUID) -> Void = { _ in }
+    /// What the x on a picture the memo ALREADY has asks for, by the uid it is held under — and
+    /// nil, which is what leaves those tiles without one. Nil by default because the callback is
+    /// the switch: a row drawn anywhere but an edit sheet has no save to state a shorter list on,
+    /// so an x there would be an affordance that did nothing.
+    var removeExisting: ((String) -> Void)? = nil
 
     @ScaledMetric(relativeTo: .body) private var tile = DesignTokens.Metric.pickedThumbnail
 
@@ -93,7 +97,9 @@ struct PickedThumbnailRow: View {
                 ForEach(items) { item in
                     switch item {
                     case .existing(let existing):
-                        ExistingThumbnail(attachment: existing.attachment, size: tile)
+                        ExistingThumbnail(
+                            attachment: existing.attachment, size: tile,
+                            remove: removeExisting.map { ask in { ask(existing.id) } })
                     case .picked(let attachment):
                         PickedThumbnail(
                             attachment: attachment, size: tile,
@@ -119,10 +125,29 @@ struct PickedThumbnailRow: View {
 struct ExistingThumbnail: View {
     let attachment: MemoAttachment
     let size: CGFloat
+    var remove: (() -> Void)? = nil
 
     var body: some View {
         AttachmentThumbnail(attachment: attachment, tier: .thumb, slot: MemoPresentation.gridSlot)
             .frame(width: size, height: size)
+            .overlay(alignment: .topTrailing) { dropControl }
+    }
+
+    /// Taking a picture the memo already has off it — which happens when the SAVE goes out, not
+    /// here. Nothing is deleted and nothing is sent by this press: the sheet states the shorter
+    /// list with the words and the date, in the one patch, so closing without saving leaves the
+    /// memo exactly as it was. It is the same x a picked tile carries, deliberately, because to
+    /// the person looking at the row the two are one list of the memo's pictures.
+    @ViewBuilder
+    private var dropControl: some View {
+        if let remove {
+            Button("Remove", systemImage: "xmark.circle.fill", action: remove)
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .shadow(radius: 4)
+                .padding(2)
+        }
     }
 }
 

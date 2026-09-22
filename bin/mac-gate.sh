@@ -1998,6 +1998,28 @@ s_buttonstyle() {
   return 1
 }
 
+s_picturelist() {
+  # The edit sheet decides the memo's whole picture list — which of its own pictures are kept and
+  # in which order — and that decision reaches the server only if the screen hosting the sheet
+  # forwards it (MEMNG-457). A host that drops it sends a patch with no list: the removal is shown
+  # on the row, the sheet closes, and the memo still holds the picture, with nothing in the app to
+  # say so. Neither call site can be reached from a test — both are private functions behind a
+  # sheet that does not present under test, taking their session from an environment only a
+  # SwiftUI body supplies, which is why the `attaching:` forwarding beside them has no witness
+  # either. So it is held the way the share-link rule holds its absence: a literal count with a
+  # positive control in the same run, in a script of its own whose text may carry the literals the
+  # checked files are counted for.
+  echo "--- picture-list forwarding rule (each edit host states the sheet's list exactly once) ---"
+  local picturelist_rule="$GATE_TARGET/scripts/picturelist-forwarding-rule.sh"
+  if [ -x "$picturelist_rule" ]; then
+    "$picturelist_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "PICTURELIST FAIL: $picturelist_rule is missing or not executable, so neither host was"
+  echo "                  checked and this step proves nothing"
+  return 1
+}
+
 s_refusal() {
   # A refusal is judged where the answer arrives and acted on one or more actor hops later, and in
   # between a renewal can replace the credential it was about. The fix is one typed value carrying
@@ -2253,6 +2275,7 @@ step refusal    s_refusal
 step sharelink  s_sharelink
 step textsel    s_textsel
 step buttonstyle s_buttonstyle
+step picturelist s_picturelist
 step apicover   s_apicover
 step testcount  s_testcount
 

@@ -11,10 +11,10 @@ import UIKit
 ///
 /// The row shows what the memo holds at the moment the sheet opens, ahead of anything picked in
 /// the sheet itself: the picture somebody is about to describe or correct is the thing that has
-/// to be in front of them while they do it. What the sheet may not do is ACT on that list —
-/// nothing here removes a picture and a save names none of them — so these cases hold both
-/// halves: that the row shows the memo's own pictures, and that it offers nothing that would
-/// change them.
+/// to be in front of them while they do it. These cases hold that half — that the memo's own
+/// pictures are on the row, in front of what was picked — and the one thing a row drawn OUTSIDE
+/// an edit sheet must not offer: an x, which only a sheet with a save behind it can honour
+/// (`PickedThumbnailRow.removeExisting`).
 @MainActor
 @Suite("The compose row on an edit")
 struct ComposeExistingPicturesTests {
@@ -54,8 +54,9 @@ struct ComposeExistingPicturesTests {
         // The control: the probe can see the row itself, so the absence below is the tile's and
         // not the probe's.
         #expect(labels.contains("1 file attached"), "the probe saw nothing of the row: \(labels)")
-        // Removal is a change to what the memo holds, which is a request this release does not
-        // send at all. An affordance that did nothing would be a lie on the screen.
+        // Taking a picture off the memo is stated by a SAVE, and this row has no save behind it:
+        // the removal callback is what an edit sheet hands down, and nothing hands one here. An
+        // affordance that did nothing would be a lie on the screen.
         #expect(
             !labels.contains {
                 $0.localizedCaseInsensitiveContains("remove")

@@ -16,17 +16,27 @@ public struct ComposeSubmission: Sendable, Equatable {
     /// gets to invent. Carrying the absence all the way through is what lets a test tell an
     /// untouched date apart from one that happens to equal the clock.
     public var createdAt: Date?
+    /// The memo's WHOLE picture list, in the order the row shows it, or nil for a sheet with
+    /// nothing to say about pictures.
+    ///
+    /// Nil and an empty list are different things all the way to the wire: nil leaves the memo's
+    /// pictures untouched, and an empty list is somebody having taken every one of them off. Only
+    /// an edit states one — a new capture goes to the outbox, which has no memo to state a list
+    /// against and nothing to remove.
+    public var pictures: [MemoPictureEntry]?
 
     public init(
         content: String,
         visibility: MemoVisibility?,
         attachments: [PickedMedia] = [],
-        createdAt: Date? = nil
+        createdAt: Date? = nil,
+        pictures: [MemoPictureEntry]? = nil
     ) {
         self.content = content
         self.visibility = visibility
         self.attachments = attachments
         self.createdAt = createdAt
+        self.pictures = pictures
     }
 
     /// What the outbox stamps this capture with: the date the writer chose, or the moment it was
@@ -158,14 +168,22 @@ public struct ComposeView: View {
         return false
     }
 
-    /// The pictures the memo already has, as the sheet was handed them when it opened.
+    /// Which of the memo's own pictures have been taken off in this sheet.
     ///
-    /// A value captured at presentation, like the words and the date beside it: a picture deleted
-    /// elsewhere while this sheet is open stays in the row, and saving neither restores it nor
-    /// sends anything about it.
+    /// Marks rather than a rebuilt list, because the list is derived from the mode on every
+    /// redraw: anything the row was handed comes straight back otherwise.
+    @State private var removals = ComposeRemovals()
+
+    /// The pictures the memo already has, as the sheet was handed them when it opened, less the
+    /// ones somebody has taken off since.
+    ///
+    /// The handed-in half is a value captured at presentation, like the words and the date beside
+    /// it: a picture deleted elsewhere while this sheet is open stays in the row, and the save
+    /// states it as kept. That is the same rule the words follow, and it is what makes the list
+    /// this sheet sends the list this sheet SHOWED.
     private var existing: [ComposeExisting] {
         guard case .edit(_, _, _, let attachments) = mode else { return [] }
-        return attachments.map(ComposeExisting.init(attachment:))
+        return removals.keeping(attachments.map(ComposeExisting.init(attachment:)))
     }
 
     /// What the row draws, in order — the memo's own pictures first, then what has been picked.
@@ -175,6 +193,10 @@ public struct ComposeView: View {
 
     /// A memo with photos and no words is a memo. Only an empty capture is nothing to post.
     ///
+    /// The memo's own pictures count towards that as much as newly picked ones do: taking one of
+    /// two off an edit with no words leaves a memo with a picture in it, and taking BOTH off
+    /// leaves nothing — which is the same thing the create rule refuses.
+    ///
     /// It is deliberately NOT the guard for the unresolved items. A disabled button explains
     /// nothing: somebody who has attached a photograph that will not download, and finds Post grey,
     /// is left to guess which of the five things they did was wrong. So the button stays live and
@@ -183,7 +205,7 @@ public struct ComposeView: View {
     private var canSave: Bool {
         ComposeAttachments.canPost(
             text: content,
-            imported: imports.attachments.count,
+            imported: imports.attachments.count + existing.count,
             isBusy: imports.isSubmitting || imports.isImporting
         )
     }
@@ -417,6 +439,17 @@ public struct ComposeView: View {
                 remove: { id in
                     guard mayChangeAttachments else { return }
                     imports.remove(id: id)
+                },
+                // The memo's own pictures, refused on the SAME question at the same instant. What
+                // a save states about them is fixed when Save is pressed exactly as the files are,
+                // and a removal taken after that would be shown on the row and left out of the
+                // patch — the memo would keep the very picture somebody had just taken off it. So
+                // the guard is here, in the closure, rather than in whether the x is drawn: a
+                // control that has gone grey is a hint, and the tap that beat the redraw is the
+                // one that does the damage.
+                removeExisting: { uid in
+                    guard mayChangeAttachments else { return }
+                    removals.remove(uid)
                 })
         }
         if imports.failed > 0,
@@ -577,7 +610,11 @@ public struct ComposeView: View {
                 content: content,
                 visibility: visibility,
                 attachments: imports.attachments,
-                createdAt: resolvedDate
+                createdAt: resolvedDate,
+                // The row IS the memo's picture list on an edit, so what it shows is what the
+                // patch states — both halves, in one order. A create states nothing: it goes to
+                // the outbox, where there is no memo yet to have a list.
+                pictures: isEdit ? ComposePictureList.entries(items: rowItems) : nil
             )
             let outcome = await submit(submission)
             switch outcome {
