@@ -49,7 +49,7 @@ private func pin(
             uids: uids
         ),
         leadTakenAt: ISO8601DateFormatter().date(from: leadTakenAt)!,
-        leadThumbnailURL: nil
+        leadImageURL: nil
     )
 }
 
