@@ -42,7 +42,7 @@ private func routedPin(_ marker: PlaceMarker, key: String) -> PlacePin {
             uids: [marker.uid]
         ),
         leadTakenAt: marker.takenAt,
-        leadThumbnailURL: nil
+        leadImageURL: nil
     )
 }
 

@@ -3,14 +3,14 @@ import MapKit
 import MemosCore
 
 /// One pin, with the two things about its lead photograph a map view needs and `PinSpec` does not
-/// carry: when that photograph was taken, and where its thumbnail lives.
+/// carry: when that photograph was taken, and where the picture it wears lives.
 ///
 /// The date is not decoration — it is what decides which member of a MapKit cluster lends the
 /// cluster its picture, and a cluster is handed nothing but its member annotations.
 nonisolated struct PlacePin: Equatable, Sendable, Identifiable {
     var spec: PinSpec
     var leadTakenAt: Date
-    var leadThumbnailURL: URL?
+    var leadImageURL: URL?
 
     var id: String { spec.key }
 }
@@ -60,7 +60,7 @@ nonisolated enum PlacesPresentation {
     /// The pins the map should be showing, each carrying its lead photograph.
     ///
     /// The grouping itself is `PlaceClustering.pins(from:)` — this only puts the lead marker's
-    /// date and thumbnail back beside the spec it was chosen for.
+    /// date and picture back beside the spec it was chosen for.
     static func pins(for markers: [PlaceMarker]) -> [PlacePin] {
         var leads: [String: PlaceMarker] = [:]
         leads.reserveCapacity(markers.count)
@@ -70,9 +70,18 @@ nonisolated enum PlacesPresentation {
             return PlacePin(
                 spec: spec,
                 leadTakenAt: lead.takenAt,
-                leadThumbnailURL: lead.thumbnailURL
+                leadImageURL: imageURL(of: lead)
             )
         }
+    }
+
+    /// Which of a lead's tiers a pin can actually draw: the thumb-tier rule of
+    /// `MemoPresentation.url(for:tier:)`, read for a marker. A video has no thumb of its own — its
+    /// still is the poster — so a pin that asks a video for a thumb asks for a file the server
+    /// never generates, and a video whose poster is not signed yet has only its thumbnail left.
+    private static func imageURL(of lead: PlaceMarker) -> URL? {
+        guard lead.mime.hasPrefix("video/") else { return lead.thumbnailURL }
+        return lead.posterURL ?? lead.thumbnailURL
     }
 
     /// The region the map opens on: the box every pin fits in, padded on any axis that collapsed.

@@ -237,7 +237,7 @@ final class PlacePinView: PlaceAnnotationView {
         )
         show(
             photoFor: place.pin.spec.uid,
-            at: place.pin.leadThumbnailURL,
+            at: place.pin.leadImageURL,
             badge: PlacesPresentation.pinBadge(for: place.pin.spec)
         )
     }
@@ -273,7 +273,7 @@ final class PlaceClusterView: PlaceAnnotationView {
         )
         show(
             photoFor: lead.spec.uid,
-            at: lead.leadThumbnailURL,
+            at: lead.leadImageURL,
             badge: PlacesPresentation.clusterBadge(for: members)
         )
     }
