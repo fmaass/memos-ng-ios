@@ -203,6 +203,7 @@ public struct TimelineView: View {
                 Self.editSheet(
                     mode: mode,
                     isAsking: memoDelete.deleteStage == .asking,
+                    failure: memoDelete.lastError,
                     send: { event in
                         memoDelete.sendDelete(event) { uid in
                             await delete(uid: uid, in: timeline)
@@ -574,18 +575,37 @@ public struct TimelineView: View {
     /// Named rather than written inside `.sheet` for the reason `editMode(for:)` is: a sheet never
     /// presents under a test, so the only honest way to hold "the sheet this screen opens really
     /// offers Delete" is to build its content the way this screen builds it and put THAT up.
+    ///
+    /// The sentence the sheet carries is shown HERE rather than around the call that presents it,
+    /// and for the same reason this factory exists at all: the screen's own notices are rows of its
+    /// list, and the sheet is drawn over the list — so a delete the server refused was answered
+    /// where nobody with the sheet open could see it. Nothing comes back through `ComposeDelete`
+    /// for the sheet to say for itself.
     static func editSheet(
         mode: ComposeView.Mode,
         isAsking: Bool,
+        failure: String?,
         send: @escaping @MainActor (MemoEditFlow.DeleteEvent) -> Void,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
-    ) -> ComposeView {
-        guard case .edit = mode else { return ComposeView(mode: mode, submit: submit) }
-        return ComposeView(
-            mode: mode,
-            delete: ComposeDelete(isAsking: isAsking, send: send),
-            submit: submit
-        )
+    ) -> some View {
+        VStack(spacing: 0) {
+            if let failure {
+                // Padded rather than given `cardRow()`: that is list-row chrome, and this is not
+                // a list.
+                NoticeCard(text: failure, tone: .error)
+                    .padding(.horizontal, DesignTokens.Space.roomy)
+                    .padding(.top, DesignTokens.Space.regular)
+            }
+            if case .edit = mode {
+                ComposeView(
+                    mode: mode,
+                    delete: ComposeDelete(isAsking: isAsking, send: send),
+                    submit: submit
+                )
+            } else {
+                ComposeView(mode: mode, submit: submit)
+            }
+        }
     }
 
     @ViewBuilder
