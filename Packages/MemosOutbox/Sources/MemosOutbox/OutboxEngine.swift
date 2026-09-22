@@ -414,9 +414,19 @@ public actor OutboxEngine: OutboxChunkHandling {
         switch await completion.create(
             job: creating, credentials: credentials, under: authority(under: credentials)
         ) {
-        case .created:
-            // The one exit. Everything the capture owns goes with it.
-            await repository.delete(creating)
+        case .created(let uid):
+            // The capture leaves only when nothing is still owed to it. An edit taken while this
+            // create was in flight is owed an apply, so the job advances in place carrying the memo
+            // the server named — anything held beside the job would be reaped by the sweep, which
+            // reaps by job id. And the removal is fenced on the manifest this pass wrote: a capture
+            // a person has since taken back is no longer this answer's to destroy.
+            if creating.pendingEdit != nil {
+                return await save(
+                    creating.awaitingPatch(uid: uid, editKey: creating.idempotencyKey.uuidString),
+                    matching: creating
+                )
+            }
+            await repository.delete(creating, ifStillCurrent: creating)
             await onChange()
             return nil
         case .unlinkable(let failure):

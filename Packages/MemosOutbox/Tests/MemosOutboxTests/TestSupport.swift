@@ -281,6 +281,10 @@ actor FaultyPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
@@ -371,6 +375,10 @@ actor GatedPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
@@ -432,6 +440,10 @@ actor SupersedingPersister: OutboxPersisting {
     func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
 
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
@@ -538,6 +550,10 @@ actor FailingThenInterferingPersister: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
@@ -616,6 +632,10 @@ actor InterferingPersistence: OutboxPersisting {
     func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
 
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 

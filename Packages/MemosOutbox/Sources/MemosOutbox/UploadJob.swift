@@ -109,6 +109,27 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
 
 /// A capture waiting for the server: the note, the originals, and everything needed to finish the
 /// job from a cold start.
+/// The edits a restored draft carries back, held beside the capture as it was FIRST SENT.
+///
+/// The create is replayed unchanged under the original key — that is what resolves a create whose
+/// answer was lost to the memo it made — and these are what is then applied to that memo. A
+/// manifest written before this existed carries no such value at all, which is what "nothing is
+/// pending" decodes as.
+public struct PendingEdit: Codable, Sendable, Equatable {
+    public var content: String
+    public var visibility: String?
+    public var capturedAt: Date
+    /// The pictures the memo keeps, in the order the editor left them.
+    public var fileIDs: [UUID]
+
+    public init(content: String, visibility: String?, capturedAt: Date, fileIDs: [UUID]) {
+        self.content = content
+        self.visibility = visibility
+        self.capturedAt = capturedAt
+        self.fileIDs = fileIDs
+    }
+}
+
 public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var id: UUID
     /// Generated once, at capture, and sent on every create attempt for this job. It is what makes
@@ -129,6 +150,19 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var attemptCount: Int
     public var nextAttemptAt: Date
     public var lastError: String?
+    /// When a person took this capture back to the editor. Optional because a manifest written
+    /// before this existed has no such field, and absent has to keep meaning "never cancelled"
+    /// rather than making that manifest unreadable.
+    public var cancelledAt: Date?
+    /// The memo a create resolved to, once the server named it.
+    public var resolvedMemoUID: String?
+    /// The key an edit of that memo is applied under, so a replayed apply is the same apply.
+    public var editKey: String?
+    /// How often the pending edit has been claimed. It is moved through the fenced write, so two
+    /// launches cannot both take it.
+    public var patchAttempt: Int?
+    /// What the editor changed while the create was in flight, still owed to the memo above.
+    public var pendingEdit: PendingEdit?
 
     public init(
         id: UUID = UUID(),
@@ -143,7 +177,12 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         waitReason: WaitReason? = nil,
         attemptCount: Int = 0,
         nextAttemptAt: Date = .distantPast,
-        lastError: String? = nil
+        lastError: String? = nil,
+        cancelledAt: Date? = nil,
+        resolvedMemoUID: String? = nil,
+        editKey: String? = nil,
+        patchAttempt: Int? = nil,
+        pendingEdit: PendingEdit? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -158,6 +197,11 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.attemptCount = attemptCount
         self.nextAttemptAt = nextAttemptAt
         self.lastError = lastError
+        self.cancelledAt = cancelledAt
+        self.resolvedMemoUID = resolvedMemoUID
+        self.editKey = editKey
+        self.patchAttempt = patchAttempt
+        self.pendingEdit = pendingEdit
     }
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteSize } }

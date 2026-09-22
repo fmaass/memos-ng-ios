@@ -259,6 +259,73 @@ public final class Outbox {
         await drainAfterAdoption()
     }
 
+    /// Takes a capture out of the queue and hands it back to the editor.
+    ///
+    /// The manifest is NOT destroyed. It carries the idempotency key and the account this capture
+    /// was made under, and a re-submit that did not present both would make a second memo out of a
+    /// create that already committed. Nothing local is removed either: the pictures handed back are
+    /// the job's own copies, which the sweep keeps while the job is on disk.
+    ///
+    /// The write is fenced on the manifest this call read, so a pass that advanced or finished the
+    /// capture inside that read wins and nothing is handed back. A capture is taken back or it is
+    /// finished, never both.
+    public func cancel(_ jobID: UUID) async -> RestoredDraft? {
+        guard let snapshot = await repository.job(jobID) else { return nil }
+        let taken = snapshot.cancelled(at: Date())
+        let written = try? await repository.save(
+            taken, ifStillCurrent: nil, matching: snapshot, else: taken
+        )
+        await refresh()
+        guard let landed = written ?? nil else { return nil }
+        return draft(of: landed)
+    }
+
+    /// Sends a restored draft again, on the SAME manifest.
+    ///
+    /// The key and the account binding travel by identity rather than being stamped afresh — which
+    /// is what makes a re-submit of a create that already committed resolve to the memo it made
+    /// instead of a second one — and an account that no longer matches becomes the mismatch hold
+    /// that already exists, never a silent re-bind. An edit is recorded rather than applied to the
+    /// capture: the create is replayed as it was first sent, and the edit is owed to the memo that
+    /// replay resolves to.
+    @discardableResult
+    public func resubmit(_ jobID: UUID, draft: RestoredDraft) async -> Bool {
+        guard let snapshot = await repository.job(jobID) else { return false }
+        var candidate = snapshot.released(at: Date())
+        if draft != self.draft(of: snapshot) {
+            candidate.pendingEdit = PendingEdit(
+                content: draft.content,
+                visibility: draft.visibility,
+                capturedAt: draft.capturedAt,
+                fileIDs: draft.pictures.map(\.id)
+            )
+        }
+        let written = try? await repository.save(
+            candidate, ifStillCurrent: nil, matching: snapshot, else: candidate
+        )
+        await refresh()
+        guard (written ?? nil) != nil else { return false }
+        await drainAfterAdoption()
+        return true
+    }
+
+    private func draft(of job: UploadJob) -> RestoredDraft {
+        RestoredDraft(
+            jobID: job.id,
+            content: job.content,
+            visibility: job.visibility,
+            capturedAt: job.capturedAt,
+            pictures: job.files.map {
+                RestoredDraft.Picture(
+                    id: $0.id,
+                    url: repository.mediaURL(job: job, file: $0),
+                    filename: $0.filename,
+                    mime: $0.mime
+                )
+            }
+        )
+    }
+
     /// Throws a capture away on purpose — the "Remove" offered by a row whose manifest could not be
     /// read, which is the only row nothing else can ever move. A capture leaves this device because
     /// a person decided it should, never because something swept.
@@ -271,5 +338,49 @@ public final class Outbox {
                 "This capture could not be removed: \(error.localizedDescription)"
         }
         await refresh()
+    }
+}
+
+/// A capture handed back to the editor: the memo as it was captured, and the originals where the
+/// job already holds them.
+///
+/// Nothing here is a copy and nothing was removed to produce it. It is a MemosOutbox value on
+/// purpose: this package cannot see the editor's own picture type, so the editor maps this into
+/// whatever it composes with.
+public struct RestoredDraft: Sendable, Equatable {
+    public struct Picture: Sendable, Equatable {
+        /// The file this picture is, so a re-submit can say which pictures the memo keeps and in
+        /// what order without the editor having to name them by path.
+        public var id: UUID
+        public var url: URL
+        public var filename: String
+        public var mime: String
+
+        public init(id: UUID, url: URL, filename: String, mime: String) {
+            self.id = id
+            self.url = url
+            self.filename = filename
+            self.mime = mime
+        }
+    }
+
+    public var jobID: UUID
+    public var content: String
+    public var visibility: String?
+    public var capturedAt: Date
+    public var pictures: [Picture]
+
+    public init(
+        jobID: UUID,
+        content: String,
+        visibility: String?,
+        capturedAt: Date,
+        pictures: [Picture]
+    ) {
+        self.jobID = jobID
+        self.content = content
+        self.visibility = visibility
+        self.capturedAt = capturedAt
+        self.pictures = pictures
     }
 }

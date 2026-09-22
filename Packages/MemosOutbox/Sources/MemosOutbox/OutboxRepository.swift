@@ -153,6 +153,16 @@ public protocol OutboxPersisting: Sendable {
         else fallback: UploadJob
     ) async throws -> UploadJob?
     func delete(_ job: UploadJob) async
+
+    /// The same removal, fenced on the manifest the caller last wrote — the question
+    /// `save(_:ifStillCurrent:matching:else:)` asks, asked of a destruction.
+    ///
+    /// A capture a person took back between a request and its answer is no longer that answer's to
+    /// destroy, and the originals it names are the only copies there are.
+    ///
+    /// - Returns: whether the manifest on disk was still `snapshot` and was therefore removed.
+    @discardableResult
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool
     func sweepOrphans() async throws -> SweepOutcome
     func sliceChunk(
         job: UploadJob, file: OutboxFile, offset: Int64, length: Int
@@ -377,6 +387,16 @@ public actor OutboxRepository {
         try? FileManager.default.removeItem(at: manifestURL(job.id))
         try? FileManager.default.removeItem(at: mediaDirectory(job.id))
         removeChunks(forJob: job.id)
+    }
+
+    /// The fenced removal — see `OutboxPersisting`. Read and write are on this isolation with
+    /// nothing awaited between them, so there is no instant between the question and the removal
+    /// for the capture to be taken back in.
+    @discardableResult
+    public func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) -> Bool {
+        guard let onDisk = self.job(snapshot.id), onDisk == snapshot else { return false }
+        delete(job)
+        return true
     }
 
     /// Throws one capture away because a PERSON said so: its manifest, whatever was set aside under

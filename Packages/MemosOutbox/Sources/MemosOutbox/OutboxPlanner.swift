@@ -165,6 +165,36 @@ extension UploadJob {
             $0.attemptCount = 0
             $0.nextAttemptAt = now
             $0.lastError = nil
+            $0.cancelledAt = nil
+        }
+    }
+
+    /// A person took this capture back to the editor.
+    ///
+    /// Nothing it owns goes anywhere: the manifest stays, so the idempotency key and the account
+    /// the capture was made under travel to the re-submit instead of being minted again, and the
+    /// originals stay where the job already holds them. The next attempt is put out of reach so
+    /// that no pass sends it while the editor has it.
+    public func cancelled(at now: Date) -> UploadJob {
+        with {
+            $0.cancelledAt = now
+            $0.state = .waiting
+            $0.waitReason = nil
+            $0.nextAttemptAt = .distantFuture
+        }
+    }
+
+    /// The server named the memo, and an edit is still owed to it. The capture stays whole until
+    /// that edit is acknowledged, carrying the memo it was resolved to rather than a note of it
+    /// kept somewhere the sweep would reap.
+    public func awaitingPatch(uid: String, editKey: String) -> UploadJob {
+        with {
+            $0.resolvedMemoUID = uid
+            $0.editKey = editKey
+            $0.patchAttempt = 0
+            $0.state = .creating
+            $0.waitReason = nil
+            $0.nextAttemptAt = .distantFuture
         }
     }
 
