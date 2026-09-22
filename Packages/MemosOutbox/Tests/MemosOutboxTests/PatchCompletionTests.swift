@@ -342,7 +342,7 @@ struct PatchCompletionTests {
         uid: String = "uC"
     ) async throws -> UploadJob {
         let job = try #require(await harness.repository.job(jobID))
-        let index = try #require(job.files.firstIndex { $0.uploadUID == nil })
+        let index = try #require(job.files.firstIndex { !$0.isComplete })
         return try await standing(harness, job) { candidate in
             candidate.files[index].uploadUID = uid
             candidate.files[index].bytesConfirmed = candidate.files[index].byteSize
@@ -507,6 +507,12 @@ struct PatchCompletionTests {
         #expect(digests.count == 3)
 
         let second = try harness(root: first.root, server: server)
+        // Read BEFORE the edit is driven home: an acknowledged edit takes the capture and the
+        // originals it held with it, so the bytes the relaunch FOUND are what this can be about.
+        let afterwards = try carried.files.map {
+            try digest(second.repository.mediaURL(job: carried, file: $0))
+        }
+        #expect(afterwards == digests)
         await settle(second, job.id)
 
         #expect(second.memoPatches.count == 1)
@@ -519,10 +525,6 @@ struct PatchCompletionTests {
         // still the same bytes it went into the relaunch with.
         let remaining = await second.repository.job(job.id)
         #expect(remaining == nil)
-        let afterwards = try carried.files.map {
-            try digest(second.repository.mediaURL(job: carried, file: $0))
-        }
-        #expect(afterwards == digests)
 
         // Letting the parked call go only now keeps the counts above about the lifetime they were
         // taken in, and leaves no task running past the end of the case.

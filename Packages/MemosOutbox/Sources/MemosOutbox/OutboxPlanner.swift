@@ -187,10 +187,18 @@ extension UploadJob {
     /// The server named the memo, and an edit is still owed to it. The capture stays whole until
     /// that edit is acknowledged, carrying the memo it was resolved to rather than a note of it
     /// kept somewhere the sweep would reap.
-    public func awaitingPatch(uid: String, editKey: String) -> UploadJob {
+    /// - Parameter attachments: the uids the memo's own pictures carry, as the create's answer
+    ///   named them. Kept because an edit names the memo's complete picture list and this is the
+    ///   only moment they are knowable.
+    public func awaitingPatch(
+        uid: String,
+        editKey: String,
+        attachments: [String] = []
+    ) -> UploadJob {
         with {
             $0.resolvedMemoUID = uid
             $0.editKey = editKey
+            $0.resolvedAttachmentUIDs = attachments
             $0.patchAttempt = 0
             $0.state = .creating
             $0.waitReason = nil

@@ -85,6 +85,14 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// written before retries were counted decodes unchanged and reads as nil — which is what an
     /// equally attempt-less task description says, and the two have to agree to be adopted.
     public var uploadAttempt: Int?
+    /// Set on a picture picked while the capture was back in the editor, and only there.
+    ///
+    /// It is what keeps that picture OUT of the create: the create is replayed exactly as it was
+    /// first sent — that is what resolves an uncertain create to the memo it made rather than to a
+    /// second one — and a picture the first send never named cannot appear in the replay. It
+    /// reaches the memo through the edit instead. Optional and last, so a manifest written before
+    /// this existed decodes unchanged and reads as "captured", which is what it is.
+    public var stagedForEdit: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -96,7 +104,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         uploadUID: String? = nil,
         bytesConfirmed: Int64 = 0,
         chunkSize: Int = OutboxDefaults.chunkSize,
-        uploadAttempt: Int? = nil
+        uploadAttempt: Int? = nil,
+        stagedForEdit: Bool? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -108,6 +117,7 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.bytesConfirmed = bytesConfirmed
         self.chunkSize = chunkSize
         self.uploadAttempt = uploadAttempt
+        self.stagedForEdit = stagedForEdit
     }
 
     public var isComplete: Bool { uploadUID != nil && bytesConfirmed >= byteSize }
@@ -169,6 +179,14 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var patchAttempt: Int?
     /// What the editor changed while the create was in flight, still owed to the memo above.
     public var pendingEdit: PendingEdit?
+    /// The uids the memo's OWN pictures carry, as the create's answer named them, in that answer's
+    /// order.
+    ///
+    /// Written down rather than derived: an edit names the memo's complete picture list, and the
+    /// only legal name for a picture the memo already holds is the attachment uid the server gave
+    /// it — which the job can learn from one place only, the body the create or its replay
+    /// answered with. A relaunch has no other way back to it.
+    public var resolvedAttachmentUIDs: [String]?
 
     public init(
         id: UUID = UUID(),
@@ -188,7 +206,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         resolvedMemoUID: String? = nil,
         editKey: String? = nil,
         patchAttempt: Int? = nil,
-        pendingEdit: PendingEdit? = nil
+        pendingEdit: PendingEdit? = nil,
+        resolvedAttachmentUIDs: [String]? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -208,6 +227,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.editKey = editKey
         self.patchAttempt = patchAttempt
         self.pendingEdit = pendingEdit
+        self.resolvedAttachmentUIDs = resolvedAttachmentUIDs
     }
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteSize } }
@@ -225,7 +245,12 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public func file(_ id: UUID) -> OutboxFile? { files.first { $0.id == id } }
 
     /// The uids the memo is created with, in capture order.
-    public var uploadUIDs: [String] { files.compactMap(\.uploadUID) }
+    ///
+    /// A picture staged for the edit is not one of them: it was picked after this create was first
+    /// sent, and a replay that named it would be a different request under the same key.
+    public var uploadUIDs: [String] {
+        files.filter { $0.stagedForEdit != true }.compactMap(\.uploadUID)
+    }
 }
 
 public enum OutboxDefaults {

@@ -88,6 +88,48 @@ public enum OutboxWire {
         }
     }
 
+    /// What editing the memo sends. Every field a compose screen lets a create set, so an edit
+    /// that carried only the text would be a silent loss of the rest, plus `edit_key`: the key the
+    /// server answers a second transmission of the SAME edit from, with the memo's current state
+    /// and no second apply.
+    ///
+    /// `attachment_uids` is the memo's complete picture list in the order the editor left it. An
+    /// entry is either an attachment uid the memo already holds or an upload uid named in THIS
+    /// request's `upload_uids`; anything else fails the whole request.
+    public struct MemoPatch: Encodable, Sendable {
+        public var content: String
+        public var visibility: String?
+        public var createdAt: String
+        public var editKey: String
+        public var uploadUIDs: [String]
+        public var attachmentUIDs: [String]
+
+        public init(
+            content: String,
+            visibility: String?,
+            createdAt: String,
+            editKey: String,
+            uploadUIDs: [String],
+            attachmentUIDs: [String]
+        ) {
+            self.content = content
+            self.visibility = visibility
+            self.createdAt = createdAt
+            self.editKey = editKey
+            self.uploadUIDs = uploadUIDs
+            self.attachmentUIDs = attachmentUIDs
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case content
+            case visibility
+            case createdAt = "created_at"
+            case editKey = "edit_key"
+            case uploadUIDs = "upload_uids"
+            case attachmentUIDs = "attachment_uids"
+        }
+    }
+
     public static func encode(_ value: some Encodable) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

@@ -41,6 +41,17 @@ public final class Outbox {
     /// the timeline's cue to reload: a capture that vanishes from Pending and does not reappear
     /// as a memo looks exactly like a lost one.
     public private(set) var lastCompletedAt: Date?
+    /// When each job's CONFIRMED bytes last changed, by job id.
+    ///
+    /// In memory and never a manifest field: it is a fact about what this device has SEEN, and
+    /// writing it down would rewrite every manifest on every sighting. An attempt that failed and
+    /// a retry that moved nothing are not progress — a stalled upload that keeps being tried has
+    /// confirmed no byte since, and that is the whole fact this instant is kept for.
+    public private(set) var lastProgressAt: [UUID: Date] = [:]
+
+    /// What each job's confirmed bytes were at the last sighting, so the instant above moves only
+    /// when the number does.
+    private var confirmedBytesSeen: [UUID: Int64] = [:]
 
     /// Why the last capture could not be written down, as a value rather than as a sentence.
     ///
@@ -182,6 +193,7 @@ public final class Outbox {
         do {
             let loaded = try await repository.loadJobs()
             jobs = loaded
+            noteProgress(in: loaded)
             queueError = nil
             if OutboxProgress.didComplete(previous: previous, current: loaded.map(\.id)) {
                 lastCompletedAt = Date()
@@ -193,6 +205,26 @@ public final class Outbox {
                 "The queue on this device could not be read: \(error.localizedDescription)"
         }
         persistenceError = await engine.lastPersistenceFailure
+    }
+
+    /// Recomputed wherever `jobs` is reassigned, from the jobs themselves: a job seen for the
+    /// first time starts its instant now, one whose confirmed bytes are unchanged keeps the
+    /// instant it had, and one that has left the queue keeps nothing.
+    private func noteProgress(in loaded: [UploadJob]) {
+        let now = Date()
+        var seen: [UUID: Int64] = [:]
+        var stamps: [UUID: Date] = [:]
+        for job in loaded {
+            let bytes = job.confirmedBytes
+            seen[job.id] = bytes
+            if confirmedBytesSeen[job.id] == bytes, let previous = lastProgressAt[job.id] {
+                stamps[job.id] = previous
+            } else {
+                stamps[job.id] = now
+            }
+        }
+        confirmedBytesSeen = seen
+        lastProgressAt = stamps
     }
 
     /// Where a queued capture's first original actually is, so a row can show it without the view
@@ -293,6 +325,16 @@ public final class Outbox {
         guard let snapshot = await repository.job(jobID) else { return false }
         var candidate = snapshot.released(at: Date())
         if draft != self.draft(of: snapshot) {
+            let known = Set(snapshot.files.map(\.id))
+            for picture in draft.pictures where !known.contains(picture.id) {
+                // A picture picked while the capture was in the editor is not in the job's media
+                // directory yet, and a manifest naming a file whose bytes are not there is the one
+                // state a relaunch cannot recover from. So it is copied BEFORE anything is written
+                // down, and a copy that fails refuses the re-submit rather than recording a
+                // picture nothing holds.
+                guard let staged = stage(picture, into: snapshot) else { return false }
+                candidate.files.append(staged)
+            }
             candidate.pendingEdit = PendingEdit(
                 content: draft.content,
                 visibility: draft.visibility,
@@ -307,6 +349,36 @@ public final class Outbox {
         guard (written ?? nil) != nil else { return false }
         await drainAfterAdoption()
         return true
+    }
+
+    /// Copies a newly picked picture into the job's own media directory, as a file the create
+    /// deliberately does not name: the create is replayed exactly as it was first sent, and this
+    /// picture reaches the memo through the edit instead.
+    ///
+    /// It keeps the id the editor gave it, because that id is what the pending edit's ordered
+    /// picture list names it by.
+    private func stage(_ picture: RestoredDraft.Picture, into job: UploadJob) -> OutboxFile? {
+        let suffix = picture.url.pathExtension
+        let storedName =
+            suffix.isEmpty ? picture.id.uuidString : "\(picture.id.uuidString).\(suffix)"
+        var file = OutboxFile(
+            id: picture.id,
+            relativePath: storedName,
+            filename: picture.filename,
+            mime: picture.mime,
+            byteSize: 0,
+            stagedForEdit: true
+        )
+        let destination = repository.mediaURL(job: job, file: file)
+        do {
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.copyItem(at: picture.url, to: destination)
+            let values = try destination.resourceValues(forKeys: [.fileSizeKey])
+            file.byteSize = Int64(values.fileSize ?? 0)
+            return file
+        } catch {
+            return nil
+        }
     }
 
     private func draft(of job: UploadJob) -> RestoredDraft {

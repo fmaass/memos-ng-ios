@@ -171,7 +171,10 @@ struct ContractTests {
 
         // The other direction, which key existence alone cannot see: a field the server newly
         // requires and the outbox never sends fails here rather than on every restored draft.
-        let mandatory = try requiredKeys("MemoPatch")
+        // Read leniently, unlike the create's: `MemoPatch` declares no `required` at all today —
+        // every field is optional, which is what makes a partial edit legal — and the day one
+        // appears this is what fails.
+        let mandatory = Set(try schema("MemoPatch")["required"] as? [String] ?? [])
         #expect(
             mandatory.isSubset(of: sent),
             "required but never sent: \(mandatory.subtracting(sent))")
