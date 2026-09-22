@@ -102,8 +102,8 @@ private func enqueue(_ world: AttemptWorld, bytes: Int = 1000) async throws -> U
     )
 }
 
-/// The state R2-2 is about: one chunk confirmed, a second chunk with the background session at the
-/// confirmed offset, and the queue told that task survived.
+/// One chunk confirmed, a second chunk with the background session at the confirmed offset, and the
+/// queue told that task survived — the state a stalled-but-alive upload is in.
 @MainActor
 private struct Stalled {
     let world: AttemptWorld
