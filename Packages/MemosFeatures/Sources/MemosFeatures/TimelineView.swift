@@ -139,7 +139,7 @@ public struct TimelineView: View {
                     composed: feedback.count,
                     openSettings: { path.append(SettingsRoute()) },
                     search: { openSearch() },
-                    newMemo: { composing = .create }
+                    newMemo: { composing = .create(restoring: nil) }
                 )
             }
             // Attached HERE, inside the stack, and not out on the chain that carries the compose
@@ -443,11 +443,35 @@ public struct TimelineView: View {
             }
             if let outbox, !outbox.jobs.isEmpty {
                 Section {
-                    ForEach(PendingMemoPresentation.rows(for: outbox.jobs)) { row in
+                    ForEach(
+                        PendingMemoPresentation.rows(
+                            for: outbox.jobs,
+                            now: .now,
+                            lastProgressAt: outbox.lastProgressAt,
+                            // Read off the queue rather than off a network monitor of this
+                            // screen's own: a capture the drain refused for the network it is on
+                            // is put down with that reason, so if any capture here is carrying it
+                            // then this network is one the policy refuses. A screen that asked
+                            // the path itself would be a second answer to a question the drain
+                            // has already answered, and the two would disagree.
+                            uploadsPermitted: !outbox.jobs.contains {
+                                $0.waitReason == .homeNetwork
+                            }
+                        )
+                    ) { row in
                         PendingCard(
                             row: row,
                             retry: { Task { await outbox.retry(row.id) } },
-                            remove: { Task { await outbox.discard(row.id) } }
+                            remove: { Task { await outbox.discard(row.id) } },
+                            cancel: {
+                                Task {
+                                    // The queue hands the draft back or it does not; a cancel
+                                    // that found nothing to stop opens no sheet.
+                                    if let draft = await outbox.cancel(row.id) {
+                                        composing = .create(restoring: ComposeRestore(draft))
+                                    }
+                                }
+                            }
                         )
                         .cardRow()
                     }

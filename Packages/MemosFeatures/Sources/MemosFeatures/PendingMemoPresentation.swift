@@ -1,15 +1,18 @@
 import Foundation
 import MemosOutbox
 
-/// The one thing a stopped row lets a person do about it.
-public enum PendingAction: Sendable, Equatable {
-    /// The queue is still working on this capture: there is nothing to press.
-    case none
-    /// A hold a person can clear — "Try again".
+/// One thing a row lets a person do about a capture. A row offers a list of them, in the order
+/// they are drawn; the empty list is the row that asks for nothing.
+public enum PendingAction: Sendable, Hashable {
+    /// A hold a person can clear, and the way back into the editor for a capture they stopped —
+    /// "Try again".
     case retry
     /// A capture nothing can move on: its manifest could not be read, so it can never be sent and
     /// no hold can be cleared. What is left is throwing it away deliberately, files and all.
     case remove
+    /// Stop a capture on its way and have its words and its files back in the editor. Offered
+    /// while it is still moving, because that is exactly when a person wants it.
+    case cancel
 }
 
 /// One queued capture, as a row.
@@ -18,25 +21,30 @@ public struct PendingRow: Sendable, Equatable, Identifiable {
     public var snippet: String
     public var status: String
     public var attachmentCount: Int
-    /// What the row offers, decided here rather than by the view drawing it.
-    public var action: PendingAction
+    /// What the row offers, in the order it is drawn, decided here rather than by the view.
+    public var actions: [PendingAction]
 
     /// True when the job is stopped and only a person can move it — the row says so and offers the
     /// one thing that would help.
-    public var needsAttention: Bool { action != .none }
+    ///
+    /// Not derived from `actions`: a capture doing its job offers Cancel and is not in trouble,
+    /// and a row painted orange for that would make the colour mean nothing on the rows that are.
+    public var needsAttention: Bool
 
     public init(
         id: UUID,
         snippet: String,
         status: String,
         attachmentCount: Int,
-        action: PendingAction
+        actions: [PendingAction],
+        needsAttention: Bool
     ) {
         self.id = id
         self.snippet = snippet
         self.status = status
         self.attachmentCount = attachmentCount
-        self.action = action
+        self.actions = actions
+        self.needsAttention = needsAttention
     }
 }
 
@@ -46,38 +54,73 @@ public struct PendingRow: Sendable, Equatable, Identifiable {
 /// each one is asserted rather than eyeballed on a device that happens to have wifi.
 public enum PendingMemoPresentation {
     /// Newest capture first, above the server's own memos — the same order the timeline reads in.
-    public static func rows(for jobs: [UploadJob]) -> [PendingRow] {
+    ///
+    /// `now` and the two facts beside it are handed in rather than read here: whether a capture's
+    /// bytes have stopped moving is a comparison against a clock, and a comparison a screen makes
+    /// against its own clock is one nothing can assert.
+    public static func rows(
+        for jobs: [UploadJob],
+        now: Date = Date(),
+        lastProgressAt: [UUID: Date] = [:],
+        uploadsPermitted: Bool = true
+    ) -> [PendingRow] {
         jobs
             .sorted { $0.capturedAt > $1.capturedAt }
             .map { job in
                 PendingRow(
                     id: job.id,
                     snippet: snippet(job.content),
-                    status: status(for: job),
+                    status: status(
+                        for: job,
+                        now: now,
+                        lastProgressAt: lastProgressAt,
+                        uploadsPermitted: uploadsPermitted
+                    ),
                     attachmentCount: job.files.count,
-                    action: action(for: job)
+                    actions: action(for: job),
+                    needsAttention: job.state == .held || job.cancelledAt != nil
                 )
             }
     }
 
-    /// What a row lets a person do, which is never more than one thing.
+    /// What a row lets a person do.
     ///
     /// A capture whose manifest could not be read is the exception every other state is measured
     /// against: "Try again" would clear a hold nothing is holding, so the row would offer a button
     /// that does nothing and sit in the pending list for ever. What it offers instead is the only
     /// move left — throwing the capture away on purpose, which is a person's decision to make and
     /// nothing else's.
-    public static func action(for job: UploadJob) -> PendingAction {
-        guard job.state == .held else { return .none }
-        switch job.holdReason {
-        case .unreadableManifest:
-            return .remove
-        case .accountMismatch, .serverRefused, .storageFailed, .none:
-            return .retry
+    ///
+    /// A capture still on its way offers Cancel beside Try again, because a person who no longer
+    /// wants it sent should not have to wait for it to finish first. A capture already being
+    /// written into a memo offers nothing: its bytes are at the server and nothing here can take
+    /// them back, so a control there would be a promise this screen cannot keep.
+    public static func action(for job: UploadJob) -> [PendingAction] {
+        if job.cancelledAt != nil { return [.retry, .remove] }
+        switch job.state {
+        case .held:
+            switch job.holdReason {
+            case .unreadableManifest:
+                return [.remove]
+            case .accountMismatch, .serverRefused, .storageFailed, .none:
+                return [.retry]
+            }
+        case .uploading, .waiting:
+            return [.cancel, .retry]
+        case .creating:
+            return []
         }
     }
 
-    public static func status(for job: UploadJob) -> String {
+    public static func status(
+        for job: UploadJob,
+        now: Date = Date(),
+        lastProgressAt: [UUID: Date] = [:],
+        uploadsPermitted: Bool = true
+    ) -> String {
+        // Said before the state, because a cancelled capture keeps whatever state it was stopped
+        // in: what a person needs to read is that it is theirs again, not where it got to.
+        if job.cancelledAt != nil { return Self.cancelledAndKept }
         switch job.state {
         case .held:
             switch job.holdReason {
@@ -93,6 +136,13 @@ public enum PendingMemoPresentation {
         case .creating:
             return "Finishing up"
         case .uploading:
+            // The network the phone is on explains the silence completely, so the row says that
+            // and not that something unknown has gone quiet.
+            if !uploadsPermitted { return Self.waitingForHomeNetwork }
+            if let last = lastProgressAt[job.id], now.timeIntervalSince(last) >= Self.stallInterval
+            {
+                return Self.noProgressConfirmed
+            }
             return "Uploading \(percent(job))%"
         case .waiting:
             // The reason comes before the attempt count on purpose. A capture refused by the
@@ -104,6 +154,24 @@ public enum PendingMemoPresentation {
             return "Waiting for home wifi"
         }
     }
+
+    /// How long a capture's confirmed bytes may stand still before the row stops showing a
+    /// percentage nothing is adding to.
+    ///
+    /// A product number rather than a derived one. One chunk is megabytes and can legitimately
+    /// take longer than a single request is given, so a shorter interval would call a working
+    /// upload stalled; longer, and the row goes on counting at a person who can see it is stuck.
+    public static let stallInterval: TimeInterval = 90
+
+    /// What a capture whose bytes stopped moving says. It states what is known — nothing has been
+    /// confirmed for a while — and nothing else: no attempt has failed, and a row that said so
+    /// would be inventing an outcome the queue has not had.
+    static let noProgressConfirmed = "No progress confirmed for \(Int(stallInterval)) s"
+
+    /// What a capture a person stopped says for as long as they leave it alone. The words and the
+    /// files are on this device and nowhere else, which is the part they need to know before they
+    /// decide between sending it again and throwing it away.
+    static let cancelledAndKept = "Cancelled — kept on this device"
 
     /// What a capture held for the wrong network says, which is also where the person is told
     /// what would send it now. A row that only said "waiting" would be true and useless.

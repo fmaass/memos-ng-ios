@@ -110,7 +110,7 @@ struct PendingMemoPresentationTests {
         // "Try again" would clear a hold that is not the queue's to clear, so the row does not
         // offer it — what it offers is the one move left on a capture nothing else can move.
         let row = PendingMemoPresentation.rows(for: [defective])[0]
-        #expect(row.action == .remove)
+        #expect(row.actions == [.remove])
         #expect(row.needsAttention, "a row only a person can end still asks for that person")
 
         let unwritable = job(
@@ -122,7 +122,7 @@ struct PendingMemoPresentationTests {
                 == "This capture could not be saved on this device: no space left"
         )
         #expect(PendingMemoPresentation.rows(for: [unwritable])[0].needsAttention)
-        #expect(PendingMemoPresentation.rows(for: [unwritable])[0].action == .retry)
+        #expect(PendingMemoPresentation.rows(for: [unwritable])[0].actions == [.retry])
     }
 
     @Test("every hold offers exactly one thing, and only the unreadable one offers Remove")
@@ -133,19 +133,21 @@ struct PendingMemoPresentationTests {
             let held = job(state: .held, holdReason: reason)
             switch reason {
             case .unreadableManifest:
-                #expect(PendingMemoPresentation.action(for: held) == .remove)
-                #expect(PendingMemoPresentation.rows(for: [held])[0].action == .remove)
+                #expect(PendingMemoPresentation.action(for: held) == [.remove])
+                #expect(PendingMemoPresentation.rows(for: [held])[0].actions == [.remove])
             case .accountMismatch, .serverRefused, .storageFailed:
-                #expect(PendingMemoPresentation.action(for: held) == .retry)
-                #expect(PendingMemoPresentation.rows(for: [held])[0].action == .retry)
+                #expect(PendingMemoPresentation.action(for: held) == [.retry])
+                #expect(PendingMemoPresentation.rows(for: [held])[0].actions == [.retry])
             }
         }
         // A hold with no reason recorded is still a hold a person may clear.
-        #expect(PendingMemoPresentation.action(for: job(state: .held)) == .retry)
-        // Nothing that is still moving asks anything of anybody.
+        #expect(PendingMemoPresentation.action(for: job(state: .held)) == [.retry])
+        // Nothing that is still moving asks anything of anybody, whatever it offers.
         for state in [JobState.waiting, .uploading, .creating] {
             let moving = job(state: state)
-            #expect(PendingMemoPresentation.action(for: moving) == .none)
+            #expect(
+                PendingMemoPresentation.action(for: moving)
+                    == (state == .creating ? [] : [.cancel, .retry]))
             #expect(!PendingMemoPresentation.rows(for: [moving])[0].needsAttention)
         }
     }
@@ -182,6 +184,129 @@ struct PendingMemoPresentationTests {
         #expect(row.snippet.isEmpty)
         #expect(row.attachmentCount == 1)
     }
+
+    /// An upload in flight is something a person may stop, and stopping it is not an emergency.
+    ///
+    /// Cancel sits beside Try again on every capture the queue is still working on, and the row
+    /// stays calm while it does: a control being offered is not the same as a row asking to be
+    /// dealt with, and painting every uploading capture orange would teach people that the colour
+    /// means nothing.
+    @Test("a capture still moving offers Cancel and Try again without asking for attention")
+    func anUploadingRowOffersCancelAndRetry() {
+        #expect(PendingMemoPresentation.action(for: job(state: .uploading)) == [.cancel, .retry])
+        #expect(PendingMemoPresentation.action(for: job(state: .waiting)) == [.cancel, .retry])
+        #expect(
+            PendingMemoPresentation.action(
+                for: job(state: .held, holdReason: .unreadableManifest)) == [.remove])
+        // Nothing to press on a capture whose bytes are already at the server: what is left is the
+        // memo being written, and cancelling that is not something this screen can promise.
+        #expect(PendingMemoPresentation.action(for: job(state: .creating)) == [])
+
+        let row = PendingMemoPresentation.rows(for: [job(state: .uploading)])[0]
+        #expect(row.actions == [.cancel, .retry])
+        #expect(!row.needsAttention, "an upload doing its job is not a row asking for a person")
+    }
+
+    /// The frozen percentage, named. A capture whose bytes stopped moving is the one thing the
+    /// pending section used to lie about — it went on counting a percentage nothing was adding
+    /// to — and the sentence that replaces it says what is known and no more: nothing has been
+    /// confirmed for a while. It is not a failure, and it must never read as one.
+    @Test("an upload whose bytes stopped moving says so, and blames the network when that is why")
+    func aStalledUploadSaysWhatIsKnown() {
+        let stalled = job(files: [file(size: 1000, confirmed: 250)], state: .uploading)
+        let progress = [stalled.id: capture]
+
+        let permitted = PendingMemoPresentation.rows(
+            for: [stalled], now: capture.addingTimeInterval(91),
+            lastProgressAt: progress, uploadsPermitted: true)[0]
+        #expect(permitted.status == "No progress confirmed for 90 s")
+        #expect(
+            !permitted.status.localizedCaseInsensitiveContains("failed"),
+            "nothing here knows that anything failed")
+
+        // The same capture, on a network it may not use: the reason is known, so the row says the
+        // reason rather than announcing a silence the network fully explains.
+        let refused = PendingMemoPresentation.rows(
+            for: [stalled], now: capture.addingTimeInterval(91),
+            lastProgressAt: progress, uploadsPermitted: false)[0]
+        #expect(
+            refused.status
+                == "Waiting for your home network — turn on Upload over mobile data in Settings"
+                + " to send it now")
+
+        // Under the interval the percentage still stands: a slow chunk is not a stalled one.
+        let early = PendingMemoPresentation.rows(
+            for: [stalled], now: capture.addingTimeInterval(89),
+            lastProgressAt: progress, uploadsPermitted: true)[0]
+        #expect(early.status == "Uploading 25%")
+    }
+
+    /// What cancel hands back, and what the editor does with it. The words have to come back
+    /// exactly as they were written, and the pictures have to be the very same files — a restored
+    /// draft that re-encoded anything would quietly replace the archive master with a copy of it.
+    @Test("a cancelled capture opens the editor on its own words and its own files")
+    func theRestoredDraftReachesTheEditor() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "restored-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let first = Data((0..<4096).map { UInt8($0 % 251) })
+        let second = Data((0..<8192).map { UInt8(($0 &* 7) % 253) })
+        let firstURL = directory.appending(path: "a.heic")
+        let secondURL = directory.appending(path: "b.mov")
+        try first.write(to: firstURL)
+        try second.write(to: secondURL)
+
+        let firstID = UUID()
+        let secondID = UUID()
+        let draft = RestoredDraft(
+            jobID: UUID(),
+            content: "on the beach\nwith the dog",
+            visibility: "PRIVATE",
+            capturedAt: capture,
+            pictures: [
+                RestoredDraft.Picture(
+                    id: firstID, url: firstURL, filename: "IMG_1.HEIC", mime: "image/heic"),
+                RestoredDraft.Picture(
+                    id: secondID, url: secondURL, filename: "IMG_2.MOV", mime: "video/quicktime"),
+            ])
+
+        guard case .create(let carried) = ComposeView.Mode.create(restoring: ComposeRestore(draft))
+        else {
+            Issue.record("a cancelled capture reopens as a create, not as anything else")
+            return
+        }
+        let restored = try #require(carried, "the create carries the draft it was restored from")
+        #expect(restored.content == "on the beach\nwith the dog")
+        #expect(restored.visibility == .private)
+        #expect(restored.capturedAt == capture)
+        // The ids are the outbox's own file ids, carried through unchanged: that is what lets a
+        // re-submit say which pictures the memo keeps, and in what order.
+        #expect(restored.pictures.map(\.id) == [firstID, secondID])
+        #expect(restored.pictures.map(\.filename) == ["IMG_1.HEIC", "IMG_2.MOV"])
+        #expect(restored.pictures.map(\.mime) == ["image/heic", "video/quicktime"])
+
+        for (picture, source) in zip(restored.pictures, [first, second]) {
+            let carriedBytes = try Data(contentsOf: picture.url)
+            #expect(
+                SHA256.hash(data: carriedBytes) == SHA256.hash(data: source),
+                "the editor was handed a different file than the queue was holding")
+        }
+    }
+
+    /// A cancelled capture nobody finished with. The bytes are on this device and nothing else
+    /// has them, so the row keeps saying so until a person either sends it or throws it away.
+    @Test("a cancelled capture left alone is kept, says so, and offers both ways out")
+    func aCancelledCaptureIsKept() {
+        var cancelled = job(state: .waiting)
+        cancelled.cancelledAt = capture
+        let row = PendingMemoPresentation.rows(for: [cancelled])[0]
+        #expect(row.status == "Cancelled — kept on this device")
+        #expect(row.actions == [.retry, .remove])
+        #expect(row.needsAttention, "a capture waiting on a person says so")
+    }
+
 }
 
 @Suite("The picker boundary")

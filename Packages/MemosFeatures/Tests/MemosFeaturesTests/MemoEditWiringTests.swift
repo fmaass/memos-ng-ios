@@ -498,7 +498,8 @@ struct MemoDeleteWiringTests {
         )
 
         // A NEW memo has nothing to delete, and says nothing about deleting.
-        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in .saved })
+        let creating = ScreenProbe.labels(
+            of: ComposeView(mode: .create(restoring: nil)) { _ in .saved })
         // Cancel rather than Post as the control: Post is disabled on an empty capture, and a
         // control that may be missing for its own reasons controls nothing.
         #expect(
@@ -538,7 +539,7 @@ struct MemoDeleteWiringTests {
 
         // A NEW memo has nothing to delete, on this screen as on the other one.
         let newMemo = TimelineView.editSheet(
-            mode: .create, isAsking: false, failure: nil, send: { _ in }
+            mode: .create(restoring: nil), isAsking: false, failure: nil, send: { _ in }
         ) { _ in .saved }
         let creating = ScreenProbe.labels(of: newMemo)
         #expect(

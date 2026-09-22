@@ -378,6 +378,7 @@ struct PendingCard: View {
     let row: PendingRow
     let retry: () -> Void
     let remove: () -> Void
+    let cancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
@@ -398,20 +399,33 @@ struct PendingCard: View {
             if !row.snippet.isEmpty {
                 Text(row.snippet).font(.body)
             }
-            switch row.action {
-            case .retry:
-                Button("Try again", action: retry)
-                    .font(.footnote)
-                    .buttonStyle(.bordered)
-                    .tint(DesignTokens.accent)
-            case .remove:
-                // The only move left on a capture the queue cannot read, and the one destructive
-                // button in the timeline: a person presses it, nothing here ever decides it.
-                Button("Remove", role: .destructive, action: remove)
-                    .font(.footnote)
-                    .buttonStyle(.bordered)
-            case .none:
-                EmptyView()
+            if !row.actions.isEmpty {
+                HStack(spacing: DesignTokens.Space.tight) {
+                    // Drawn in the order the row offers them, which is the order the presentation
+                    // decided: what a person is most likely to want comes first, and a view that
+                    // sorted them again would be the second place that decision lives.
+                    ForEach(row.actions, id: \.self) { action in
+                        switch action {
+                        case .retry:
+                            Button("Try again", action: retry)
+                                .font(.footnote)
+                                .buttonStyle(.bordered)
+                                .tint(DesignTokens.accent)
+                        case .remove:
+                            // The one destructive button in the timeline: a person presses it,
+                            // nothing here ever decides it.
+                            Button("Remove", role: .destructive, action: remove)
+                                .font(.footnote)
+                                .buttonStyle(.bordered)
+                        case .cancel:
+                            // Pressing it is not the guard against two cancels landing at once —
+                            // the queue settles that where the job's state is owned.
+                            Button("Cancel", action: cancel)
+                                .font(.footnote)
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                }
             }
         }
         .padding(DesignTokens.Space.roomy)
