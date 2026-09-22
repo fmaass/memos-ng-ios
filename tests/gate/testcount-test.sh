@@ -470,6 +470,18 @@ if [ -s "$step" ] && grep -q 'GATE_TEST_BUNDLES' "$step"; then
   else
     bad "the candidate is not written above the comparison call (write ${candidate_write:-none}, call ${verdict_call:-none}) — a refused run would hand back nothing to re-record from"
   fi
+  # The shell's comparison is not the only thing that judges these counts. The counter's own loop
+  # fails a bundle that executed nothing, and a candidate written after THAT is missing from the
+  # run that most needs it — while the check above stays green, because the write would still
+  # precede the verdict call further down. So the write is held above the counter's first judgment
+  # too, the line `if n < 1:`. Located with awk rather than `grep -n | head`, which would close the
+  # pipe under its own producer.
+  python_judgment="$(awk '/if n < 1:/ { print NR; exit }' "$step")"
+  if [ -n "$candidate_write" ] && [ -n "$python_judgment" ] && [ "$candidate_write" -lt "$python_judgment" ]; then
+    ok "the candidate counts are written before the counter judges them either"
+  else
+    bad "the candidate is not written above the counter's own judgment (write ${candidate_write:-none}, \`if n < 1:\` ${python_judgment:-none}) — a bundle that executed nothing would leave no candidate"
+  fi
 else
   bad "no s_testcount function could be read out of $GATE — the two checks it carries proved nothing"
 fi
