@@ -2083,12 +2083,14 @@ for root in data.get("testNodes", []) or []:
     walk(root, None, ran, idle)
 print("test counts per bundle: " + (", ".join(f"{k}={v}" for k, v in sorted(ran.items())) or "(none)"))
 print("skipped or not run: " + (", ".join(f"{k}={v}" for k, v in sorted(idle.items())) or "(none)"))
-# Written as soon as the counts are read and before any of them is judged, so a run they or the
-# comparison FAIL still hands back the file a deliberate reduction is re-recorded from — the shape
-# the pins step's Package.resolved copy already has. A run that never got counts at all returned
-# above this line and leaves no candidate behind at all. One row per bundle the gate wanted, in
-# that order, because the comparison is per bundle and the baseline is required to name exactly
-# this set.
+# Every run that OBTAINED the counts writes them here before any of them is judged — before the
+# loop below and before the shell's comparison — so a run that either one FAILS still hands back
+# the file a deliberate reduction is re-recorded from, the shape the pins step's Package.resolved
+# copy already has. A run that never obtained counts leaves no candidate and exits non-zero: no
+# result bundle returns 1 at the `-d "$XCRESULT"` test, a failing `xcresulttool` returns 1 on its
+# own line, and JSON this cannot parse or walk raises here, which exits this block non-zero and is
+# handed back as the step's `count_rc`. One row per bundle the gate wanted, in that order, because
+# the comparison is per bundle and the baseline is required to name exactly this set.
 with open(".gate-artifacts/testcount-baseline.tsv", "w") as candidate:
     for bundle in wanted:
         candidate.write("%s\t%d\n" % (bundle, ran.get(bundle, 0)))

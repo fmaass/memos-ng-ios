@@ -55,12 +55,12 @@ baseline that is absent, unreadable or malformed fails too — a count nobody re
 What the comparison catches is the loss of a test that RAN: it does not catch the deletion of a
 test that was skipped, nor a reduction that stays inside headroom accumulated since the baseline
 was last recorded — and because the baseline is re-recorded from a branch's final tree before it
-merges, headroom at a merge is zero. A run that read the counts writes them to
-`.gate-artifacts/testcount-baseline.tsv` before it judges them, so a deliberate reduction is
+merges, headroom at a merge is zero. Every run that obtained the counts writes them to
+`.gate-artifacts/testcount-baseline.tsv` before any of them is judged, so a deliberate reduction is
 recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
-never by hand; a run that could not read them at all — no result bundle, a failing `xcresulttool`,
-JSON it cannot walk — leaves no candidate and fails the step, and a step that an earlier failing
-step skipped leaves nothing behind either.
+never by hand; a run that never obtained counts — no result bundle, a failing `xcresulttool`, JSON
+it cannot parse or walk — exits non-zero and leaves no candidate, and a step that an earlier
+failing step skipped leaves nothing behind either.
 Changing that tracked file is a reviewed act that an audit of the change has to see and justify — a
 reduction is named in the change that makes it, with the tests it retired — and no mechanism in the
 gate accepts or rejects a baseline change on its own. It ends with one summary line of every step's exit code and
