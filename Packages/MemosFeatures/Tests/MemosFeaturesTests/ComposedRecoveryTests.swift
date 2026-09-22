@@ -28,10 +28,20 @@ private enum Wire {
 final class ScriptedWireTransport: ClientTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var operations: [String] = []
+    private var refused: Set<String> = []
 
     var whoamis: Int { lock.withLock { operations.count(where: { $0 == Wire.whoami }) } }
     var pages: Int { lock.withLock { operations.count(where: { $0 == Wire.listMemos }) } }
     var seen: [String] { lock.withLock { operations } }
+
+    /// Makes this operation answer 500 from now on.
+    ///
+    /// A status the contract does not document, on purpose: it reaches the store as a plain
+    /// failure. A 401 would be a credential's refusal and would run the session-ending lane, which
+    /// is a different subject entirely.
+    func refuse(_ operationID: String) {
+        lock.withLock { _ = refused.insert(operationID) }
+    }
 
     func send(
         _ request: HTTPRequest,
@@ -40,6 +50,9 @@ final class ScriptedWireTransport: ClientTransport, @unchecked Sendable {
         operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
         lock.withLock { operations.append(operationID) }
+        if lock.withLock({ refused.contains(operationID) }) {
+            return (HTTPResponse(status: .internalServerError), nil)
+        }
         var response = HTTPResponse(status: .ok)
         response.headerFields[.contentType] = "application/json"
         let payload: String

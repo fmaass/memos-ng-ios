@@ -521,7 +521,7 @@ struct MemoDeleteWiringTests {
             for: MemoFixture.memo(uid: "m1", content: "the boiler man", createdAt: created)
         )
         let sheet = TimelineView.editSheet(
-            mode: mode, isAsking: false, send: { _ in }
+            mode: mode, isAsking: false, failure: nil, send: { _ in }
         ) { _ in .saved }
         let editing = ScreenProbe.labels(of: sheet)
 
@@ -538,7 +538,7 @@ struct MemoDeleteWiringTests {
 
         // A NEW memo has nothing to delete, on this screen as on the other one.
         let newMemo = TimelineView.editSheet(
-            mode: .create, isAsking: false, send: { _ in }
+            mode: .create, isAsking: false, failure: nil, send: { _ in }
         ) { _ in .saved }
         let creating = ScreenProbe.labels(of: newMemo)
         #expect(
