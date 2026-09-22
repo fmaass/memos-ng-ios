@@ -698,6 +698,68 @@ struct MediaZoomTests {
         #expect(abs(out.offset.height - 150) < 0.001)
     }
 
+    /// Between the two thresholds. Past 844/520 the upright picture does overflow vertically, so
+    /// the limit is no longer zero — but at 1.7 it is 20 against an anchored share of 35, and the
+    /// point under the fingers still slides down the screen by the difference. Letting go of the
+    /// anchor only where the limit is exactly zero would leave that half-answer in place.
+    @Test("an upright picture with too little vertical room still keeps its point")
+    func firstPinchWhereTheVerticalRoomIsShortOfTheAnchor() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let room = MediaZoom.panLimit(scale: 1.7, fitted: fitted, viewport: viewport)
+        #expect(abs(room.height - 20) < 0.001, "the fixture proves nothing if the room is zero")
+
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 1.7, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 1.7) < 0.001)
+        #expect(abs(out.offset.width + 70) < 0.001)
+        #expect(abs(out.offset.height - 35) < 0.001)
+    }
+
+    /// The same shortfall on the wide shape, where it opens later and closes slower: at 3 the
+    /// vertical room is 16.75 against an anchored share of 100. Two shapes again, because what is
+    /// asserted is a property of the live transform and not of an aspect ratio.
+    @Test("a wide picture with too little vertical room still keeps its point")
+    func firstPinchOnAWidePictureWhereTheVerticalRoomIsShortOfTheAnchor() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 4.0 / 3.0, in: viewport)
+        let room = MediaZoom.panLimit(scale: 3, fitted: fitted, viewport: viewport)
+        #expect(abs(room.height - 16.75) < 0.001, "the fixture proves nothing if the room is zero")
+
+        let out = MediaZoom.live(
+            .identity,
+            pinch: MediaZoom.Pinch(magnification: 3, anchor: anchor(x: 100, y: -50)),
+            pannedBy: .zero,
+            fitted: fitted,
+            viewport: viewport
+        )
+        #expect(abs(out.scale - 3) < 0.001)
+        #expect(abs(out.offset.width + 200) < 0.001)
+        #expect(abs(out.offset.height - 100) < 0.001)
+    }
+
+    /// The other side of that: a drag with no pinch under it has no point to keep still, so it
+    /// still stops at the edge. Carried 500 points sideways at twice its fitted width the picture
+    /// would be drawn as a sliver against the far edge while the finger is down.
+    @Test("a drag with no pinch under it still stops at the edge")
+    func dragWithNoPinchStopsAtTheEdge() {
+        let fitted = MediaZoom.fittedSize(aspectRatio: 0.75, in: viewport)
+        let out = MediaZoom.live(
+            MediaZoom.Transform(scale: 2, offset: .zero),
+            pinch: nil,
+            pannedBy: CGSize(width: 500, height: 0),
+            fitted: fitted,
+            viewport: viewport
+        )
+        let limit = MediaZoom.panLimit(scale: 2, fitted: fitted, viewport: viewport)
+        #expect(abs(limit.width - 195) < 0.001)
+        #expect(abs(out.offset.width - 195) < 0.001)
+        #expect(abs(out.offset.height) < 0.001)
+    }
+
     /// The pinch and the drag are separate recognisers and nothing says which of them ends first.
     /// Either order has to leave the picture exactly where the fingers had it, and both orders
     /// have to end on the same committed transform — all of it inside the limits here, so a clamp
