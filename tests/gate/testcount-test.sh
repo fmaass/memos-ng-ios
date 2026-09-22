@@ -305,10 +305,12 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   fi
 
   # Each bundle is judged on its own row and nothing else. Here the two bundles sum to the same
-  # total as their baselines, and one of them has still lost a case: a condition on the total —
-  # or on the average, which over the same two bundles is that total — passes this and would have
-  # hidden the loss. That no other aggregate may decide it either is the rule, not something this
-  # fixture shows: a count of bundles at or above their row is 1 of 2 here, and rejects it.
+  # total as their baselines, and one of them has still lost a case: a condition on the total
+  # passes this and would have hidden the loss. So does one on the average — not because the two
+  # are the same number (the total is 20 and the average 10), but because over a fixed pair of
+  # bundles the average moves only as the total does, so on this fixture the two give the same
+  # verdict. That no other aggregate may decide it either is the rule, not something this fixture
+  # shows: a count of bundles at or above their row is 1 of 2 here, and rejects it.
   write_pair_fixture "$tmp/mixed-direction.json" MemosCoreTests 9 MemosAPITests 11
   run_step "$tmp/mixed-direction.json" "MemosCoreTests MemosAPITests" \
     "$(baseline mixed-direction MemosCoreTests 10 MemosAPITests 10)"
