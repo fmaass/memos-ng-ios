@@ -141,9 +141,9 @@ public enum MediaZoom {
     /// whatever drag are still in flight folded into it.
     ///
     /// One function rather than two handlers composing by accident. The pinch goes first and the
-    /// drag's translation is added after it in screen points, and a drag with nothing pinching
-    /// under it is clamped at the end against the scale actually being drawn — so a drag moves the
-    /// picture by the distance the finger travelled however far the pinch has taken the scale.
+    /// drag's translation is added after it in screen points — the distance the finger travelled,
+    /// whatever the pinch has done to the scale, rather than a distance multiplied by it — and a
+    /// drag with nothing pinching under it is then held to the limits of the scale being drawn.
     public static func live(
         _ transform: Transform,
         pinch: Pinch?,
