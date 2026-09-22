@@ -271,9 +271,9 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   fi
 
   # --- (d) the count judged against the tracked baseline ------------------------------------------
-  # Equal is the shape of a healthy run, and the only case here that expects the comparison to
-  # accept anything: without it a verdict script that refused every input would satisfy all the
-  # rest.
+  # Equal is the shape of a healthy run, and one of the two cases here that expect the comparison
+  # to accept anything at all: without them a verdict script that refused every input would
+  # satisfy all the rest.
   run_step "$tmp/mixed.json" "MemosCoreTests" "$(baseline equal MemosCoreTests 3)"
   if [ "$RC" -eq 0 ] && ! has "TESTCOUNT FAIL"; then
     ok "a bundle whose count equals its baseline row passes"
