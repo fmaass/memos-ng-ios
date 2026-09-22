@@ -141,9 +141,9 @@ public enum MediaZoom {
     /// whatever drag are still in flight folded into it.
     ///
     /// One function rather than two handlers composing by accident. The pinch goes first and the
-    /// drag's translation is added after it in screen points, with a single clamp at the end
-    /// against the scale actually being drawn — so a drag moves the picture by the distance the
-    /// finger travelled however far the pinch has taken the scale.
+    /// drag's translation is added after it in screen points, and a drag with nothing pinching
+    /// under it is clamped at the end against the scale actually being drawn — so a drag moves the
+    /// picture by the distance the finger travelled however far the pinch has taken the scale.
     public static func live(
         _ transform: Transform,
         pinch: Pinch?,
@@ -167,17 +167,22 @@ public enum MediaZoom {
                 height: anchor.height - ratio * (anchor.height - offset.height)
             )
         }
+        let proposed = CGSize(
+            width: offset.width + translation.width,
+            height: offset.height + translation.height
+        )
+        // While fingers are pinching, the point they landed on is what has to stay still, so the
+        // anchored frame is drawn wherever the arithmetic puts it. Below the scale at which the
+        // picture overflows an axis the limit on that axis is zero, and trimming to it is the
+        // picture snapping to the middle of the screen while the fingers are somewhere else — a
+        // pinch that follows them sideways and not vertically. A gesture is allowed past the
+        // limits; what it leaves BEHIND is not, and `settled` puts them back when the fingers go.
+        if pinch != nil {
+            return Transform(scale: scale, offset: proposed)
+        }
         return Transform(
             scale: scale,
-            offset: clampedOffset(
-                CGSize(
-                    width: offset.width + translation.width,
-                    height: offset.height + translation.height
-                ),
-                scale: scale,
-                fitted: fitted,
-                viewport: viewport
-            )
+            offset: clampedOffset(proposed, scale: scale, fitted: fitted, viewport: viewport)
         )
     }
 
@@ -185,10 +190,11 @@ public enum MediaZoom {
     /// because zooming back out shrinks the room a pan was allowed to use — without this, a
     /// picture pinched out after being panned stays stuck off-centre.
     ///
-    /// The same arithmetic as the live frame, asked for the moment the fingers leave, so what was
-    /// drawn under them and what is kept cannot disagree — exactly so for the transform handed in
-    /// here. A drag that committed first went through `panned`, and where that commit's clamp
-    /// bound, the frame recomputed from it moves by the difference.
+    /// The same arithmetic as the live frame, asked for the moment the fingers leave, and then
+    /// held to the limits that frame was allowed past while it was under them: an offset outside
+    /// the limits of the scale it is stored with is not something the callers that read a
+    /// committed transform can be handed. A drag that committed first went through `panned`, and
+    /// where either clamp bound, the frame recomputed from it moves by the difference.
     public static func settled(
         _ transform: Transform,
         magnifiedBy magnification: Double,
@@ -196,12 +202,21 @@ public enum MediaZoom {
         fitted: CGSize,
         viewport: CGSize
     ) -> Transform {
-        live(
+        let drawn = live(
             transform,
             pinch: Pinch(magnification: magnification, anchor: anchor),
             pannedBy: .zero,
             fitted: fitted,
             viewport: viewport
+        )
+        return Transform(
+            scale: drawn.scale,
+            offset: clampedOffset(
+                drawn.offset,
+                scale: drawn.scale,
+                fitted: fitted,
+                viewport: viewport
+            )
         )
     }
 
