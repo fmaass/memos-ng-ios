@@ -374,6 +374,47 @@ if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   else
     bad "a duplicated baseline row was accepted (exit $RC)"; show
   fi
+
+  # A count too long to be one is not a number the comparison can use, and bash's own arithmetic
+  # says so by failing rather than by answering: a test that errors is neither true nor false, and
+  # an `if` reads it as false, which is the answer that passes. So the shape is refused before any
+  # comparison is attempted, on either file.
+  printf 'MemosCoreTests\t999999999999999999999999999999\n' > "$tmp/baseline-enormous.tsv"
+  run_step "$tmp/mixed.json" "MemosCoreTests" "$tmp/baseline-enormous.tsv"
+  if [ "$RC" -eq 2 ] && has "TESTCOUNT FAIL" && ! has "TESTCOUNT ok"; then
+    ok "a baseline count too long to be a number fails instead of passing on a failed comparison"
+  else
+    bad "an enormous baseline count was not refused (exit $RC)"; show
+  fi
+
+  # The same shape on the other side: a bundle named twice in the list the gate wants gives the
+  # counter's candidate two rows for it, and a comparison that read both at once would compare
+  # neither.
+  run_step "$tmp/mixed.json" "MemosCoreTests MemosCoreTests" "$(baseline dup-observed MemosCoreTests 3)"
+  if [ "$RC" -eq 2 ] && has "names MemosCoreTests twice" && ! has "TESTCOUNT ok"; then
+    ok "an observed file naming a bundle twice fails"
+  else
+    bad "a duplicated observed row was accepted (exit $RC)"; show
+  fi
+
+  # Bytes that never survive being read as rows. `read` drops a NUL without a word, so the row it
+  # hands back validates while the file it came from holds something else; and a file whose last
+  # byte is not LF was cut off mid-write, which makes its last count a number nobody finished.
+  printf 'MemosCoreTests\t3\000\n' > "$tmp/baseline-nul.tsv"
+  run_step "$tmp/mixed.json" "MemosCoreTests" "$tmp/baseline-nul.tsv"
+  if [ "$RC" -eq 2 ] && has "TESTCOUNT FAIL" && ! has "TESTCOUNT ok"; then
+    ok "a baseline holding a byte that is not printable ASCII, TAB or LF fails"
+  else
+    bad "a baseline with a NUL byte in it was accepted (exit $RC)"; show
+  fi
+
+  printf 'MemosCoreTests\t3' > "$tmp/baseline-unterminated.tsv"
+  run_step "$tmp/mixed.json" "MemosCoreTests" "$tmp/baseline-unterminated.tsv"
+  if [ "$RC" -eq 2 ] && has "TESTCOUNT FAIL" && ! has "TESTCOUNT ok"; then
+    ok "a baseline whose last row has no newline fails"
+  else
+    bad "an unterminated baseline was accepted (exit $RC)"; show
+  fi
 fi
 
 # --- verdict ----------------------------------------------------------------------------------------
