@@ -7,7 +7,7 @@ import Testing
 /// `Outbox` exposes no engine, and a delayed answer has to reach the very handler the background
 /// session would have answered — a second engine over the same repository would be answering a
 /// question nobody asked.
-final class HandlerBox: @unchecked Sendable {
+final class AttemptHandlerBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: (any OutboxChunkHandling)?
 
@@ -27,7 +27,7 @@ private struct AttemptWorld {
     let completion: ScriptedCompletion
     let network: StubNetworkPath
     let clock: MutableClock
-    let box: HandlerBox
+    let box: AttemptHandlerBox
     let outbox: Outbox
     let preferencesName: String
     let binding: AccountBinding
@@ -62,7 +62,7 @@ private func makeWorld(
         allowsMobileData: allowsMobileData,
         name: "memosng.outbox.tests.attempt.\(UUID().uuidString)"
     )
-    let box = HandlerBox()
+    let box = AttemptHandlerBox()
     let outbox = Outbox(
         repository: repository,
         credentials: provider,
@@ -387,7 +387,7 @@ private func legacyQueue(_ world: AttemptWorld, byteSize: Int = 400) throws -> L
 
 @Suite("The first launch after the update")
 @MainActor
-struct LegacyManifestTests {
+struct LegacyAttemptManifestTests {
     @Test("a build-22 manifest decodes, its three-term task is adopted, and the job completes")
     func legacyManifestSurvives() async throws {
         let world = try makeWorld()
