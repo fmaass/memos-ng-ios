@@ -1,6 +1,7 @@
 import Foundation
 import HTTPTypes
 import MemosAPI
+import MemosOutbox
 import OpenAPIRuntime
 import Testing
 
