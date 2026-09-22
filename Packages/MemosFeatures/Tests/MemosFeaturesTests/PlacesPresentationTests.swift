@@ -43,7 +43,7 @@ private func pin(uid: String, count: Int, takenAt: String) -> PlacePin {
             uids: [uid]
         ),
         leadTakenAt: ISO8601DateFormatter().date(from: takenAt)!,
-        leadThumbnailURL: nil
+        leadImageURL: nil
     )
 }
 
@@ -61,8 +61,35 @@ struct PlacesPresentationTests {
         #expect(pins[0].spec.uid == "new", "the newest photo at a coordinate leads its pin")
         #expect(pins[0].spec.count == 2)
         #expect(pins[0].leadTakenAt == ISO8601DateFormatter().date(from: "2026-03-01T00:00:00Z")!)
-        #expect(pins[0].leadThumbnailURL?.absoluteString.hasSuffix("/assets/new/thumb") == true)
+        #expect(pins[0].leadImageURL?.absoluteString.hasSuffix("/assets/new/thumb") == true)
         #expect(pins[1].spec.uid == "far")
+    }
+
+    @Test("a pin whose lead is a video wears that video's poster")
+    func videoLeadWearsItsPoster() throws {
+        var lead = placeMarker(uid: "clip")
+        lead.mime = "video/quicktime"
+        lead.posterURL = URL(string: "https://example.invalid/assets/clip/poster")
+        let pin = try #require(PlacesPresentation.pins(for: [lead]).first)
+        #expect(pin.leadImageURL == URL(string: "https://example.invalid/assets/clip/poster"))
+    }
+
+    @Test("a picture lead keeps its thumbnail, though the server signs it a poster tier too")
+    func pictureLeadKeepsItsThumbnail() throws {
+        var lead = placeMarker(uid: "shot")
+        lead.mime = "image/jpeg"
+        lead.posterURL = URL(string: "https://example.invalid/assets/shot/poster")
+        let pin = try #require(PlacesPresentation.pins(for: [lead]).first)
+        #expect(pin.leadImageURL == URL(string: "https://example.invalid/assets/shot/thumb"))
+    }
+
+    @Test("a video lead the server has no poster for falls back to the thumbnail")
+    func videoLeadWithoutAPosterFallsBackToItsThumbnail() throws {
+        var lead = placeMarker(uid: "clip")
+        lead.mime = "video/quicktime"
+        lead.posterURL = nil
+        let pin = try #require(PlacesPresentation.pins(for: [lead]).first)
+        #expect(pin.leadImageURL == URL(string: "https://example.invalid/assets/clip/thumb"))
     }
 
     @Test("the map opens on the box every pin fits in")

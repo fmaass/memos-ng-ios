@@ -174,7 +174,7 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
         for (key, pin) in wanted where !touched.contains(key) {
             guard let annotation = annotations[key] else { continue }
             annotation.adopt(pin)
-            guard pin.leadThumbnailURL != nil, sink.isAwaitingPhotograph(annotation) else {
+            guard pin.leadImageURL != nil, sink.isAwaitingPhotograph(annotation) else {
                 continue
             }
             sink.refresh(annotation)

@@ -30,7 +30,7 @@ private func placePin(
             uids: uids ?? [lead]
         ),
         leadTakenAt: ISO8601DateFormatter().date(from: takenAt)!,
-        leadThumbnailURL: thumbnail
+        leadImageURL: thumbnail
     )
 }
 
@@ -165,7 +165,7 @@ struct PlacesAnnotationTests {
         #expect(sink.added.count == 1, "the pin was rebuilt rather than handed the new URL")
         let born = try #require(sink.added.first)
         #expect(
-            born.pin.leadThumbnailURL == second,
+            born.pin.leadImageURL == second,
             "the annotation kept a signature that lapses while a live one was thrown away"
         )
     }
