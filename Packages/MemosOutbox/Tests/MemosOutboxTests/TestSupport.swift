@@ -103,6 +103,12 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         lock.withLock { issued[identity.taskDescription] }
     }
 
+    /// Forgets a chunk's generation the way the production delegate does when a task ends: keyed by
+    /// the task DESCRIPTION, which is why two transfers that share one description share one epoch.
+    func consumeEpoch(of identity: OutboxTaskIdentity) {
+        lock.withLock { issued.removeValue(forKey: identity.taskDescription) }
+    }
+
     /// What the authority answered, in order, each time this executor was reached.
     var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
 
