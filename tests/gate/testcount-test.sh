@@ -163,8 +163,10 @@ show() { printf '%s\n' "$OUT" | sed 's/^/     | /'; }
 # The cases in (a) to (c) are about the counter, and each of them is given a baseline of its own
 # whose rows are the counts that case's fixture executes, so what it asserts is still the thing it
 # was written to assert and not an incidental disagreement with a number recorded somewhere else.
-# The cases from (d) on are about the comparison, and each one's baseline disagrees with its
-# fixture in exactly the one way that case exists to pin down.
+# The cases from (d) on are about the comparison, and each one's baseline is built to pin exactly
+# one behaviour of it. Mostly that means differing from the fixture in the one way that case is
+# about; the equal case at the head of (d) is the one that agrees with its fixture, because a
+# verdict script that refused every input it was ever shown is caught by nothing else.
 if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   # --- (a) a bundle mixing every outcome ----------------------------------------------------------
   # Three cases ran (one passed, one failed, one failed as it was expected to) and two skipped.
