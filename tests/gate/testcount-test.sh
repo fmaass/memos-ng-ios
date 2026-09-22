@@ -165,8 +165,8 @@ show() { printf '%s\n' "$OUT" | sed 's/^/     | /'; }
 # was written to assert and not an incidental disagreement with a number recorded somewhere else.
 # The cases from (d) on are about the comparison, and each one's baseline is built to pin exactly
 # one behaviour of it. Mostly that means differing from the fixture in the one way that case is
-# about; the equal case at the head of (d) is the one that agrees with its fixture, because a
-# verdict script that refused every input it was ever shown is caught by nothing else.
+# about; the equal case at the head of (d) is the one that agrees with its fixture, because the
+# floor is met by equality too, and no other case in (d) asks the comparison to accept that.
 if [ "$counter_control" -eq 1 ] && [ "$verdict_control" -eq 1 ]; then
   # --- (a) a bundle mixing every outcome ----------------------------------------------------------
   # Three cases ran (one passed, one failed, one failed as it was expected to) and two skipped.
@@ -476,9 +476,10 @@ if [ -s "$step" ] && grep -q 'GATE_TEST_BUNDLES' "$step"; then
     bad "the candidate is not written above the comparison call (write ${candidate_write:-none}, call ${verdict_call:-none}) — a refused run would hand back nothing to re-record from"
   fi
   # The shell's comparison is not the only thing that judges these counts. The counter's own loop
-  # fails a bundle that executed nothing, and a candidate written after THAT is missing from the
-  # run that most needs it — while the check above stays green, because the write would still
-  # precede the verdict call further down. So the write is held above the counter's first judgment
+  # fails a bundle that executed nothing, and a candidate written after THAT is written only because
+  # the loop happens to fall through to its exit today, not because the step promised it — while
+  # the check above stays green, because the write would still precede the verdict call further
+  # down. So the write is held above the counter's first judgment
   # too, the line `if n < 1:`. Located with awk rather than `grep -n | head`, which would close the
   # pipe under its own producer.
   python_judgment="$(awk '/if n < 1:/ { print NR; exit }' "$step")"
