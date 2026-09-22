@@ -44,10 +44,11 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     public var duration: Double?
     /// When the picture was TAKEN, as the server read it from the file's own metadata.
     ///
-    /// Distinct from the memo's `createdAt`, which is when it was posted: a roll of holiday photos
-    /// uploaded in one evening all share that instant and differ only here. `nil` is the ordinary
-    /// case for anything the camera did not date — a screenshot, a drawing, a file stripped of its
-    /// metadata — so nothing may treat it as an ordering key on its own.
+    /// Distinct from the memo's `createdAt`, which is the memo's DATE — the one the compose sheet
+    /// chose or defaulted to, and which may be backdated — while this is when THIS picture was
+    /// taken: a roll of holiday photos filed under one evening's date all differ only here. `nil`
+    /// is the ordinary case for anything the camera did not date — a screenshot, a drawing, a file
+    /// stripped of its metadata — so nothing may treat it as an ordering key on its own.
     public var captureInstant: Date?
     public var thumbnailURL: URL?
     public var previewURL: URL?

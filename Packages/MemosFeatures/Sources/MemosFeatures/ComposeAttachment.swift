@@ -218,14 +218,16 @@ nonisolated enum ComposeRow {
 
     /// The memo's own pictures in the order they were TAKEN, oldest first.
     ///
-    /// The server holds them in upload order, which for a batch out of a library is the order the
-    /// picker handed them over rather than the order they happened in — and the row is the order
+    /// The server serves them by their saved position and then by id, which for a batch out of a
+    /// library starts as the order the picker handed them over rather than the order they happened
+    /// in — and a save from this sheet can now replace that order outright. The row is the order
     /// the memo will carry, so it has to be the one somebody would recognise. A picture whose file
     /// said nothing about when it was taken keeps its place at the END, in the order it arrived
     /// in: an unknown date is not a date, and putting it among the dated ones would be inventing
-    /// one. The index tie-break is the stability `sorted(by:)` does not promise — two files out of
-    /// one burst carry the same instant, and a pair that came back either way round would
-    /// reshuffle the row between two redraws of the same memo.
+    /// one. The index tie-break is not there to make `sorted(by:)` stable — it is, and has been
+    /// since Swift 5.8 (SE-0372). It stays because two files out of one burst carry the same
+    /// instant to the second, and it is what states their order HERE, in this file, instead of
+    /// leaving the row's order inherited from a guarantee made somewhere else.
     ///
     /// It is applied to this group alone, never across the row: a picked file has no instant here,
     /// and one sorted to the front would put a picture that is not on the memo yet ahead of the

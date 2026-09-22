@@ -9,11 +9,12 @@
 # removal is shown on the row, the sheet closes, and the memo still holds the picture. Nothing in
 # the app would say so, and the sheet would have lied on the one screen somebody was watching.
 #
-# It is a source-text rule and not a test because neither call site can be reached from one. Both
-# are `private func`s behind a `.sheet` that does not present under test, and both take their
-# session from a non-optional `@Environment` that only a SwiftUI body can supply — the same reason
-# the `attaching:` forwarding beside it has never had a witness either. A seam cut into production
-# code to let a test in would be a change to the screens this rule exists to hold still.
+# It is a source-text rule and not a test because neither call site can be reached from one: both
+# are `private func`s behind a `.sheet` that does not present under test, and that sheet is the
+# fence whichever way the host reads its session — the timeline's `@Environment` is non-optional
+# and only a SwiftUI body can supply it, the detail screen's is optional and guarded — the same
+# reason the `attaching:` forwarding beside it has never had a witness either. A seam cut into
+# production code to let a test in would change the screens this rule exists to hold still.
 #
 # The fence is EXACTLY ONE uncommented occurrence per host, not "at least one". Two would mean a
 # second save path had grown beside the first, which is precisely the kind of drift that leaves one

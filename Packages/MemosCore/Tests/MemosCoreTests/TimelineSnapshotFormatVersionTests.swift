@@ -39,7 +39,7 @@ struct TimelineSnapshotFormatVersionTests {
         #expect(store.read(identity: identity) == nil)
         // The control, and the point: the same file under the current number is read, so what the
         // assertion above caught is the version and not a snapshot this store cannot read at all.
-        #expect(TimelineSnapshot.currentFormatVersion != versionBeforeCaptureInstants)
+        #expect(TimelineSnapshot.currentFormatVersion == 2)
         var current = snapshot
         current.formatVersion = TimelineSnapshot.currentFormatVersion
         try JSONEncoder().encode(current).write(to: root.appending(path: identity.fileName))

@@ -52,9 +52,10 @@ struct ComposePictureListTests {
         #expect(sorted.map(\.id) == ["a2", "a1", "u1", "u2"])
     }
 
-    /// Two files out of one burst carry the same instant to the second, and `sorted(by:)` is not
-    /// a stable sort — without a tie-break the pair could come back either way round and the row
-    /// would reshuffle itself between two redraws of the same memo.
+    /// Two files out of one burst carry the same instant to the second. `sorted(by:)` is stable,
+    /// and has been since Swift 5.8 (SE-0372), so the tie-break in `byCaptureInstant` is not what
+    /// keeps the pair from swapping; it states that order in the code, and this case is what holds
+    /// the screen to it rather than to a guarantee made in a library.
     @Test("two pictures taken at the same instant keep the order they arrived in")
     func equalInstantsKeepTheirArrivalOrder() {
         let sorted = ComposeRow.byCaptureInstant([
