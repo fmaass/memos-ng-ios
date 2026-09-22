@@ -39,6 +39,10 @@ token-screen button rule (`scripts/managetokens-buttonstyle-rule.sh`: the word-b
 List row and a default-styled control in it is pressed by a tap anywhere in that row, with
 `CardButton(` at least six times outside any comment in the same file as the control and one uncommented
 `.buttonStyle(.borderless)` line in `Design/CardButton.swift` as a hint that is not a fence) → the
+picture-list forwarding rule (`scripts/picturelist-forwarding-rule.sh`: in each of `TimelineView.swift`
+and `MemoDetailView.swift` the literal `listing: submission.pictures` appears on exactly one
+uncommented line — neither save call site can be reached from a test, both being private functions
+behind a sheet that never presents — with the `attaching:` forwarding beside it as the control) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
 exclusions, with the operation count it read as the control) → a

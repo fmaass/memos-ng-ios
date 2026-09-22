@@ -54,8 +54,9 @@ struct ComposeExistingPicturesTests {
         // The control: the probe can see the row itself, so the absence below is the tile's and
         // not the probe's.
         #expect(labels.contains("1 file attached"), "the probe saw nothing of the row: \(labels)")
-        // Removal is a change to what the memo holds, which is a request this release does not
-        // send at all. An affordance that did nothing would be a lie on the screen.
+        // Taking a picture off the memo is stated by a SAVE, and this row has no save behind it:
+        // the removal callback is what an edit sheet hands down, and nothing hands one here. An
+        // affordance that did nothing would be a lie on the screen.
         #expect(
             !labels.contains {
                 $0.localizedCaseInsensitiveContains("remove")
