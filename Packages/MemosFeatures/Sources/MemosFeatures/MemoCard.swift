@@ -464,7 +464,9 @@ struct PendingCard: View {
                                 .buttonStyle(.bordered)
                                 .tint(DesignTokens.accent)
                         case .reopen:
-                            Button("Try again", action: reopen)
+                            // Its own word, because a row may offer it beside Try again, and two
+                            // buttons reading the same would leave the person guessing which sends.
+                            Button("Reopen", action: reopen)
                                 .font(.footnote)
                                 .buttonStyle(.bordered)
                                 .tint(DesignTokens.accent)

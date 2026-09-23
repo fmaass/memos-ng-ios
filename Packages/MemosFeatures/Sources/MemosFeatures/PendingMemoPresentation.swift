@@ -12,8 +12,9 @@ public enum PendingAction: Sendable, Hashable {
     /// Stop a capture on its way and have its words and its files back in the editor. Offered
     /// while it is still moving, because that is exactly when a person wants it.
     case cancel
-    /// The way back into the editor for a capture a person stopped. It is not a retry: nothing
-    /// is sent, the queue hands the draft back and the editor opens on it.
+    /// The way back into the editor for a capture a person stopped, or whose change stopped before
+    /// it was sent. It is not a retry: nothing is sent, the queue hands the draft back and the
+    /// editor opens on it.
     case reopen
 }
 
@@ -104,12 +105,22 @@ public enum PendingMemoPresentation {
             switch job.holdReason {
             case .unreadableManifest:
                 return [.remove]
-            case .accountMismatch, .serverRefused, .storageFailed, .editIncomplete, .memoGone,
-                .none:
+            case .memoGone:
+                // The memo may come back, so Try again stays; Remove is the way out that does not
+                // pretend the change was answered.
+                return [.retry, .remove]
+            case .editIncomplete:
+                // Stopped before it was sent, so the capture is the person's again and the editor
+                // is offered back — unless a change already stands unanswered, whose body stays
+                // frozen until the server settles it.
+                return job.editUnansweredSince == nil ? [.reopen, .retry] : [.retry]
+            case .accountMismatch, .serverRefused, .storageFailed, .none:
+                // No Remove here: a change turned away while it was still unanswered is not a
+                // deleted memo, and Remove would throw away a capture whose change may have landed.
                 return [.retry]
             }
         case .uploading, .waiting:
-            // An edit on the wire can be neither taken back NOR sent again by hand: the queue
+            // An unanswered edit can be neither taken back NOR sent again by hand: the queue
             // refuses the cancel while it is unresolved, and the engine's own backoff replays it
             // under the key it was minted with. A button answering nothing is a lie, so the row
             // offers nothing until the server answers definitely.
@@ -132,7 +143,7 @@ public enum PendingMemoPresentation {
         // The two states `action(for:)` fences, for its reason: the row can do nothing while that
         // request stands. Held and creating keep their own — theirs is the more specific reason.
         if job.editUnansweredSince != nil, job.state == .uploading || job.state == .waiting {
-            return Self.sendingEdit
+            return Self.editUnanswered
         }
         switch job.state {
         case .held:
@@ -143,7 +154,13 @@ public enum PendingMemoPresentation {
                 return "This capture could not be read — its files are kept"
             case .storageFailed:
                 return job.lastError ?? "This capture could not be saved on this device"
-            case .serverRefused, .editIncomplete, .memoGone, .none:
+            case .editIncomplete:
+                return job.lastError ?? "A picture this memo keeps is missing from this device"
+            case .memoGone:
+                // The reason is the whole of what the person needs to read, so the server's own
+                // words for the refusal do not replace it.
+                return "This memo is no longer on the server"
+            case .serverRefused, .none:
                 return job.lastError ?? "Needs attention"
             }
         case .creating:
@@ -203,9 +220,10 @@ public enum PendingMemoPresentation {
     /// again and binning it.
     static let cancelledAndKept = "Cancelled — kept on this device"
 
-    /// "Waiting to try again" would describe a backoff, and this is not one — the request is out
-    /// and its answer is what the row waits for.
-    static let sendingEdit = "Sending your change — waiting for the server's answer"
+    /// True on the wire and in the backoff between replays alike: what stands is the answer, not
+    /// the request, and the queue sends the change again under the same key until it comes.
+    static let editUnanswered =
+        "Your change hasn't been answered yet — it will be sent again until it is"
 
     /// What a capture held for the wrong network says, which is also where the person is told
     /// what would send it now. A row that only said "waiting" would be true and useless.

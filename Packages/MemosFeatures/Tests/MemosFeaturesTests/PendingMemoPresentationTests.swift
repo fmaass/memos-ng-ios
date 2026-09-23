@@ -377,7 +377,7 @@ struct PendingMemoPresentationTests {
             await screen.settle(turns: 5)
             // The editor is drawn first, as the row offers it, so it is the first control that
             // answers to this label.
-            #expect(screen.press("Try again"), "the row drew no control to press")
+            #expect(screen.press("Reopen"), "the row drew no control to press")
             await screen.settle(turns: 5)
         }
         #expect(presses.reopened == [stopped.id])
