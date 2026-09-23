@@ -147,7 +147,7 @@ struct ContractTests {
         job.visibility = "PRIVATE"
         job.resolvedMemoUID = "m1"
         job.editKey = UUID().uuidString
-        job.resolvedAttachmentUIDs = ["att-u1"]
+        job.files[0].attachmentUID = "att-u1"
         job.pendingEdit = PendingEdit(
             content: "the pier, the day after",
             visibility: "PUBLIC",
@@ -178,6 +178,18 @@ struct ContractTests {
         #expect(
             mandatory.isSubset(of: sent),
             "required but never sent: \(mandatory.subtracting(sent))")
+
+        // An edit that chose nothing of its own still travels under the visibility the capture was
+        // made with: an omitted key means "leave it", which is how an edit loses what it changed.
+        var inherited = job
+        inherited.pendingEdit?.visibility = nil
+        let request2 = try OutboxRequests.patchMemo(
+            baseURL: Fixture.server, token: "pat-token", job: inherited)
+        #expect(try sentKeys(request2).contains("visibility"))
+        let sentBody = try #require(request2.httpBody)
+        let body = try #require(
+            try JSONSerialization.jsonObject(with: sentBody) as? [String: Any])
+        #expect(body["visibility"] as? String == "PRIVATE")
     }
 
     @Test("a UUID satisfies the idempotency key's own rules", .tags(.contract))

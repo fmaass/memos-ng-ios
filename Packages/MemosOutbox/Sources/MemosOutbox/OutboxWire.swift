@@ -102,7 +102,9 @@ public enum OutboxWire {
         public var createdAt: String
         public var editKey: String
         public var uploadUIDs: [String]
-        public var attachmentUIDs: [String]
+        /// Absent where the edit cannot name the memo's pictures: the synthesized encoder leaves
+        /// the key out, and the server leaves the memo's own list alone.
+        public var attachmentUIDs: [String]?
 
         public init(
             content: String,
@@ -110,7 +112,7 @@ public enum OutboxWire {
             createdAt: String,
             editKey: String,
             uploadUIDs: [String],
-            attachmentUIDs: [String]
+            attachmentUIDs: [String]?
         ) {
             self.content = content
             self.visibility = visibility

@@ -697,7 +697,7 @@ struct PatchCompletionTests {
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
             $0.resolvedMemoUID = "m1"
             $0.editKey = UUID().uuidString
-            $0.resolvedAttachmentUIDs = ["att-u1"]
+            $0.files[0].attachmentUID = "att-u1"
         }
         let draft = try #require(await harness.outbox.cancel(job.id))
         var picked = draft

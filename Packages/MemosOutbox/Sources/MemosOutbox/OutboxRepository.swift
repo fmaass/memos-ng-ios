@@ -171,6 +171,9 @@ public protocol OutboxPersisting: Sendable {
     ) async throws -> URL
     func removeChunk(at url: URL) async
     func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL
+    /// Where this job's copy of the original lives. The drain reads those bytes to answer a
+    /// question only they can answer — which of the memo's pictures this original became.
+    func mediaURL(job: UploadJob, file: OutboxFile) -> URL
 }
 
 /// The outbox on disk.

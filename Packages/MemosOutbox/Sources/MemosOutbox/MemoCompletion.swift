@@ -7,7 +7,7 @@ public enum MemoCompletionOutcome: Sendable, Equatable {
     /// the outbox, so it carries the uid rather than an optional: a success nobody can read is not
     /// proof that anything was stored, and deleting someone's only copy of a photo on the strength
     /// of a status code is the one mistake in this file that cannot be undone.
-    case created(uid: String, attachments: [String])
+    case created(uid: String, attachments: [ResolvedAttachment])
     /// The server refused to link the uploads and said which ones, per file.
     case unlinkable(UploadsUnlinkableFailure)
     /// Try again later with the same idempotency key: a timeout, a 5xx, a lost connection. Safe by
@@ -20,6 +20,22 @@ public enum MemoCompletionOutcome: Sendable, Equatable {
     /// and by then nothing else knows which credential this refusal was about. `nil` where the
     /// refusal is this device's own — a memo that could not even be prepared.
     case refused(String, OutboxRefusal?)
+}
+
+/// One picture the created memo holds, as the create's own answer named it.
+///
+/// The digest is the server's, over exactly the bytes this device uploaded, and it is the only
+/// thing in the answer that can be recomputed here — so it is what lets a local original be
+/// matched to the attachment it became. Nullable in the contract, and a memo whose store has not
+/// hashed a part yet says so, which is why it is optional rather than absent.
+public struct ResolvedAttachment: Sendable, Equatable {
+    public var uid: String
+    public var sha256: String?
+
+    public init(uid: String, sha256: String?) {
+        self.uid = uid
+        self.sha256 = sha256
+    }
 }
 
 extension MemoCompletionOutcome {
@@ -154,7 +170,7 @@ public struct MemoCompletionEndpoint: MemoCompleting {
                 // the next attempt is another chance to read the same answer, not a second memo.
                 return .retry("The server's answer could not be read; retrying with the same key.")
             }
-            return .created(uid: uid, attachments: Self.attachmentUIDs(from: response.body))
+            return .created(uid: uid, attachments: Self.attachments(from: response.body))
         case 409:
             if let failure = UploadsUnlinkableFailure.decode(response.body) {
                 return .unlinkable(failure)
@@ -245,20 +261,23 @@ public struct MemoCompletionEndpoint: MemoCompleting {
         return (try? JSONDecoder().decode(Created.self, from: body))?.uid
     }
 
-    /// The uids the memo's pictures carry, read from the same answer the uid came from.
+    /// The pictures the memo holds, read from the same answer the uid came from.
     ///
     /// This is the ONLY moment they can be learned: an edit may name a picture the memo already
     /// holds by its attachment uid and by nothing else, and the upload uid the job is carrying is
     /// not one. An answer without them reads as none, which is what a memo with no pictures has.
-    private static func attachmentUIDs(from body: Data) -> [String] {
+    private static func attachments(from body: Data) -> [ResolvedAttachment] {
         struct Created: Decodable {
             struct Attachment: Decodable {
                 var uid: String
+                var sha256: String?
             }
 
             var attachments: [Attachment]?
         }
         let decoded = try? JSONDecoder().decode(Created.self, from: body)
-        return (decoded?.attachments ?? []).map(\.uid)
+        return (decoded?.attachments ?? []).map {
+            ResolvedAttachment(uid: $0.uid, sha256: $0.sha256)
+        }
     }
 }

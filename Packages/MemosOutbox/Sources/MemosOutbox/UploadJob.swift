@@ -85,6 +85,12 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// written before retries were counted decodes unchanged and reads as nil — which is what an
     /// equally attempt-less task description says, and the two have to agree to be adopted.
     public var uploadAttempt: Int?
+    /// The uid the memo's own picture carries, once the create's answer has been matched to this
+    /// original. It is the ONLY name an edit may use for a picture the memo already holds — an
+    /// upload uid is not one — and it is written once, where that answer is applied. Optional and
+    /// last, so a manifest written before this existed decodes unchanged and reads as unnamed,
+    /// which is what an edit then treats as "leave the memo's pictures alone".
+    public var attachmentUID: String?
     /// Set on a picture picked while the capture was back in the editor, and only there.
     ///
     /// It is what keeps that picture OUT of the create: the create is replayed exactly as it was
@@ -105,6 +111,7 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         bytesConfirmed: Int64 = 0,
         chunkSize: Int = OutboxDefaults.chunkSize,
         uploadAttempt: Int? = nil,
+        attachmentUID: String? = nil,
         stagedForEdit: Bool? = nil
     ) {
         self.id = id
@@ -117,6 +124,7 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.bytesConfirmed = bytesConfirmed
         self.chunkSize = chunkSize
         self.uploadAttempt = uploadAttempt
+        self.attachmentUID = attachmentUID
         self.stagedForEdit = stagedForEdit
     }
 
@@ -189,15 +197,6 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// the editor, because the body the server is answering about is the one on disk. Optional
     /// because a manifest written before this existed has none, and absent means "not in flight".
     public var editSentAt: Date?
-    /// The uids the memo's OWN pictures carry, as the create's answer named them, in that answer's
-    /// order.
-    ///
-    /// Written down rather than derived: an edit names the memo's complete picture list, and the
-    /// only legal name for a picture the memo already holds is the attachment uid the server gave
-    /// it — which the job can learn from one place only, the body the create or its replay
-    /// answered with. A relaunch has no other way back to it.
-    public var resolvedAttachmentUIDs: [String]?
-
     public init(
         id: UUID = UUID(),
         idempotencyKey: UUID = UUID(),
@@ -217,8 +216,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         editKey: String? = nil,
         patchAttempt: Int? = nil,
         pendingEdit: PendingEdit? = nil,
-        editSentAt: Date? = nil,
-        resolvedAttachmentUIDs: [String]? = nil
+        editSentAt: Date? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -239,7 +237,6 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.patchAttempt = patchAttempt
         self.pendingEdit = pendingEdit
         self.editSentAt = editSentAt
-        self.resolvedAttachmentUIDs = resolvedAttachmentUIDs
     }
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteSize } }

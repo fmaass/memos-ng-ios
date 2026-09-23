@@ -306,6 +306,10 @@ actor FaultyPersistence: OutboxPersisting {
     nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
         inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
+    }
 }
 
 /// A hold a test opens by hand, so that a test can be INSIDE a drain when something happens.
@@ -402,6 +406,10 @@ actor GatedPersistence: OutboxPersisting {
     nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
         inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
+    }
 }
 
 /// Supersedes the grant on the way INTO the write — the hop `OutboxEngine` makes into
@@ -469,6 +477,10 @@ actor SupersedingPersister: OutboxPersisting {
 
     nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
         inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 
@@ -581,6 +593,10 @@ actor FailingThenInterferingPersister: OutboxPersisting {
     nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
         inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
+    }
 }
 
 /// The other pass, landing INSIDE the write hop of ONE chosen write.
@@ -665,6 +681,10 @@ actor InterferingPersistence: OutboxPersisting {
 
     nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
         inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 

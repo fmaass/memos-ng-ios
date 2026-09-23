@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The drain: what actually moves a capture from this phone to the server.
@@ -453,6 +454,41 @@ public actor OutboxEngine: OutboxChunkHandling {
         return job.advancing(fileID: fileID, bytesConfirmed: offset)
     }
 
+    /// The originals this create sent, named by the attachments the answer came back with.
+    ///
+    /// Asked exactly here, in the pass that writes the create's outcome down: the answer and the
+    /// bytes it describes are both in hand, and the job has not yet been saved — so no later
+    /// response can rename a picture that this one already named.
+    private func named(_ job: UploadJob, as answer: [ResolvedAttachment]) -> UploadJob {
+        let originals = job.files.filter { $0.stagedForEdit != true }
+        var digests: [UUID: String] = [:]
+        for file in originals {
+            if let digest = Self.digest(of: repository.mediaURL(job: job, file: file)) {
+                digests[file.id] = digest
+            }
+        }
+        let bound = OutboxAttachmentIdentity.bind(
+            files: originals, digests: digests, answer: answer)
+        var named = job
+        for index in named.files.indices {
+            named.files[index].attachmentUID = bound[named.files[index].id]
+        }
+        return named
+    }
+
+    /// A file's SHA-256, hex and lowercase, read a megabyte at a time so a video does not arrive in
+    /// memory whole. A copy this device can no longer read simply has no digest: identity then
+    /// falls back to the order the answer came in, which is the honest state of that knowledge.
+    private static func digest(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     private func complete(
         _ job: UploadJob,
         credentials: OutboxCredentials
@@ -478,10 +514,9 @@ public actor OutboxEngine: OutboxChunkHandling {
             // a person has since taken back is no longer this answer's to destroy.
             if creating.pendingEdit != nil {
                 return await save(
-                    creating.awaitingPatch(
+                    named(creating, as: attachments).awaitingPatch(
                         uid: uid,
-                        editKey: creating.editKey ?? creating.idempotencyKey.uuidString,
-                        attachments: attachments
+                        editKey: creating.editKey ?? creating.idempotencyKey.uuidString
                     ),
                     matching: creating
                 )

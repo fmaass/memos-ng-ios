@@ -98,23 +98,22 @@ public enum OutboxRequests {
             let edit = job.pendingEdit
         else { throw Failure.incompleteEdit }
         let staged = Set(job.files.filter { $0.stagedForEdit == true }.map(\.id))
-        let originals = job.files.filter { $0.stagedForEdit != true }
-        let resolved = job.resolvedAttachmentUIDs ?? []
-        // Positional, and refused unless the two counts agree: the answer lists the memo's
-        // attachments in the order the create sent its uploads, so the nth original is the nth
-        // attachment — and a count that does not match means that correspondence is broken, which
-        // is a request that must not be guessed at.
-        guard originals.count == resolved.count else { throw Failure.incompleteEdit }
-        var attachmentByFile: [UUID: String] = [:]
-        for (index, file) in originals.enumerated() { attachmentByFile[file.id] = resolved[index] }
-        let attachmentUIDs = try edit.fileIDs.map { id -> String in
+        // A kept picture may be named only by the attachment uid the create's answer was matched
+        // to; a picture picked in the editor is named by its upload uid, which the memo has not
+        // seen yet and which the job must therefore be holding. The list travels whole or not at
+        // all: an omitted key leaves the memo's pictures as they are, while a list missing one
+        // entry DELETES that picture, so an original that could not be named takes the whole list
+        // out of the request. The cost is that a removal or a reorder does not reach that memo
+        // until it can be named; nothing the person still has is destroyed on a guess.
+        let named = try edit.fileIDs.map { id -> String? in
             if staged.contains(id) {
                 guard let uid = job.file(id)?.uploadUID else { throw Failure.incompleteEdit }
                 return uid
             }
-            guard let uid = attachmentByFile[id] else { throw Failure.incompleteEdit }
-            return uid
+            return job.file(id)?.attachmentUID
         }
+        let attachmentUIDs: [String]? =
+            named.contains { $0 == nil } ? nil : named.compactMap { $0 }
         var request = URLRequest(url: baseURL.appending(path: "api/memos").appending(path: uid))
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -122,7 +121,12 @@ public enum OutboxRequests {
         request.httpBody = try OutboxWire.encode(
             OutboxWire.MemoPatch(
                 content: edit.content,
-                visibility: edit.visibility,
+                // Visibility travels on EVERY edit that has one to send. The server reads an
+                // omitted key as "leave it", so an edit that meant PRIVATE and said nothing would
+                // leave the memo public; the contract declares no null for this field, so a value
+                // is what goes. Both nil is the one honest omission: the create sent no visibility
+                // either, so the memo already carries the account's own answer.
+                visibility: edit.visibility ?? job.visibility,
                 createdAt: OutboxEncoding.iso8601(edit.capturedAt),
                 editKey: editKey,
                 uploadUIDs: edit.fileIDs.compactMap {
@@ -137,7 +141,8 @@ public enum OutboxRequests {
     /// A request this device cannot build from what it holds.
     public enum Failure: Error, Sendable, Equatable {
         /// The job is not carrying everything an edit names — the memo it resolved to, the key it
-        /// is applied under, or a picture list that maps. Nothing is sent on a guess.
+        /// is applied under, or the upload session of a picture the editor added. Nothing is sent
+        /// on a guess.
         case incompleteEdit
     }
 
