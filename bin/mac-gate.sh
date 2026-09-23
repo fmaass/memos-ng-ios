@@ -131,6 +131,33 @@ die_refuse() {
   exit 2
 }
 
+# --- the test-count candidate: cleared before anything else --------------------------------------
+# The candidate at the documented path (`<repo root>/.gate-artifacts/testcount-baseline.tsv`, or
+# `$MAC_GATE_ARTIFACTS/testcount-baseline.tsv`) is what the documented `cp` records, so it must be
+# one this run put there through its validated copyback and nothing else. The copyback never writes
+# that path directly — it stages into `incoming-<run token>/` and scripts/testcount-candidate-owner.sh
+# promotes the candidate only beside this run's stamp — so an earlier run's candidate is the only
+# other thing that can be there. It goes here, first: before the arguments are read and before any
+# refusal, so every exit this run can take after this point — a refused argument, a missing host, a
+# failed mirror, a signal — leaves no candidate unless this run's own promotion wrote it. Staging
+# folders an earlier run abandoned are NOT touched here but in the copyback, right before this run's
+# own copy: this point is reached before the lane lock, so by `--help`, `--classify-only` and a run
+# the lock is about to refuse, and a discard here could take a live run's staging mid-copy. The
+# folder is resolved the way the rest of the run resolves it (a relative override is relative to
+# the repository root); a run that can resolve neither an override nor a root has no documented path
+# and clears nothing, and is refused below as it always was. A removal that fails refuses the run:
+# the refusal names the file, and nothing after it runs.
+early_root="$(git rev-parse --show-toplevel 2>/dev/null)" || early_root=""
+case "${MAC_GATE_ARTIFACTS:-}" in
+  /*) artifacts="$MAC_GATE_ARTIFACTS" ;;
+  "") artifacts="${early_root:+$early_root/.gate-artifacts}" ;;
+  *) artifacts="${early_root:+$early_root/$MAC_GATE_ARTIFACTS}" ;;
+esac
+if [ -n "$artifacts" ]; then
+  rm -f "$artifacts/testcount-baseline.tsv" \
+    || die_refuse "cannot remove $artifacts/testcount-baseline.tsv: stale candidate left in place — not this run's"
+fi
+
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -398,18 +425,12 @@ branch_slug="${branch_slug:0:40}"
 # is still writing.
 RUN_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
 [ -n "$RUN_TOKEN" ] || RUN_TOKEN="$$-$(date -u +%s)"
-artifacts="${MAC_GATE_ARTIFACTS:-$repo_root/.gate-artifacts}"
 log="$artifacts/mac-gate-$branch_slug-$RUN_TOKEN.log"
 # Opened where the run wants it rather than on the way past, because the default artifacts
 # directory is INSIDE the tree the classifier reads: a log created before the classification would
 # be an untracked path in the change set it is classifying.
 open_run_log() {
   mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
-  # The test-count candidate is this run's or nobody's: an earlier run's copy would outlive any
-  # run that ends before the copyback — a refused mirror, a failed step — and be the one the
-  # documented `cp` records. Removed here, before any exit this run can take; a copyback that
-  # fetched an earlier run's folder from the build host is answered by the stamp check after it.
-  rm -f "$artifacts/testcount-baseline.tsv"
   : > "$log" || die_refuse "cannot write $log"
 }
 say() { printf '%s\n' "$*" | tee -a "$log"; }
@@ -1025,8 +1046,9 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 cd "$GATE_TARGET" || { echo "remote: cannot enter $GATE_TARGET"; exit 2; }
-rm -rf .gate-artifacts && mkdir -p .gate-artifacts
-printf '%s\n' "$GATE_RUN_TOKEN" > .gate-artifacts/run-token
+# One chain, so the stamp exists only in a folder this run cleared and created: a clear that failed
+# leaves no stamp of this run's beside what an earlier run left, and the run stops here.
+rm -rf .gate-artifacts && mkdir -p .gate-artifacts && printf '%s\n' "$GATE_RUN_TOKEN" > .gate-artifacts/run-token || { echo "remote: cannot clear the artifacts folder"; exit 2; }
 XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG.xcresult"
 # Build scratch lives OUTSIDE the mirrored tree. Inside it, `swift format lint --recursive .`
 # would walk the dependency checkouts SwiftPM drops in DerivedData and lint other people's code;
@@ -2344,25 +2366,43 @@ fi
 
 # --- (7) copy the evidence back ---------------------------------------------------------------
 say "--- step: copyback ---"
-# This copy only adds (not `--delete`, which would also take this run's log, written only on this
-# side); the candidate an earlier run may have left here went at open_run_log, so afterwards a
-# candidate is here only if this copy brought one. What it brings is whatever the build host's
-# folder holds, and a remote that stopped before clearing that folder leaves the previous run's
-# there, so the candidate stays only if the folder carries this run's stamp, the `run-token` the
-# remote writes right after clearing it. A removal that script decided on and could not carry out
-# fails the copyback step, so the summary says so; the step's code is the first non-zero of the
-# copy's and the script's. Without the script to ask, nothing here can tell whose candidate it is,
-# so it goes.
-rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
-copyback_rc="${PIPESTATUS[0]}"
+# Both modes end here, through this one block. The copy lands in a staging folder of this run's,
+# never in the artifacts folder itself: what it brings is whatever the build host's folder holds,
+# and a remote that stopped before clearing that folder leaves the previous run's there, candidate
+# and all. First, every staging folder already present is discarded, one line each. Only a run that
+# holds this branch's lane lock gets here, so no run of this branch can be mid-copy into one of them:
+# what is present can only be a folder an earlier run abandoned (a shared MAC_GATE_ARTIFACTS across
+# branches is outside that). This is why the discard lives here and not at startup, which is reached
+# before the lock. A discard that fails is this step's failure. The staging folder is named for this
+# run's token, so no other run's copy lands in it, and rsync creates it. Its path goes to the log the
+# moment the copy returns, so a signal at any later instant leaves the path named. Then the owner
+# script promotes the candidate to the documented path only when the staged `run-token` is this
+# run's — the remote writes it on the chain that clears its folder — and moves the rest up either
+# way, as evidence. A stamp that is not this run's, or a promotion or deletion that script could not
+# carry out, fails the copyback step; the step's code is the first non-zero of the discard's, the
+# copy's and the script's. Without the script nothing can tell whose candidate it is, so nothing is
+# promoted, the step keeps the codes before it, and the staging folder stays for the next run.
+copyback_rc=0
+for abandoned in "$artifacts"/incoming-*; do
+  [ -e "$abandoned" ] || [ -L "$abandoned" ] || continue
+  say "discarding abandoned staging $abandoned from an earlier run"
+  if ! rm -rf "$abandoned"; then
+    say "copyback: could not remove the abandoned staging $abandoned"
+    [ "$copyback_rc" -ne 0 ] || copyback_rc=1
+  fi
+done
+rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/incoming-$RUN_TOKEN/" 2>&1 | tee -a "$log"
+rsync_rc="${PIPESTATUS[0]}"
+[ "$copyback_rc" -ne 0 ] || copyback_rc="$rsync_rc"
+staging="$artifacts/incoming-$RUN_TOKEN"
+say "copyback: staged in $staging (rsync exit $rsync_rc)"
 candidate_owner="$repo_root/scripts/testcount-candidate-owner.sh"
 if [ -x "$candidate_owner" ]; then
-  "$candidate_owner" "$artifacts" "$RUN_TOKEN" 2>&1 | tee -a "$log"
+  "$candidate_owner" "$staging" "$artifacts" "$RUN_TOKEN" 2>&1 | tee -a "$log"
   owner_rc="${PIPESTATUS[0]}"
   [ "$copyback_rc" -ne 0 ] || copyback_rc="$owner_rc"
 else
-  rm -f "$artifacts/testcount-baseline.tsv"
-  say "testcount candidate: removed, $candidate_owner is missing or not executable"
+  say "testcount candidate: not promoted, $candidate_owner is missing or not executable; $staging is kept"
 fi
 record copyback "$copyback_rc"
 say "artifacts   : $artifacts"
