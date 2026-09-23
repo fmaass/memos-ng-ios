@@ -193,6 +193,42 @@ struct AttemptRetryTests {
         #expect(reloaded.confirmedBytes == 400, "bytes moved under a refusing policy")
         #expect(reloaded.waitReason == .homeNetwork, "the card cannot say why nothing moved")
     }
+
+    @Test("Retry hands back every task older than the attempt it just minted, and only those")
+    func retryKeepsTheSuccessorItJustScheduled() async throws {
+        let world = try makeWorld()
+        defer { world.cleanUp() }
+        let stalled = try await stall(world)
+        let current = try #require(await world.repository.job(stalled.job.id))
+        // Named, rather than left at whatever the stall reached, so the term the retry bumps FROM
+        // is the one the identities below are written against.
+        var prepared = current
+        prepared.files[0].uploadAttempt = 1
+        let saved = try #require(
+            try await world.repository.save(
+                prepared, ifStillCurrent: nil, matching: current, else: prepared))
+        let fileID = try #require(saved.files.first).id
+        let predecessor = OutboxTaskIdentity(
+            jobID: saved.id, fileID: fileID, offset: 400, attempt: 1)
+        let successor = OutboxTaskIdentity(jobID: saved.id, fileID: fileID, offset: 400, attempt: 2)
+        let legacy = OutboxTaskIdentity(jobID: saved.id, fileID: fileID, offset: 0, attempt: nil)
+        world.scheduler.pretend(inFlight: [predecessor, successor, legacy])
+
+        await world.outbox.retry(saved.id)
+
+        #expect(
+            world.scheduler.cancellations.contains(predecessor),
+            "the task Retry replaced was left running"
+        )
+        #expect(
+            world.scheduler.cancellations.contains(legacy),
+            "a task minted before the attempt term was left running"
+        )
+        #expect(
+            !world.scheduler.cancellations.contains(successor),
+            "Retry cancelled the very task it had just scheduled"
+        )
+    }
 }
 
 @Suite("The predecessor's answer arrives after its replacement was scheduled")

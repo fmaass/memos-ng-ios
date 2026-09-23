@@ -182,6 +182,12 @@ private struct Patching {
         http.requests(method: "POST").filter { $0.url?.path() == "/api/memos" }
     }
 
+    /// The upload sessions a pass opened, which is how a picture staged into a restored draft
+    /// shows that it reached the wire before the edit did.
+    var uploadPosts: [URLRequest] {
+        http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }
+    }
+
     /// Edits only: a chunk is a PATCH as well, and it goes to the upload session, not to the memo.
     var memoPatches: [URLRequest] {
         http.requests(method: "PATCH").filter {
@@ -201,6 +207,7 @@ struct PatchCompletionTests {
     private func harness(
         root existing: URL? = nil,
         server: MemoServer = MemoServer(),
+        clock: MutableClock? = nil,
         completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil
     ) throws -> Patching {
         let root = try existing ?? Fixture.temporaryDirectory()
@@ -229,6 +236,14 @@ struct PatchCompletionTests {
         }
         let preferences = Fixture.preferences()
         let endpoint = MemoCompletionEndpoint(http: http)
+        // Only when a case hands one over: the facade's own stamps come from the real clock, so a
+        // default of anything but `Date.init` would put the queue behind itself.
+        let tick: @Sendable () -> Date
+        if let clock {
+            tick = { clock.now }
+        } else {
+            tick = Date.init
+        }
         let outbox = Outbox(
             repository: repository,
             credentials: provider,
@@ -236,7 +251,8 @@ struct PatchCompletionTests {
             scheduler: ScriptedScheduler(),
             completion: completion?(endpoint) ?? endpoint,
             network: StubNetworkPath(),
-            preferences: preferences.store
+            preferences: preferences.store,
+            clock: tick
         )
         return Patching(
             root: root,
@@ -367,6 +383,7 @@ struct PatchCompletionTests {
         let edited = editedDraft(draft, picking: try newPicture(harness))
         let resubmitted = await harness.outbox.resubmit(job.id, draft: edited)
         #expect(resubmitted)
+        let minted = try #require(await harness.repository.job(job.id)?.editKey)
         _ = try await stagedUpload(harness, job.id)
         await settle(harness, job.id)
 
@@ -400,7 +417,11 @@ struct PatchCompletionTests {
         // The newly picked picture is named as an upload in the same request that places it, which
         // is the only form the contract accepts an upload uid in a picture list under.
         #expect(body["upload_uids"] as? [String] == ["uC"])
-        #expect(body["edit_key"] as? String == job.idempotencyKey.uuidString)
+        // The edit key is a value of its own, minted for this edit and written down before the
+        // pass that sends it — never the create's idempotency key, which answers a different
+        // question and would make a second edit indistinguishable from the first.
+        #expect(body["edit_key"] as? String == minted)
+        #expect(minted != job.idempotencyKey.uuidString)
 
         let memo = try #require(harness.server.memo("m1"))
         #expect(memo.content == "the pier, the day after")
@@ -489,6 +510,8 @@ struct PatchCompletionTests {
         let wanted = editedDraft(draft, picking: try newPicture(first))
         let resubmitted = await first.outbox.resubmit(job.id, draft: wanted)
         #expect(resubmitted)
+        let minted = try #require(await first.repository.job(job.id)?.editKey)
+        #expect(minted != job.idempotencyKey.uuidString)
         _ = try await stagedUpload(first, job.id)
 
         let parked = Task { await first.outbox.drain() }
@@ -498,7 +521,7 @@ struct PatchCompletionTests {
         #expect(first.memoPatches.count == 0)
         let carried = try #require(await first.repository.job(job.id))
         #expect(carried.resolvedMemoUID == "m1")
-        #expect(carried.editKey == job.idempotencyKey.uuidString)
+        #expect(carried.editKey == minted)
         // Asserted on the files, not on the manifest: a manifest that still lists three pictures
         // over a media directory that lost one is exactly the state this has to rule out.
         let digests = try carried.files.map {
@@ -545,6 +568,8 @@ struct PatchCompletionTests {
         let wanted = editedDraft(draft, picking: try newPicture(first))
         let resubmitted = await first.outbox.resubmit(job.id, draft: wanted)
         #expect(resubmitted)
+        let minted = try #require(await first.repository.job(job.id)?.editKey)
+        #expect(minted != job.idempotencyKey.uuidString)
         _ = try await stagedUpload(first, job.id)
         await settle(first, job.id)
 
@@ -554,7 +579,7 @@ struct PatchCompletionTests {
         #expect(server.editApplications == 1)
         let carried = try #require(await first.repository.job(job.id))
         #expect(carried.resolvedMemoUID == "m1")
-        #expect(carried.editKey == job.idempotencyKey.uuidString)
+        #expect(carried.editKey == minted)
 
         let second = try harness(root: first.root, server: server)
         await settle(second, job.id)
@@ -566,7 +591,7 @@ struct PatchCompletionTests {
         #expect(transmissions.count == 2)
         #expect(transmissions[0].httpBody == transmissions[1].httpBody)
         let replayed = try sent(transmissions[1])["edit_key"] as? String
-        #expect(replayed == job.idempotencyKey.uuidString)
+        #expect(replayed == minted)
         #expect(server.editApplications == 1)
         #expect(server.memoCount == 1)
         #expect(first.memoPosts.count + second.memoPosts.count == 2)
@@ -608,5 +633,165 @@ struct PatchCompletionTests {
         }
         await harness.outbox.refresh()
         #expect(harness.outbox.lastProgressAt[job.id] == moved)
+    }
+
+    // MARK: - F8/F3/N1/N2: the edit is one logical edit, sent once it can be
+
+    /// A restored draft with the text changed and its pictures left alone: an edit that needs no
+    /// staged upload, so a case about the edit's own lifetime is not also about the chunk pipeline.
+    private func textEdited(_ draft: RestoredDraft) -> RestoredDraft {
+        var edited = draft
+        edited.content = "the pier, the day after"
+        return edited
+    }
+
+    @Test("a refused edit waits out its backoff and is replayed under the key it was minted with")
+    func aRefusedEditWaitsItsBackoffAndIsReplayed() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let harness = try harness(server: server, clock: clock)
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        #expect(await resubmitting.value)
+
+        #expect(harness.memoPatches.count == 1)
+        let carried = try #require(await harness.repository.job(job.id))
+        let minted = try #require(carried.editKey)
+        #expect(carried.editSentAt == nil, "a refused edit is still marked as in flight")
+        // The control for the line after it: the refusal really did space the next attempt out,
+        // so a second pass finding nothing to do is the backoff and not an empty queue.
+        #expect(carried.nextAttemptAt > clock.now)
+
+        await harness.outbox.drain()
+        #expect(harness.memoPatches.count == 1, "a pass inside the backoff sent the edit again")
+
+        clock.advance(carried.nextAttemptAt.timeIntervalSince(clock.now) + 1)
+        await settle(harness, job.id)
+
+        let transmissions = harness.memoPatches
+        #expect(transmissions.count == 2, "the retry slot was never given back")
+        for transmission in transmissions {
+            #expect(try sent(transmission)["edit_key"] as? String == minted)
+        }
+        #expect(server.editApplications == 1)
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    @Test("a picture staged after the create resolved goes up before the edit that names it")
+    func aStagedPictureUploadsBeforeTheEdit() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 1))
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [(name: "a.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        // The state a relaunch finds: the server took the memo and the answer was lost, so the
+        // create's own resolution is written down by hand rather than raced for.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.resolvedAttachmentUIDs = ["att-u1"]
+        }
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        var picked = draft
+        picked.pictures.append(try newPicture(harness))
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: picked) }
+        #expect(await resubmitting.value)
+
+        #expect(
+            harness.memoPatches.count == 0,
+            "the edit went out naming a picture the server does not have"
+        )
+        #expect(harness.uploadPosts.count == 1, "the staged picture never got an upload session")
+
+        _ = try await stagedUpload(harness, job.id)
+        await settle(harness, job.id)
+
+        #expect(harness.memoPatches.count == 1)
+        let body = try sent(try #require(harness.memoPatches.first))
+        #expect(body["upload_uids"] as? [String] == ["uC"])
+        #expect(body["attachment_uids"] as? [String] == ["att-u1", "uC"])
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    @Test("a second cancel hands back the edited draft, not the one the capture was made with")
+    func aSecondCancelHandsBackTheEditedDraft() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 2))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        var edited = draft
+        edited.content = "the pier, the day after"
+        edited.visibility = "PUBLIC"
+        edited.capturedAt = Self.edited
+        let survivor = draft.pictures[1]
+        edited.pictures = [survivor]
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: edited) }
+        #expect(await resubmitting.value)
+
+        let again = try #require(await harness.outbox.cancel(job.id))
+        #expect(again.content == "the pier, the day after")
+        #expect(again.visibility == "PUBLIC")
+        #expect(again.capturedAt == Self.edited)
+        #expect(again.pictures.map(\.id) == [survivor.id])
+    }
+
+    @Test("an edit already on the wire cannot be taken back until it is answered")
+    func aTransmittedEditCannotBeCancelled() async throws {
+        let entered = Latch()
+        let released = Latch()
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1),
+            completion: { PatchParking($0, entered: entered, released: released) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        // Its own drain is what reaches the parked edit, so the call has to be left running.
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        await entered.wait()
+
+        #expect(await harness.outbox.cancel(job.id) == nil, "an edit in flight was taken back")
+        let carried = try #require(await harness.repository.job(job.id))
+        #expect(carried.editSentAt != nil)
+        #expect(carried.cancelledAt == nil, "the refused cancel marked the capture anyway")
+
+        await released.open()
+        #expect(await resubmitting.value)
+    }
+
+    @Test("a second edit is sent under a key of its own")
+    func aSecondEditIsSentUnderItsOwnKey() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 2))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        let firstResubmit = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        #expect(await firstResubmit.value)
+        let firstKey = try #require(await harness.repository.job(job.id)?.editKey)
+
+        let again = try #require(await harness.outbox.cancel(job.id))
+        var second = again
+        second.content = "the pier, a week later"
+        let secondResubmit = Task { await harness.outbox.resubmit(job.id, draft: second) }
+        #expect(await secondResubmit.value)
+
+        #expect(harness.memoPatches.count == 1)
+        let key = try sent(try #require(harness.memoPatches.first))["edit_key"] as? String
+        #expect(key != firstKey, "the second edit reused the first edit's key")
+        #expect(key != job.idempotencyKey.uuidString, "the edit went out under the create's key")
     }
 }

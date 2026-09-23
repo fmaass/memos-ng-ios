@@ -91,7 +91,15 @@ private struct Cancelling {
     let provider: SwitchableCredentials
     let server: MemoServer
     let outbox: Outbox
+    let scheduler: ScriptedScheduler
+    let box: AttemptHandlerBox
     let preferencesName: String
+
+    /// The engine the facade handed its scheduler, so a case can answer a chunk the way a
+    /// background session does — the only way in to a wake point that has no drain in front of it.
+    var handler: (any OutboxChunkHandling) {
+        get throws { try #require(box.value, "the facade never handed its engine over") }
+    }
 
     func cleanUp() {
         try? FileManager.default.removeItem(at: root)
@@ -139,14 +147,17 @@ struct CancelTests {
             }
         }
         let preferences = Fixture.preferences()
+        let scheduler = ScriptedScheduler()
+        let box = AttemptHandlerBox()
         let outbox = Outbox(
             repository: repository,
             credentials: provider,
             http: http,
-            scheduler: ScriptedScheduler(),
+            scheduler: scheduler,
             completion: completion?(http) ?? MemoCompletionEndpoint(http: http),
             network: StubNetworkPath(),
-            preferences: preferences.store
+            preferences: preferences.store,
+            attachScheduler: { handler in box.value = handler }
         )
         return Cancelling(
             root: root,
@@ -155,6 +166,8 @@ struct CancelTests {
             provider: provider,
             server: server,
             outbox: outbox,
+            scheduler: scheduler,
+            box: box,
             preferencesName: preferences.name
         )
     }
@@ -464,5 +477,133 @@ struct CancelTests {
         if let resolvedBefore { #expect(resolved == resolvedBefore) }
         let finished = await harness.repository.job(job.id)
         #expect(finished == nil)
+    }
+
+    // MARK: - F2: the marker is a fence, not a hint
+
+    /// The identity a background task for this job's first file carries, at the offset and the
+    /// attempt term the manifest says it was scheduled under.
+    private func identity(of job: UploadJob) throws -> OutboxTaskIdentity {
+        let file = try #require(job.files.first)
+        return OutboxTaskIdentity(
+            jobID: job.id,
+            fileID: file.id,
+            offset: file.bytesConfirmed,
+            attempt: file.uploadAttempt
+        )
+    }
+
+    /// What a background session hands back when a chunk landed.
+    private func confirming(_ identity: OutboxTaskIdentity, bytes: Int) -> ChunkResult {
+        ChunkResult(
+            identity: identity,
+            statusCode: 200,
+            body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":\#(bytes)}"#.utf8)
+        )
+    }
+
+    @Test("a chunk answered after the cancel moves nothing the cancel left behind")
+    func aLateChunkAnswerLeavesTheMarkedCaptureAlone() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let taken = try await capture(harness, content: "taken back", files: [("one.heic", 800)])
+        let other = try await capture(harness, content: "still going", files: [("two.heic", 800)])
+        await harness.outbox.adopt()
+        let markedStanding = try await standing(harness, taken) {
+            $0.state = .uploading
+            $0.files[0].uploadUID = "u1"
+        }
+        let goingStanding = try await standing(harness, other) {
+            $0.state = .uploading
+            $0.files[0].uploadUID = "u1"
+        }
+        _ = try #require(await harness.outbox.cancel(taken.id))
+        let marked = try #require(await harness.repository.job(taken.id))
+
+        try await harness.handler.handle(confirming(identity(of: markedStanding), bytes: 400))
+
+        let after = try #require(await harness.repository.job(taken.id))
+        #expect(after == marked, "an answer that outlived the cancel moved the capture anyway")
+        #expect(harness.memoPosts.isEmpty, "the answer carried the capture on to a memo")
+
+        // The control the equality needs: the SAME answer on a capture nobody took back does move
+        // the manifest, so the line above is about the marker and not about a swallowed answer.
+        let before = try #require(await harness.repository.job(other.id))
+        try await harness.handler.handle(confirming(identity(of: goingStanding), bytes: 400))
+        let moved = try #require(await harness.repository.job(other.id))
+        #expect(moved != before, "control: an ordinary chunk answer moved nothing either")
+        #expect(moved.confirmedBytes == 400)
+    }
+
+    @Test("a capture back in the editor plans nothing, and no failure brings it back into reach")
+    func aCancelledCapturePlansNothing() throws {
+        let credentials = Fixture.credentials()
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let later = now.addingTimeInterval(3600)
+        let going = Fixture.job(files: [Fixture.file()])
+        let marked = going.cancelled(at: now)
+
+        #expect(
+            OutboxPlanner.nextAction(for: marked, credentials: credentials, now: later)
+                == .wait(until: marked.nextAttemptAt),
+            "a pass an hour later found work to do on a capture that is in the editor"
+        )
+        // Control: the same job without the marker has work waiting at the same instant.
+        #expect(
+            OutboxPlanner.nextAction(for: going, credentials: credentials, now: later)
+                == .startUpload(fileID: try #require(going.files.first).id)
+        )
+
+        let backedOff = marked.backingOff(at: later, error: "nothing came back")
+        #expect(
+            backedOff.nextAttemptAt == .distantFuture,
+            "a failure re-armed a capture that is in the editor"
+        )
+        // Control: a backoff on the unmarked job does move its next attempt, so the line above is
+        // about the marker rather than about a backoff that never writes.
+        #expect(going.backingOff(at: later, error: "nothing came back").nextAttemptAt > later)
+    }
+
+    @Test("the cancel hands back the tasks of the capture it took, and no others")
+    func cancelAbandonsOnlyThisCapturesTasks() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let taken = try await capture(harness, content: "taken back", files: [("one.heic", 800)])
+        let other = try await capture(harness, content: "still going", files: [("two.heic", 800)])
+        let mine = try identity(of: taken)
+        let theirs = try identity(of: other)
+        harness.scheduler.pretend(inFlight: [mine, theirs])
+
+        _ = try #require(await harness.outbox.cancel(taken.id))
+
+        // The other capture's task is the control: a cancel that handed back everything in flight
+        // would pass a test that only looked for its own.
+        #expect(harness.scheduler.cancellations == [mine])
+        #expect(!harness.scheduler.cancellations.contains(theirs), "another capture lost its task")
+    }
+
+    @Test("Try again does nothing to a capture that is in the editor, and still frees a held one")
+    func retryRefusesACaptureInTheEditor() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let taken = try await capture(harness, content: "taken back")
+        _ = try #require(await harness.outbox.cancel(taken.id))
+        let marked = try #require(await harness.repository.job(taken.id))
+
+        await harness.outbox.retry(taken.id)
+
+        let after = try #require(await harness.repository.job(taken.id))
+        #expect(after == marked, "Try again moved a capture the editor is holding")
+        #expect(harness.memoPosts.isEmpty, "Try again sent a capture the editor is holding")
+
+        // The control: the same call on a HELD capture does reach the wire, so the two lines above
+        // are about the marker and not about a Try again that does nothing at all.
+        let held = try await capture(harness, content: "held")
+        _ = try await standing(harness, held) {
+            $0.state = .held
+            $0.holdReason = .accountMismatch
+        }
+        await harness.outbox.retry(held.id)
+        #expect(harness.memoPosts.count == 1, "control: Try again freed nothing")
     }
 }
