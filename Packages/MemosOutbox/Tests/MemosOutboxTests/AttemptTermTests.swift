@@ -1,6 +1,7 @@
 import Foundation
-import MemosOutbox
 import Testing
+
+@testable import MemosOutbox
 
 /// The engine the facade built, handed out through `attachScheduler`.
 ///
@@ -634,5 +635,65 @@ struct SupersededTaskTests {
         #expect(
             world.scheduler.cancellations.allSatisfy { ($0.attempt ?? -1) < 2 },
             "a retry handed back the successor another retry had just scheduled")
+    }
+}
+
+/// A protocol that answers nothing, so a task that was started stays started.
+///
+/// The enumeration below is the one production line no double stands in for: it reads back what a
+/// real session is holding. These tasks exist only to BE read back, so the loading they begin
+/// never finishes and no byte leaves the machine.
+private final class SilentProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {}
+
+    override func stopLoading() {}
+}
+
+/// What the scheduler makes of the descriptions it finds on a session it did not write.
+///
+/// After a relaunch every description on the session was written by whatever build put it there,
+/// so the reconciliation has to read a build-22 three-term one and a four-term one from this build
+/// side by side. Both are written here as raw strings for that reason: composed through
+/// `OutboxTaskIdentity` they would only prove the type can read its own spelling back.
+@Suite("The real scheduler reads back what the session is holding")
+struct BackgroundSchedulerEnumerationTests {
+
+    @Test("a description build 22 wrote is enumerated beside one this build writes")
+    func bothTermFormsAreEnumerated() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SilentProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let url = try #require(URL(string: "https://example.invalid/api/uploads/u1"))
+        let jobID = UUID()
+        let legacyFileID = UUID()
+        let currentFileID = UUID()
+        let legacy = session.dataTask(with: url)
+        legacy.taskDescription = "\(jobID.uuidString)|\(legacyFileID.uuidString)|0"
+        let current = session.dataTask(with: url)
+        current.taskDescription = "\(jobID.uuidString)|\(currentFileID.uuidString)|400|2"
+        legacy.resume()
+        current.resume()
+
+        let inFlight = await BackgroundChunkScheduler(session: session).inFlight()
+
+        #expect(inFlight.count == 2, "the session was holding two tasks that name a chunk")
+        #expect(inFlight.allSatisfy { $0.jobID == jobID }, "the capture was not read back")
+        let readLegacy = try #require(
+            inFlight.first { $0.fileID == legacyFileID },
+            "a three-term description was dropped by the enumeration"
+        )
+        #expect(readLegacy.attempt == nil, "a term that is not there was read as an attempt")
+        #expect(readLegacy.offset == 0)
+        let readCurrent = try #require(
+            inFlight.first { $0.fileID == currentFileID },
+            "a four-term description was dropped by the enumeration"
+        )
+        #expect(readCurrent.attempt == 2, "the term that tells the attempts apart was dropped")
+        #expect(readCurrent.offset == 400)
     }
 }
