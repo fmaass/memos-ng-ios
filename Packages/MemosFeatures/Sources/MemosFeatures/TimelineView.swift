@@ -849,9 +849,10 @@ public struct TimelineView: View {
     /// new capture.
     ///
     /// "Default" on the picker is a word, not a value a memo can carry. It resolves HERE to the
-    /// account's own choice WHEN that choice is known; when it is not, Post refuses and says so,
-    /// because sending nothing would hand the queue its own fallback — the visibility the job
-    /// already has, which is exactly the one the person just stopped choosing.
+    /// account's own choice WHEN that choice is known; when it is not, Post refuses and says so for
+    /// a capture that carries a visibility of its own, because sending nothing would hand the queue
+    /// its own fallback — that visibility, exactly the one the person just stopped choosing. A
+    /// capture restored with none opened on Default, so no choice was stopped and none is sent.
     @MainActor
     static func post(
         _ submission: ComposeSubmission,
@@ -863,7 +864,8 @@ public struct TimelineView: View {
         guard let restored else { return await enqueue(submission) ? .saved : .enqueueFailed }
         // "Default" with no account default known is a word this app cannot turn into a value.
         // Sending nothing would hand the queue its own fallback — the visibility the job already
-        // has, which is the one the person just stopped choosing — so Post refuses.
+        // has, which is the one the person just stopped choosing — so Post refuses. A capture
+        // restored with none opened on Default: nothing was stopped, so nil goes.
         if submission.visibility == nil, accountDefault == nil, restored.visibility != nil {
             return .refused(.defaultVisibilityUnknown)
         }

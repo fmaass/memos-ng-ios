@@ -106,7 +106,7 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
 /// cannot live in an actor it would have to await.
 /// It is `public` for one reason: this class IS the seam between the URL loading system and the
 /// engine, the drop it used to have happened here, and `MemosOutboxTests` exercises the package
-/// through its public surface rather than with `@testable`. `deliver` is what the callback below
+/// through its public surface where it drives this class. `deliver` is what the callback below
 /// calls, and what a test can call.
 public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
