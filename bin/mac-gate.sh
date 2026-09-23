@@ -405,6 +405,10 @@ log="$artifacts/mac-gate-$branch_slug-$RUN_TOKEN.log"
 # be an untracked path in the change set it is classifying.
 open_run_log() {
   mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
+  # The test-count candidate is this run's or nobody's: an earlier run's copy would outlive any
+  # run that ends before the copyback — a refused mirror, a failed step — and be the one the
+  # documented `cp` records. Removed here, before any exit this run can take.
+  rm -f "$artifacts/testcount-baseline.tsv"
   : > "$log" || die_refuse "cannot write $log"
 }
 say() { printf '%s\n' "$*" | tee -a "$log"; }
@@ -2338,11 +2342,9 @@ fi
 
 # --- (7) copy the evidence back ---------------------------------------------------------------
 say "--- step: copyback ---"
-# The copy below only adds, so a candidate an earlier run left in this folder would outlive a run
-# that obtained no counts and be the one the documented `cp` records. It goes first: afterwards a
-# candidate is here only if this copy brought one. Not `--delete`, which would also take this
-# run's log, written only on this side.
-rm -f "$artifacts/testcount-baseline.tsv"
+# This copy only adds (not `--delete`, which would also take this run's log, written only on this
+# side); the candidate an earlier run may have left here went at open_run_log, so afterwards a
+# candidate is here only if this copy brought one.
 rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
 record copyback "${PIPESTATUS[0]}"
 say "artifacts   : $artifacts"
