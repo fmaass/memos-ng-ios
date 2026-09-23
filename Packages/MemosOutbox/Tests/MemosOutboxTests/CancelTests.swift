@@ -493,6 +493,39 @@ struct CancelTests {
         #expect(await harness.outbox.resubmit(job.id, draft: draft) == .accepted)
     }
 
+    @Test("a re-submit after another read set the manifest aside is refused, not a lost job")
+    func aResubmitAfterQuarantineIsRefused() async throws {
+        let first = try harness()
+        defer { first.cleanUp() }
+        let job = try await capture(first, files: [("one.heic", 800)])
+        let draft = try #require(await first.outbox.cancel(job.id))
+
+        let outbox = first.root.appending(path: "outbox")
+        let manifest = outbox.appending(path: "jobs/\(job.id.uuidString).json")
+        let corrupt = Data(#"{"id":"not a job"}"#.utf8)
+        try corrupt.write(to: manifest)
+
+        // Some OTHER read is what sets it aside: after that the active pathname is gone, so a
+        // reader that only looks there sees an absence that never happened.
+        _ = try await first.repository.loadJobs()
+        let aside = outbox.appending(path: "quarantine/\(job.id.uuidString).json")
+        #expect(try Data(contentsOf: aside) == corrupt)
+
+        // Not `.vanished`: that answer is what the editor makes a SECOND memo out of.
+        #expect(await first.outbox.resubmit(job.id, draft: draft) == .refused(.captureUnreadable))
+        // Asked again it says the same: the first answer neither consumed nor restored anything.
+        #expect(await first.outbox.resubmit(job.id, draft: draft) == .refused(.captureUnreadable))
+
+        // And over the same directory from a cold start, where nothing in memory could be
+        // supplying the answer.
+        let relaunched = try harness(root: first.root, server: first.server)
+        defer { Fixture.forgetting(relaunched.preferencesName) }
+        #expect(
+            await relaunched.outbox.resubmit(job.id, draft: draft) == .refused(.captureUnreadable))
+
+        #expect(try Data(contentsOf: aside) == corrupt, "a refused re-submit dropped the capture")
+    }
+
     // MARK: - The marker is a fence, not a hint
 
     /// The identity a background task for this job's first file carries, at the offset and the
