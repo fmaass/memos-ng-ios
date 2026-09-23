@@ -89,9 +89,78 @@ public struct ComposeDelete {
 /// output's file. Neither of them re-encodes anything, and the one obvious way of doing this —
 /// `UIImagePickerController` — was rejected for exactly that reason: it hands back a transcoded
 /// JPEG for a still the phone took as HEIF. The original is the archive master (ADR-0008).
+/// A capture a person stopped, as the editor takes it.
+///
+/// The queue hands back a `RestoredDraft`, which cannot name the editor's own picture type — the
+/// dependency runs the other way round — so the mapping happens here, once. The files come across
+/// as the very same files: nothing is copied and nothing is re-encoded, because those bytes are
+/// the archive master and a restored draft that quietly replaced them with a rendering would lose
+/// what the capture was taken for (ADR-0008).
+nonisolated public struct ComposeRestore: Equatable {
+    /// The capture this draft came out of. A restored draft goes back to the job it was taken
+    /// from — same manifest, same idempotency key — so a create that already committed resolves to
+    /// the memo it made instead of posting a second one.
+    public var jobID: UUID
+    public var content: String
+    public var visibility: MemoVisibility?
+    public var capturedAt: Date
+    public var pictures: [PickedMedia]
+
+    public init(
+        jobID: UUID,
+        content: String,
+        visibility: MemoVisibility?,
+        capturedAt: Date,
+        pictures: [PickedMedia]
+    ) {
+        self.jobID = jobID
+        self.content = content
+        self.visibility = visibility
+        self.capturedAt = capturedAt
+        self.pictures = pictures
+    }
+
+    public init(_ draft: RestoredDraft) {
+        self.init(
+            jobID: draft.jobID,
+            content: draft.content,
+            // A capture staged before the account had an answer for who sees things carries no
+            // visibility, and neither does the draft: the unmarked choice is still unmarked.
+            visibility: draft.visibility.flatMap(MemoVisibility.init(rawValue:)),
+            capturedAt: draft.capturedAt,
+            // The queue's own file ids are kept, so a picture the editor sends back is the same
+            // picture to both sides and the order a person sees is the order that is sent.
+            pictures: draft.pictures.map {
+                PickedMedia(id: $0.id, url: $0.url, filename: $0.filename, mime: $0.mime)
+            }
+        )
+    }
+}
+
+/// The editor's answer as the queue's own draft. The picture ids are the queue's own ids for the
+/// files it handed over, and a picture picked while the sheet was open carries an id the queue has
+/// never seen — which is exactly how `resubmit` tells a kept file from a new one.
+extension RestoredDraft {
+    init(_ submission: ComposeSubmission, jobID: UUID, visibility: String?) {
+        self.init(
+            jobID: jobID,
+            content: submission.content,
+            visibility: visibility,
+            capturedAt: submission.capturedAt(),
+            pictures: submission.attachments.map {
+                RestoredDraft.Picture(id: $0.id, url: $0.url, filename: $0.filename, mime: $0.mime)
+            }
+        )
+    }
+}
+
 public struct ComposeView: View {
     public enum Mode: Equatable {
-        case create
+        /// A new memo — and, when a capture on its way was stopped, the draft it was stopped
+        /// from. A cancelled upload is a create that had already been staged, so it comes back to
+        /// the same screen with the same words and the same pictures rather than to one of its
+        /// own that would have to answer every question this one already answers.
+        case create(restoring: ComposeRestore?)
         /// An edit opens on the memo as it stands, its display date and its pictures included —
         /// the date row is a change to something that already has one, not a blank to fill in,
         /// and the pictures are what the memo has rather than what this sheet has been given.
@@ -126,6 +195,8 @@ public struct ComposeView: View {
     /// What the sheet has up — its keyboard and its photo picker — as one value, so the order
     /// between them is a thing a test can hold. See `ComposeStage`.
     @State private var stage = ComposeStage()
+    /// Whether the draft this sheet was restored from has already been put on the row.
+    @State private var hasRestoredPictures = false
     @FocusState private var editorFocused: Bool
 
     public init(
@@ -154,11 +225,20 @@ public struct ComposeView: View {
         _content = State(
             initialValue: {
                 if case .edit(_, let content, _, _) = mode { return content }
+                if case .create(let restored?) = mode { return restored.content }
                 return ""
             }())
         _date = State(
             initialValue: {
                 if case .edit(_, _, let createdAt, _) = mode { return createdAt }
+                // The instant the capture was taken, not the instant it was cancelled: a photo
+                // rescued out of the queue an hour later is still a photo taken an hour ago.
+                if case .create(let restored?) = mode { return restored.capturedAt }
+                return nil
+            }())
+        _visibility = State(
+            initialValue: {
+                if case .create(let restored?) = mode { return restored.visibility }
                 return nil
             }())
     }
@@ -246,6 +326,14 @@ public struct ComposeView: View {
                 }
             }
             .task {
+                // Once per opening, and from the task rather than from `init`: the sheet's struct
+                // is rebuilt on every redraw, and attaching from there would add the same files
+                // again each time. `captured` is what the camera uses, which is the behaviour
+                // these files need — a restored picture must survive the next trip to the picker.
+                if case .create(let restored?) = mode, !hasRestoredPictures {
+                    hasRestoredPictures = true
+                    for picture in restored.pictures { imports.captured(picture) }
+                }
                 stage.opened()
                 // Applied here as well as through the change handler below. The first raise is
                 // what decides whether this screen opens ready to be written in, and it must not
@@ -634,7 +722,11 @@ public struct ComposeView: View {
                 switch failure {
                 case .transport(sent: true), .serverFailure:
                     imports.mayHaveLandedOnServer(failure)
-                case .transport(sent: false), .authorization, .storage, .rejection:
+                // The two refusals belong here for the same reason: this attempt sent nothing, so
+                // the set is not frozen by it — whatever may already have landed was frozen when
+                // THAT request went.
+                case .transport(sent: false), .authorization, .storage, .rejection,
+                    .captureUnchanged, .defaultVisibilityUnknown:
                     break
                 }
                 // One exception, and it is about a single sentence: an answer that never left the

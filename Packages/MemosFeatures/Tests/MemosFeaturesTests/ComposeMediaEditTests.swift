@@ -103,7 +103,8 @@ struct ComposeMediaEditTests {
     @Test("an edit sheet still says nothing about who can see the memo")
     func theEditSheetOffersNoVisibility() {
         let editing = ScreenProbe.labels(of: ComposeView(mode: mode()) { _ in .saved })
-        let creating = ScreenProbe.labels(of: ComposeView(mode: .create) { _ in .saved })
+        let creating = ScreenProbe.labels(
+            of: ComposeView(mode: .create(restoring: nil)) { _ in .saved })
 
         // Who can see a memo is its own deliberate action on the memo, not something that changes
         // as a side effect of fixing a typo.

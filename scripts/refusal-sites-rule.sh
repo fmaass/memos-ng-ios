@@ -263,7 +263,9 @@ pin "'await wipeCredential()' in SessionStore.swift" 7 \
   "$(grep -caF 'await wipeCredential()' "$session_store")" \
   "An eighth call is an eighth way a response can end a session."
 # The receiver varies — six read 'job.held(' and 'current.held(' — so the grep is on the method.
-pin "'.held(' in OutboxEngine.swift" 6 \
+# Seven since the refused arm stopped writing the same hold twice: the settlement decision now
+# rides on the value written, not on which of two branches wrote it.
+pin "'.held(' in OutboxEngine.swift" 7 \
   "$(grep -caF '.held(' "$outbox_engine")" \
   "A new hold is a new way a refusal can strand a capture behind a 'sign in again'."
 # And the other half of the hold, which MOVED to OutboxRefusal when the status mapping did: the
@@ -311,7 +313,9 @@ pin "'PresentedCredential(' in SessionStore.swift" 3 \
 pin "'self.credential = ' in SessionStore.swift" 1 \
   "$(grep -caF 'self.credential = ' "$session_store")" \
   "A second assignment is a second moment a credential becomes this device's."
-pin "'OutboxRepository(' constructions" 30 \
+# 34 since RecoveryTests drives the real repository on a directory of its own: an answer that
+# names fewer pictures than the create sent cannot be scripted through the completion tests' server.
+pin "'OutboxRepository(' constructions" 34 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

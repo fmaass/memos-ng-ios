@@ -139,7 +139,7 @@ public struct TimelineView: View {
                     composed: feedback.count,
                     openSettings: { path.append(SettingsRoute()) },
                     search: { openSearch() },
-                    newMemo: { composing = .create }
+                    newMemo: { composing = .create(restoring: nil) }
                 )
             }
             // Attached HERE, inside the stack, and not out on the chain that carries the compose
@@ -442,18 +442,23 @@ public struct TimelineView: View {
                 .id(Self.jumpTop)
             }
             if let outbox, !outbox.jobs.isEmpty {
-                Section {
-                    ForEach(PendingMemoPresentation.rows(for: outbox.jobs)) { row in
-                        PendingCard(
-                            row: row,
-                            retry: { Task { await outbox.retry(row.id) } },
-                            remove: { Task { await outbox.discard(row.id) } }
-                        )
-                        .cardRow()
+                PendingSection(
+                    jobs: outbox.jobs,
+                    lastProgressAt: outbox.lastProgressAt,
+                    verdict: outbox.uploadVerdict,
+                    retry: { id in Task { await outbox.retry(id) } },
+                    remove: { id in Task { await outbox.discard(id) } },
+                    restore: { id in
+                        Task {
+                            // The queue hands the draft back or it does not; a change the server
+                            // has not answered yet is refused, and a restore that found nothing to
+                            // stop opens no sheet.
+                            if let draft = await outbox.cancel(id) {
+                                composing = .create(restoring: ComposeRestore(draft))
+                            }
+                        }
                     }
-                } header: {
-                    SectionHeading(title: "Pending")
-                }
+                )
             }
             // Session-level notices (a credential that could not be saved, a failed revoke)
             // must survive into the signed-in surface — a warning nobody can see is not one.
@@ -789,23 +794,23 @@ public struct TimelineView: View {
     ) async -> ComposeOutcome {
         let outcome: ComposeOutcome
         switch mode {
-        case .create:
+        case .create(let restored):
             guard let outbox else { return .failed(.authorization) }
-            let saved = await outbox.enqueue(
-                content: submission.content,
-                visibility: submission.visibility?.rawValue,
-                // A backdated capture keeps the date it was given all the way through the queue:
-                // the job's capture stamp IS what the create call sends as `created_at`. On Auto
-                // that date is the earliest instant the attached files carried, resolved before
-                // the sheet would let this be tapped.
-                capturedAt: submission.capturedAt(),
-                sources: submission.attachments.map(\.stagedSource)
-            )
-            outcome =
-                saved
-                ? .saved
-                : .failed(
+            switch await Self.post(
+                submission,
+                restoring: restored,
+                accountDefault: session.defaultVisibility,
+                resubmit: { await outbox.resubmit($0, draft: $1) },
+                enqueue: { await Self.enqueue($0, into: outbox) }
+            ) {
+            case .saved:
+                outcome = .saved
+            case .refused(let failure):
+                outcome = .failed(failure)
+            case .enqueueFailed:
+                outcome = .failed(
                     outbox.lastEnqueueFailure == .notSignedIn ? .authorization : .storage)
+            }
         case .edit(let uid, _, let createdAt, _):
             guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return .failed(.authorization)
@@ -827,6 +832,66 @@ public struct TimelineView: View {
         }
         feedback.fire(outcome.isSaved ? .posted : .postFailed)
         return outcome
+    }
+
+    /// What Post did, for the one caller that turns it into a sheet answer. A Bool could only
+    /// say "no": the three ways out differ in what the sheet must do next.
+    enum PostOutcome: Equatable {
+        case saved
+        case enqueueFailed
+        case refused(ComposeFailure)
+    }
+
+    /// What Post does with a create, decided once. A capture the editor was HANDED goes back to
+    /// the job it came out of: same manifest, same key, so a create that already committed
+    /// resolves to its own memo. A job that vanished under the open editor has nothing left to go
+    /// back to, and the words and files on this screen are not thrown away for it — they become a
+    /// new capture.
+    ///
+    /// "Default" on the picker is a word, not a value a memo can carry. It resolves HERE to the
+    /// account's own choice WHEN that choice is known; when it is not, Post refuses and says so for
+    /// a capture that carries a visibility of its own, because sending nothing would hand the queue
+    /// its own fallback — that visibility, exactly the one the person just stopped choosing. A
+    /// capture restored with none opened on Default, so no choice was stopped and none is sent.
+    @MainActor
+    static func post(
+        _ submission: ComposeSubmission,
+        restoring restored: ComposeRestore?,
+        accountDefault: MemoVisibility? = nil,
+        resubmit: (UUID, RestoredDraft) async -> ResubmitOutcome,
+        enqueue: (ComposeSubmission) async -> Bool
+    ) async -> PostOutcome {
+        guard let restored else { return await enqueue(submission) ? .saved : .enqueueFailed }
+        // "Default" with no account default known is a word this app cannot turn into a value.
+        // Sending nothing would hand the queue its own fallback — the visibility the job already
+        // has, which is the one the person just stopped choosing — so Post refuses. A capture
+        // restored with none opened on Default: nothing was stopped, so nil goes.
+        if submission.visibility == nil, accountDefault == nil, restored.visibility != nil {
+            return .refused(.defaultVisibilityUnknown)
+        }
+        let visibility = (submission.visibility ?? accountDefault)?.rawValue
+        let draft = RestoredDraft(submission, jobID: restored.jobID, visibility: visibility)
+        switch await resubmit(restored.jobID, draft) {
+        case .accepted: return .saved
+        // Only a job that is GONE becomes a second capture. A refusal is not that: the capture
+        // may already have committed a memo, and a fresh key would be a second one.
+        case .vanished: return await enqueue(submission) ? .saved : .enqueueFailed
+        case .refused(let reason): return .refused(.captureUnchanged(reason))
+        }
+    }
+
+    @MainActor
+    static func enqueue(_ submission: ComposeSubmission, into outbox: Outbox) async -> Bool {
+        await outbox.enqueue(
+            content: submission.content,
+            visibility: submission.visibility?.rawValue,
+            // A backdated capture keeps the date it was given all the way through the queue: the
+            // job's capture stamp IS what the create call sends as `created_at`. On Auto that date
+            // is the earliest instant the attached files carried, resolved before the sheet would
+            // let this be tapped.
+            capturedAt: submission.capturedAt(),
+            sources: submission.attachments.map(\.stagedSource)
+        )
     }
 
     /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.

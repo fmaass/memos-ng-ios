@@ -141,6 +141,57 @@ struct ContractTests {
         #expect(withVisibility.isSubset(of: Set(declared.keys)))
     }
 
+    @Test("every key the outbox sends on a memo edit exists in MemoPatch", .tags(.contract))
+    func memoPatchKeys() throws {
+        var job = Fixture.job(files: [Fixture.file(uploadUID: "u1")])
+        job.visibility = "PRIVATE"
+        job.resolvedMemoUID = "m1"
+        job.editKey = UUID().uuidString
+        job.files[0].attachmentUID = "att-u1"
+        job.pendingEdit = PendingEdit(
+            content: "the pier, the day after",
+            visibility: "PUBLIC",
+            capturedAt: Date(timeIntervalSince1970: 1_751_111_111),
+            fileIDs: job.files.map(\.id)
+        )
+        let request = try OutboxRequests.patchMemo(
+            baseURL: Fixture.server, token: "pat-token", job: job
+        )
+        let sent = try sentKeys(request)
+        let declared = try properties("MemoPatch")
+        for key in sent {
+            #expect(declared[key] != nil, "MemoPatch has no '\(key)'")
+        }
+
+        // The four fields a compose screen lets a create change, plus the key the server answers a
+        // second transmission from: an edit missing any of them is a silent loss of what the
+        // person changed, and one missing the key is a second edit rather than a replay.
+        #expect(sent.isSuperset(of: ["content", "created_at", "visibility", "edit_key"]))
+        #expect(sent.contains("attachment_uids"))
+
+        // The other direction, which key existence alone cannot see: a field the server newly
+        // requires and the outbox never sends fails here rather than on every restored draft.
+        // Read leniently, unlike the create's: `MemoPatch` declares no `required` at all today —
+        // every field is optional, which is what makes a partial edit legal — and the day one
+        // appears this is what fails.
+        let mandatory = Set(try schema("MemoPatch")["required"] as? [String] ?? [])
+        #expect(
+            mandatory.isSubset(of: sent),
+            "required but never sent: \(mandatory.subtracting(sent))")
+
+        // An edit that chose nothing of its own still travels under the visibility the capture was
+        // made with: an omitted key means "leave it", which is how an edit loses what it changed.
+        var inherited = job
+        inherited.pendingEdit?.visibility = nil
+        let request2 = try OutboxRequests.patchMemo(
+            baseURL: Fixture.server, token: "pat-token", job: inherited)
+        #expect(try sentKeys(request2).contains("visibility"))
+        let sentBody = try #require(request2.httpBody)
+        let body = try #require(
+            try JSONSerialization.jsonObject(with: sentBody) as? [String: Any])
+        #expect(body["visibility"] as? String == "PRIVATE")
+    }
+
     @Test("a UUID satisfies the idempotency key's own rules", .tags(.contract))
     func idempotencyKeyShape() throws {
         let key = try #require(try properties("MemoCreate")["idempotency_key"] as? [String: Any])

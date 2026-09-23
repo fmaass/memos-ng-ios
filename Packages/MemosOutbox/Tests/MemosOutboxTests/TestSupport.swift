@@ -89,6 +89,7 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     private var scheduled: [Scheduled] = []
     private var cancelled: [OutboxTaskIdentity] = []
     private var pretendInFlight: [OutboxTaskIdentity]
+    private var park: (@Sendable () async -> Void)?
 
     init(inFlight: [OutboxTaskIdentity] = []) {
         self.pretendInFlight = inFlight
@@ -103,10 +104,31 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         lock.withLock { issued[identity.taskDescription] }
     }
 
+    /// Forgets a chunk's generation the way the production delegate does when a task ends: keyed by
+    /// the task DESCRIPTION, which is why two transfers that share one description share one epoch.
+    func consumeEpoch(of identity: OutboxTaskIdentity) {
+        lock.withLock { issued.removeValue(forKey: identity.taskDescription) }
+    }
+
     /// What the authority answered, in order, each time this executor was reached.
     var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
 
-    func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { pretendInFlight } }
+    func inFlight() async -> [OutboxTaskIdentity] {
+        let hook = lock.withLock {
+            let taken = park
+            park = nil
+            return taken
+        }
+        await hook?()
+        return lock.withLock { pretendInFlight }
+    }
+
+    /// Run INSIDE `inFlight()` before it answers, so a test can put a second call into the hop the
+    /// first suspends on; the call that runs it clears it, so only the first enumeration parks.
+    var beforeInFlight: (@Sendable () async -> Void)? {
+        get { lock.withLock { park } }
+        set { lock.withLock { park = newValue } }
+    }
 
     /// Set after the harness knows the job and file ids a relaunch would have left behind.
     func pretend(inFlight identities: [OutboxTaskIdentity]) {
@@ -281,18 +303,28 @@ actor FaultyPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 
@@ -371,18 +403,28 @@ actor GatedPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 
@@ -433,18 +475,28 @@ actor SupersedingPersister: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 
@@ -538,18 +590,28 @@ actor FailingThenInterferingPersister: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 
@@ -617,18 +679,28 @@ actor InterferingPersistence: OutboxPersisting {
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }
 
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
     func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
 
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL {
-        try await inner.sliceChunk(job: job, file: file, offset: offset, length: length)
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
     }
 
     func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
 
-    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset)
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
     }
 }
 
@@ -814,4 +886,35 @@ final class Counter: @unchecked Sendable {
     func increment() { lock.withLock { value += 1 } }
 
     var count: Int { lock.withLock { value } }
+}
+
+/// A latch a test can wait on from one side and open from the other.
+actor Latch {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        isOpen = true
+        for continuation in waiting { continuation.resume() }
+        waiting = []
+    }
+
+    /// Waits for the latch, but never forever: a mutation that keeps it shut has to turn the test
+    /// RED, and an unbounded wait parks the whole bundle instead — a witness that deadlocks is no
+    /// fence. A poll rather than a race between the wait and a sleep, because cancelling the losing
+    /// child of a task group cannot resume a checked continuation: the group would park at the end
+    /// of its own scope.
+    /// - Returns: whether the latch opened before the deadline.
+    func wait(within seconds: Double = 2) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !isOpen, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return isOpen
+    }
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
 }

@@ -641,6 +641,63 @@ struct OrdinaryWriteFenceLivenessTests {
         )
         #expect(await harness.engine.lastPersistenceFailure != nil, "and it is said out loud")
     }
+
+    /// The server settles the change, and the disk will not take the write that says so.
+    ///
+    /// What lands instead is a hold about the manifest that is STILL on disk — the one the claim
+    /// wrote, still waiting for the server's word — so the hold may not describe it as answered.
+    /// A hold is not an answer about the change: taken from the candidate, the storage failure
+    /// would clear a marker whose clearing was refused, and the capture would offer its draft back
+    /// while the memo it may already have changed says otherwise.
+    @Test("a storage hold over a refusal that never landed keeps the unanswered change's marker")
+    func storageHoldKeepsTheUnansweredMarker() async throws {
+        let http = ScriptedHTTP { request in
+            switch (request.httpMethod ?? "", request.url?.path() ?? "") {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("PATCH", _):
+                return OutboxHTTPResponse(statusCode: 422)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+        let harness = try await Harness.make(
+            bytes: 400,
+            http: http,
+            persistence: { repository in
+                RefusingOneWrite(repository, refusing: { $0.holdReason == .serverRefused })
+            }
+        )
+        defer { harness.cleanUp() }
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].attachmentUID = "a1"
+        job.files[0].bytesConfirmed = job.files[0].byteSize
+        job.resolvedMemoUID = "m1"
+        job.editKey = "k1"
+        job.pendingEdit = PendingEdit(
+            content: "on the beach, and then the ferry",
+            visibility: "PRIVATE",
+            capturedAt: harness.now,
+            fileIDs: [job.files[0].id]
+        )
+        job.state = .waiting
+        job.nextAttemptAt = harness.now
+        try await harness.repository.save(job)
+
+        await harness.engine.drain()
+
+        let disk = try #require(harness.persistence as? RefusingOneWrite)
+        #expect(await disk.refused, "the write this witness is about was never reached")
+        #expect(harness.http.requests(method: "PATCH").count == 1, "the edit went out once")
+        let saved = try #require(await harness.reload())
+        #expect(saved.holdReason == .storageFailed, "the storage failure is not what held it")
+        #expect(
+            saved.editUnansweredSince == harness.now,
+            Comment(
+                rawValue: "the hold took the marker from the candidate, so a change still on the "
+                    + "wire reads as answered"))
+    }
 }
 
 // MARK: - the world these witnesses run in
@@ -756,4 +813,77 @@ actor HandlerBox {
     private(set) var handler: (any OutboxChunkHandling)?
 
     func attach(_ handler: any OutboxChunkHandling) { self.handler = handler }
+}
+
+/// The disk as it behaves when ONE write cannot be made: the one a predicate names, once.
+///
+/// `FaultyPersistence` refuses a COUNT from the first write on, which cannot say "the claim landed
+/// and the answer to it did not" — and that order is the whole premise of a recovery hold written
+/// about a manifest that already carries a marker. The write is named by the CANDIDATE the engine
+/// offers, as the fence witnesses above name theirs, because a count would move with the next
+/// write this lane gains.
+private actor RefusingOneWrite: OutboxPersisting {
+    struct Refused: Error {}
+
+    private let inner: OutboxRepository
+    private let matches: @Sendable (UploadJob) -> Bool
+    private(set) var refused = false
+
+    init(_ inner: OutboxRepository, refusing matches: @escaping @Sendable (UploadJob) -> Bool) {
+        self.inner = inner
+        self.matches = matches
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func save(_ job: UploadJob) async throws {
+        try refuseIfNamed(job)
+        try await inner.save(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        try refuseIfNamed(job)
+        return try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+    }
+
+    private func refuseIfNamed(_ job: UploadJob) throws {
+        guard !refused, matches(job) else { return }
+        refused = true
+        throw Refused()
+    }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
+    ) async throws -> URL {
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
+    }
 }

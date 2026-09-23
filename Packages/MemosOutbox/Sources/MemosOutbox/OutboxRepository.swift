@@ -153,12 +153,27 @@ public protocol OutboxPersisting: Sendable {
         else fallback: UploadJob
     ) async throws -> UploadJob?
     func delete(_ job: UploadJob) async
+
+    /// The same removal, fenced on the manifest the caller last wrote — the question
+    /// `save(_:ifStillCurrent:matching:else:)` asks, asked of a destruction.
+    ///
+    /// A capture a person took back between a request and its answer is no longer that answer's to
+    /// destroy, and the originals it names are the only copies there are.
+    ///
+    /// - Returns: whether the manifest on disk was still `snapshot` and was therefore removed.
+    @discardableResult
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool
     func sweepOrphans() async throws -> SweepOutcome
+    // `attempt` carries no default here: a protocol requirement may not have one. The concrete
+    // queue below defaults it to nil, which is what keeps every caller that predates the term.
     func sliceChunk(
-        job: UploadJob, file: OutboxFile, offset: Int64, length: Int
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
     ) async throws -> URL
     func removeChunk(at url: URL) async
-    func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL
+    func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL
+    /// Where this job's copy of the original lives. The drain reads those bytes to answer a
+    /// question only they can answer — which of the memo's pictures this original became.
+    func mediaURL(job: UploadJob, file: OutboxFile) -> URL
 }
 
 /// The outbox on disk.
@@ -303,23 +318,38 @@ public actor OutboxRepository {
         return jobs.sorted { $0.capturedAt < $1.capturedAt }
     }
 
-    /// One job, or nil when nothing actionable stands under that id.
+    /// What stands under an id, with "could not be read" told apart from "is not there".
+    ///
+    /// Absence is the one answer that authorises a fresh enqueue, so it is never inferred from a
+    /// failure to look. A manifest an earlier read set aside is gone from the active path, and
+    /// reading that as absence would make a second memo out of the same capture.
     ///
     /// A manifest that cannot be decoded is quarantined here too, so that a background wake — which
     /// only ever asks for the one job its chunk belongs to — still sets aside what it cannot read,
     /// and the next refresh says so, rather than answering "no such capture" for ever.
-    public func job(_ id: UUID) -> UploadJob? {
+    public func presence(_ id: UUID) -> JobPresence {
         let url = manifestURL(id)
         switch readJob(at: url) {
         case .decoded(let job):
-            return job
+            return .present(job)
         case .undecodable(let reason):
             quarantine(url, reason: reason)
-            return nil
-        case .unreadable, .vanished:
-            return nil
+            return .unreadable
+        case .unreadable:
+            return .unreadable
+        case .vanished:
+            // The active path is empty, which on its own says nothing: the capture may have
+            // finished, or some earlier read may have set its manifest aside. Only the quarantine
+            // can tell those apart, and a lookup that cannot answer is not an answer.
+            guard let setAside = try? files(surfacingAs: id, in: quarantineRoot) else {
+                return .unreadable
+            }
+            return setAside.isEmpty ? .absent : .unreadable
         }
     }
+
+    /// One job, or nil when nothing actionable stands under that id.
+    public func job(_ id: UUID) -> UploadJob? { presence(id).job }
 
     public func save(_ job: UploadJob) throws {
         _ = try persist(job)
@@ -377,6 +407,16 @@ public actor OutboxRepository {
         try? FileManager.default.removeItem(at: manifestURL(job.id))
         try? FileManager.default.removeItem(at: mediaDirectory(job.id))
         removeChunks(forJob: job.id)
+    }
+
+    /// The fenced removal — see `OutboxPersisting`. Read and write are on this isolation with
+    /// nothing awaited between them, so there is no instant between the question and the removal
+    /// for the capture to be taken back in.
+    @discardableResult
+    public func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) -> Bool {
+        guard let onDisk = self.job(snapshot.id), onDisk == snapshot else { return false }
+        delete(job)
+        return true
     }
 
     /// Throws one capture away because a PERSON said so: its manifest, whatever was set aside under
@@ -669,7 +709,8 @@ public actor OutboxRepository {
         job: UploadJob,
         file: OutboxFile,
         offset: Int64,
-        length: Int
+        length: Int,
+        attempt: Int? = nil
     ) throws -> URL {
         let source = mediaURL(job: job, file: file)
         guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)) else {
@@ -682,13 +723,20 @@ public actor OutboxRepository {
         guard data.count == length else {
             throw OutboxStorageError.shortRead(expected: length, got: data.count)
         }
-        let url = chunkURL(jobID: job.id, fileID: file.id, offset: offset)
+        let url = chunkURL(jobID: job.id, fileID: file.id, offset: offset, attempt: attempt)
         try data.write(to: url, options: .atomic)
         return url
     }
 
-    public nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64) -> URL {
-        chunksRoot.appending(path: "\(jobID.uuidString)-\(fileID.uuidString)-\(offset).part")
+    public nonisolated func chunkURL(
+        jobID: UUID, fileID: UUID, offset: Int64, attempt: Int? = nil
+    ) -> URL {
+        // The attempt is APPENDED. The orphan sweep names a chunk's owner by the first 36
+        // characters of the file name, so the job UUID has to stay at the head of it — a chunk a
+        // retry sliced would otherwise read as belonging to no job and be swept while live.
+        let stem = "\(jobID.uuidString)-\(fileID.uuidString)-\(offset)"
+        guard let attempt else { return chunksRoot.appending(path: "\(stem).part") }
+        return chunksRoot.appending(path: "\(stem)-a\(attempt).part")
     }
 
     public func removeChunk(at url: URL) {
@@ -792,3 +840,18 @@ public actor OutboxRepository {
 }
 
 extension OutboxRepository: OutboxPersisting {}
+
+/// What a lookup by id found, with the two kinds of nothing kept apart.
+///
+/// `absent` is a promise — the queue and the quarantine both looked and neither holds a manifest
+/// under that id — and it is the only one of the three a fresh enqueue may be built on.
+public enum JobPresence: Sendable, Equatable {
+    case present(UploadJob)
+    case absent
+    case unreadable
+
+    public var job: UploadJob? {
+        if case .present(let job) = self { return job }
+        return nil
+    }
+}

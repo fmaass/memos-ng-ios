@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 import OpenAPIRuntime
 
 /// Why a compose did not go through.
@@ -39,6 +40,12 @@ public enum ComposeFailure: Sendable, Equatable {
     /// memo. The retry is safe for the reason `transport(sent: true)`'s is — the same edit key,
     /// which the server replays rather than applying twice.
     case serverFailure
+    /// The queue refused to put this capture back where it came from: nothing was sent and
+    /// nothing changed. Each reason is answerable differently, so the refusal is carried whole.
+    case captureUnchanged(ResubmitRefusal)
+    /// "Default" was chosen and the account's own default is not known, so there is no value a
+    /// memo could carry that means it. Nothing was asked of the queue.
+    case defaultVisibilityUnknown
 }
 
 /// What a compose attempt did.
