@@ -450,9 +450,9 @@ public struct TimelineView: View {
                     remove: { id in Task { await outbox.discard(id) } },
                     restore: { id in
                         Task {
-                            // The queue hands the draft back or it does not; an edit already on
-                            // the wire is refused, and a restore that found nothing to stop opens
-                            // no sheet.
+                            // The queue hands the draft back or it does not; a change the server
+                            // has not answered yet is refused, and a restore that found nothing to
+                            // stop opens no sheet.
                             if let draft = await outbox.cancel(id) {
                                 composing = .create(restoring: ComposeRestore(draft))
                             }
