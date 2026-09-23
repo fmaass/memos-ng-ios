@@ -493,7 +493,7 @@ struct CancelTests {
         #expect(await harness.outbox.resubmit(job.id, draft: draft) == .accepted)
     }
 
-    // MARK: - F2: the marker is a fence, not a hint
+    // MARK: - The marker is a fence, not a hint
 
     /// The identity a background task for this job's first file carries, at the offset and the
     /// attempt term the manifest says it was scheduled under.

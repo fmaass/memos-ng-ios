@@ -103,17 +103,18 @@ public enum OutboxRequests {
         // seen yet and which the job must therefore be holding. The list travels whole or not at
         // all: an omitted key leaves the memo's pictures as they are, while a list missing one
         // entry DELETES that picture, so an original that could not be named takes the whole list
-        // out of the request. The cost is that a removal or a reorder does not reach that memo
-        // until it can be named; nothing the person still has is destroyed on a guess.
-        let named = try edit.fileIDs.map { id -> String? in
+        // out of the request ENTIRELY, as `incompleteEdit`: the job holds, whole, and nothing
+        // partial is ever sent. A retained original the create's answer did not name is made
+        // nameable at re-submit by uploading it again, so this throw is a broken invariant
+        // rather than an ordinary state.
+        let attachmentUIDs = try edit.fileIDs.map { id -> String in
             if staged.contains(id) {
                 guard let uid = job.file(id)?.uploadUID else { throw Failure.incompleteEdit }
                 return uid
             }
-            return job.file(id)?.attachmentUID
+            guard let uid = job.file(id)?.attachmentUID else { throw Failure.incompleteEdit }
+            return uid
         }
-        let attachmentUIDs: [String]? =
-            named.contains { $0 == nil } ? nil : named.compactMap { $0 }
         var request = URLRequest(url: baseURL.appending(path: "api/memos").appending(path: uid))
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

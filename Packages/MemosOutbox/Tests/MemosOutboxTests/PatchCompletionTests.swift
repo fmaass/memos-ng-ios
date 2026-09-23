@@ -912,7 +912,9 @@ struct PatchCompletionTests {
         await harness.outbox.drain()
         // A create whose answer named one of the two originals: the other can be named by nothing
         // the memo holds, which is the state the re-submit has to make nameable again.
-        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+        let prepared = try await standing(
+            harness, try #require(await harness.repository.job(job.id))
+        ) {
             $0.resolvedMemoUID = "m1"
             $0.editKey = UUID().uuidString
             $0.files[0].attachmentUID = "att-u1"
@@ -924,7 +926,9 @@ struct PatchCompletionTests {
 
         let staged = try #require(await harness.repository.job(job.id))
         #expect(staged.files[1].stagedForEdit == true)
-        #expect(staged.files[1].uploadUID == nil)
+        #expect(
+            staged.files[1].uploadUID != prepared.files[1].uploadUID,
+            "the unnamed original kept the uid the create's upload consumed")
         #expect(staged.files[1].bytesConfirmed == 0)
         #expect(staged.files[0].stagedForEdit != true, "a named original was sent again")
 

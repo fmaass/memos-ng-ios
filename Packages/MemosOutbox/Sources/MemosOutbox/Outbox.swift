@@ -348,9 +348,11 @@ public final class Outbox {
     /// that already exists, never a silent re-bind. An edit is recorded rather than applied to the
     /// capture: the create is replayed as it was first sent, and the edit is owed to the memo that
     /// replay resolves to.
-    @discardableResult
-    public func resubmit(_ jobID: UUID, draft: RestoredDraft) async -> Bool {
-        guard let snapshot = await repository.job(jobID) else { return false }
+    public func resubmit(_ jobID: UUID, draft: RestoredDraft) async -> ResubmitOutcome {
+        guard let snapshot = await repository.job(jobID) else { return .vanished }
+        // An edit of this capture is claimed: its body cannot be replaced under the server's feet,
+        // and a new key over uploads the previous edit consumed is a memo the server refuses.
+        guard snapshot.editSentAt == nil else { return .refused(.editInFlight) }
         var candidate = snapshot.released(at: Date())
         if draft != self.draft(of: snapshot) {
             let known = Set(snapshot.files.map(\.id))
@@ -360,7 +362,9 @@ public final class Outbox {
                 // state a relaunch cannot recover from. So it is copied BEFORE anything is written
                 // down, and a copy that fails refuses the re-submit rather than recording a
                 // picture nothing holds.
-                guard let staged = stage(picture, into: snapshot) else { return false }
+                guard let staged = stage(picture, into: snapshot) else {
+                    return .refused(.stagingFailed)
+                }
                 candidate.files.append(staged)
             }
             candidate.pendingEdit = PendingEdit(
@@ -375,12 +379,50 @@ public final class Outbox {
             // sends it — a re-submit of the SAME draft never reaches this and keeps its key.
             candidate.editKey = UUID().uuidString
         }
+        // Every retained original must be NAMEABLE before the PATCH, because the picture list
+        // travels whole: one the create's answer never named is uploaded again, and the server
+        // folds identical bytes back onto the attachment it stored, so the entry resolves to the
+        // picture the memo holds. Only once the create RESOLVED: before that the create names
+        // these files, and re-staging would change the body whose byte-for-byte replay the key
+        // authorises.
+        if candidate.resolvedMemoUID != nil, let edit = candidate.pendingEdit {
+            let kept = Set(edit.fileIDs)
+            for index in candidate.files.indices
+            where kept.contains(candidate.files[index].id)
+                && candidate.files[index].stagedForEdit != true
+                && candidate.files[index].attachmentUID == nil
+            {
+                let file = candidate.files[index]
+                // Checked before anything is written: re-staging a copy this device cannot read
+                // promises an upload that can never be made. The person removes that picture
+                // instead — and then its omission is a removal the memo asked for, not a guess.
+                guard isReadable(file, of: snapshot) else {
+                    return .refused(.pictureMissing(filename: file.filename))
+                }
+                candidate.files[index].stagedForEdit = true
+                candidate.files[index].uploadUID = nil
+                candidate.files[index].bytesConfirmed = 0
+            }
+        }
+        // The cancelled transfers are superseded before the replacement can be scheduled — the same
+        // bump Try again performs — so the abandoned task's late answer fails the attempt guard.
+        candidate = candidate.bumpingAttempts().job
         let written = try? await repository.save(
             candidate, ifStillCurrent: nil, matching: snapshot, else: candidate
         )
         await refresh()
-        guard (written ?? nil) != nil else { return false }
+        guard (written ?? nil) != nil else { return .refused(.writeLost) }
         await drainAfterAdoption()
+        return .accepted
+    }
+
+    /// Whether the job's copy of this original can still be read: a send, or a promise unkeepable.
+    private func isReadable(_ file: OutboxFile, of job: UploadJob) -> Bool {
+        guard
+            let handle = try? FileHandle(
+                forReadingFrom: repository.mediaURL(job: job, file: file))
+        else { return false }
+        try? handle.close()
         return true
     }
 
@@ -507,4 +549,26 @@ public struct RestoredDraft: Sendable, Equatable {
         self.capturedAt = capturedAt
         self.pictures = pictures
     }
+}
+
+/// How a re-submit ended. Never a Bool: "the job is gone" and "the fenced write lost" are opposite
+/// instructions to the editor. Each refusal below has its own sentence on the screen.
+public enum ResubmitOutcome: Sendable, Equatable {
+    case accepted
+    /// No job under that id — a fresh enqueue is the answer.
+    case vanished
+    /// The job stands and holds the draft; the editor keeps it.
+    case refused(ResubmitRefusal)
+}
+
+/// Why a re-submit left the capture where it was.
+public enum ResubmitRefusal: Sendable, Equatable {
+    /// A picture picked in the editor could not be copied in.
+    case stagingFailed
+    /// The fenced manifest write did not land.
+    case writeLost
+    /// An edit is claimed; its body is immutable until answered.
+    case editInFlight
+    /// A retained original is no longer readable on this device.
+    case pictureMissing(filename: String)
 }

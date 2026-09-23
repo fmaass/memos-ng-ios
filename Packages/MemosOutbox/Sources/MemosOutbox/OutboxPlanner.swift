@@ -45,7 +45,8 @@ public enum OutboxPlanner {
         // captured under another account must never reach a request, whatever else is true of it.
         guard job.binding.matches(credentials) else { return .hold(.accountMismatch) }
         // A capture a person has taken back to the editor is not the queue's to send, whatever
-        // else is true of it. The mark is the fence; the date it parks is only what the row shows.
+        // else is true of it. The mark is the fence; the date it parks is what this wait is
+        // reported as, and no screen displays it.
         if job.cancelledAt != nil { return .wait(until: job.nextAttemptAt) }
         if job.state == .held { return .hold(job.holdReason ?? .serverRefused) }
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
@@ -178,13 +179,33 @@ extension UploadJob {
         }
     }
 
+    /// Moves every file still transferring to a NEW attempt term, so the task holding the old one
+    /// is distinguishable from its replacement and its late answer can be ignored rather than
+    /// rewinding the cursor its successor is moving. The hand retry and the re-submit of a taken
+    /// back capture both mint terms here and ONLY here, so the two agree on what a term means.
+    /// - Returns: the job with the new terms, and the term each file now stands at.
+    public func bumpingAttempts() -> (job: UploadJob, attempts: [UUID: Int?]) {
+        let next = with { candidate in
+            for index in candidate.files.indices where !candidate.files[index].isComplete {
+                candidate.files[index].uploadAttempt =
+                    (candidate.files[index].uploadAttempt ?? 0) + 1
+            }
+        }
+        return (next, next.attemptTerms)
+    }
+
+    /// The term each file stands at, as the manifest has it — the shape a cancel predicate reads.
+    public var attemptTerms: [UUID: Int?] {
+        Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0.uploadAttempt) })
+    }
+
     /// A person took this capture back to the editor.
     ///
     /// Nothing it owns goes anywhere: the manifest stays, so the idempotency key and the account
     /// the capture was made under travel to the re-submit instead of being minted again, and the
     /// originals stay where the job already holds them. The mark itself is what keeps every pass
-    /// off the capture — each wake point refuses a marked job — and the date parked here is what
-    /// the pending row shows, not what stops a send.
+    /// off the capture — each wake point refuses a marked job — and the date parked here only
+    /// keeps an unmarked pass from finding work; no screen shows it.
     public func cancelled(at now: Date) -> UploadJob {
         with {
             $0.cancelledAt = now
@@ -209,7 +230,8 @@ extension UploadJob {
             $0.waitReason = nil
             // Due now: what keeps the create from being sent again is that the edit branch takes
             // every pass in which the planner could answer `.createMemo` again, and a job still
-            // missing a file's bytes is answered `.startUpload` rather than a create.
+            // missing a file's bytes is answered `.startUpload` or `.uploadChunk` — whichever
+            // that file's cursor calls for — rather than a create.
             $0.nextAttemptAt = .distantPast
         }
     }

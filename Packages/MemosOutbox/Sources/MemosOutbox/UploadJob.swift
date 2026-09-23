@@ -182,17 +182,20 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var resolvedMemoUID: String?
     /// The key the edit below is applied under, minted once per logical edit and kept across
     /// every transmission of that edit, so a replay is the same apply rather than a second one.
-    /// It is not the create's idempotency key: a second edit of the same memo is a different edit
-    /// and carries a different key.
+    /// A second edit of the same memo is a different edit and mints a key of its own — but a
+    /// create that resolved while an edit was already owed and no key had been minted adopts the
+    /// create's idempotency key here, once (OutboxEngine.swift:531).
     public var editKey: String?
-    /// How often the pending edit has been put on the wire, moved through the fenced write. A
+    /// How often the pending edit has been CLAIMED for transmission, advanced by the fenced write
+    /// that precedes building the request — so it counts intents to send, not arrivals. A
     /// relaunch deliberately claims the edit again — that is the recovery — and this counts those
     /// claims rather than preventing them; what makes the extra transmission harmless is the key
     /// above, which turns it into a replay of the same edit.
     public var patchAttempt: Int?
     /// What the editor changed while the create was in flight, still owed to the memo above.
     public var pendingEdit: PendingEdit?
-    /// When the pending edit above was last put on the wire, cleared the moment an outcome says it
+    /// When the pending edit above was last claimed for transmission — written before the request
+    /// is built, so it does not say the server saw it — cleared only where an outcome proves it
     /// is owed again. While it is set the edit is immutable: the capture cannot be taken back to
     /// the editor, because the body the server is answering about is the one on disk. Optional
     /// because a manifest written before this existed has none, and absent means "not in flight".

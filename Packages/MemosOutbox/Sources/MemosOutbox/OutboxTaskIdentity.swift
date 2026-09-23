@@ -49,4 +49,22 @@ public struct OutboxTaskIdentity: Sendable, Equatable, Hashable {
         }
         self.init(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
     }
+
+    /// The tasks a retry that saved `bumped` left BEHIND: this job's, for a file that retry moved,
+    /// carrying a term OLDER than the one it saved. A task at or past it is the replacement this
+    /// retry scheduled or one a LATER retry minted mid-enumeration — cancelling either tears down
+    /// a live transfer. A legacy task carries no term at all, which no term can predate, so it is
+    /// always a predecessor.
+    public static func supersededTasks(
+        inFlight: [OutboxTaskIdentity],
+        bumped: [UUID: Int?],
+        jobID: UUID
+    ) -> [OutboxTaskIdentity] {
+        inFlight.filter { identity in
+            guard identity.jobID == jobID, let term = bumped[identity.fileID], let saved = term
+            else { return false }
+            guard let attempt = identity.attempt else { return true }
+            return attempt < saved
+        }
+    }
 }

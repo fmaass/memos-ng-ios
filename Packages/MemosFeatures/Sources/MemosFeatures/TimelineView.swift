@@ -800,7 +800,7 @@ public struct TimelineView: View {
                 submission,
                 restoring: restored,
                 accountDefault: session.defaultVisibility,
-                resubmit: { await outbox.resubmit($0, draft: $1) },
+                resubmit: { await outbox.resubmit($0, draft: $1) == .accepted },
                 enqueue: { await Self.enqueue($0, into: outbox) }
             )
             outcome =

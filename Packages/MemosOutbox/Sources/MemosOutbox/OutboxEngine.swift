@@ -18,8 +18,10 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     /// The jobs whose edit is on the wire right now. In memory on purpose: it is the claim that
     /// keeps two invocations inside one launch from being two requests, and a relaunch is meant to
-    /// ask again. A job is in here only while an answer is outstanding — every outcome that leaves
-    /// the edit still owed gives the claim back, so the backoff it was put into can be served.
+    /// ask again. It is claimed in `applyEdit` before the fenced write and given back by every
+    /// outcome that leaves this job alive — a failed claim, a retry, a refusal, and an applied edit
+    /// whose terminal delete lost its fence. Only an applied edit that DELETED the job keeps it,
+    /// and nothing can ask about a job that is gone.
     private var editsTransmitted: Set<UUID> = []
 
     private let repository: any OutboxPersisting
@@ -36,6 +38,10 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// because every request means the same thing — look at the queue again — so one more pass
     /// answers all of them.
     private var drainRequested = false
+    /// The jobs a `release` is running for, claimed synchronously before its first hop. A second
+    /// release for one already releasing is REFUSED, not joined: the first write already minted its
+    /// replacement's term, and a second bump would mint one for a transfer nobody scheduled.
+    private var releasing: Set<UUID> = []
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -172,19 +178,22 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
+        // Claimed before any hop, per job: `inFlight()` suspends below and a second Try again
+        // landing in that hop must not mint a second term.
+        guard releasing.insert(jobID).inserted else { return }
+        defer { releasing.remove(jobID) }
         guard let job = await repository.job(jobID) else { return }
         // A capture the editor holds is not retried from here: its way back into the queue is the
         // re-submit that clears the mark. Nothing is written, so the manifest the editor was handed
         // stays exactly as it was taken back.
         guard job.cancelledAt == nil else { return }
+        // An edit already claimed is not retried by hand: the body the server is answering about is
+        // on disk, the engine's backoff replays it under its minted key, and nothing is written.
+        guard job.editSentAt == nil else { return }
         // A stalled upload is retried by moving the file to a NEW attempt: the task still holding
         // the old one is then distinguishable from its replacement, which is what lets a late
         // answer from it be ignored instead of rewinding the cursor its successor is moving.
-        let released = job.released(at: clock()).with { next in
-            for index in next.files.indices where !next.files[index].isComplete {
-                next.files[index].uploadAttempt = (next.files[index].uploadAttempt ?? 0) + 1
-            }
-        }
+        let released = job.released(at: clock()).bumpingAttempts().job
         // Fenced, and BEFORE anything is cancelled: nothing is torn down on a state nobody wrote.
         // The other order would leave a job whose only live task was cancelled and whose manifest
         // still names the attempt that task was sent under.
@@ -195,10 +204,9 @@ public actor OutboxEngine: OutboxChunkHandling {
         // Only the tasks this retry left behind. A task already carrying the attempt the write
         // above minted IS the replacement — cancelling it would tear down the transfer this call
         // exists to start. A legacy task carries no attempt at all and is never the replacement.
-        let bumped = Dictionary(uniqueKeysWithValues: saved.files.map { ($0.id, $0.uploadAttempt) })
-        let live = await scheduler.inFlight().filter {
-            $0.jobID == jobID && $0.attempt != (bumped[$0.fileID] ?? nil)
-        }
+        let bumped = saved.attemptTerms
+        let live = OutboxTaskIdentity.supersededTasks(
+            inFlight: await scheduler.inFlight(), bumped: bumped, jobID: jobID)
         if !live.isEmpty {
             await scheduler.cancel(live)
         }
@@ -477,13 +485,17 @@ public actor OutboxEngine: OutboxChunkHandling {
     }
 
     /// A file's SHA-256, hex and lowercase, read a megabyte at a time so a video does not arrive in
-    /// memory whole. A copy this device can no longer read simply has no digest: identity then
+    /// memory whole. A copy this device cannot open, or cannot finish reading, has NO digest —
+    /// a hash of the bytes that did arrive is a different file's identity — and identity then
     /// falls back to the order the answer came in, which is the honest state of that knowledge.
     private static func digest(of url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+        while true {
+            let chunk: Data?
+            do { chunk = try handle.read(upToCount: 1 << 20) } catch { return nil }
+            guard let chunk, !chunk.isEmpty else { break }
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -568,8 +580,9 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// invocations of this — a drain, and the `advance` a finished chunk re-enters — must be one
     /// request on the wire, and the second is REFUSED rather than joined: this job is waiting for
     /// an answer, and asking again buys nothing the edit key does not already give. The claim is
-    /// given back the moment an outcome leaves the edit still owed, so the backoff that outcome
-    /// wrote can be served by a later pass; only an applied edit keeps it, and that job is gone.
+    /// given back the moment an outcome leaves this job alive, so the backoff that outcome wrote
+    /// can be served by a later pass; it is kept only where the applied edit's fenced delete
+    /// succeeded, and there is then no job left to ask about.
     /// A relaunch claims afresh on purpose — that is the whole recovery — and it is safe because
     /// the key makes the second transmission a replay rather than a second edit.
     private func applyEdit(_ job: UploadJob, credentials: OutboxCredentials) async {
@@ -597,15 +610,21 @@ public actor OutboxEngine: OutboxChunkHandling {
             // Fenced on the manifest this pass wrote: an answer that outlived a cancel, or a
             // relaunch that finished the same edit first, is no longer this pass's to act on — and
             // this delete takes the person's only copy of the pictures with it.
-            await repository.delete(claimed, ifStillCurrent: claimed)
+            guard await repository.delete(claimed, ifStillCurrent: claimed) else {
+                // The manifest moved under the PATCH, so this pass is not the one that destroys it:
+                // the claim goes back and the job stands whole — `pendingEdit` and `editKey` intact
+                // — so the next drain replays the SAME key and the delete is tried again.
+                editsTransmitted.remove(job.id)
+                await onChange()
+                return
+            }
             await onChange()
         case .retry(let message):
-            // Still owed, and no longer in flight: the same body will be replayed under the same
-            // key once its backoff is up, so the claim goes back with the write that says so.
-            await save(
-                claimed.backingOff(at: clock(), error: message).with { $0.editSentAt = nil },
-                matching: claimed
-            )
+            // Still owed, and the transmission's fate unknown: the request may have reached the
+            // server, so `editSentAt` STAYS SET — the body and key it may be holding are immutable
+            // until an answer settles it, and the server answers the replay under that key before
+            // it checks the upload uids. Only the claim goes back, for the backoff below.
+            await save(claimed.backingOff(at: clock(), error: message), matching: claimed)
             editsTransmitted.remove(job.id)
         case .refused(let message, let refused):
             // Not decided here: `save` hops into `OutboxRepository`, and a renewal landing in that
