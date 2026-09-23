@@ -365,7 +365,7 @@ struct PatchCompletionTests {
         }
     }
 
-    // MARK: - 2f: the edited restored draft, the full edit
+    // MARK: - An edited restored draft, applied as one edit
 
     @Test("an edited restored draft becomes one memo carrying every edit")
     func theEditedDraftIsAppliedAsOneEdit() async throws {
@@ -432,7 +432,7 @@ struct PatchCompletionTests {
         #expect(remaining == nil)
     }
 
-    // MARK: - rulings 7 and 8: the replayed create is one memo
+    // MARK: - A replayed create is one memo
 
     @Test("a replay answered 201 with the same uid makes no second memo", arguments: [201, 200])
     func aReplayedCreateIsOneMemo(status: Int) async throws {
@@ -456,7 +456,7 @@ struct PatchCompletionTests {
         #expect(remaining == nil)
     }
 
-    // MARK: - premise charge (iv): a create and an edit, never both, never neither
+    // MARK: - A create and an edit, never both, never neither
 
     @Test("a resubmit sends an edit exactly when there is one", arguments: [true, false])
     func createAndEditAreExclusive(editing: Bool) async throws {
@@ -490,7 +490,7 @@ struct PatchCompletionTests {
         #expect(remaining == nil)
     }
 
-    // MARK: - 2h: the job survives the replay, and a relaunch drives the edit home
+    // MARK: - The job survives the replay, and a relaunch drives the edit home
 
     @Test("a relaunch before the edit was sent drives it home")
     func aRelaunchBeforeTheEditFinishesIt() async throws {
@@ -615,7 +615,7 @@ struct PatchCompletionTests {
         #expect(remaining == nil)
     }
 
-    // MARK: - item 4's outbox half: when the confirmed bytes last moved
+    // MARK: - When the confirmed bytes last moved
 
     @Test("the last-progress instant moves only when confirmed bytes do")
     func lastProgressFollowsConfirmedBytes() async throws {
@@ -649,7 +649,7 @@ struct PatchCompletionTests {
         #expect(harness.outbox.lastProgressAt[job.id] == moved)
     }
 
-    // MARK: - F8/F3/N1/N2: the edit is one logical edit, sent once it can be
+    // MARK: - The edit is one logical edit, sent once it can be
 
     /// A restored draft with the text changed and its pictures left alone: an edit that needs no
     /// staged upload, so a case about the edit's own lifetime is not also about the chunk pipeline.
