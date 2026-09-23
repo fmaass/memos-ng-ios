@@ -693,7 +693,7 @@ struct OrdinaryWriteFenceLivenessTests {
         let saved = try #require(await harness.reload())
         #expect(saved.holdReason == .storageFailed, "the storage failure is not what held it")
         #expect(
-            saved.editSentAt == harness.now,
+            saved.editUnansweredSince == harness.now,
             "the hold took the marker from the candidate, so a change still on the wire reads as "
                 + "answered")
     }

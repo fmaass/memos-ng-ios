@@ -254,7 +254,7 @@ struct PendingMemoPresentationTests {
     @Test("a capture whose edit is already on the wire offers nothing")
     func anEditOnTheWireOffersNothing() {
         var sending = job(state: .uploading)
-        sending.editSentAt = capture
+        sending.editUnansweredSince = capture
 
         #expect(
             PendingMemoPresentation.action(for: sending) == [],

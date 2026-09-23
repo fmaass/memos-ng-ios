@@ -327,7 +327,7 @@ public final class Outbox {
     /// the person may take the capture back after it — nothing is written by the refusal.
     public func cancel(_ jobID: UUID) async -> RestoredDraft? {
         guard let snapshot = await repository.job(jobID) else { return nil }
-        guard snapshot.editSentAt == nil else { return nil }
+        guard snapshot.editUnansweredSince == nil else { return nil }
         let taken = snapshot.cancelled(at: Date())
         let written = try? await repository.save(
             taken, ifStillCurrent: nil, matching: snapshot, else: taken
@@ -352,7 +352,7 @@ public final class Outbox {
         guard let snapshot = await repository.job(jobID) else { return .vanished }
         // An edit of this capture is claimed: its body cannot be replaced under the server's feet,
         // and a new key over uploads the previous edit consumed is a memo the server refuses.
-        guard snapshot.editSentAt == nil else { return .refused(.editInFlight) }
+        guard snapshot.editUnansweredSince == nil else { return .refused(.editUnanswered) }
         var candidate = snapshot.released(at: Date())
         if draft != self.draft(of: snapshot) {
             let known = Set(snapshot.files.map(\.id))
@@ -567,8 +567,11 @@ public enum ResubmitRefusal: Sendable, Equatable {
     case stagingFailed
     /// The fenced manifest write did not land.
     case writeLost
-    /// An edit is claimed; its body is immutable until answered.
-    case editInFlight
+    /// A change is claimed and unanswered; its body is immutable until the server settles it.
+    case editUnanswered
     /// A retained original is no longer readable on this device.
     case pictureMissing(filename: String)
+    /// The capture's manifest could not be read just now. Absent is not the same as unreadable:
+    /// a re-submit answered `vanished` here would enqueue a second memo for the same capture.
+    case captureUnreadable
 }

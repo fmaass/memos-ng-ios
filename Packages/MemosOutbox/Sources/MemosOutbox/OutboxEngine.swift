@@ -189,7 +189,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         guard job.cancelledAt == nil else { return }
         // An edit already claimed is not retried by hand: the body the server is answering about is
         // on disk, the engine's backoff replays it under its minted key, and nothing is written.
-        guard job.editSentAt == nil else { return }
+        guard job.editUnansweredSince == nil else { return }
         // A stalled upload is retried by moving the file to a NEW attempt: the task still holding
         // the old one is then distinguishable from its replacement, which is what lets a late
         // answer from it be ignored instead of rewinding the cursor its successor is moving.
@@ -595,7 +595,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             let claimed = await save(
                 job.with {
                     $0.patchAttempt = ($0.patchAttempt ?? 0) + 1
-                    $0.editSentAt = clock()
+                    $0.editUnansweredSince = clock()
                 },
                 matching: job
             )
@@ -621,7 +621,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             await onChange()
         case .retry(let message):
             // Still owed, and the transmission's fate unknown: the request may have reached the
-            // server, so `editSentAt` STAYS SET — the body and key it may be holding are immutable
+            // server, so `editUnansweredSince` STAYS SET — the body and key it may be holding are immutable
             // until an answer settles it, and the server answers the replay under that key before
             // it checks the upload uids. Only the claim goes back, for the backoff below.
             await save(claimed.backingOff(at: clock(), error: message), matching: claimed)
@@ -632,15 +632,17 @@ public actor OutboxEngine: OutboxChunkHandling {
             // made where the write is.
             if let refused {
                 await save(
-                    claimed.held(.serverRefused, error: message).with { $0.editSentAt = nil },
+                    claimed.held(.serverRefused, error: message)
+                        .with { $0.editUnansweredSince = nil },
                     ifStillCurrent: refused.issuedUnder,
                     matching: claimed,
                     else: claimed.backingOff(at: clock(), error: refused.supersededMessage)
-                        .with { $0.editSentAt = nil }
+                        .with { $0.editUnansweredSince = nil }
                 )
             } else {
                 await save(
-                    claimed.held(.serverRefused, error: message).with { $0.editSentAt = nil },
+                    claimed.held(.serverRefused, error: message)
+                        .with { $0.editUnansweredSince = nil },
                     matching: claimed
                 )
             }
@@ -895,6 +897,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             return "This capture could not be read from the queue."
         case .storageFailed:
             return "This capture could not be saved on this device."
+        case .editIncomplete:
+            return "A picture this memo keeps is missing from this device."
+        case .memoGone:
+            return "This memo is no longer on the server."
         }
     }
 }

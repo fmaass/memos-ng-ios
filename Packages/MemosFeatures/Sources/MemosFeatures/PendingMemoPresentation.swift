@@ -104,7 +104,8 @@ public enum PendingMemoPresentation {
             switch job.holdReason {
             case .unreadableManifest:
                 return [.remove]
-            case .accountMismatch, .serverRefused, .storageFailed, .none:
+            case .accountMismatch, .serverRefused, .storageFailed, .editIncomplete, .memoGone,
+                .none:
                 return [.retry]
             }
         case .uploading, .waiting:
@@ -112,7 +113,7 @@ public enum PendingMemoPresentation {
             // refuses the cancel while it is unresolved, and the engine's own backoff replays it
             // under the key it was minted with. A button answering nothing is a lie, so the row
             // offers nothing until the server answers definitely.
-            return job.editSentAt == nil ? [.cancel, .retry] : []
+            return job.editUnansweredSince == nil ? [.cancel, .retry] : []
         case .creating:
             return []
         }
@@ -130,7 +131,7 @@ public enum PendingMemoPresentation {
         if job.cancelledAt != nil { return Self.cancelledAndKept }
         // The two states `action(for:)` fences, for its reason: the row can do nothing while that
         // request stands. Held and creating keep their own — theirs is the more specific reason.
-        if job.editSentAt != nil, job.state == .uploading || job.state == .waiting {
+        if job.editUnansweredSince != nil, job.state == .uploading || job.state == .waiting {
             return Self.sendingEdit
         }
         switch job.state {
@@ -142,7 +143,7 @@ public enum PendingMemoPresentation {
                 return "This capture could not be read — its files are kept"
             case .storageFailed:
                 return job.lastError ?? "This capture could not be saved on this device"
-            case .serverRefused, .none:
+            case .serverRefused, .editIncomplete, .memoGone, .none:
                 return job.lastError ?? "Needs attention"
             }
         case .creating:

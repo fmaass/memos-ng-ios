@@ -673,7 +673,7 @@ struct PatchCompletionTests {
         let carried = try #require(await harness.repository.job(job.id))
         let minted = try #require(carried.editKey)
         #expect(
-            carried.editSentAt != nil,
+            carried.editUnansweredSince != nil,
             "a lost answer gave the body back, so a second edit could replace the key")
         // The control for the line after it: the refusal really did space the next attempt out,
         // so a second pass finding nothing to do is the backoff and not an empty queue.
@@ -776,7 +776,7 @@ struct PatchCompletionTests {
 
         #expect(await harness.outbox.cancel(job.id) == nil, "an edit in flight was taken back")
         let carried = try #require(await harness.repository.job(job.id))
-        #expect(carried.editSentAt != nil)
+        #expect(carried.editUnansweredSince != nil)
         #expect(carried.cancelledAt == nil, "the refused cancel marked the capture anyway")
 
         await released.open()
@@ -827,7 +827,7 @@ struct PatchCompletionTests {
         #expect(
             await entered.wait(within: 2), "the edit never reached the completion double")
         let parked = try #require(await harness.repository.job(job.id))
-        #expect(parked.editSentAt != nil, "the premise: the edit is claimed")
+        #expect(parked.editUnansweredSince != nil, "the premise: the edit is claimed")
 
         await harness.outbox.retry(job.id)
 
@@ -900,12 +900,12 @@ struct PatchCompletionTests {
         let carried = try #require(await harness.repository.job(job.id))
         let minted = try #require(carried.editKey)
         #expect(
-            carried.editSentAt != nil,
+            carried.editUnansweredSince != nil,
             "a lost answer gave the body back, so a second edit could replace the key")
         #expect(await harness.outbox.cancel(job.id) == nil)
         #expect(
             await harness.outbox.resubmit(job.id, draft: textEdited(draft))
-                == .refused(.editInFlight))
+                == .refused(.editUnanswered))
 
         clock.advance(carried.nextAttemptAt.timeIntervalSince(clock.now) + 1)
         await settle(harness, job.id)
@@ -1015,12 +1015,12 @@ struct PatchCompletionTests {
         #expect(refused.state == .held)
         #expect(refused.holdReason == .serverRefused)
         #expect(
-            refused.editSentAt != nil,
+            refused.editUnansweredSince != nil,
             "an answer that never looked at the key was read as the edit's fate")
         #expect(await harness.outbox.cancel(job.id) == nil, "the unanswered change was taken back")
         #expect(
             await harness.outbox.resubmit(job.id, draft: textEdited(draft))
-                == .refused(.editInFlight))
+                == .refused(.editUnanswered))
     }
 
     @Test("Try again releases a hold carrying an unanswered edit, and replays the same key")
@@ -1037,7 +1037,7 @@ struct PatchCompletionTests {
         #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
         let carried = try #require(await harness.repository.job(job.id))
         let minted = try #require(carried.editKey)
-        #expect(carried.editSentAt != nil, "the premise: the edit is owed")
+        #expect(carried.editUnansweredSince != nil, "the premise: the edit is owed")
         // The hold a capture made under another account wakes up in, reached while its change is
         // still owed: the account is right again, so Try again is the whole way out.
         _ = try await standing(harness, carried) {

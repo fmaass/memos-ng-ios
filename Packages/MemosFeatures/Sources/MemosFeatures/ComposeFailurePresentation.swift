@@ -42,11 +42,14 @@ nonisolated public enum ComposeFailurePresentation {
             case .stagingFailed, .writeLost:
                 return "This capture could not be changed on this device."
                     + " Nothing was sent — what you wrote is still here, so try again."
-            case .editInFlight:
-                return "The last change to this capture is still on its way."
-                    + " Wait for its answer, then try again."
+            case .editUnanswered:
+                return "The last change to this capture hasn't been answered yet."
+                    + " Wait for the answer, then try again."
             case .pictureMissing(let filename):
                 return "\(filename) is no longer on this device — remove it and try again."
+            case .captureUnreadable:
+                return "This capture could not be read on this device just now."
+                    + " Nothing was sent — what you wrote is still here, so try again."
             }
         case .defaultVisibilityUnknown:
             return "Your account's default visibility isn't known yet — choose one,"

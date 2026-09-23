@@ -49,6 +49,13 @@ public enum HoldReason: String, Codable, Sendable, Equatable, CaseIterable {
     /// the change did not happen. The capture stops here rather than being carried on from a state
     /// only memory believes in.
     case storageFailed
+    /// A picture this capture's change keeps is not nameable to the server: its bytes are gone from
+    /// this device, or the change names a file the capture no longer has. Nothing was sent.
+    case editIncomplete
+    /// The memo this capture's change is owed to is no longer on the server. It is a reason of its
+    /// own rather than a sentence under `serverRefused`, because the row's actions are read from
+    /// the reason, and this is the one unanswered change a person may take the capture back from.
+    case memoGone
 }
 
 /// Why a waiting job is waiting on an EVENT rather than on the clock.
@@ -199,7 +206,17 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// is owed again. While it is set the edit is immutable: the capture cannot be taken back to
     /// the editor, because the body the server is answering about is the one on disk. Optional
     /// because a manifest written before this existed has none, and absent means "not in flight".
-    public var editSentAt: Date?
+    public var editUnansweredSince: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, idempotencyKey, content, visibility, capturedAt, files, binding, state
+        case holdReason, waitReason, attemptCount, nextAttemptAt, lastError, cancelledAt
+        case resolvedMemoUID, editKey, patchAttempt, pendingEdit
+        // Every manifest already written spells it this way, and a rename that re-spelled it would
+        // read as "no change is owed" on every capture a person is already carrying.
+        case editUnansweredSince = "editSentAt"
+    }
+
     public init(
         id: UUID = UUID(),
         idempotencyKey: UUID = UUID(),
@@ -219,7 +236,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         editKey: String? = nil,
         patchAttempt: Int? = nil,
         pendingEdit: PendingEdit? = nil,
-        editSentAt: Date? = nil
+        editUnansweredSince: Date? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -239,7 +256,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.editKey = editKey
         self.patchAttempt = patchAttempt
         self.pendingEdit = pendingEdit
-        self.editSentAt = editSentAt
+        self.editUnansweredSince = editUnansweredSince
     }
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteSize } }
