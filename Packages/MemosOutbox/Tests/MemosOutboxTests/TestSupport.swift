@@ -899,6 +899,20 @@ actor Latch {
         waiting = []
     }
 
+    /// Waits for the latch, but never forever: a mutation that keeps it shut has to turn the test
+    /// RED, and an unbounded wait parks the whole bundle instead — a witness that deadlocks is no
+    /// fence. A poll rather than a race between the wait and a sleep, because cancelling the losing
+    /// child of a task group cannot resume a checked continuation: the group would park at the end
+    /// of its own scope.
+    /// - Returns: whether the latch opened before the deadline.
+    func wait(within seconds: Double = 2) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !isOpen, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return isOpen
+    }
+
     func wait() async {
         if isOpen { return }
         await withCheckedContinuation { waiting.append($0) }

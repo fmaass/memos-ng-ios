@@ -621,7 +621,8 @@ struct SupersededTaskTests {
             await released.wait()
         }
         let first = Task { await world.outbox.retry(saved.id) }
-        await entered.wait()
+        #expect(
+            await entered.wait(within: 2), "the first Try again never reached `inFlight()`")
 
         await world.outbox.retry(saved.id)
 

@@ -498,7 +498,8 @@ struct PatchCompletionTests {
         _ = try await stagedUpload(first, job.id)
 
         let parked = Task { await first.outbox.drain() }
-        await entered.wait()
+        #expect(
+            await entered.wait(within: 2), "the PATCH never reached the completion double")
 
         // The create is resolved and written down, and nothing of the edit has reached the wire.
         #expect(first.memoPatches.count == 0)
@@ -758,7 +759,8 @@ struct PatchCompletionTests {
         let draft = try #require(await harness.outbox.cancel(job.id))
         // Its own drain is what reaches the parked edit, so the call has to be left running.
         let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
-        await entered.wait()
+        #expect(
+            await entered.wait(within: 2), "the edit never reached the completion double")
 
         #expect(await harness.outbox.cancel(job.id) == nil, "an edit in flight was taken back")
         let carried = try #require(await harness.repository.job(job.id))
@@ -810,7 +812,8 @@ struct PatchCompletionTests {
         let draft = try #require(await harness.outbox.cancel(job.id))
         // Its own drain is what reaches the parked edit, so the call has to be left running.
         let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
-        await entered.wait()
+        #expect(
+            await entered.wait(within: 2), "the edit never reached the completion double")
         let parked = try #require(await harness.repository.job(job.id))
         #expect(parked.editSentAt != nil, "the premise: the edit is claimed")
 
@@ -845,7 +848,8 @@ struct PatchCompletionTests {
         }
         let draft = try #require(await harness.outbox.cancel(job.id))
         let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
-        await entered.wait()
+        #expect(
+            await entered.wait(within: 2), "the edit never reached the completion double")
         // The manifest moves while the PATCH is out, so the delete that follows it is fenced off
         // the version it was written against — the one thing that must not destroy the capture.
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
