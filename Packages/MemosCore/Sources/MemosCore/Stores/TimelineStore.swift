@@ -24,6 +24,21 @@ public enum TimelineTie: Sendable, Equatable {
     case alreadyExisted
 }
 
+/// One picture in the list a save states, in the order the sheet showed it.
+///
+/// Two cases because the two kinds of picture are named differently on the wire and only one of
+/// them has a name the client already knows: `attachment_uids` accepts an attachment uid the memo
+/// already holds, or an upload uid named in the SAME request's `upload_uids` — and a picture just
+/// picked from the library has no attachment uid until the server answers. So a picked one travels
+/// as its PLACE in the files handed to `attaching:`, and is resolved to the uid the upload
+/// returned at the moment that answer is in hand.
+public enum MemoPictureEntry: Equatable, Sendable {
+    /// A picture the memo already holds, by its attachment uid.
+    case kept(String)
+    /// A picture going up in this same save, by its place in `attaching:`.
+    case uploading(Int)
+}
+
 /// The timeline: one cursor-paginated page at a time.
 ///
 /// The cursor comes from the server (`nextCursor`) rather than from an offset the client keeps:
@@ -967,18 +982,26 @@ public final class TimelineStore {
     /// date and its attachments, and the sheet stays open with the words still in it. Uploads that
     /// did land before the failure are pending sessions the server expires; nothing links them, so
     /// nothing appears half-attached.
+    ///
+    /// `listing` is the third of these absences and the sharpest one. `attachment_uids` REPLACES a
+    /// memo's picture list with what it names, so the key is left out entirely when the caller has
+    /// nothing to say about pictures — nil means untouched, and every caller that never opened the
+    /// compose sheet sends exactly that. A caller that does pass a list is stating the memo's WHOLE
+    /// list in its order, which is why an empty one is honoured as deliberate clearing rather than
+    /// read as "nothing to say".
     @discardableResult
     public func edit(
         uid: String,
         content: String,
         createdAt: Date? = nil,
         attaching files: [StagedSource] = [],
+        listing pictures: [MemoPictureEntry]? = nil,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
         let attempt = MemoEditAttempt(
             uid: uid, content: content, createdAt: createdAt,
-            files: files.map(\.editIdentity)
+            files: files.map(\.editIdentity), pictures: pictures
         )
         // The place in line is taken here, before the key is minted and before a single byte goes
         // up: a save that joins the one ahead of it must present neither a second key nor a second
@@ -1049,11 +1072,29 @@ public final class TimelineStore {
             mutationChangedNothing(claim, on: attempt.uid)
             return .failed(.authorization)
         }
+        // The sheet's list, with each picked picture standing in for the upload uid the server has
+        // just issued for it — the only name the patch can use, since a picture picked a moment ago
+        // has no attachment uid yet. `attachment_uids` is the COMPLETE list and the server unlinks
+        // what it omits, so an entry that cannot be resolved takes the whole key out of the request:
+        // a partial list would delete a picture nobody removed.
+        let listed: [String]? = attempt.pictures.flatMap { entries in
+            var resolved: [String] = []
+            for entry in entries {
+                switch entry {
+                case .kept(let uid):
+                    resolved.append(uid)
+                case .uploading(let index):
+                    guard let uploadUIDs, uploadUIDs.indices.contains(index) else { return nil }
+                    resolved.append(uploadUIDs[index])
+                }
+            }
+            return resolved
+        }
         let outcome = await patchOutcome(
             uid: attempt.uid,
             .init(
-                content: attempt.content, createdAt: attempt.createdAt, editKey: key,
-                uploadUids: uploadUIDs
+                attachmentUids: listed, content: attempt.content, createdAt: attempt.createdAt,
+                editKey: key, uploadUids: uploadUIDs
             ),
             claim: claim,
             using: handle,
@@ -1083,6 +1124,12 @@ public final class TimelineStore {
         /// lost save a second time instead of replaying it — which is the one thing the key exists
         /// to prevent (`StagedSource.editIdentity`).
         var files: [String]
+        /// The picture list this save states, or nil when it states none.
+        ///
+        /// Part of the attempt, and so part of the key, because two saves that differ ONLY in which
+        /// pictures the memo keeps are two different edits: sharing a key would have the server
+        /// replay the first and answer 200 while the removal went nowhere.
+        var pictures: [MemoPictureEntry]?
     }
 
     /// The edit a key was minted for, that key, and how many invocations are USING it right now.

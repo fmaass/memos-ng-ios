@@ -42,6 +42,14 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     public var width: Int?
     public var height: Int?
     public var duration: Double?
+    /// When the picture was TAKEN, as the server read it from the file's own metadata.
+    ///
+    /// Distinct from the memo's `createdAt`, which is the memo's DATE — the one the compose sheet
+    /// chose or defaulted to, and which may be backdated — while this is when THIS picture was
+    /// taken: a roll of holiday photos filed under one evening's date all differ only here. `nil`
+    /// is the ordinary case for anything the camera did not date — a screenshot, a drawing, a file
+    /// stripped of its metadata — so nothing may treat it as an ordering key on its own.
+    public var captureInstant: Date?
     public var thumbnailURL: URL?
     public var previewURL: URL?
     public var webURL: URL?
@@ -74,6 +82,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         width: Int? = nil,
         height: Int? = nil,
         duration: Double? = nil,
+        captureInstant: Date? = nil,
         thumbnailURL: URL? = nil,
         previewURL: URL? = nil,
         webURL: URL? = nil,
@@ -88,6 +97,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         self.width = width
         self.height = height
         self.duration = duration
+        self.captureInstant = captureInstant
         self.thumbnailURL = thumbnailURL
         self.previewURL = previewURL
         self.webURL = webURL
@@ -231,6 +241,7 @@ extension MemoAttachment {
             width: generated.width,
             height: generated.height,
             duration: generated.duration,
+            captureInstant: generated.captureInstant,
             thumbnailURL: URL(string: generated.thumbnailUrl, relativeTo: baseURL)?.absoluteURL,
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,

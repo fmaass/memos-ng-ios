@@ -73,3 +73,33 @@ public protocol NetworkPathProviding: Sendable {
     func currentPath() -> NetworkPath
     func onPathChange(_ handler: @escaping OutboxTrigger)
 }
+
+/// Whether the queue may spend bytes on the network this phone is on, as a screen can read it.
+///
+/// The policy answers a Bool; a card has to say WHY. The reason is a value rather than a sentence,
+/// because the sentence belongs to the presentation and the fact belongs here.
+public enum UploadVerdict: Sendable, Equatable {
+    case permitted
+    case refused(Reason)
+
+    public enum Reason: Sendable, Equatable {
+        /// Low Data Mode, which the toggle never overrides.
+        case lowDataMode
+        /// The phone's own radio, with mobile data turned off in Settings.
+        case cellularWhileMobileDataOff
+        /// A network the system calls expensive — a hotspot — with mobile data turned off.
+        case expensiveWhileMobileDataOff
+    }
+
+    public init(policy: UploadNetworkPolicy, path: NetworkPath) {
+        if path.isConstrained {
+            self = .refused(.lowDataMode)
+        } else if path.usesCellular, !policy.allowsMobileData {
+            self = .refused(.cellularWhileMobileDataOff)
+        } else if path.isExpensive, !policy.allowsMobileData {
+            self = .refused(.expensiveWhileMobileDataOff)
+        } else {
+            self = .permitted
+        }
+    }
+}

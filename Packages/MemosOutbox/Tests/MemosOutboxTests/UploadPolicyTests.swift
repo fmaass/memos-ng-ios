@@ -32,6 +32,26 @@ struct UploadNetworkPolicyTests {
 
     /// Low Data Mode is a decision a person made about the whole phone. The toggle says "you may
     /// spend my data plan", never "ignore what I told the phone".
+    @Test("the verdict says permitted exactly when the rule permits")
+    func theVerdictAgreesWithThePolicy() {
+        let paths: [NetworkPath] = [
+            .wifi,
+            .cellular,
+            NetworkPath(usesCellular: false, isExpensive: true, isConstrained: false),
+            NetworkPath(usesCellular: false, isExpensive: false, isConstrained: true),
+        ]
+        for allowsMobileData in [false, true] {
+            let policy = UploadNetworkPolicy(allowsMobileData: allowsMobileData)
+            for path in paths {
+                #expect(
+                    (UploadVerdict(policy: policy, path: path) == .permitted)
+                        == policy.permits(path),
+                    "the reason a screen shows and the answer the drain acts on are one rule"
+                )
+            }
+        }
+    }
+
     @Test("Low Data Mode refuses whatever the toggle says")
     func constrainedAlwaysWaits() {
         let constrained = NetworkPath(usesCellular: false, isExpensive: false, isConstrained: true)
@@ -156,6 +176,7 @@ struct UploadTriggerTests {
         let scheduler: ScriptedScheduler
         let network: StubNetworkPath
         let outbox: Outbox
+        let preferences: UploadPreferences
         let preferencesName: String
         let jobID: UUID
 
@@ -202,6 +223,7 @@ struct UploadTriggerTests {
             scheduler: scheduler,
             network: network,
             outbox: outbox,
+            preferences: preferences.store,
             preferencesName: preferences.name,
             jobID: job.id
         )
@@ -222,6 +244,28 @@ struct UploadTriggerTests {
         let sending = try #require(await harness.reload())
         #expect(sending.state == .uploading)
         #expect(sending.waitReason == nil)
+    }
+
+    @Test("the reason the queue is holding follows the network and the toggle")
+    func theVerdictFollowsTheNetworkAndTheToggle() async throws {
+        let harness = try await makeHarness()
+        defer { harness.cleanUp() }
+        #expect(harness.outbox.uploadVerdict == .refused(.cellularWhileMobileDataOff))
+
+        await harness.network.move(to: .wifi)
+        #expect(harness.outbox.uploadVerdict == .permitted)
+
+        await harness.network.move(to: .cellular)
+        await harness.preferences.set(true)
+        #expect(harness.outbox.uploadVerdict == .permitted, "the toggle is the other event")
+
+        await harness.network.move(
+            to: NetworkPath(usesCellular: false, isExpensive: false, isConstrained: true)
+        )
+        #expect(
+            harness.outbox.uploadVerdict == .refused(.lowDataMode),
+            "Low Data Mode outranks the toggle that was just turned on"
+        )
     }
 
     @Test("turning the toggle on sends what was already queued")

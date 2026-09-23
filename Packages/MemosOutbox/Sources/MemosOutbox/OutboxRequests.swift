@@ -82,6 +82,71 @@ public enum OutboxRequests {
         return request
     }
 
+    /// The edit owed to the memo an uncertain create resolved to.
+    ///
+    /// Every byte of it is built from the MANIFEST and nothing else, so the same job builds the
+    /// same request in a process that has never seen the first one — which is what makes a
+    /// relaunch's second transmission a replay the server answers from the key rather than a
+    /// second edit. What the job cannot name, it refuses to send: a picture list assembled from
+    /// half a mapping would silently drop a picture from the memo.
+    public static func patchMemo(
+        baseURL: URL,
+        token: String,
+        job: UploadJob
+    ) throws -> URLRequest {
+        guard let uid = job.resolvedMemoUID, let editKey = job.editKey,
+            let edit = job.pendingEdit
+        else { throw Failure.incompleteEdit }
+        let staged = Set(job.files.filter { $0.stagedForEdit == true }.map(\.id))
+        // A kept picture may be named only by the attachment uid the create's answer was matched
+        // to; a picture picked in the editor is named by its upload uid, which the memo has not
+        // seen yet and which the job must therefore be holding. The list travels whole or not at
+        // all: an omitted key leaves the memo's pictures as they are, while a list missing one
+        // entry DELETES that picture, so an original that could not be named takes the whole list
+        // out of the request ENTIRELY, as `incompleteEdit`: the job holds, whole, and nothing
+        // partial is ever sent. A retained original the create's answer did not name is made
+        // nameable before the edit is claimed, so this is the net under that recovery, not a path
+        // the ordinary sequence takes.
+        let attachmentUIDs = try edit.fileIDs.map { id -> String in
+            if staged.contains(id) {
+                guard let uid = job.file(id)?.uploadUID else { throw Failure.incompleteEdit }
+                return uid
+            }
+            guard let uid = job.file(id)?.attachmentUID else { throw Failure.incompleteEdit }
+            return uid
+        }
+        var request = URLRequest(url: baseURL.appending(path: "api/memos").appending(path: uid))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try OutboxWire.encode(
+            OutboxWire.MemoPatch(
+                content: edit.content,
+                // Visibility travels on EVERY edit that has one to send. The server reads an
+                // omitted key as "leave it", so an edit that meant PRIVATE and said nothing would
+                // leave the memo public; the contract declares no null for this field, so a value
+                // is what goes. Both nil is the one honest omission: the create sent no visibility
+                // either, so the memo already carries the account's own answer.
+                visibility: edit.visibility ?? job.visibility,
+                createdAt: OutboxEncoding.iso8601(edit.capturedAt),
+                editKey: editKey,
+                uploadUIDs: edit.fileIDs.compactMap {
+                    staged.contains($0) ? job.file($0)?.uploadUID : nil
+                },
+                attachmentUIDs: attachmentUIDs
+            )
+        )
+        return request
+    }
+
+    /// A request this device cannot build from what it holds.
+    public enum Failure: Error, Sendable, Equatable {
+        /// The job is not carrying everything an edit names — the memo it resolved to, the key it
+        /// is applied under, or the upload session of a picture the editor added. Nothing is sent
+        /// on a guess.
+        case incompleteEdit
+    }
+
     /// The header the offset HEAD answers with, read case-insensitively because header names are.
     public static let offsetHeader = "Upload-Offset"
 

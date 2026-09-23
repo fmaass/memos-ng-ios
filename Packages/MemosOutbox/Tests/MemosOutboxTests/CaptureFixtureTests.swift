@@ -183,3 +183,179 @@ actor NeverReturns {
         for waiter in waiters { waiter.resume() }
     }
 }
+
+/// What a capture looks like on disk, as bytes.
+///
+/// A manifest is the only thing a capture survives a relaunch as, and the build that reads it is
+/// not always the build that wrote it. A round trip cannot see any of that: encoder and decoder
+/// agree with each other whatever the keys are called, so a renamed property takes its key along
+/// and every manifest already on the device silently loses that field. So the key SET is pinned
+/// here against a job with nothing left nil — a key is only missing visibly when there was a value
+/// under it — and the fixtures below are written by hand rather than produced by the encoder under
+/// test. The genuine pre-edit manifest from build 22 is pinned separately, where the drain that
+/// has to survive it is (`AttemptTermTests.swift`).
+@Suite("The manifest on disk")
+struct ManifestKeyTests {
+    /// Every key `UploadJob` writes. Kept as a literal list rather than derived from the type,
+    /// because a list derived from the type would be renamed by the same edit it is meant to
+    /// catch.
+    static let keys: Set<String> = [
+        "id", "idempotencyKey", "content", "visibility", "capturedAt", "files", "binding", "state",
+        "holdReason", "waitReason", "attemptCount", "nextAttemptAt", "lastError", "cancelledAt",
+        "resolvedMemoUID", "editKey", "patchAttempt", "pendingEdit", "editSentAt",
+    ]
+
+    static let jobID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    static let idempotencyKey = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+    static let fileID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+
+    /// No real capture is held, waiting AND cancelled at once. This one is, because an optional
+    /// left nil encodes to no key at all, and a key that is never written cannot be missed.
+    static func populated() -> UploadJob {
+        UploadJob(
+            id: jobID,
+            idempotencyKey: idempotencyKey,
+            content: "on the beach",
+            visibility: "PROTECTED",
+            capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+            files: [
+                OutboxFile(
+                    id: fileID,
+                    relativePath: "one.heic",
+                    filename: "one.heic",
+                    mime: "image/heic",
+                    byteSize: 4096,
+                    lastModified: Date(timeIntervalSince1970: 1_750_000_001),
+                    uploadUID: "u1",
+                    bytesConfirmed: 2048,
+                    chunkSize: 1024,
+                    uploadAttempt: 2,
+                    attachmentUID: "a1",
+                    stagedForEdit: true)
+            ],
+            binding: AccountBinding(
+                serverBaseURL: URL(string: "https://memos.example/")!, ownerSubject: "owner-1"),
+            state: .held,
+            holdReason: .serverRefused,
+            waitReason: .homeNetwork,
+            attemptCount: 3,
+            nextAttemptAt: Date(timeIntervalSince1970: 1_750_000_020),
+            lastError: "the server said no",
+            cancelledAt: Date(timeIntervalSince1970: 1_750_000_080),
+            resolvedMemoUID: "memos/42",
+            editKey: "44444444-4444-4444-4444-444444444444",
+            patchAttempt: 2,
+            pendingEdit: PendingEdit(
+                content: "on the beach, later",
+                visibility: "PUBLIC",
+                capturedAt: Date(timeIntervalSince1970: 1_750_000_200),
+                fileIDs: [fileID]),
+            editUnansweredSince: Date(timeIntervalSince1970: 1_750_000_140))
+    }
+
+    /// The same capture as `populated()`, spelled out in the on-disk shape from before the marker
+    /// was renamed in code, whose key stays `editSentAt`. Typed out rather than round-tripped: a
+    /// fixture the encoder produced would agree with any rename the encoder also made.
+    static let populatedManifest = Data(
+        """
+        {
+          "id" : "11111111-1111-1111-1111-111111111111",
+          "idempotencyKey" : "22222222-2222-2222-2222-222222222222",
+          "content" : "on the beach",
+          "visibility" : "PROTECTED",
+          "capturedAt" : "2025-06-15T15:06:40Z",
+          "files" : [
+            {
+              "id" : "33333333-3333-3333-3333-333333333333",
+              "relativePath" : "one.heic",
+              "filename" : "one.heic",
+              "mime" : "image\\/heic",
+              "byteSize" : 4096,
+              "lastModified" : "2025-06-15T15:06:41Z",
+              "uploadUID" : "u1",
+              "bytesConfirmed" : 2048,
+              "chunkSize" : 1024,
+              "uploadAttempt" : 2,
+              "attachmentUID" : "a1",
+              "stagedForEdit" : true
+            }
+          ],
+          "binding" : {
+            "serverBaseURL" : "https:\\/\\/memos.example\\/",
+            "ownerSubject" : "owner-1"
+          },
+          "state" : "held",
+          "holdReason" : "serverRefused",
+          "waitReason" : "homeNetwork",
+          "attemptCount" : 3,
+          "nextAttemptAt" : "2025-06-15T15:07:00Z",
+          "lastError" : "the server said no",
+          "cancelledAt" : "2025-06-15T15:08:00Z",
+          "resolvedMemoUID" : "memos\\/42",
+          "editKey" : "44444444-4444-4444-4444-444444444444",
+          "patchAttempt" : 2,
+          "pendingEdit" : {
+            "content" : "on the beach, later",
+            "visibility" : "PUBLIC",
+            "capturedAt" : "2025-06-15T15:10:00Z",
+            "fileIDs" : ["33333333-3333-3333-3333-333333333333"]
+          },
+          "editSentAt" : "2025-06-15T15:09:00Z"
+        }
+        """.utf8)
+
+    /// The repository's own pair (`OutboxRepository.persist`), because what is being pinned is
+    /// what that writes and what the next launch reads.
+    static var encoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    @Test("a capture with nothing left nil writes exactly these keys, and no others")
+    func theEmittedKeySet() throws {
+        let data = try Self.encoder.encode(Self.populated())
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any],
+            "a manifest is a JSON object")
+        #expect(Set(object.keys) == Self.keys)
+    }
+
+    @Test("a manifest in the shape from before the rename decodes field for field")
+    func thePopulatedFixtureDecodes() throws {
+        let decoded = try Self.decoder.decode(UploadJob.self, from: Self.populatedManifest)
+        // The whole value, so a key that quietly stopped being read cannot hide behind the fields
+        // somebody remembered to list here.
+        #expect(decoded == Self.populated())
+    }
+
+    @Test("a manifest that says when the edit was claimed still hands that instant back")
+    func theClaimedInstantIsReadBack() throws {
+        let manifest = Data(
+            """
+            {
+              "id" : "11111111-1111-1111-1111-111111111111",
+              "idempotencyKey" : "22222222-2222-2222-2222-222222222222",
+              "content" : "on the beach",
+              "capturedAt" : "2025-06-15T15:06:40Z",
+              "files" : [],
+              "binding" : {
+                "serverBaseURL" : "https:\\/\\/memos.example\\/",
+                "ownerSubject" : "owner-1"
+              },
+              "state" : "creating",
+              "attemptCount" : 0,
+              "nextAttemptAt" : "2025-06-15T15:06:40Z",
+              "editSentAt" : "2025-06-15T15:09:00Z"
+            }
+            """.utf8)
+        let decoded = try Self.decoder.decode(UploadJob.self, from: manifest)
+        #expect(decoded.editUnansweredSince == Date(timeIntervalSince1970: 1_750_000_140))
+    }
+}

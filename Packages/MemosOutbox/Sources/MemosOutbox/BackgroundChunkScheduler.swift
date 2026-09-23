@@ -47,6 +47,18 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
         )
     }
 
+    /// The same scheduler over a session handed in.
+    ///
+    /// A background configuration belongs to the app's identifier and survives the process, so the
+    /// enumeration below — the one thing here that reads what the system is holding rather than
+    /// asking it for something — can otherwise only be exercised against whatever the app itself
+    /// left behind. This takes the session instead, so the descriptions it reads are the ones the
+    /// caller wrote.
+    internal init(session: URLSession, delegate: OutboxSessionDelegate = OutboxSessionDelegate()) {
+        self.delegate = delegate
+        self.session = session
+    }
+
     /// Wired after construction because the handler is the engine, and the engine needs the
     /// scheduler: one of the two references has to be attached rather than passed in.
     public func attach(_ handler: any OutboxChunkHandling) async {
@@ -94,7 +106,7 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
 /// cannot live in an actor it would have to await.
 /// It is `public` for one reason: this class IS the seam between the URL loading system and the
 /// engine, the drop it used to have happened here, and `MemosOutboxTests` exercises the package
-/// through its public surface rather than with `@testable`. `deliver` is what the callback below
+/// through its public surface where it drives this class. `deliver` is what the callback below
 /// calls, and what a test can call.
 public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()

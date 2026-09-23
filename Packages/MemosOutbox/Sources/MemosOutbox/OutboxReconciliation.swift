@@ -47,7 +47,12 @@ public enum OutboxReconciliation {
                 let file = job.file(task.fileID),
                 file.uploadUID != nil,
                 !file.isComplete,
-                file.bytesConfirmed == task.offset
+                file.bytesConfirmed == task.offset,
+                // The attempt the task was sent under, against the one the manifest names now. A
+                // task a retry superseded sits at the same offset as its replacement, so without
+                // this the obsolete one would be adopted and the replacement cancelled as a
+                // duplicate.
+                file.uploadAttempt == task.attempt
             else {
                 cancelled.append(task)
                 continue

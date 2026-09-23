@@ -298,9 +298,10 @@ enum Stub {
     /// from the moment the attachment does, long before the worker has produced anything to serve
     /// from them.
     ///
-    /// `position` is null the way a row written before the order was kept is: the field is
-    /// REQUIRED on `AttachmentRef` (nullable, but required), so a payload without it does not
-    /// decode at all — and what these tests are about is never the order the server saved.
+    /// `position` and `captureInstant` are null unless a test asks for them, the way a row written
+    /// before either was kept is. Both fields are REQUIRED on `AttachmentRef` (nullable, but
+    /// required), as are `sha256`, `capture_civil` and `capture_source`, which nothing here has a
+    /// use for and which are therefore spelled as the nulls they are rather than left out.
     ///
     /// `exp` and `sig` mint them the way the server does — `?exp=&scope=&sig=`, the shape
     /// `sign_asset_url` writes — for the tests that are about the SIGNATURE having a life of its
@@ -310,14 +311,20 @@ enum Stub {
         uid: String,
         status: String,
         mime: String = "image/jpeg",
+        captureInstant: String? = nil,
+        position: Int? = nil,
         exp: Int? = nil,
         sig: String = "aaaa"
     ) -> String {
         let query = exp.map { "?exp=\($0)&scope=1&sig=\(sig)" } ?? ""
+        let capture = captureInstant.map { "\"\($0)\"" } ?? "null"
+        let place = position.map(String.init) ?? "null"
         return """
             {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
             "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
-            "hasLegacyPrint":false,"renditions":[],"position":null,\
+            "hasLegacyPrint":false,"renditions":[],"position":\(place),\
+            "sha256":null,"capture_instant":\(capture),"capture_civil":null,\
+            "capture_source":null,\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
             "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
             "webUrl":"/api/attachments/\(uid)/web\(query)",\

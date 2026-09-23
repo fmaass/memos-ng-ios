@@ -1,8 +1,11 @@
 import CryptoKit
 import Foundation
-import MemosFeatures
+import MemosCore
 import MemosOutbox
+import SwiftUI
 import Testing
+
+@testable import MemosFeatures
 
 @Suite("The pending section")
 struct PendingMemoPresentationTests {
@@ -51,7 +54,8 @@ struct PendingMemoPresentationTests {
     @Test("a capture held for the home network says so, and says what would send it")
     func waitingForTheHomeNetwork() {
         #expect(
-            PendingMemoPresentation.status(for: job(waitReason: .homeNetwork))
+            PendingMemoPresentation.status(
+                for: job(), verdict: .refused(.cellularWhileMobileDataOff))
                 == "Waiting for your home network — turn on Upload over mobile data in Settings"
                 + " to send it now"
         )
@@ -62,10 +66,46 @@ struct PendingMemoPresentationTests {
     @Test("a held capture that had also failed before still says what it is waiting for")
     func theReasonBeatsTheAttemptCount() {
         let status = PendingMemoPresentation.status(
-            for: job(waitReason: .homeNetwork, attemptCount: 3)
+            for: job(attemptCount: 3), verdict: .refused(.cellularWhileMobileDataOff)
         )
         #expect(status.contains("home network"))
         #expect(!status.contains("try again"))
+    }
+
+    /// The refused sentence names the reason, and it comes from the queue's live verdict rather
+    /// than from a marker on the job: the drain writes `waitReason` when it gets as far as trying,
+    /// and a capture the network never let it start on has nothing written on it at all.
+    @Test("a capture the network refuses reads the reason it was refused for")
+    func theRefusedRowNamesTheReason() {
+        let moving = job(files: [file(size: 1000, confirmed: 250)], state: .uploading)
+
+        #expect(
+            PendingMemoPresentation.rows(
+                for: [moving], verdict: .refused(.cellularWhileMobileDataOff))[0].status
+                == "Waiting for your home network — turn on Upload over mobile data in Settings"
+                + " to send it now"
+        )
+        // A hotspot is the same hold under a different name for the radio, and the same switch
+        // would send the capture now — so it is the same sentence.
+        #expect(
+            PendingMemoPresentation.rows(
+                for: [moving], verdict: .refused(.expensiveWhileMobileDataOff))[0].status
+                == "Waiting for your home network — turn on Upload over mobile data in Settings"
+                + " to send it now"
+        )
+        // Low Data Mode is not that switch's business, so its sentence does not send a person to
+        // a setting that would not help.
+        #expect(
+            PendingMemoPresentation.rows(for: [moving], verdict: .refused(.lowDataMode))[0].status
+                == "Low Data Mode is on for this network — turn it off in Settings to send it now"
+        )
+        // The verdict decides, not the marker: a job still carrying `homeNetwork` on a network
+        // that permits the upload is a capture waiting its turn, not one being held.
+        #expect(
+            PendingMemoPresentation.rows(
+                for: [job(waitReason: .homeNetwork)], verdict: .permitted)[0].status
+                == "Waiting for home wifi"
+        )
     }
 
     @Test("every state a job can be in has its own sentence")
@@ -110,7 +150,7 @@ struct PendingMemoPresentationTests {
         // "Try again" would clear a hold that is not the queue's to clear, so the row does not
         // offer it — what it offers is the one move left on a capture nothing else can move.
         let row = PendingMemoPresentation.rows(for: [defective])[0]
-        #expect(row.action == .remove)
+        #expect(row.actions == [.remove])
         #expect(row.needsAttention, "a row only a person can end still asks for that person")
 
         let unwritable = job(
@@ -122,30 +162,48 @@ struct PendingMemoPresentationTests {
                 == "This capture could not be saved on this device: no space left"
         )
         #expect(PendingMemoPresentation.rows(for: [unwritable])[0].needsAttention)
-        #expect(PendingMemoPresentation.rows(for: [unwritable])[0].action == .retry)
+        #expect(PendingMemoPresentation.rows(for: [unwritable])[0].actions == [.retry])
     }
 
-    @Test("every hold offers exactly one thing, and only the unreadable one offers Remove")
+    @Test("every hold offers exactly what its reason leaves, with and without an unanswered change")
     func actionPerHoldReason() {
         // The switch is what makes this exhaustive: a hold reason added later does not compile
-        // until someone has said what its row lets a person do about it.
+        // until someone has said what its row lets a person do about it — both while a change
+        // the server has not answered stands and while none does.
         for reason in HoldReason.allCases {
             let held = job(state: .held, holdReason: reason)
+            var unanswered = held
+            unanswered.editUnansweredSince = capture
+            let expected: (answered: [PendingAction], whileUnanswered: [PendingAction])
             switch reason {
             case .unreadableManifest:
-                #expect(PendingMemoPresentation.action(for: held) == .remove)
-                #expect(PendingMemoPresentation.rows(for: [held])[0].action == .remove)
+                expected = ([.remove], [.remove])
+            case .memoGone:
+                expected = ([.retry, .remove], [.retry, .remove])
+            case .editIncomplete:
+                expected = ([.reopen, .retry], [.retry])
             case .accountMismatch, .serverRefused, .storageFailed:
-                #expect(PendingMemoPresentation.action(for: held) == .retry)
-                #expect(PendingMemoPresentation.rows(for: [held])[0].action == .retry)
+                expected = ([.retry], [.retry])
             }
+            let (answered, whileUnanswered) = expected
+            #expect(PendingMemoPresentation.action(for: held) == answered, "\(reason)")
+            #expect(
+                PendingMemoPresentation.rows(for: [held])[0].actions == answered, "\(reason)")
+            #expect(
+                PendingMemoPresentation.action(for: unanswered) == whileUnanswered,
+                "\(reason) with an unanswered change")
+            #expect(
+                PendingMemoPresentation.rows(for: [unanswered])[0].actions == whileUnanswered,
+                "\(reason) with an unanswered change")
         }
         // A hold with no reason recorded is still a hold a person may clear.
-        #expect(PendingMemoPresentation.action(for: job(state: .held)) == .retry)
-        // Nothing that is still moving asks anything of anybody.
+        #expect(PendingMemoPresentation.action(for: job(state: .held)) == [.retry])
+        // Nothing that is still moving asks anything of anybody, whatever it offers.
         for state in [JobState.waiting, .uploading, .creating] {
             let moving = job(state: state)
-            #expect(PendingMemoPresentation.action(for: moving) == .none)
+            #expect(
+                PendingMemoPresentation.action(for: moving)
+                    == (state == .creating ? [] : [.cancel, .retry]))
             #expect(!PendingMemoPresentation.rows(for: [moving])[0].needsAttention)
         }
     }
@@ -182,6 +240,269 @@ struct PendingMemoPresentationTests {
         #expect(row.snippet.isEmpty)
         #expect(row.attachmentCount == 1)
     }
+
+    /// An upload in flight is something a person may stop, and stopping it is not an emergency.
+    ///
+    /// Cancel sits beside Try again on every capture the queue is still working on, and the row
+    /// stays calm while it does: a control being offered is not the same as a row asking to be
+    /// dealt with, and painting every uploading capture orange would teach people that the colour
+    /// means nothing.
+    @Test("a capture still moving offers Cancel and Try again without asking for attention")
+    func anUploadingRowOffersCancelAndRetry() {
+        #expect(PendingMemoPresentation.action(for: job(state: .uploading)) == [.cancel, .retry])
+        #expect(PendingMemoPresentation.action(for: job(state: .waiting)) == [.cancel, .retry])
+        #expect(
+            PendingMemoPresentation.action(
+                for: job(state: .held, holdReason: .unreadableManifest)) == [.remove])
+        // Nothing to press on a capture whose bytes are already at the server: what is left is the
+        // memo being written, and cancelling that is not something this screen can promise.
+        #expect(PendingMemoPresentation.action(for: job(state: .creating)) == [])
+
+        let row = PendingMemoPresentation.rows(for: [job(state: .uploading)])[0]
+        #expect(row.actions == [.cancel, .retry])
+        #expect(!row.needsAttention, "an upload doing its job is not a row asking for a person")
+    }
+
+    /// While an edit the server has not answered stands, the row offers nothing. The queue refuses
+    /// the cancel and replays the edit itself, where the job's state is owned, so the row leaves
+    /// the answer to it; what this fences is the row offering either button meanwhile.
+    @Test("a capture whose edit is already unanswered offers nothing")
+    func anUnansweredEditOffersNothing() {
+        var sending = job(state: .uploading)
+        sending.editUnansweredSince = capture
+
+        #expect(
+            PendingMemoPresentation.action(for: sending) == [],
+            "the row offers neither while the edit is unanswered")
+        let sentence = PendingMemoPresentation.status(for: sending)
+        #expect(
+            sentence == "Your change hasn't been answered yet — it will be sent again until it is")
+        #expect(
+            PendingMemoPresentation.action(for: job(state: .uploading)) == [.cancel, .retry],
+            "the same capture with nothing on the wire still offers Cancel")
+        #expect(
+            PendingMemoPresentation.status(for: job(state: .uploading)) == "Uploading 100%",
+            "and still counts its bytes")
+    }
+
+    /// The backoff is part of an unanswered change, not a pause from it: nothing is on the wire
+    /// while the queue waits, yet the change stands and the next replay sends it again under the
+    /// same key. So the row says the change is unanswered — never that it is being sent, and never
+    /// anything that reads as given up — and it still offers nothing to press.
+    @Test("a capture waiting out its backoff says its change is still unanswered")
+    func anUnansweredEditInBackoffSaysSo() {
+        var backingOff = job(state: .waiting, attemptCount: 2, lastError: "Service Unavailable")
+        backingOff.nextAttemptAt = capture.addingTimeInterval(600)
+        backingOff.editUnansweredSince = capture
+
+        #expect(
+            PendingMemoPresentation.status(for: backingOff, now: capture)
+                == "Your change hasn't been answered yet — it will be sent again until it is")
+        #expect(PendingMemoPresentation.action(for: backingOff) == [])
+    }
+
+    /// Three holds a person could not tell apart by their buttons, told apart by what each one
+    /// leaves them. A memo the server no longer has may come back, so Try again stays, and Remove
+    /// is the way out that does not pretend the change was answered. A change refused while it was
+    /// still unanswered — a 401 or a 403 — is not a deleted memo, and Remove there would throw
+    /// away a capture whose change may already have landed. A refusal with nothing unanswered keeps
+    /// the row it always had.
+    @Test("a memo gone from the server, a refused unanswered change and a plain refusal differ")
+    func threeRefusalsThreeRows() {
+        var gone = job(state: .held, holdReason: .memoGone)
+        gone.editUnansweredSince = capture
+        var refusedUnanswered = job(
+            state: .held, holdReason: .serverRefused, lastError: "You may not change this memo")
+        refusedUnanswered.editUnansweredSince = capture
+        let refused = job(state: .held, holdReason: .serverRefused, lastError: "File too large")
+
+        let goneRow = PendingMemoPresentation.rows(for: [gone])[0]
+        #expect(goneRow.actions == [.retry, .remove])
+        #expect(goneRow.status == "This memo is no longer on the server")
+        #expect(goneRow.needsAttention)
+
+        let refusedUnansweredRow = PendingMemoPresentation.rows(for: [refusedUnanswered])[0]
+        #expect(refusedUnansweredRow.actions == [.retry])
+        #expect(refusedUnansweredRow.status == "You may not change this memo")
+        #expect(refusedUnansweredRow.needsAttention)
+
+        let refusedRow = PendingMemoPresentation.rows(for: [refused])[0]
+        #expect(refusedRow.actions == [.retry])
+        #expect(refusedRow.status == "File too large")
+        #expect(refusedRow.needsAttention)
+    }
+
+    /// A change stopped before it was ever sent — a picture it keeps is missing from this device —
+    /// leaves the capture wholly the person's: nothing reached the server, so nothing unanswered
+    /// needs protecting, and the row offers the editor back beside Try again. The press has to
+    /// land on the way back into the editor rather than on the retry, and what that way hands the
+    /// sheet has to open on the capture's own words. Whether the queue hands the draft back for
+    /// such a hold is the queue's own witness; this is the row's half and the sheet's.
+    @Test("a change stopped before it was sent offers the editor back, and the press reaches it")
+    @MainActor
+    func anIncompleteEditReopensTheEditor() async {
+        let stopped = job(
+            content: "on the beach\nwith the dog", state: .held, holdReason: .editIncomplete)
+        var unanswered = stopped
+        unanswered.editUnansweredSince = capture
+
+        #expect(PendingMemoPresentation.action(for: stopped) == [.reopen, .retry])
+        let row = PendingMemoPresentation.rows(for: [stopped])[0]
+        #expect(row.actions == [.reopen, .retry])
+        #expect(row.needsAttention)
+        #expect(row.status == "A picture this memo keeps is missing from this device")
+        #expect(
+            PendingMemoPresentation.action(for: unanswered) == [.retry],
+            "once a change is unanswered the queue's rule wins, and the editor is not offered")
+
+        final class Presses {
+            var reopened: [UUID] = []
+            var retried: [UUID] = []
+        }
+        let presses = Presses()
+        await PressProbe.withScreen(
+            List {
+                PendingSection(
+                    jobs: [stopped],
+                    lastProgressAt: [:],
+                    verdict: .permitted,
+                    retry: { presses.retried.append($0) },
+                    remove: { _ in },
+                    restore: { presses.reopened.append($0) }
+                )
+            },
+            height: 400
+        ) { screen in
+            await screen.settle(turns: 5)
+            // The editor is drawn first, as the row offers it, so it is the first control that
+            // answers to this label.
+            #expect(screen.press("Reopen"), "the row drew no control to press")
+            await screen.settle(turns: 5)
+        }
+        #expect(presses.reopened == [stopped.id])
+        #expect(presses.retried.isEmpty, "the press reached Try again instead of the editor")
+
+        let draft = RestoredDraft(
+            jobID: stopped.id, content: stopped.content, visibility: nil,
+            capturedAt: stopped.capturedAt, pictures: [])
+        await PressProbe.withScreen(
+            ComposeView(
+                mode: .create(restoring: ComposeRestore(draft)), imports: ComposeImports()
+            ) { _ in .saved },
+            height: 852
+        ) { screen in
+            await screen.settle(turns: 50, until: { screen.says("on the beach") })
+            #expect(screen.says("on the beach"), "the editor did not open on the capture's words")
+        }
+    }
+
+    /// The frozen percentage, named. A capture whose bytes stopped moving is the one thing the
+    /// pending section used to lie about — it went on counting a percentage nothing was adding
+    /// to — and the sentence that replaces it says what is known and no more: nothing has been
+    /// confirmed for a while. It is not a failure, and it must never read as one.
+    @Test("an upload whose bytes stopped moving says so, and blames the network when that is why")
+    func aStalledUploadSaysWhatIsKnown() {
+        let stalled = job(files: [file(size: 1000, confirmed: 250)], state: .uploading)
+        let progress = [stalled.id: capture]
+
+        let permitted = PendingMemoPresentation.rows(
+            for: [stalled], now: capture.addingTimeInterval(91),
+            lastProgressAt: progress, verdict: .permitted)[0]
+        #expect(permitted.status == "No progress confirmed for 90 s")
+        #expect(
+            !permitted.status.localizedCaseInsensitiveContains("failed"),
+            "nothing here knows that anything failed")
+
+        // The same capture, on a network it may not use: the reason is known, so the row says the
+        // reason rather than announcing a silence the network fully explains.
+        let refused = PendingMemoPresentation.rows(
+            for: [stalled], now: capture.addingTimeInterval(91),
+            lastProgressAt: progress, verdict: .refused(.cellularWhileMobileDataOff))[0]
+        #expect(
+            refused.status
+                == "Waiting for your home network — turn on Upload over mobile data in Settings"
+                + " to send it now")
+
+        // Under the interval the percentage still stands: a slow chunk is not a stalled one.
+        let early = PendingMemoPresentation.rows(
+            for: [stalled], now: capture.addingTimeInterval(89),
+            lastProgressAt: progress, verdict: .permitted)[0]
+        #expect(early.status == "Uploading 25%")
+    }
+
+    /// What cancel hands back, and what the editor does with it. The words have to come back
+    /// exactly as they were written, and the pictures have to be the very same files — a restored
+    /// draft that re-encoded anything would quietly replace the archive master with a copy of it.
+    @Test("a cancelled capture opens the editor on its own words and its own files")
+    @MainActor
+    func theRestoredDraftReachesTheEditor() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "restored-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let first = Data((0..<4096).map { UInt8($0 % 251) })
+        let second = Data((0..<8192).map { UInt8(($0 &* 7) % 253) })
+        let firstURL = directory.appending(path: "a.heic")
+        let secondURL = directory.appending(path: "b.mov")
+        try first.write(to: firstURL)
+        try second.write(to: secondURL)
+
+        let firstID = UUID()
+        let secondID = UUID()
+        let draft = RestoredDraft(
+            jobID: UUID(),
+            content: "on the beach\nwith the dog",
+            visibility: "PRIVATE",
+            capturedAt: capture,
+            pictures: [
+                RestoredDraft.Picture(
+                    id: firstID, url: firstURL, filename: "IMG_1.HEIC", mime: "image/heic"),
+                RestoredDraft.Picture(
+                    id: secondID, url: secondURL, filename: "IMG_2.MOV", mime: "video/quicktime"),
+            ])
+
+        let mode = ComposeView.Mode.create(restoring: ComposeRestore(draft))
+        let imports = ComposeImports()
+
+        await PressProbe.withScreen(
+            ComposeView(mode: mode, imports: imports) { _ in .saved },
+            height: 852
+        ) { screen in
+            await screen.settle(turns: 200, until: { imports.attachments.count == 2 })
+            #expect(screen.says("on the beach"))
+        }
+
+        // Read off the sheet's own import list rather than off the value handed to it: what a
+        // person then sends is what the sheet took in, and a mapping that never ran leaves this
+        // empty.
+        let carried = imports.attachments
+        // The ids are the outbox's own file ids, carried through unchanged: that is what lets a
+        // re-submit say which pictures the memo keeps, and in what order.
+        #expect(carried.map(\.id) == [firstID, secondID])
+        #expect(carried.map(\.filename) == ["IMG_1.HEIC", "IMG_2.MOV"])
+        #expect(carried.map(\.mime) == ["image/heic", "video/quicktime"])
+
+        for (picture, source) in zip(carried, [first, second]) {
+            let carriedBytes = try Data(contentsOf: picture.url)
+            #expect(
+                SHA256.hash(data: carriedBytes) == SHA256.hash(data: source),
+                "the editor was handed a different file than the queue was holding")
+        }
+    }
+
+    /// A cancelled capture nobody finished with. The bytes are kept on this device, and the row
+    /// keeps saying so until a person either sends it again or throws it away.
+    @Test("a cancelled capture left alone is kept, says so, and offers both ways out")
+    func aCancelledCaptureIsKept() {
+        var cancelled = job(state: .waiting)
+        cancelled.cancelledAt = capture
+        let row = PendingMemoPresentation.rows(for: [cancelled])[0]
+        #expect(row.status == "Cancelled — kept on this device")
+        #expect(row.actions == [.reopen, .remove])
+        #expect(row.needsAttention, "a capture waiting on a person says so")
+    }
+
 }
 
 @Suite("The picker boundary")
@@ -268,5 +589,291 @@ struct ComposeAttachmentsTests {
             label: "holiday.jpg")
         #expect(ComposeAttachments.postRefusal(items: [failed])?.contains("holiday.jpg") == true)
         #expect(ComposeAttachments.postRefusal(items: []) == nil)
+    }
+}
+
+/// What Post does with a create, and the one place that decides it.
+///
+/// A capture the editor was HANDED goes back to the job it came out of: same manifest, same key,
+/// so a create that already committed resolves to its own memo rather than posting a second one.
+/// The branch in the view holds no conditional of its own, which is what lets this be asked here.
+@MainActor
+@Suite("What Post does with a create")
+struct TimelinePostRoutingTests {
+    private let capture = Date(timeIntervalSince1970: 1_750_000_000)
+
+    /// Which way out was taken, and with what. Local to this suite: what a recorder is has to be
+    /// decided once per case, and a shared one would have to answer everything.
+    private final class Routing {
+        var resubmitted: [(UUID, RestoredDraft)] = []
+        var enqueued: [ComposeSubmission] = []
+        var answer: ResubmitOutcome = .accepted
+    }
+
+    private func draft(_ jobID: UUID, visibility: MemoVisibility?) -> ComposeRestore {
+        ComposeRestore(
+            jobID: jobID, content: "on the beach", visibility: visibility, capturedAt: capture,
+            pictures: [])
+    }
+
+    private func post(
+        _ routing: Routing,
+        _ submission: ComposeSubmission,
+        restoring restored: ComposeRestore?,
+        accountDefault: MemoVisibility? = nil
+    ) async -> MemosFeatures.TimelineView.PostOutcome {
+        await TimelineView.post(
+            submission,
+            restoring: restored,
+            accountDefault: accountDefault,
+            resubmit: {
+                routing.resubmitted.append(($0, $1))
+                return routing.answer
+            },
+            enqueue: {
+                routing.enqueued.append($0)
+                return true
+            }
+        )
+    }
+
+    @Test("a restored draft goes back to the job it came out of")
+    func postSendsARestoredDraftBackToItsJob() async {
+        let routing = Routing()
+        let jobID = UUID()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+
+        #expect(posted == .saved)
+        #expect(
+            routing.enqueued.isEmpty,
+            "a restored draft goes back to its job, never out as a second capture")
+        #expect(routing.resubmitted.count == 1)
+        #expect(routing.resubmitted.first?.0 == jobID)
+        #expect(routing.resubmitted.first?.1.jobID == jobID)
+        #expect(routing.resubmitted.first?.1.content == "on the beach")
+    }
+
+    /// The job the editor was opened on is gone by the time Post is pressed. The words and the
+    /// files on this screen are not thrown away for that — they become a new capture. This is an
+    /// assumption stated rather than a rule anything else already holds.
+    @Test("a capture whose job vanished under the editor becomes a fresh one")
+    func aVanishedJobBecomesAFreshCapture() async {
+        let routing = Routing()
+        routing.answer = .vanished
+        let jobID = UUID()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+
+        #expect(posted == .saved)
+        #expect(routing.resubmitted.count == 1, "the job was asked for first")
+        #expect(routing.enqueued.count == 1)
+    }
+
+    /// A refusal is not a vanished job. The queue still holds the capture and its key, so posting
+    /// the words again as a new one would be a second memo for the same capture.
+    @Test("a resubmit the queue refused never becomes a second capture")
+    func aRefusedResubmitIsNotASecondCapture() async {
+        let routing = Routing()
+        routing.answer = .refused(.stagingFailed)
+        let jobID = UUID()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+
+        #expect(posted == .refused(.captureUnchanged(.stagingFailed)))
+        #expect(
+            routing.enqueued.isEmpty,
+            "a refusal is not a vanished job — the capture keeps its key")
+        #expect(routing.resubmitted.count == 1)
+        let said = ComposeFailurePresentation.sentence(for: .captureUnchanged(.stagingFailed))
+        #expect(
+            said == "This capture could not be changed on this device."
+                + " Nothing was sent — what you wrote is still here, so try again.")
+    }
+
+    /// The queue can name the one file it could not find, so the sheet names it too: "a picture"
+    /// would leave the person hunting through the ones that are still there.
+    @Test("a picture the queue cannot find is named in the sentence")
+    func aMissingPictureIsNamedOnTheSheet() async {
+        let routing = Routing()
+        routing.answer = .refused(.pictureMissing(filename: "IMG_0042.HEIC"))
+        let jobID = UUID()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+
+        #expect(posted == .refused(.captureUnchanged(.pictureMissing(filename: "IMG_0042.HEIC"))))
+        let said = ComposeFailurePresentation.sentence(
+            for: .captureUnchanged(.pictureMissing(filename: "IMG_0042.HEIC")))
+        #expect(said.contains("IMG_0042.HEIC"))
+        #expect(routing.enqueued.isEmpty)
+    }
+
+    @Test("a capture the editor was not handed is a new one, and is enqueued")
+    func aNewCaptureIsEnqueued() async {
+        let routing = Routing()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: nil)
+
+        #expect(posted == .saved)
+        #expect(routing.resubmitted.isEmpty)
+        #expect(routing.enqueued.count == 1)
+    }
+
+    /// "Default" is a word on a picker, not a value a memo can carry. A capture created PUBLIC and
+    /// then edited to Default has to reach the server as the account's own default, because the
+    /// queue's fallback for an edit that states nothing is the visibility the job already has —
+    /// which is exactly the one the person just stopped choosing.
+    @Test("Default resolves to the account's own visibility, not to what the capture had")
+    func defaultResolvesToTheAccountsOwnChoice() async {
+        let routing = Routing()
+        let jobID = UUID()
+        let unmarked = ComposeSubmission(content: "on the beach", visibility: nil, attachments: [])
+
+        _ = await post(
+            routing, unmarked, restoring: draft(jobID, visibility: .public),
+            accountDefault: .private)
+        #expect(routing.resubmitted.last?.1.visibility == "PRIVATE")
+
+        // No account default known: nothing here can turn "Default" into a value, and the job's
+        // own PUBLIC is not the account's answer — so Post refuses and the sheet stays open.
+        let refused = await post(
+            routing, unmarked, restoring: draft(jobID, visibility: .public), accountDefault: nil)
+        #expect(refused == .refused(.defaultVisibilityUnknown))
+        #expect(routing.resubmitted.count == 1, "only the first case reached the queue")
+
+        // A picked visibility is the person's own answer; the account default never overrides it.
+        let picked = ComposeSubmission(
+            content: "on the beach", visibility: .public, attachments: [])
+        _ = await post(
+            routing, picked, restoring: draft(jobID, visibility: .private),
+            accountDefault: .private)
+        #expect(routing.resubmitted.last?.1.visibility == "PUBLIC")
+    }
+
+    /// "Default" with nothing to resolve it against. Sending nothing would hand the queue its own
+    /// fallback — the visibility the capture already carries, which is exactly the one just
+    /// stopped being chosen — so Post asks the queue for nothing and the sheet says why.
+    @Test("Default with no known account default is refused, and nothing is sent")
+    func postRefusesDefaultTheAccountCannotName() async {
+        let routing = Routing()
+        let jobID = UUID()
+        let unmarked = ComposeSubmission(content: "on the beach", visibility: nil, attachments: [])
+
+        let refused = await post(
+            routing, unmarked, restoring: draft(jobID, visibility: .public), accountDefault: nil)
+
+        #expect(refused == .refused(.defaultVisibilityUnknown))
+        #expect(routing.resubmitted.isEmpty, "nothing is asked of the queue")
+        #expect(routing.enqueued.isEmpty)
+
+        // The draft states nothing either, so nil IS the answer here: the memo already carries
+        // the account's default and this edit is not changing it.
+        let posted = await post(
+            routing, unmarked, restoring: draft(jobID, visibility: nil), accountDefault: nil)
+
+        #expect(posted == .saved)
+        #expect(routing.resubmitted.count == 1)
+        #expect(routing.resubmitted.last?.1.visibility == nil)
+    }
+}
+
+/// The one place on the timeline whose sentence changes because time passed rather than because
+/// something happened.
+///
+/// The clock is injected by CHOOSING `lastProgressAt`: the real 90 s constant with a last-progress
+/// instant 90 s less a moment ago, so the deadline falls a fraction of a second into the case.
+/// Nothing is faked, and no clock is handed to the section.
+@MainActor
+@Suite("The pending section wakes at the stall deadline")
+struct PendingSectionDeadlineTests {
+    private let capture = Date(timeIntervalSince1970: 1_750_000_000)
+
+    private func job(confirmed: Int64, state: JobState = .uploading) -> UploadJob {
+        UploadJob(
+            content: "on the beach",
+            capturedAt: capture,
+            files: [
+                OutboxFile(
+                    relativePath: "a.heic",
+                    filename: "IMG_1.HEIC",
+                    mime: "image/heic",
+                    byteSize: 1000,
+                    uploadUID: "u1",
+                    bytesConfirmed: confirmed
+                )
+            ],
+            binding: AccountBinding(
+                serverBaseURL: URL(string: "https://memos.example.invalid")!,
+                ownerSubject: "fabian"
+            ),
+            state: state
+        )
+    }
+
+    @Test("the row stops counting at the deadline, with nothing else having happened")
+    func theRowStopsCountingWhenTheDeadlinePasses() async {
+        let moving = job(confirmed: 250)
+        let due = Date().addingTimeInterval(0.15)
+        let progress = [moving.id: due.addingTimeInterval(-PendingMemoPresentation.stallInterval)]
+
+        await PressProbe.withScreen(
+            List {
+                PendingSection(
+                    jobs: [moving],
+                    lastProgressAt: progress,
+                    verdict: .permitted,
+                    retry: { _ in },
+                    remove: { _ in },
+                    restore: { _ in }
+                )
+            },
+            height: 400
+        ) { screen in
+            await screen.settle(turns: 5)
+            #expect(screen.says("Uploading 25%"), "under the interval the percentage stands")
+            await screen.settle(
+                turns: 400, until: { screen.says("No progress confirmed for 90 s") })
+            #expect(
+                screen.says("No progress confirmed for 90 s"),
+                "the sentence changed with no event but the deadline")
+            #expect(!screen.says("Uploading 25%"))
+        }
+    }
+
+    /// One wake, at the first instant any row would start saying something else — never a tick.
+    @Test("the earliest deadline wins, and a capture that is not uploading has none")
+    func theEarliestDeadlineWins() {
+        let first = job(confirmed: 250)
+        let second = job(confirmed: 500)
+        let progress = [first.id: capture, second.id: capture.addingTimeInterval(10)]
+
+        #expect(
+            PendingMemoPresentation.stallDeadline(
+                for: [first, second], lastProgressAt: progress, after: capture)
+                == capture.addingTimeInterval(PendingMemoPresentation.stallInterval)
+        )
+        // A deadline already behind the instant it is measured from is not a wake to arm.
+        #expect(
+            PendingMemoPresentation.stallDeadline(
+                for: [first], lastProgressAt: progress,
+                after: capture.addingTimeInterval(PendingMemoPresentation.stallInterval + 1))
+                == nil
+        )
+        // Nothing is counting on a capture whose bytes are not moving.
+        let waiting = job(confirmed: 250, state: .waiting)
+        #expect(
+            PendingMemoPresentation.stallDeadline(
+                for: [waiting], lastProgressAt: [waiting.id: capture], after: capture) == nil
+        )
     }
 }

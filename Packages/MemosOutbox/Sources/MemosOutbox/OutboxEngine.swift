@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The drain: what actually moves a capture from this phone to the server.
@@ -15,6 +16,14 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// drain, and hands the job to the ordinary backoff instead.
     static let maxStepsPerPass = 32
 
+    /// The jobs holding this launch's one PATCH claim. In memory on purpose: it is the claim that
+    /// keeps two invocations inside one launch from being two requests, and a relaunch is meant to
+    /// ask again. It is claimed in `applyEdit` before the fenced write and given back by every
+    /// outcome that leaves this job alive — a failed claim, a retry, a refusal, and an applied edit
+    /// whose terminal delete lost its fence. Only an applied edit that DELETED the job keeps it,
+    /// because nothing can ask about a job that is gone.
+    private var editsTransmitted: Set<UUID> = []
+
     private let repository: any OutboxPersisting
     private let credentials: any OutboxCredentialsProviding
     private let http: any OutboxHTTPPerforming
@@ -29,6 +38,11 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// because every request means the same thing — look at the queue again — so one more pass
     /// answers all of them.
     private var drainRequested = false
+    /// The jobs a `release` is running for, claimed synchronously before its first hop. A second
+    /// release for one already releasing is REFUSED, not joined: the first call owns this job's
+    /// next term, whether it has minted it yet or not, and a second bump would mint one for a
+    /// transfer nobody scheduled.
+    private var releasing: Set<UUID> = []
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -165,18 +179,94 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
+        // Claimed before any hop, per job: `inFlight()` suspends below and a second Try again
+        // landing in that hop must not mint a second term.
+        guard releasing.insert(jobID).inserted else { return }
+        defer { releasing.remove(jobID) }
         guard let job = await repository.job(jobID) else { return }
-        await save(job.released(at: clock()), matching: job)
+        // A capture the editor holds is not retried from here: its way back into the queue is the
+        // re-submit that clears the mark. Nothing is written, so the manifest the editor was handed
+        // stays exactly as it was taken back.
+        guard job.cancelledAt == nil else { return }
+        // A PATCH this launch has claimed is not retried by hand — that claim IS the outstanding
+        // request, and a second one would be a second request on the wire. An edit merely
+        // unanswered is a different thing: the hold is cleared and the next drain replays the same
+        // key over the same body, which is the only way out of a hold a stale refusal left.
+        guard !editsTransmitted.contains(jobID) else { return }
+        // A stalled upload is retried by moving the file to a NEW attempt: the task still holding
+        // the old one is then distinguishable from its replacement, which is what lets a late
+        // answer from it be ignored instead of rewinding the cursor its successor is moving.
+        let released = job.released(at: clock()).bumpingAttempts().job
+        // Fenced, and BEFORE anything is cancelled: nothing is torn down on a state nobody wrote.
+        // The other order would leave a job whose only live task was cancelled and whose manifest
+        // still names the attempt that task was sent under.
+        guard let saved = await save(released, matching: job) else {
+            await onChange()
+            return
+        }
+        // Only the tasks this retry left behind. A task already carrying the attempt the write
+        // above minted IS the replacement — cancelling it would tear down the transfer this call
+        // exists to start. A legacy task carries no attempt at all and is never the replacement.
+        let bumped = saved.attemptTerms
+        let live = OutboxTaskIdentity.supersededTasks(
+            inFlight: await scheduler.inFlight(), bumped: bumped, jobID: jobID)
+        if !live.isEmpty {
+            await scheduler.cancel(live)
+        }
         await onChange()
     }
 
     private func advance(_ job: UploadJob, credentials: OutboxCredentials) async {
         var current = job
         for _ in 0..<Self.maxStepsPerPass {
+            // A capture taken back to the editor is answered by nothing: not the edit below, not
+            // the planner, not a step this pass already earned.
+            guard current.cancelledAt == nil else { return }
             // Asked again for every step, beside `permitsNetwork` and for the same reason: the
             // only honest moment is the moment before a request would go out, and each of the
             // three actions below produces one.
             guard mayStillSend(credentials) else { return }
+            // Before the planner, and deliberately: this branch takes every pass in which the
+            // planner could answer `.createMemo` again, which is what keeps a create whose memo is
+            // already named from being sent a third time. It is asked for from the manifest, the
+            // only place a relaunch can read it from. Its own backoff is honoured here — a refused
+            // edit waits like anything else — and a file still missing bytes goes through the
+            // planner first, because an edit names the memo's complete picture list and a staged
+            // picture has no uid until it is uploaded.
+            if current.pendingEdit != nil, current.resolvedMemoUID != nil, current.state != .held {
+                // Before the completeness gate, and it is what opens it: an original the create's
+                // answer never named has no uid the PATCH could name it by, so it is uploaded
+                // again and the server folds identical bytes back onto the attachment it holds.
+                guard let recovered = await stageUnnamedOriginals(current) else { return }
+                current = recovered
+                // The backoff is asked HERE and not around the recovery above: making an original
+                // nameable again writes to this device and asks nothing of the server, and a
+                // capture that waits for its backoff before it re-stages waits for the upload too.
+                if clock() >= current.nextAttemptAt, current.files.allSatisfy(\.isComplete) {
+                    guard permitsNetwork() else {
+                        await waitForNetwork(current)
+                        return
+                    }
+                    // Built here, before anything is claimed: the build is the one part of this
+                    // that can fail without a server, and an edit that never went out must leave
+                    // the capture exactly as a person could still take it back.
+                    let request: URLRequest
+                    do {
+                        request = try OutboxRequests.patchMemo(
+                            baseURL: credentials.serverBaseURL,
+                            token: credentials.token,
+                            job: current
+                        )
+                    } catch {
+                        await hold(current, reason: .editIncomplete)
+                        return
+                    }
+                    await applyEdit(current, request: request, credentials: credentials)
+                    return
+                }
+                // A file still needs its bytes, or the backoff has not run out. The planner below
+                // uploads or waits, whichever it is, and a later pass re-enters here.
+            }
             switch OutboxPlanner.nextAction(
                 for: current, credentials: credentials, now: clock()
             ) {
@@ -337,7 +427,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         let chunk: URL
         do {
             chunk = try await repository.sliceChunk(
-                job: job, file: file, offset: offset, length: length
+                job: job, file: file, offset: offset, length: length, attempt: file.uploadAttempt
             )
         } catch {
             await save(
@@ -351,7 +441,9 @@ public actor OutboxEngine: OutboxChunkHandling {
             uploadUID: uploadUID,
             offset: offset
         )
-        let identity = OutboxTaskIdentity(jobID: job.id, fileID: fileID, offset: offset)
+        let identity = OutboxTaskIdentity(
+            jobID: job.id, fileID: fileID, offset: offset, attempt: file.uploadAttempt
+        )
         // Written down BEFORE the hand-off, and the hand-off does not happen if it was not.
         //
         // The other order — send first, record afterwards — is the one overtake this queue makes
@@ -397,6 +489,45 @@ public actor OutboxEngine: OutboxChunkHandling {
         return job.advancing(fileID: fileID, bytesConfirmed: offset)
     }
 
+    /// The originals this create sent, named by the attachments the answer came back with.
+    ///
+    /// Asked exactly here, in the pass that writes the create's outcome down: the answer and the
+    /// bytes it describes are both in hand, and the job has not yet been saved — so no later
+    /// response can rename a picture that this one already named.
+    private func named(_ job: UploadJob, as answer: [ResolvedAttachment]) -> UploadJob {
+        let originals = job.files.filter { $0.stagedForEdit != true }
+        var digests: [UUID: String] = [:]
+        for file in originals {
+            if let digest = Self.digest(of: repository.mediaURL(job: job, file: file)) {
+                digests[file.id] = digest
+            }
+        }
+        let bound = OutboxAttachmentIdentity.bind(
+            files: originals, digests: digests, answer: answer)
+        var named = job
+        for index in named.files.indices {
+            named.files[index].attachmentUID = bound[named.files[index].id]
+        }
+        return named
+    }
+
+    /// A file's SHA-256, hex and lowercase, read a megabyte at a time so a video does not arrive in
+    /// memory whole. A copy this device cannot open, or cannot finish reading, has NO digest —
+    /// a hash of the bytes that did arrive is a different file's identity — and identity then
+    /// falls back to the order the answer came in, which is the honest state of that knowledge.
+    private static func digest(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk: Data?
+            do { chunk = try handle.read(upToCount: 1 << 20) } catch { return nil }
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     private func complete(
         _ job: UploadJob,
         credentials: OutboxCredentials
@@ -414,9 +545,22 @@ public actor OutboxEngine: OutboxChunkHandling {
         switch await completion.create(
             job: creating, credentials: credentials, under: authority(under: credentials)
         ) {
-        case .created:
-            // The one exit. Everything the capture owns goes with it.
-            await repository.delete(creating)
+        case .created(let uid, let attachments):
+            // The capture leaves only when nothing is still owed to it. An edit taken while this
+            // create was in flight is owed an apply, so the job advances in place carrying the memo
+            // the server named — anything held beside the job would be reaped by the sweep, which
+            // reaps by job id. And the removal is fenced on the manifest this pass wrote: a capture
+            // a person has since taken back is no longer this answer's to destroy.
+            if creating.pendingEdit != nil {
+                return await save(
+                    named(creating, as: attachments).awaitingPatch(
+                        uid: uid,
+                        editKey: creating.editKey ?? creating.idempotencyKey.uuidString
+                    ),
+                    matching: creating
+                )
+            }
+            await repository.delete(creating, ifStillCurrent: creating)
             await onChange()
             return nil
         case .unlinkable(let failure):
@@ -457,6 +601,98 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
     }
 
+    /// The edit owed to the memo the create resolved to, applied.
+    ///
+    /// ONE transmission at a time, claimed synchronously here before any hop. Two overlapping
+    /// invocations of this — a drain, and the `advance` a finished chunk re-enters — must be one
+    /// request on the wire, and the second is REFUSED rather than joined: this job is waiting for
+    /// an answer, and asking again buys nothing the edit key does not already give. The claim is
+    /// given back the moment an outcome leaves this job alive, so the backoff that outcome wrote
+    /// can be served by a later pass; it is kept only where the applied edit's fenced delete
+    /// succeeded, and there is then no job left to ask about.
+    /// A relaunch claims afresh on purpose — that is the whole recovery — and it is safe because
+    /// the key makes the second transmission a replay rather than a second edit.
+    private func applyEdit(
+        _ job: UploadJob, request: URLRequest, credentials: OutboxCredentials
+    ) async {
+        guard editsTransmitted.insert(job.id).inserted else { return }
+        // Nothing is sent on a state nobody wrote, and the written value is what every outcome
+        // below is judged against — the same rule the create is sent under. The same write records
+        // that the edit is in flight, which is what makes the body the server is answering about
+        // immutable until it answers.
+        guard
+            let claimed = await save(
+                job.with {
+                    $0.patchAttempt = ($0.patchAttempt ?? 0) + 1
+                    // Only when it is not already set: a replay is the same edit, and moving the
+                    // instant would say the uncertainty began when this transmission did.
+                    $0.editUnansweredSince = $0.editUnansweredSince ?? clock()
+                },
+                matching: job
+            )
+        else {
+            editsTransmitted.remove(job.id)
+            return
+        }
+        switch await completion.patch(
+            job: claimed, request: request, credentials: credentials,
+            under: authority(under: credentials)
+        ) {
+        case .applied:
+            // Fenced on the manifest this pass wrote: an answer that outlived a cancel, or a
+            // relaunch that finished the same edit first, is no longer this pass's to act on — and
+            // this delete takes the person's only copy of the pictures with it.
+            guard await repository.delete(claimed, ifStillCurrent: claimed) else {
+                // The manifest moved under the PATCH, so this pass is not the one that destroys it:
+                // the claim goes back and the job stands whole — `pendingEdit` and `editKey` intact
+                // — so the next drain replays the SAME key and the delete is tried again.
+                editsTransmitted.remove(job.id)
+                await onChange()
+                return
+            }
+            await onChange()
+        case .retry(let message):
+            // Still owed, and the transmission's fate unknown: the request may have reached the
+            // server, so `editUnansweredSince` STAYS SET — the body and key it may be holding are immutable
+            // until an answer settles it, and the server answers the replay under that key before
+            // it checks the upload uids. Only the claim goes back, for the backoff below.
+            await save(claimed.backingOff(at: clock(), error: message), matching: claimed)
+            editsTransmitted.remove(job.id)
+        case .refused(let message, let refused):
+            // A 404 is answered before the key is looked up, so it says nothing about this edit —
+            // only that the memo it is owed to is gone. Its own reason, because the row's actions
+            // are read from the reason and Remove belongs on this hold and no other.
+            let reason: HoldReason = refused.statusCode == 404 ? .memoGone : .serverRefused
+            // The only refusal that settles the key: the server decided it from the body this
+            // edit is frozen on, so the first transmission would have been answered the same way
+            // and cannot have committed. Everything else leaves the capture uncertain, and the
+            // way back out is a replay under the same key.
+            let settles = refused.deterministicOnTheFrozenBody
+            // Not decided here: `save` hops into `OutboxRepository`, and a renewal landing in that
+            // hop is exactly what this fence is about, so both outcomes travel and the choice is
+            // made where the write is. The superseded one keeps the marker whatever the status —
+            // a refusal a replaced credential earned answers nothing about the key either.
+            await save(
+                claimed.held(reason, error: message)
+                    .with { $0.editUnansweredSince = settles ? nil : $0.editUnansweredSince },
+                ifStillCurrent: refused.issuedUnder,
+                matching: claimed,
+                else: claimed.backingOff(at: clock(), error: refused.supersededMessage)
+            )
+            editsTransmitted.remove(job.id)
+        }
+    }
+
+    /// Drops whatever this job still has in flight, and writes nothing.
+    ///
+    /// The manifest is the caller's to write — a cancel writes its mark first and then asks for
+    /// this — so that nothing is ever torn down on a state nobody wrote.
+    public func abandonTasks(jobID: UUID) async {
+        let live = await scheduler.inFlight().filter { $0.jobID == jobID }
+        guard !live.isEmpty else { return }
+        await scheduler.cancel(live)
+    }
+
     // MARK: - chunk answers
 
     /// Called by the background session, possibly in a process launched for this alone.
@@ -466,20 +702,34 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// and needs a credential only for the parts that talk to the server again. A byte count
     /// thrown away because nobody was signed in yet is a chunk re-uploaded for no reason.
     public func handle(_ result: ChunkResult) async {
+        guard let job = await repository.job(result.identity.jobID) else { return }
+        // A capture a person has taken back to the editor: the bytes this answer reports are no
+        // longer the queue's business, and banking them would move a manifest the editor holds.
+        // Before the chunk is dropped and before anything is written, so the job is left exactly
+        // as the cancel wrote it.
+        guard job.cancelledAt == nil else { return }
+        // An answer from a superseded attempt — a task a reconcile cancelled, or a duplicate that
+        // outlived the one whose answer already landed. The job has moved on, and applying this
+        // would rewind the cursor and re-send bytes the server already holds.
+        //
+        // The offset alone cannot tell the two apart after a retry: the replacement starts at the
+        // very offset the task it replaced was sent at, so the attempt the task PRESENTED is what
+        // says which of them this answer belongs to.
+        guard let file = job.file(result.identity.fileID),
+            file.bytesConfirmed == result.identity.offset,
+            file.uploadAttempt == result.identity.attempt
+        else { return }
+        // Dropped only once the answer is this file's to act on, and only the chunk this task was
+        // sent FROM. A predecessor answering late would otherwise take the replacement's slice out
+        // from under a transfer that is still running.
         await repository.removeChunk(
             at: repository.chunkURL(
                 jobID: result.identity.jobID,
                 fileID: result.identity.fileID,
-                offset: result.identity.offset
+                offset: result.identity.offset,
+                attempt: result.identity.attempt
             )
         )
-        guard let job = await repository.job(result.identity.jobID) else { return }
-        // An answer from a superseded attempt — a task a reconcile cancelled, or a duplicate that
-        // outlived the one whose answer already landed. The job has moved on, and applying this
-        // would rewind the cursor and re-send bytes the server already holds.
-        guard let file = job.file(result.identity.fileID),
-            file.bytesConfirmed == result.identity.offset
-        else { return }
 
         let fileID = result.identity.fileID
         let credentials = await credentials.currentCredentials()
@@ -579,6 +829,63 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     // MARK: - helpers
 
+    /// Makes every retained original this edit keeps nameable again, before the edit is claimed.
+    ///
+    /// The create's answer binds the uploads it named onto attachments; an original it folded away
+    /// — identical bytes, or a count the server disagreed with — is left with no attachment uid,
+    /// and the PATCH's picture list travels whole or not at all. So it is sent again, under a new
+    /// upload, and the server folds it back onto the attachment it already holds.
+    ///
+    /// - Returns: the job to carry on with, or nil where this pass wrote a hold and is done.
+    private func stageUnnamedOriginals(_ job: UploadJob) async -> UploadJob? {
+        guard let edit = job.pendingEdit else { return job }
+        let kept = Set(edit.fileIDs)
+        let unnamed = job.files.filter {
+            kept.contains($0.id) && $0.stagedForEdit != true && $0.attachmentUID == nil
+        }
+        guard !unnamed.isEmpty else { return job }
+        // Checked before anything is written: re-staging a copy this device cannot read promises
+        // an upload that can never be made, and the capture would then retry for ever. The person
+        // takes it back and removes that picture instead.
+        guard unnamed.allSatisfy({ isReadable($0, of: job) }) else {
+            await hold(job, reason: .editIncomplete)
+            return nil
+        }
+        let restaging = Set(unnamed.map(\.id))
+        let staged = job.with { candidate in
+            for index in candidate.files.indices
+            where restaging.contains(candidate.files[index].id) {
+                candidate.files[index].stagedForEdit = true
+                candidate.files[index].uploadUID = nil
+                candidate.files[index].bytesConfirmed = 0
+            }
+        }
+        // A re-staged file is transferring again, so it moves to a NEW term — the same bump Try
+        // again performs. Without it the finished predecessor's late duplicate answer carries the
+        // same file, offset and term, and would be credited to the replacement, which would then
+        // read complete with its bytes never sent.
+        let bumped = staged.bumpingAttempts().job
+        guard let saved = await save(bumped, matching: job) else { return nil }
+        // After the write, and only over tasks the bump left behind: a task already carrying the
+        // new term IS the replacement.
+        let live = OutboxTaskIdentity.supersededTasks(
+            inFlight: await scheduler.inFlight(), bumped: saved.attemptTerms, jobID: job.id)
+        if !live.isEmpty {
+            await scheduler.cancel(live)
+        }
+        return saved
+    }
+
+    /// Whether the job's copy of this original can still be read: a send, or a promise unkeepable.
+    private func isReadable(_ file: OutboxFile, of job: UploadJob) -> Bool {
+        guard
+            let handle = try? FileHandle(
+                forReadingFrom: repository.mediaURL(job: job, file: file))
+        else { return false }
+        try? handle.close()
+        return true
+    }
+
     private func hold(_ job: UploadJob, reason: HoldReason) async {
         guard job.state != .held || job.holdReason != reason else { return }
         await save(job.held(reason, error: Self.message(for: reason)), matching: job)
@@ -651,7 +958,11 @@ public actor OutboxEngine: OutboxChunkHandling {
         matching snapshot: UploadJob
     ) async {
         guard job.state != .held || job.holdReason != .storageFailed else { return }
+        // The marker comes from the SNAPSHOT, never from the candidate: the candidate is the write
+        // that did not happen, and one of them clears the marker. Taking it from there would put a
+        // settled capture on disk over an edit the server never answered.
         let held = job.held(.storageFailed, error: Self.storageMessage(error))
+            .with { $0.editUnansweredSince = snapshot.editUnansweredSince }
         do {
             // The same checked write, so there is one implementation of "is this still the capture
             // I decided about" and not a second one here. The epoch is deliberately unknown — a
@@ -680,6 +991,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             return "This capture could not be read from the queue."
         case .storageFailed:
             return "This capture could not be saved on this device."
+        case .editIncomplete:
+            return "A picture this memo keeps is missing from this device."
+        case .memoGone:
+            return "This memo is no longer on the server."
         }
     }
 }
