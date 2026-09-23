@@ -247,9 +247,10 @@ struct PendingMemoPresentationTests {
         #expect(!row.needsAttention, "an upload doing its job is not a row asking for a person")
     }
 
-    /// An edit already on the wire cannot be taken back, so the row stops offering to take it
-    /// back. The queue is what refuses the cancel, where the job's state is owned; what this
-    /// fences is the row promising something the queue would then have to refuse.
+    /// An edit already on the wire can be neither taken back nor sent again, so the row offers
+    /// nothing while that edit is claimed. The queue is what refuses the cancel and what replays
+    /// the edit itself, where the job's state is owned; what this fences is the row promising
+    /// either one, which the queue would then have to refuse.
     @Test("a capture whose edit is already on the wire offers nothing")
     func anEditOnTheWireOffersNothing() {
         var sending = job(state: .uploading)

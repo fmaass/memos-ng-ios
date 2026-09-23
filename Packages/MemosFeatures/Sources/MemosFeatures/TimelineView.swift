@@ -796,18 +796,21 @@ public struct TimelineView: View {
         switch mode {
         case .create(let restored):
             guard let outbox else { return .failed(.authorization) }
-            let saved = await Self.post(
+            switch await Self.post(
                 submission,
                 restoring: restored,
                 accountDefault: session.defaultVisibility,
-                resubmit: { await outbox.resubmit($0, draft: $1) == .accepted },
+                resubmit: { await outbox.resubmit($0, draft: $1) },
                 enqueue: { await Self.enqueue($0, into: outbox) }
-            )
-            outcome =
-                saved
-                ? .saved
-                : .failed(
+            ) {
+            case .saved:
+                outcome = .saved
+            case .refused(let failure):
+                outcome = .failed(failure)
+            case .enqueueFailed:
+                outcome = .failed(
                     outbox.lastEnqueueFailure == .notSignedIn ? .authorization : .storage)
+            }
         case .edit(let uid, _, let createdAt, _):
             guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return .failed(.authorization)
@@ -831,28 +834,48 @@ public struct TimelineView: View {
         return outcome
     }
 
+    /// What Post did, for the one caller that turns it into a sheet answer. A Bool could only
+    /// say "no": the three ways out differ in what the sheet must do next.
+    enum PostOutcome: Equatable {
+        case saved
+        case enqueueFailed
+        case refused(ComposeFailure)
+    }
+
     /// What Post does with a create, decided once. A capture the editor was HANDED goes back to
     /// the job it came out of: same manifest, same key, so a create that already committed
     /// resolves to its own memo. A job that vanished under the open editor has nothing left to go
     /// back to, and the words and files on this screen are not thrown away for it — they become a
     /// new capture.
     ///
-    /// "Default" on the picker is a word, not a value a memo can carry, so it resolves HERE to the
-    /// account's own choice: the queue's fallback for an edit that states nothing is the
-    /// visibility the job already has, which is the one the person just stopped choosing.
+    /// "Default" on the picker is a word, not a value a memo can carry. It resolves HERE to the
+    /// account's own choice WHEN that choice is known; when it is not, Post refuses and says so,
+    /// because sending nothing would hand the queue its own fallback — the visibility the job
+    /// already has, which is exactly the one the person just stopped choosing.
     @MainActor
     static func post(
         _ submission: ComposeSubmission,
         restoring restored: ComposeRestore?,
         accountDefault: MemoVisibility? = nil,
-        resubmit: (UUID, RestoredDraft) async -> Bool,
+        resubmit: (UUID, RestoredDraft) async -> ResubmitOutcome,
         enqueue: (ComposeSubmission) async -> Bool
-    ) async -> Bool {
-        guard let restored else { return await enqueue(submission) }
+    ) async -> PostOutcome {
+        guard let restored else { return await enqueue(submission) ? .saved : .enqueueFailed }
+        // "Default" with no account default known is a word this app cannot turn into a value.
+        // Sending nothing would hand the queue its own fallback — the visibility the job already
+        // has, which is the one the person just stopped choosing — so Post refuses.
+        if submission.visibility == nil, accountDefault == nil, restored.visibility != nil {
+            return .refused(.defaultVisibilityUnknown)
+        }
         let visibility = (submission.visibility ?? accountDefault)?.rawValue
         let draft = RestoredDraft(submission, jobID: restored.jobID, visibility: visibility)
-        if await resubmit(restored.jobID, draft) { return true }
-        return await enqueue(submission)
+        switch await resubmit(restored.jobID, draft) {
+        case .accepted: return .saved
+        // Only a job that is GONE becomes a second capture. A refusal is not that: the capture
+        // may already have committed a memo, and a fresh key would be a second one.
+        case .vanished: return await enqueue(submission) ? .saved : .enqueueFailed
+        case .refused(let reason): return .refused(.captureUnchanged(reason))
+        }
     }
 
     @MainActor

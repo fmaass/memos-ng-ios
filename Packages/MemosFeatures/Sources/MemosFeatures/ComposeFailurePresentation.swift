@@ -37,6 +37,20 @@ nonisolated public enum ComposeFailurePresentation {
             // on.
             return "The server failed on this save, so it is not known whether it went through."
                 + " Try again — the same save is repeated, never applied twice."
+        case .captureUnchanged(let refusal):
+            switch refusal {
+            case .stagingFailed, .writeLost:
+                return "This capture could not be changed on this device."
+                    + " Nothing was sent — what you wrote is still here, so try again."
+            case .editInFlight:
+                return "The last change to this capture is still on its way."
+                    + " Wait for its answer, then try again."
+            case .pictureMissing(let filename):
+                return "\(filename) is no longer on this device — remove it and try again."
+            }
+        case .defaultVisibilityUnknown:
+            return "Your account's default visibility isn't known yet — choose one,"
+                + " or try again once you're online."
         }
     }
 
@@ -50,7 +64,11 @@ nonisolated public enum ComposeFailurePresentation {
         switch failure {
         case .transport: return .transport
         case .storage: return .storage
-        case .authorization, .rejection, .serverFailure: return nil
+        // A refusal is not the FILES' business either: nothing was sent, and `pictureMissing`
+        // names ONE file, so marking every tile would point at the wrong pictures.
+        case .authorization, .rejection, .serverFailure, .captureUnchanged,
+            .defaultVisibilityUnknown:
+            return nil
         }
     }
 }

@@ -722,7 +722,11 @@ public struct ComposeView: View {
                 switch failure {
                 case .transport(sent: true), .serverFailure:
                     imports.mayHaveLandedOnServer(failure)
-                case .transport(sent: false), .authorization, .storage, .rejection:
+                // The two refusals belong here for the same reason: this attempt sent nothing, so
+                // the set is not frozen by it — whatever may already have landed was frozen when
+                // THAT request went.
+                case .transport(sent: false), .authorization, .storage, .rejection,
+                    .captureUnchanged, .defaultVisibilityUnknown:
                     break
                 }
                 // One exception, and it is about a single sentence: an answer that never left the

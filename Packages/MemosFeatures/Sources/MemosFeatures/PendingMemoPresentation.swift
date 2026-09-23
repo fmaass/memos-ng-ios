@@ -108,10 +108,11 @@ public enum PendingMemoPresentation {
                 return [.retry]
             }
         case .uploading, .waiting:
-            // An edit already on the wire cannot be taken back, so the row does not offer to: the
-            // queue refuses a cancel while it is unresolved, and a button that answers nothing is
-            // a lie.
-            return job.editSentAt == nil ? [.cancel, .retry] : [.retry]
+            // An edit on the wire can be neither taken back NOR sent again by hand: the queue
+            // refuses the cancel while it is unresolved, and the engine's own backoff replays it
+            // under the key it was minted with. A button answering nothing is a lie, so the row
+            // offers nothing until the server answers definitely.
+            return job.editSentAt == nil ? [.cancel, .retry] : []
         case .creating:
             return []
         }
@@ -127,6 +128,11 @@ public enum PendingMemoPresentation {
         // the marker parks it back in `waiting` — and what they do need to read is that it is
         // theirs again.
         if job.cancelledAt != nil { return Self.cancelledAndKept }
+        // The two states `action(for:)` fences, for its reason: the row can do nothing while that
+        // request stands. Held and creating keep their own — theirs is the more specific reason.
+        if job.editSentAt != nil, job.state == .uploading || job.state == .waiting {
+            return Self.sendingEdit
+        }
         switch job.state {
         case .held:
             switch job.holdReason {
@@ -195,6 +201,10 @@ public enum PendingMemoPresentation {
     /// queue owes the edit to — and that is what they need before choosing between sending it
     /// again and binning it.
     static let cancelledAndKept = "Cancelled — kept on this device"
+
+    /// "Waiting to try again" would describe a backoff, and this is not one — the request is out
+    /// and its answer is what the row waits for.
+    static let sendingEdit = "Sending your change — waiting for the server's answer"
 
     /// What a capture held for the wrong network says, which is also where the person is told
     /// what would send it now. A row that only said "waiting" would be true and useless.
