@@ -263,10 +263,9 @@ struct PendingMemoPresentationTests {
         #expect(!row.needsAttention, "an upload doing its job is not a row asking for a person")
     }
 
-    /// An edit the server has not answered can be neither taken back nor sent again by hand, so
-    /// the row offers nothing while it stands. The queue is what refuses the cancel and what
-    /// replays the edit itself, where the job's state is owned; what this fences is the row
-    /// promising either one, which the queue would then have to refuse.
+    /// While an edit the server has not answered stands, the row offers nothing. The queue refuses
+    /// the cancel and replays the edit itself, where the job's state is owned, so the row leaves
+    /// the answer to it; what this fences is the row offering either button meanwhile.
     @Test("a capture whose edit is already unanswered offers nothing")
     func anUnansweredEditOffersNothing() {
         var sending = job(state: .uploading)
@@ -274,7 +273,7 @@ struct PendingMemoPresentationTests {
 
         #expect(
             PendingMemoPresentation.action(for: sending) == [],
-            "the queue refuses both while the edit is unresolved")
+            "the row offers neither while the edit is unanswered")
         let sentence = PendingMemoPresentation.status(for: sending)
         #expect(
             sentence == "Your change hasn't been answered yet — it will be sent again until it is")

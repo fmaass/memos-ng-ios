@@ -1099,7 +1099,7 @@ struct PatchCompletionTests {
         let prepared = try await standing(
             first, try #require(await first.repository.job(job.id))
         ) {
-            // A committed create leaves no backoff of its own behind.
+            // Planted as a resolved create moving on to its pending edit, no backoff standing.
             $0.attemptCount = 0
             $0.nextAttemptAt = .distantPast
             $0.resolvedMemoUID = "m1"
@@ -1274,7 +1274,7 @@ struct PatchCompletionTests {
         // Every file the manifest holds is complete, so nothing is re-staged and the gate passes:
         // the kept picture that names no file can surface nowhere but the request itself.
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
-            // A committed create leaves no backoff of its own behind.
+            // Planted as a resolved create moving on to its pending edit, no backoff standing.
             $0.attemptCount = 0
             $0.nextAttemptAt = .distantPast
             $0.resolvedMemoUID = "m1"
@@ -1311,7 +1311,7 @@ struct PatchCompletionTests {
         _ = try await uploaded(harness, job)
         await harness.outbox.drain()
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
-            // A committed create leaves no backoff of its own behind.
+            // Planted as a resolved create moving on to its pending edit, no backoff standing.
             $0.attemptCount = 0
             $0.nextAttemptAt = .distantPast
             $0.resolvedMemoUID = "m1"

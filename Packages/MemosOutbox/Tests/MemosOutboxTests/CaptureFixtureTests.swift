@@ -253,9 +253,9 @@ struct ManifestKeyTests {
             editUnansweredSince: Date(timeIntervalSince1970: 1_750_000_140))
     }
 
-    /// The same capture as `populated()`, spelled out as a build that never heard of this branch
-    /// wrote it. Typed out rather than round-tripped: a fixture the encoder produced would agree
-    /// with any rename the encoder also made.
+    /// The same capture as `populated()`, spelled out in the on-disk shape from before the marker
+    /// was renamed in code, whose key stays `editSentAt`. Typed out rather than round-tripped: a
+    /// fixture the encoder produced would agree with any rename the encoder also made.
     static let populatedManifest = Data(
         """
         {
@@ -327,7 +327,7 @@ struct ManifestKeyTests {
         #expect(Set(object.keys) == Self.keys)
     }
 
-    @Test("a manifest written before this branch decodes field for field")
+    @Test("a manifest in the shape from before the rename decodes field for field")
     func thePopulatedFixtureDecodes() throws {
         let decoded = try Self.decoder.decode(UploadJob.self, from: Self.populatedManifest)
         // The whole value, so a key that quietly stopped being read cannot hide behind the fields

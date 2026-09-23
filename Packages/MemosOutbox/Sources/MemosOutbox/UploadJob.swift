@@ -54,7 +54,8 @@ public enum HoldReason: String, Codable, Sendable, Equatable, CaseIterable {
     case editIncomplete
     /// The memo this capture's change is owed to is no longer on the server. It is a reason of its
     /// own rather than a sentence under `serverRefused`, because the row's actions are read from
-    /// the reason, and this is the one unanswered change a person may take the capture back from.
+    /// the reason, and this is the one unanswered change a person may remove outright — the editor
+    /// stays closed to it while the change is unanswered.
     case memoGone
 }
 

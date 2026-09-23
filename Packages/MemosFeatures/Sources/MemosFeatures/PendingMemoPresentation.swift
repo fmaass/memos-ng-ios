@@ -120,10 +120,9 @@ public enum PendingMemoPresentation {
                 return [.retry]
             }
         case .uploading, .waiting:
-            // An unanswered edit can be neither taken back NOR sent again by hand: the queue
-            // refuses the cancel while it is unresolved, and the engine's own backoff replays it
-            // under the key it was minted with. A button answering nothing is a lie, so the row
-            // offers nothing until the server answers definitely.
+            // While an edit stands unanswered the row offers nothing: the queue refuses the cancel,
+            // and its own backoff sends the edit again under the key it was minted with, so the
+            // row leaves the answer to the queue until the server gives one.
             return job.editUnansweredSince == nil ? [.cancel, .retry] : []
         case .creating:
             return []

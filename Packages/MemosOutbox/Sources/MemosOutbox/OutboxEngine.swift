@@ -264,8 +264,8 @@ public actor OutboxEngine: OutboxChunkHandling {
                     await applyEdit(current, request: request, credentials: credentials)
                     return
                 }
-                // Something was re-staged. The planner below uploads it, and a later pass
-                // re-enters here with every entry nameable.
+                // A file still needs its bytes, or the backoff has not run out. The planner below
+                // uploads or waits, whichever it is, and a later pass re-enters here.
             }
             switch OutboxPlanner.nextAction(
                 for: current, credentials: credentials, now: clock()
