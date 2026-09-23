@@ -97,17 +97,23 @@ public struct ComposeDelete {
 /// the archive master and a restored draft that quietly replaced them with a rendering would lose
 /// what the capture was taken for (ADR-0008).
 nonisolated public struct ComposeRestore: Equatable {
+    /// The capture this draft came out of. A restored draft goes back to the job it was taken
+    /// from — same manifest, same idempotency key — so a create that already committed resolves to
+    /// the memo it made instead of posting a second one.
+    public var jobID: UUID
     public var content: String
     public var visibility: MemoVisibility?
     public var capturedAt: Date
     public var pictures: [PickedMedia]
 
     public init(
+        jobID: UUID,
         content: String,
         visibility: MemoVisibility?,
         capturedAt: Date,
         pictures: [PickedMedia]
     ) {
+        self.jobID = jobID
         self.content = content
         self.visibility = visibility
         self.capturedAt = capturedAt
@@ -116,6 +122,7 @@ nonisolated public struct ComposeRestore: Equatable {
 
     public init(_ draft: RestoredDraft) {
         self.init(
+            jobID: draft.jobID,
             content: draft.content,
             // A capture staged before the account had an answer for who sees things carries no
             // visibility, and neither does the draft: the unmarked choice is still unmarked.
@@ -125,6 +132,23 @@ nonisolated public struct ComposeRestore: Equatable {
             // picture to both sides and the order a person sees is the order that is sent.
             pictures: draft.pictures.map {
                 PickedMedia(id: $0.id, url: $0.url, filename: $0.filename, mime: $0.mime)
+            }
+        )
+    }
+}
+
+/// The editor's answer as the queue's own draft. The picture ids are the queue's own ids for the
+/// files it handed over, and a picture picked while the sheet was open carries an id the queue has
+/// never seen — which is exactly how `resubmit` tells a kept file from a new one.
+extension RestoredDraft {
+    init(_ submission: ComposeSubmission, jobID: UUID, visibility: String?) {
+        self.init(
+            jobID: jobID,
+            content: submission.content,
+            visibility: visibility,
+            capturedAt: submission.capturedAt(),
+            pictures: submission.attachments.map {
+                RestoredDraft.Picture(id: $0.id, url: $0.url, filename: $0.filename, mime: $0.mime)
             }
         )
     }

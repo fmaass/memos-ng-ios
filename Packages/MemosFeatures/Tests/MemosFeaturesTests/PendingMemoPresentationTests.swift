@@ -356,8 +356,8 @@ struct PendingMemoPresentationTests {
         }
     }
 
-    /// A cancelled capture nobody finished with. The bytes are on this device and nothing else
-    /// has them, so the row keeps saying so until a person either sends it or throws it away.
+    /// A cancelled capture nobody finished with. The bytes are kept on this device, and the row
+    /// keeps saying so until a person either sends it again or throws it away.
     @Test("a cancelled capture left alone is kept, says so, and offers both ways out")
     func aCancelledCaptureIsKept() {
         var cancelled = job(state: .waiting)

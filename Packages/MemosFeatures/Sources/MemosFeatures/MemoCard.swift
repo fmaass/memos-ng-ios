@@ -1,5 +1,6 @@
 import CoreGraphics
 import MemosCore
+import MemosOutbox
 import SwiftUI
 
 /// One memo, as a card.
@@ -372,6 +373,56 @@ struct ArchivedPill: View {
     }
 }
 
+/// The pending section, and the one place on the timeline whose sentence changes because time
+/// passed rather than because something happened. It wakes ONCE, at the earliest instant a row
+/// would start saying something else, and re-arms from what that redraw finds — never on a
+/// repeating tick, which would redraw a still screen every second for the one second in ninety
+/// that has anything to say.
+struct PendingSection: View {
+    let jobs: [UploadJob]
+    let lastProgressAt: [UUID: Date]
+    let verdict: UploadVerdict
+    let retry: (UUID) -> Void
+    let remove: (UUID) -> Void
+    /// Cancel on a capture still moving, and Try again on one already stopped: both ask the queue
+    /// for the draft and open the editor on what comes back.
+    let restore: (UUID) -> Void
+
+    /// The instant the last arming was measured from. Read here so that writing it re-runs this
+    /// body.
+    @State private var armedAt = Date()
+
+    var body: some View {
+        let now = Date()
+        let deadline = PendingMemoPresentation.stallDeadline(
+            for: jobs, lastProgressAt: lastProgressAt, after: armedAt)
+        Section {
+            ForEach(
+                PendingMemoPresentation.rows(
+                    for: jobs, now: now, lastProgressAt: lastProgressAt, verdict: verdict)
+            ) { row in
+                PendingCard(
+                    row: row,
+                    retry: { retry(row.id) },
+                    remove: { remove(row.id) },
+                    cancel: { restore(row.id) },
+                    reopen: { restore(row.id) }
+                )
+                .cardRow()
+            }
+        } header: {
+            SectionHeading(title: "Pending")
+        }
+        .task(id: deadline) {
+            guard let deadline else { return }
+            let wait = deadline.timeIntervalSince(Date())
+            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            guard !Task.isCancelled else { return }
+            armedAt = deadline
+        }
+    }
+}
+
 /// A capture that has not reached the server yet, in the same card the finished memos use — a
 /// queued memo is a memo, and a row that looks like a system notice makes it read like an error.
 struct PendingCard: View {
@@ -379,6 +430,7 @@ struct PendingCard: View {
     let retry: () -> Void
     let remove: () -> Void
     let cancel: () -> Void
+    let reopen: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
@@ -411,15 +463,20 @@ struct PendingCard: View {
                                 .font(.footnote)
                                 .buttonStyle(.bordered)
                                 .tint(DesignTokens.accent)
+                        case .reopen:
+                            Button("Try again", action: reopen)
+                                .font(.footnote)
+                                .buttonStyle(.bordered)
+                                .tint(DesignTokens.accent)
                         case .remove:
-                            // The one destructive button in the timeline: a person presses it,
-                            // nothing here ever decides it.
+                            // Destructive, and pressed by a person: nothing here ever decides it.
                             Button("Remove", role: .destructive, action: remove)
                                 .font(.footnote)
                                 .buttonStyle(.bordered)
                         case .cancel:
-                            // Pressing it is not the guard against two cancels landing at once —
-                            // the queue settles that where the job's state is owned.
+                            // Offered only while the queue can still take the capture back, and
+                            // the press is not the guard: two landing at once are settled where
+                            // the job's state is owned.
                             Button("Cancel", action: cancel)
                                 .font(.footnote)
                                 .buttonStyle(.bordered)

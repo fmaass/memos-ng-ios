@@ -4,8 +4,7 @@ import MemosOutbox
 /// One thing a row lets a person do about a capture. A row offers a list of them, in the order
 /// they are drawn; the empty list is the row that asks for nothing.
 public enum PendingAction: Sendable, Hashable {
-    /// A hold a person can clear, and the way back into the editor for a capture they stopped —
-    /// "Try again".
+    /// A hold a person can clear — "Try again" on a capture the queue stopped itself.
     case retry
     /// A capture nothing can move on: its manifest could not be read, so it can never be sent and
     /// no hold can be cleared. What is left is throwing it away deliberately, files and all.
@@ -13,6 +12,9 @@ public enum PendingAction: Sendable, Hashable {
     /// Stop a capture on its way and have its words and its files back in the editor. Offered
     /// while it is still moving, because that is exactly when a person wants it.
     case cancel
+    /// The way back into the editor for a capture a person stopped. It is not a retry: nothing
+    /// is sent, the queue hands the draft back and the editor opens on it.
+    case reopen
 }
 
 /// One queued capture, as a row.
@@ -62,7 +64,7 @@ public enum PendingMemoPresentation {
         for jobs: [UploadJob],
         now: Date = Date(),
         lastProgressAt: [UUID: Date] = [:],
-        uploadsPermitted: Bool = true
+        verdict: UploadVerdict = .permitted
     ) -> [PendingRow] {
         jobs
             .sorted { $0.capturedAt > $1.capturedAt }
@@ -74,7 +76,7 @@ public enum PendingMemoPresentation {
                         for: job,
                         now: now,
                         lastProgressAt: lastProgressAt,
-                        uploadsPermitted: uploadsPermitted
+                        verdict: verdict
                     ),
                     attachmentCount: job.files.count,
                     actions: action(for: job),
@@ -96,7 +98,7 @@ public enum PendingMemoPresentation {
     /// written into a memo offers nothing: its bytes are at the server and nothing here can take
     /// them back, so a control there would be a promise this screen cannot keep.
     public static func action(for job: UploadJob) -> [PendingAction] {
-        if job.cancelledAt != nil { return [.retry, .remove] }
+        if job.cancelledAt != nil { return [.reopen, .remove] }
         switch job.state {
         case .held:
             switch job.holdReason {
@@ -106,7 +108,10 @@ public enum PendingMemoPresentation {
                 return [.retry]
             }
         case .uploading, .waiting:
-            return [.cancel, .retry]
+            // An edit already on the wire cannot be taken back, so the row does not offer to: the
+            // queue refuses a cancel while it is unresolved, and a button that answers nothing is
+            // a lie.
+            return job.editSentAt == nil ? [.cancel, .retry] : [.retry]
         case .creating:
             return []
         }
@@ -116,10 +121,11 @@ public enum PendingMemoPresentation {
         for job: UploadJob,
         now: Date = Date(),
         lastProgressAt: [UUID: Date] = [:],
-        uploadsPermitted: Bool = true
+        verdict: UploadVerdict = .permitted
     ) -> String {
-        // Said before the state, because a cancelled capture keeps whatever state it was stopped
-        // in: what a person needs to read is that it is theirs again, not where it got to.
+        // Said before the state, because a stopped capture's state says nothing a person needs —
+        // the marker parks it back in `waiting` — and what they do need to read is that it is
+        // theirs again.
         if job.cancelledAt != nil { return Self.cancelledAndKept }
         switch job.state {
         case .held:
@@ -138,7 +144,7 @@ public enum PendingMemoPresentation {
         case .uploading:
             // The network the phone is on explains the silence completely, so the row says that
             // and not that something unknown has gone quiet.
-            if !uploadsPermitted { return Self.waitingForHomeNetwork }
+            if case .refused(let reason) = verdict { return Self.refusal(reason) }
             if let last = lastProgressAt[job.id], now.timeIntervalSince(last) >= Self.stallInterval
             {
                 return Self.noProgressConfirmed
@@ -149,7 +155,7 @@ public enum PendingMemoPresentation {
             // network it is on is not spacing out a retry — nothing was tried — and "Waiting to
             // try again" on a phone that will never try until it is back on wifi is the kind of
             // sentence that makes a person force-quit the app.
-            if job.waitReason == .homeNetwork { return Self.waitingForHomeNetwork }
+            if case .refused(let reason) = verdict { return Self.refusal(reason) }
             if job.attemptCount > 0 { return "Waiting to try again" }
             return "Waiting for home wifi"
         }
@@ -158,19 +164,36 @@ public enum PendingMemoPresentation {
     /// How long a capture's confirmed bytes may stand still before the row stops showing a
     /// percentage nothing is adding to.
     ///
-    /// A product number rather than a derived one. One chunk is megabytes and can legitimately
-    /// take longer than a single request is given, so a shorter interval would call a working
-    /// upload stalled; longer, and the row goes on counting at a person who can see it is stuck.
+    /// A product number, chosen and not derived: one chunk is megabytes and may legitimately take
+    /// longer than a single request is given, and a row that goes on counting at a person who can
+    /// see it is stuck is the thing this replaces.
     public static let stallInterval: TimeInterval = 90
 
+    /// The next instant at which a row's sentence changes because time passed and nothing else
+    /// happened. `nil` when no row is counting: a screen that armed a wake for a capture that is
+    /// not uploading would be a timer with extra steps. The verdict is not consulted — a refused
+    /// row's sentence does not depend on time, and a verdict change redraws the section anyway.
+    public static func stallDeadline(
+        for jobs: [UploadJob],
+        lastProgressAt: [UUID: Date],
+        after instant: Date
+    ) -> Date? {
+        jobs
+            .filter { $0.state == .uploading && $0.cancelledAt == nil }
+            .compactMap { lastProgressAt[$0.id]?.addingTimeInterval(stallInterval) }
+            .filter { $0 > instant }
+            .min()
+    }
+
     /// What a capture whose bytes stopped moving says. It states what is known — nothing has been
-    /// confirmed for a while — and nothing else: no attempt has failed, and a row that said so
-    /// would be inventing an outcome the queue has not had.
+    /// confirmed for a while — and nothing else: whether anything failed is not something this row
+    /// is told, and a sentence that guessed would be inventing an outcome.
     static let noProgressConfirmed = "No progress confirmed for \(Int(stallInterval)) s"
 
     /// What a capture a person stopped says for as long as they leave it alone. The words and the
-    /// files are on this device and nowhere else, which is the part they need to know before they
-    /// decide between sending it again and throwing it away.
+    /// files are kept HERE — the create may already have committed a memo at the server, which the
+    /// queue owes the edit to — and that is what they need before choosing between sending it
+    /// again and binning it.
     static let cancelledAndKept = "Cancelled — kept on this device"
 
     /// What a capture held for the wrong network says, which is also where the person is told
@@ -178,6 +201,23 @@ public enum PendingMemoPresentation {
     static let waitingForHomeNetwork =
         "Waiting for your home network — turn on Upload over mobile data in Settings"
         + " to send it now"
+
+    /// Low Data Mode is not the mobile-data switch's business, so its sentence does not send a
+    /// person to a setting that would not help.
+    static let waitingForLowDataMode =
+        "Low Data Mode is on for this network — turn it off in Settings to send it now"
+
+    /// The one network sentence per reason. Each names what would send the capture NOW, because a
+    /// row that only said "waiting" would be true and useless. A hotspot and the phone's own radio
+    /// are the same hold behind the same switch, so they read the same.
+    static func refusal(_ reason: UploadVerdict.Reason) -> String {
+        switch reason {
+        case .cellularWhileMobileDataOff, .expensiveWhileMobileDataOff:
+            return waitingForHomeNetwork
+        case .lowDataMode:
+            return waitingForLowDataMode
+        }
+    }
 
     /// A capture with no words is described by what it carries, so the row is never blank.
     public static func snippet(_ content: String, limit: Int = 120) -> String {

@@ -442,42 +442,23 @@ public struct TimelineView: View {
                 .id(Self.jumpTop)
             }
             if let outbox, !outbox.jobs.isEmpty {
-                Section {
-                    ForEach(
-                        PendingMemoPresentation.rows(
-                            for: outbox.jobs,
-                            now: .now,
-                            lastProgressAt: outbox.lastProgressAt,
-                            // Read off the queue rather than off a network monitor of this
-                            // screen's own: a capture the drain refused for the network it is on
-                            // is put down with that reason, so if any capture here is carrying it
-                            // then this network is one the policy refuses. A screen that asked
-                            // the path itself would be a second answer to a question the drain
-                            // has already answered, and the two would disagree.
-                            uploadsPermitted: !outbox.jobs.contains {
-                                $0.waitReason == .homeNetwork
+                PendingSection(
+                    jobs: outbox.jobs,
+                    lastProgressAt: outbox.lastProgressAt,
+                    verdict: outbox.uploadVerdict,
+                    retry: { id in Task { await outbox.retry(id) } },
+                    remove: { id in Task { await outbox.discard(id) } },
+                    restore: { id in
+                        Task {
+                            // The queue hands the draft back or it does not; an edit already on
+                            // the wire is refused, and a restore that found nothing to stop opens
+                            // no sheet.
+                            if let draft = await outbox.cancel(id) {
+                                composing = .create(restoring: ComposeRestore(draft))
                             }
-                        )
-                    ) { row in
-                        PendingCard(
-                            row: row,
-                            retry: { Task { await outbox.retry(row.id) } },
-                            remove: { Task { await outbox.discard(row.id) } },
-                            cancel: {
-                                Task {
-                                    // The queue hands the draft back or it does not; a cancel
-                                    // that found nothing to stop opens no sheet.
-                                    if let draft = await outbox.cancel(row.id) {
-                                        composing = .create(restoring: ComposeRestore(draft))
-                                    }
-                                }
-                            }
-                        )
-                        .cardRow()
+                        }
                     }
-                } header: {
-                    SectionHeading(title: "Pending")
-                }
+                )
             }
             // Session-level notices (a credential that could not be saved, a failed revoke)
             // must survive into the signed-in surface — a warning nobody can see is not one.
@@ -813,17 +794,14 @@ public struct TimelineView: View {
     ) async -> ComposeOutcome {
         let outcome: ComposeOutcome
         switch mode {
-        case .create:
+        case .create(let restored):
             guard let outbox else { return .failed(.authorization) }
-            let saved = await outbox.enqueue(
-                content: submission.content,
-                visibility: submission.visibility?.rawValue,
-                // A backdated capture keeps the date it was given all the way through the queue:
-                // the job's capture stamp IS what the create call sends as `created_at`. On Auto
-                // that date is the earliest instant the attached files carried, resolved before
-                // the sheet would let this be tapped.
-                capturedAt: submission.capturedAt(),
-                sources: submission.attachments.map(\.stagedSource)
+            let saved = await Self.post(
+                submission,
+                restoring: restored,
+                accountDefault: session.defaultVisibility,
+                resubmit: { await outbox.resubmit($0, draft: $1) },
+                enqueue: { await Self.enqueue($0, into: outbox) }
             )
             outcome =
                 saved
@@ -851,6 +829,44 @@ public struct TimelineView: View {
         }
         feedback.fire(outcome.isSaved ? .posted : .postFailed)
         return outcome
+    }
+
+    /// What Post does with a create, decided once. A capture the editor was HANDED goes back to
+    /// the job it came out of: same manifest, same key, so a create that already committed
+    /// resolves to its own memo. A job that vanished under the open editor has nothing left to go
+    /// back to, and the words and files on this screen are not thrown away for it — they become a
+    /// new capture.
+    ///
+    /// "Default" on the picker is a word, not a value a memo can carry, so it resolves HERE to the
+    /// account's own choice: the queue's fallback for an edit that states nothing is the
+    /// visibility the job already has, which is the one the person just stopped choosing.
+    @MainActor
+    static func post(
+        _ submission: ComposeSubmission,
+        restoring restored: ComposeRestore?,
+        accountDefault: MemoVisibility? = nil,
+        resubmit: (UUID, RestoredDraft) async -> Bool,
+        enqueue: (ComposeSubmission) async -> Bool
+    ) async -> Bool {
+        guard let restored else { return await enqueue(submission) }
+        let visibility = (submission.visibility ?? accountDefault)?.rawValue
+        let draft = RestoredDraft(submission, jobID: restored.jobID, visibility: visibility)
+        if await resubmit(restored.jobID, draft) { return true }
+        return await enqueue(submission)
+    }
+
+    @MainActor
+    static func enqueue(_ submission: ComposeSubmission, into outbox: Outbox) async -> Bool {
+        await outbox.enqueue(
+            content: submission.content,
+            visibility: submission.visibility?.rawValue,
+            // A backdated capture keeps the date it was given all the way through the queue: the
+            // job's capture stamp IS what the create call sends as `created_at`. On Auto that date
+            // is the earliest instant the attached files carried, resolved before the sheet would
+            // let this be tapped.
+            capturedAt: submission.capturedAt(),
+            sources: submission.attachments.map(\.stagedSource)
+        )
     }
 
     /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.
