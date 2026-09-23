@@ -250,15 +250,22 @@ struct PendingMemoPresentationTests {
     /// An edit already on the wire cannot be taken back, so the row stops offering to take it
     /// back. The queue is what refuses the cancel, where the job's state is owned; what this
     /// fences is the row promising something the queue would then have to refuse.
-    @Test("a capture whose edit is already on the wire offers no Cancel")
-    func anEditOnTheWireOffersNoCancel() {
+    @Test("a capture whose edit is already on the wire offers nothing")
+    func anEditOnTheWireOffersNothing() {
         var sending = job(state: .uploading)
         sending.editSentAt = capture
 
-        #expect(PendingMemoPresentation.action(for: sending) == [.retry])
+        #expect(
+            PendingMemoPresentation.action(for: sending) == [],
+            "the queue refuses both while the edit is unresolved")
+        let sentence = PendingMemoPresentation.status(for: sending)
+        #expect(sentence == "Sending your change — waiting for the server's answer")
         #expect(
             PendingMemoPresentation.action(for: job(state: .uploading)) == [.cancel, .retry],
             "the same capture with nothing on the wire still offers Cancel")
+        #expect(
+            PendingMemoPresentation.status(for: job(state: .uploading)) == "Uploading 100%",
+            "and still counts its bytes")
     }
 
     /// The frozen percentage, named. A capture whose bytes stopped moving is the one thing the
@@ -472,7 +479,7 @@ struct TimelinePostRoutingTests {
     private final class Routing {
         var resubmitted: [(UUID, RestoredDraft)] = []
         var enqueued: [ComposeSubmission] = []
-        var answer = true
+        var answer: ResubmitOutcome = .accepted
     }
 
     private func draft(_ jobID: UUID, visibility: MemoVisibility?) -> ComposeRestore {
@@ -486,7 +493,7 @@ struct TimelinePostRoutingTests {
         _ submission: ComposeSubmission,
         restoring restored: ComposeRestore?,
         accountDefault: MemoVisibility? = nil
-    ) async -> Bool {
+    ) async -> MemosFeatures.TimelineView.PostOutcome {
         await TimelineView.post(
             submission,
             restoring: restored,
@@ -509,9 +516,9 @@ struct TimelinePostRoutingTests {
         let submission = ComposeSubmission(
             content: "on the beach", visibility: .private, attachments: [])
 
-        let sent = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
 
-        #expect(sent)
+        #expect(posted == .saved)
         #expect(
             routing.enqueued.isEmpty,
             "a restored draft goes back to its job, never out as a second capture")
@@ -527,16 +534,58 @@ struct TimelinePostRoutingTests {
     @Test("a capture whose job vanished under the editor becomes a fresh one")
     func aVanishedJobBecomesAFreshCapture() async {
         let routing = Routing()
-        routing.answer = false
+        routing.answer = .vanished
         let jobID = UUID()
         let submission = ComposeSubmission(
             content: "on the beach", visibility: .private, attachments: [])
 
-        let sent = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
 
-        #expect(sent)
+        #expect(posted == .saved)
         #expect(routing.resubmitted.count == 1, "the job was asked for first")
         #expect(routing.enqueued.count == 1)
+    }
+
+    /// A refusal is not a vanished job. The queue still holds the capture and its key, so posting
+    /// the words again as a new one would be a second memo for the same capture.
+    @Test("a resubmit the queue refused never becomes a second capture")
+    func aRefusedResubmitIsNotASecondCapture() async {
+        let routing = Routing()
+        routing.answer = .refused(.stagingFailed)
+        let jobID = UUID()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+
+        #expect(posted == .refused(.captureUnchanged(.stagingFailed)))
+        #expect(
+            routing.enqueued.isEmpty,
+            "a refusal is not a vanished job — the capture keeps its key")
+        #expect(routing.resubmitted.count == 1)
+        let said = ComposeFailurePresentation.sentence(for: .captureUnchanged(.stagingFailed))
+        #expect(
+            said == "This capture could not be changed on this device."
+                + " Nothing was sent — what you wrote is still here, so try again.")
+    }
+
+    /// The queue can name the one file it could not find, so the sheet names it too: "a picture"
+    /// would leave the person hunting through the ones that are still there.
+    @Test("a picture the queue cannot find is named in the sentence")
+    func aMissingPictureIsNamedOnTheSheet() async {
+        let routing = Routing()
+        routing.answer = .refused(.pictureMissing(filename: "IMG_0042.HEIC"))
+        let jobID = UUID()
+        let submission = ComposeSubmission(
+            content: "on the beach", visibility: .private, attachments: [])
+
+        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+
+        #expect(posted == .refused(.captureUnchanged(.pictureMissing(filename: "IMG_0042.HEIC"))))
+        let said = ComposeFailurePresentation.sentence(
+            for: .captureUnchanged(.pictureMissing(filename: "IMG_0042.HEIC")))
+        #expect(said.contains("IMG_0042.HEIC"))
+        #expect(routing.enqueued.isEmpty)
     }
 
     @Test("a capture the editor was not handed is a new one, and is enqueued")
@@ -545,9 +594,9 @@ struct TimelinePostRoutingTests {
         let submission = ComposeSubmission(
             content: "on the beach", visibility: .private, attachments: [])
 
-        let sent = await post(routing, submission, restoring: nil)
+        let posted = await post(routing, submission, restoring: nil)
 
-        #expect(sent)
+        #expect(posted == .saved)
         #expect(routing.resubmitted.isEmpty)
         #expect(routing.enqueued.count == 1)
     }
@@ -567,11 +616,12 @@ struct TimelinePostRoutingTests {
             accountDefault: .private)
         #expect(routing.resubmitted.last?.1.visibility == "PRIVATE")
 
-        // No account default known yet: the edit states nothing, and the queue's own fallback to
-        // what the job already carries is the right answer rather than a guess made here.
-        _ = await post(
+        // No account default known: nothing here can turn "Default" into a value, and the job's
+        // own PUBLIC is not the account's answer — so Post refuses and the sheet stays open.
+        let refused = await post(
             routing, unmarked, restoring: draft(jobID, visibility: .public), accountDefault: nil)
-        #expect(routing.resubmitted.last?.1.visibility == nil)
+        #expect(refused == .refused(.defaultVisibilityUnknown))
+        #expect(routing.resubmitted.count == 1, "only the first case reached the queue")
 
         // A picked visibility is the person's own answer; the account default never overrides it.
         let picked = ComposeSubmission(
@@ -580,6 +630,32 @@ struct TimelinePostRoutingTests {
             routing, picked, restoring: draft(jobID, visibility: .private),
             accountDefault: .private)
         #expect(routing.resubmitted.last?.1.visibility == "PUBLIC")
+    }
+
+    /// "Default" with nothing to resolve it against. Sending nothing would hand the queue its own
+    /// fallback — the visibility the capture already carries, which is exactly the one just
+    /// stopped being chosen — so Post asks the queue for nothing and the sheet says why.
+    @Test("Default with no known account default is refused, and nothing is sent")
+    func postRefusesDefaultTheAccountCannotName() async {
+        let routing = Routing()
+        let jobID = UUID()
+        let unmarked = ComposeSubmission(content: "on the beach", visibility: nil, attachments: [])
+
+        let refused = await post(
+            routing, unmarked, restoring: draft(jobID, visibility: .public), accountDefault: nil)
+
+        #expect(refused == .refused(.defaultVisibilityUnknown))
+        #expect(routing.resubmitted.isEmpty, "nothing is asked of the queue")
+        #expect(routing.enqueued.isEmpty)
+
+        // The draft states nothing either, so nil IS the answer here: the memo already carries
+        // the account's default and this edit is not changing it.
+        let posted = await post(
+            routing, unmarked, restoring: draft(jobID, visibility: nil), accountDefault: nil)
+
+        #expect(posted == .saved)
+        #expect(routing.resubmitted.count == 1)
+        #expect(routing.resubmitted.last?.1.visibility == nil)
     }
 }
 
