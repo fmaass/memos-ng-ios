@@ -59,8 +59,9 @@ private actor Latch {
     }
 }
 
-/// The real completion path, parked where the request has gone out and its answer has not come
-/// back — the only instant a cancel can land in that this queue cannot otherwise be put into.
+/// The real completion path, parked at the instant BEFORE the request goes out: the latch opens
+/// on entry and the inner call is made only once the test lets it go, which is the one moment a
+/// cancel can land in that this queue cannot otherwise be put into.
 private final class ParkedCompletion: MemoCompleting, @unchecked Sendable {
     private let inner: any MemoCompleting
     private let entered: Latch
@@ -252,12 +253,16 @@ struct CancelTests {
         let harness = try harness()
         defer { harness.cleanUp() }
         let job = try await capture(harness, files: [("one.heic", 4096)])
-        let midway = try await standing(harness, job) {
-            $0.state = .uploading
-            $0.files[0].uploadUID = "u1"
-            $0.files[0].bytesConfirmed = 2048
-        }
+        await harness.outbox.start()
+        let scheduled = try #require(harness.scheduler.uploads.first, "no chunk was ever sent")
+        // The chunk is with the background session now, which is the state a cancel has to reach
+        // into: told to the double so that everything deriving a live task sees the same one.
+        harness.scheduler.pretend(inFlight: [scheduled.identity])
+        let midway = try #require(await harness.repository.job(job.id))
+
         let draft = try #require(await harness.outbox.cancel(job.id))
+
+        #expect(harness.scheduler.cancellations.contains { $0.jobID == job.id })
         let held = harness.repository.mediaURL(job: midway, file: midway.files[0])
         #expect(try digest(draft.pictures[0].url) == digest(held))
         #expect(try Data(contentsOf: draft.pictures[0].url).count == 4096)

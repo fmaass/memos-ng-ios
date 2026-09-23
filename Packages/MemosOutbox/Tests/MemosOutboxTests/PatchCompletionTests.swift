@@ -580,11 +580,22 @@ struct PatchCompletionTests {
         let carried = try #require(await first.repository.job(job.id))
         #expect(carried.resolvedMemoUID == "m1")
         #expect(carried.editKey == minted)
+        let mediaBefore = try carried.files.map {
+            try Data(contentsOf: first.repository.mediaURL(job: carried, file: $0))
+        }
 
         // The backoff that lost answer wrote is honoured across the relaunch too, so the second
         // lifetime reads the same manifest on a clock that has moved past the wait.
         let later = MutableClock(carried.nextAttemptAt.addingTimeInterval(1))
         let second = try harness(root: first.root, server: server, clock: later)
+        // A replay is only byte-for-byte if the bytes are still there to send: the originals the
+        // first lifetime staged have to survive its death untouched.
+        let survived = try #require(await second.repository.job(job.id))
+        let mediaAfter = try survived.files.map {
+            try Data(contentsOf: second.repository.mediaURL(job: survived, file: $0))
+        }
+        #expect(mediaBefore == mediaAfter, "the originals did not survive the relaunch")
+        #expect(mediaAfter.allSatisfy { !$0.isEmpty })
         await settle(second, job.id)
 
         // Two transmissions across the two lifetimes, byte-identical and under the same key, and

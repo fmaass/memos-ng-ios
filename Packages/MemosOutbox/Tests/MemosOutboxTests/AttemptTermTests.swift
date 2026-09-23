@@ -440,8 +440,9 @@ struct LegacyAttemptManifestTests {
         #expect(loaded.holdReason != .unreadableManifest, "the manifest was quarantined")
         #expect(loaded.files.first?.bytesConfirmed == 0, "the confirmed offset did not survive")
 
-        // The raw session hands over a DESCRIPTION, and a description build 22 wrote names three
-        // terms. Going through `inFlight()` would hide exactly the drop this is about.
+        // A description build 22 wrote names three terms, and this parses one the way the raw
+        // session hands it over; the double is then told to report it as in flight, which is
+        // the only way this case can hold the reconciliation to adopting it.
         let task = try #require(
             OutboxTaskIdentity(
                 taskDescription: "\(legacy.jobID.uuidString)|\(legacy.fileID.uuidString)|0"
@@ -450,9 +451,10 @@ struct LegacyAttemptManifestTests {
         )
         world.scheduler.pretend(inFlight: [task])
 
-        await world.outbox.adopt()
+        await world.outbox.start()
 
         #expect(world.scheduler.cancellations.isEmpty, "the legacy task was cancelled, not adopted")
+        #expect(world.scheduler.uploads.isEmpty, "the adopted task was sent a second time")
 
         try await world.handler.handle(
             ChunkResult(
