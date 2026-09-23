@@ -571,3 +571,67 @@ struct AttemptSweepTests {
         )
     }
 }
+
+@Suite("The terms a retry leaves behind, and the one retry that mints them")
+@MainActor
+struct SupersededTaskTests {
+    @Test("the superseded set is every task older than the saved term, and nothing at or past it")
+    func supersededTasksNamesOnlyThePredecessors() {
+        let job = UUID()
+        let file = UUID()
+        let all = [nil, 1, 2, 3].map {
+            OutboxTaskIdentity(jobID: job, fileID: file, offset: 0, attempt: $0)
+        }
+
+        let superseded = OutboxTaskIdentity.supersededTasks(
+            inFlight: all, bumped: [file: 2], jobID: job)
+
+        #expect(superseded.map(\.attempt) == [nil, 1])
+        #expect(!superseded.contains(all[2]), "the replacement this retry scheduled")
+        #expect(!superseded.contains(all[3]), "a successor a later retry minted")
+
+        // The control: the same tasks belong to another capture, and none of them is this one's.
+        #expect(
+            OutboxTaskIdentity.supersededTasks(
+                inFlight: all, bumped: [file: 2], jobID: UUID()
+            ).isEmpty)
+    }
+
+    @Test("a second Try again landing inside the first is refused, so one term is minted")
+    func aSecondTryAgainInsideTheFirstIsRefused() async throws {
+        let world = try makeWorld()
+        defer { world.cleanUp() }
+        let stalled = try await stall(world)
+        let current = try #require(await world.repository.job(stalled.job.id))
+        var prepared = current
+        prepared.files[0].uploadAttempt = 1
+        let saved = try #require(
+            try await world.repository.save(
+                prepared, ifStillCurrent: nil, matching: current, else: prepared))
+        let fileID = try #require(saved.files.first).id
+        let predecessor = OutboxTaskIdentity(
+            jobID: saved.id, fileID: fileID, offset: 400, attempt: 1)
+        world.scheduler.pretend(inFlight: [predecessor])
+        let entered = Latch()
+        let released = Latch()
+        // Parks the first retry where it enumerates the live tasks — after it has saved its bump,
+        // which is the window a second press has to be refused in.
+        world.scheduler.beforeInFlight = {
+            await entered.open()
+            await released.wait()
+        }
+        let first = Task { await world.outbox.retry(saved.id) }
+        await entered.wait()
+
+        await world.outbox.retry(saved.id)
+
+        await released.open()
+        await first.value
+
+        let after = try #require(await world.repository.job(saved.id))
+        #expect(after.files[0].uploadAttempt == 2, "two overlapping retries minted two terms")
+        #expect(
+            world.scheduler.cancellations.allSatisfy { ($0.attempt ?? -1) < 2 },
+            "a retry handed back the successor another retry had just scheduled")
+    }
+}

@@ -42,23 +42,6 @@ private final class MemoServer: @unchecked Sendable {
     }
 }
 
-/// A latch a test can wait on from one side and open from the other.
-private actor Latch {
-    private var isOpen = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
-
-    func open() {
-        isOpen = true
-        for continuation in waiting { continuation.resume() }
-        waiting = []
-    }
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { waiting.append($0) }
-    }
-}
-
 /// The real completion path, parked at the instant BEFORE the request goes out: the latch opens
 /// on entry and the inner call is made only once the test lets it go, which is the one moment a
 /// cancel can land in that this queue cannot otherwise be put into.
@@ -315,7 +298,7 @@ struct CancelTests {
         let carried = try #require(await harness.repository.job(job.id))
         #expect(carried.idempotencyKey == job.idempotencyKey)
         let resubmitted = await harness.outbox.resubmit(job.id, draft: draft)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         #expect(harness.server.memoCount == 1)
         #expect(harness.memoPosts.count == 2)
         // As FIRST SENT, byte for byte: the replay is the same request, which is what the server
@@ -335,7 +318,7 @@ struct CancelTests {
         let before = try await harness.repository.loadJobs().count
         let draft = try #require(await harness.outbox.cancel(job.id))
         let resubmitted = await harness.outbox.resubmit(job.id, draft: draft)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         let carried = try #require(await harness.repository.job(job.id))
         #expect(carried.idempotencyKey == job.idempotencyKey)
         let after = try await harness.repository.loadJobs().count
@@ -369,7 +352,7 @@ struct CancelTests {
         #expect(standing.cancelledAt != nil)
         #expect(harness.server.memoCount == 1)
         let resubmitted = await harness.outbox.resubmit(job.id, draft: draft)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         #expect(harness.server.memoCount == 1)
     }
 
@@ -381,7 +364,7 @@ struct CancelTests {
         let draft = try #require(await harness.outbox.cancel(job.id))
         harness.provider.set(Fixture.credentials(owner: "someone-else"))
         let resubmitted = await harness.outbox.resubmit(job.id, draft: draft)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         let held = try #require(await harness.repository.job(job.id))
         #expect(held.binding == Fixture.binding())
         #expect(held.state == .held)
@@ -475,13 +458,39 @@ struct CancelTests {
         #expect(standing.cancelledAt != nil)
         let resolvedBefore = harness.server.uid(forKey: job.idempotencyKey)
         let resubmitted = await harness.outbox.resubmit(job.id, draft: try #require(draft))
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         #expect(harness.server.memoCount == 1)
         let resolved = harness.server.uid(forKey: job.idempotencyKey)
         #expect(resolved != nil)
         if let resolvedBefore { #expect(resolved == resolvedBefore) }
         let finished = await harness.repository.job(job.id)
         #expect(finished == nil)
+    }
+
+    @Test("a re-submit that refuses says which refusal it is, and none of them is a lost job")
+    func aRefusedResubmitIsNotAVanishedOne() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [("one.heic", 800)])
+        let draft = try #require(await harness.outbox.cancel(job.id))
+
+        // No job under that id: the editor's answer is a fresh enqueue, not a kept draft.
+        #expect(await harness.outbox.resubmit(UUID(), draft: draft) == .vanished)
+
+        var picked = draft
+        picked.pictures.append(
+            RestoredDraft.Picture(
+                id: UUID(),
+                url: harness.root.appending(path: "gone.heic"),
+                filename: "gone.heic",
+                mime: "image/heic"))
+        #expect(await harness.outbox.resubmit(job.id, draft: picked) == .refused(.stagingFailed))
+        #expect(
+            await harness.repository.job(job.id)?.pendingEdit == nil,
+            "the refused re-submit wrote anyway")
+
+        // The control the two refusals need: the same capture, with a draft that stages, is taken.
+        #expect(await harness.outbox.resubmit(job.id, draft: draft) == .accepted)
     }
 
     // MARK: - F2: the marker is a fence, not a hint
@@ -505,6 +514,33 @@ struct CancelTests {
             statusCode: 200,
             body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":\#(bytes)}"#.utf8)
         )
+    }
+
+    @Test("a re-submit leaves the transfer the cancel gave up behind, at an older term")
+    func aResubmitSupersedesTheCancelledTransfer() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [("one.heic", 800)])
+        await harness.outbox.start()
+        let scheduled = try #require(harness.scheduler.uploads.first, "no chunk was ever sent")
+        harness.scheduler.pretend(inFlight: [scheduled.identity])
+        let midway = try #require(await harness.repository.job(job.id))
+        let draft = try #require(await harness.outbox.cancel(job.id))
+
+        #expect(await harness.outbox.resubmit(job.id, draft: draft) == .accepted)
+        try await harness.handler.handle(confirming(scheduled.identity, bytes: 400))
+
+        let after = try #require(await harness.repository.job(job.id))
+        #expect(after.files[0].uploadAttempt == (midway.files[0].uploadAttempt ?? 0) + 1)
+        #expect(
+            after.files[0].bytesConfirmed == 0,
+            "the cancelled task's late answer moved the replacement")
+        #expect(try identity(of: after) != scheduled.identity)
+
+        // The control the two lines above need: the SAME answer, carrying the term the
+        // replacement actually stands at, does move the manifest.
+        try await harness.handler.handle(confirming(try identity(of: after), bytes: 400))
+        #expect(await harness.repository.job(job.id)?.confirmedBytes == 400)
     }
 
     @Test("a chunk answered after the cancel moves nothing the cancel left behind")

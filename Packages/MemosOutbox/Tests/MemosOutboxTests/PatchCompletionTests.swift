@@ -111,23 +111,6 @@ private final class MemoServer: @unchecked Sendable {
     }
 }
 
-/// A latch a test can wait on from one side and open from the other.
-private actor Latch {
-    private var isOpen = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
-
-    func open() {
-        isOpen = true
-        for continuation in waiting { continuation.resume() }
-        waiting = []
-    }
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { waiting.append($0) }
-    }
-}
-
 /// The real completion path, parked at the instant the edit is about to go out and has not.
 ///
 /// It is how a test stands in the one place a relaunch has to be able to happen: the create is
@@ -382,7 +365,7 @@ struct PatchCompletionTests {
         #expect(draft.pictures.count == 2)
         let edited = editedDraft(draft, picking: try newPicture(harness))
         let resubmitted = await harness.outbox.resubmit(job.id, draft: edited)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         let minted = try #require(await harness.repository.job(job.id)?.editKey)
         _ = try await stagedUpload(harness, job.id)
         await settle(harness, job.id)
@@ -444,7 +427,7 @@ struct PatchCompletionTests {
         await harness.outbox.drain()
         let draft = try #require(await harness.outbox.cancel(job.id))
         let resubmitted = await harness.outbox.resubmit(job.id, draft: draft)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         await settle(harness, job.id)
 
         #expect(harness.server.memoCount == 1)
@@ -469,7 +452,7 @@ struct PatchCompletionTests {
         let draft = try #require(await harness.outbox.cancel(job.id))
         let wanted = editing ? editedDraft(draft, picking: try newPicture(harness)) : draft
         let resubmitted = await harness.outbox.resubmit(job.id, draft: wanted)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         if editing { _ = try await stagedUpload(harness, job.id) }
         await settle(harness, job.id)
 
@@ -509,7 +492,7 @@ struct PatchCompletionTests {
         let draft = try #require(await first.outbox.cancel(job.id))
         let wanted = editedDraft(draft, picking: try newPicture(first))
         let resubmitted = await first.outbox.resubmit(job.id, draft: wanted)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         let minted = try #require(await first.repository.job(job.id)?.editKey)
         #expect(minted != job.idempotencyKey.uuidString)
         _ = try await stagedUpload(first, job.id)
@@ -567,7 +550,7 @@ struct PatchCompletionTests {
         let draft = try #require(await first.outbox.cancel(job.id))
         let wanted = editedDraft(draft, picking: try newPicture(first))
         let resubmitted = await first.outbox.resubmit(job.id, draft: wanted)
-        #expect(resubmitted)
+        #expect(resubmitted == .accepted)
         let minted = try #require(await first.repository.job(job.id)?.editKey)
         #expect(minted != job.idempotencyKey.uuidString)
         _ = try await stagedUpload(first, job.id)
@@ -671,12 +654,14 @@ struct PatchCompletionTests {
         await harness.outbox.drain()
         let draft = try #require(await harness.outbox.cancel(job.id))
         let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
-        #expect(await resubmitting.value)
+        #expect(await resubmitting.value == .accepted)
 
         #expect(harness.memoPatches.count == 1)
         let carried = try #require(await harness.repository.job(job.id))
         let minted = try #require(carried.editKey)
-        #expect(carried.editSentAt == nil, "a refused edit is still marked as in flight")
+        #expect(
+            carried.editSentAt != nil,
+            "a lost answer gave the body back, so a second edit could replace the key")
         // The control for the line after it: the refusal really did space the next attempt out,
         // so a second pass finding nothing to do is the backoff and not an empty queue.
         #expect(carried.nextAttemptAt > clock.now)
@@ -714,7 +699,7 @@ struct PatchCompletionTests {
         var picked = draft
         picked.pictures.append(try newPicture(harness))
         let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: picked) }
-        #expect(await resubmitting.value)
+        #expect(await resubmitting.value == .accepted)
 
         #expect(
             harness.memoPatches.count == 0,
@@ -748,7 +733,7 @@ struct PatchCompletionTests {
         let survivor = draft.pictures[1]
         edited.pictures = [survivor]
         let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: edited) }
-        #expect(await resubmitting.value)
+        #expect(await resubmitting.value == .accepted)
 
         let again = try #require(await harness.outbox.cancel(job.id))
         #expect(again.content == "the pier, the day after")
@@ -781,7 +766,7 @@ struct PatchCompletionTests {
         #expect(carried.cancelledAt == nil, "the refused cancel marked the capture anyway")
 
         await released.open()
-        #expect(await resubmitting.value)
+        #expect(await resubmitting.value == .accepted)
     }
 
     @Test("a second edit is sent under a key of its own")
@@ -794,18 +779,190 @@ struct PatchCompletionTests {
         await harness.outbox.drain()
         let draft = try #require(await harness.outbox.cancel(job.id))
         let firstResubmit = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
-        #expect(await firstResubmit.value)
+        #expect(await firstResubmit.value == .accepted)
         let firstKey = try #require(await harness.repository.job(job.id)?.editKey)
 
         let again = try #require(await harness.outbox.cancel(job.id))
         var second = again
         second.content = "the pier, a week later"
         let secondResubmit = Task { await harness.outbox.resubmit(job.id, draft: second) }
-        #expect(await secondResubmit.value)
+        #expect(await secondResubmit.value == .accepted)
 
         #expect(harness.memoPatches.count == 1)
         let key = try sent(try #require(harness.memoPatches.first))["edit_key"] as? String
         #expect(key != firstKey, "the second edit reused the first edit's key")
         #expect(key != job.idempotencyKey.uuidString, "the edit went out under the create's key")
+    }
+
+    @Test("Try again does nothing to a capture whose edit is already claimed")
+    func retryDuringAClaimedEditIsANoOp() async throws {
+        let entered = Latch()
+        let released = Latch()
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1),
+            completion: { PatchParking($0, entered: entered, released: released) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        // Its own drain is what reaches the parked edit, so the call has to be left running.
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        await entered.wait()
+        let parked = try #require(await harness.repository.job(job.id))
+        #expect(parked.editSentAt != nil, "the premise: the edit is claimed")
+
+        await harness.outbox.retry(job.id)
+
+        let after = try #require(await harness.repository.job(job.id))
+        // Whole-manifest equality, because a hand retry here could go wrong in two ways at once:
+        // by minting a term for a transfer nobody scheduled, and by moving the job's own state.
+        #expect(after == parked, "Try again moved a capture whose edit is claimed")
+
+        await released.open()
+        #expect(await resubmitting.value == .accepted)
+    }
+
+    @Test("an applied edit whose fenced delete lost the manifest replays the same key")
+    func anAppliedEditThatLosesItsFenceKeepsTheJobAndReplaysTheKey() async throws {
+        let entered = Latch()
+        let released = Latch()
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1),
+            completion: { PatchParking($0, entered: entered, released: released) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [(name: "a.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        // The state a relaunch finds: the server took the memo and the answer was lost.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+        }
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        await entered.wait()
+        // The manifest moves while the PATCH is out, so the delete that follows it is fenced off
+        // the version it was written against — the one thing that must not destroy the capture.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.lastError = "moved under the edit"
+        }
+        await released.open()
+        #expect(await resubmitting.value == .accepted)
+
+        let survivor = try #require(
+            await harness.repository.job(job.id),
+            "the applied edit destroyed a manifest it no longer owned")
+        #expect(survivor.pendingEdit != nil)
+        let key = try #require(survivor.editKey)
+
+        await settle(harness, job.id)
+
+        #expect(harness.memoPatches.count == 2, "the edit was never tried again")
+        #expect(try sent(harness.memoPatches[1])["edit_key"] as? String == key)
+        #expect(harness.server.editApplications == 1, "the replay made a second edit")
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    @Test("an edit whose answer was lost holds the capture until the server answers definitely")
+    func aLostEditAnswerKeepsTheCaptureUntilItIsSettled() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let harness = try harness(server: server, clock: clock)
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+
+        let carried = try #require(await harness.repository.job(job.id))
+        let minted = try #require(carried.editKey)
+        #expect(
+            carried.editSentAt != nil,
+            "a lost answer gave the body back, so a second edit could replace the key")
+        #expect(await harness.outbox.cancel(job.id) == nil)
+        #expect(
+            await harness.outbox.resubmit(job.id, draft: textEdited(draft))
+                == .refused(.editInFlight))
+
+        clock.advance(carried.nextAttemptAt.timeIntervalSince(clock.now) + 1)
+        await settle(harness, job.id)
+
+        let transmissions = harness.memoPatches
+        #expect(transmissions.count == 2, "the retry slot was never given back")
+        for transmission in transmissions {
+            #expect(try sent(transmission)["edit_key"] as? String == minted)
+        }
+        #expect(server.editApplications == 1)
+    }
+
+    @Test("an original the create's answer never named is sent again and the edit names both")
+    func anUnnamedRetainedOriginalIsSentAgainAndTheEditNamesBoth() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 1))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        // A create whose answer named one of the two originals: the other can be named by nothing
+        // the memo holds, which is the state the re-submit has to make nameable again.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = nil
+        }
+        let draft = try #require(await harness.outbox.cancel(job.id))
+
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+
+        let staged = try #require(await harness.repository.job(job.id))
+        #expect(staged.files[1].stagedForEdit == true)
+        #expect(staged.files[1].uploadUID == nil)
+        #expect(staged.files[1].bytesConfirmed == 0)
+        #expect(staged.files[0].stagedForEdit != true, "a named original was sent again")
+
+        _ = try await stagedUpload(harness, job.id)
+        await settle(harness, job.id)
+
+        let body = try sent(try #require(harness.memoPatches.first))
+        #expect(body["attachment_uids"] as? [String] == ["att-u1", "uC"])
+        #expect(body["upload_uids"] as? [String] == ["uC"])
+    }
+
+    @Test("an original whose bytes this device no longer holds refuses the re-submit")
+    func anOriginalWhoseBytesAreGoneRefusesTheResubmit() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 1))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let prepared = try await standing(
+            harness, try #require(await harness.repository.job(job.id))
+        ) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = nil
+        }
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        try FileManager.default.removeItem(
+            at: harness.repository.mediaURL(job: prepared, file: prepared.files[1]))
+
+        #expect(
+            await harness.outbox.resubmit(job.id, draft: textEdited(draft))
+                == .refused(.pictureMissing(filename: "b.heic")))
+
+        let untouched = try #require(await harness.repository.job(job.id))
+        #expect(
+            untouched.files[1].stagedForEdit != true, "an unreadable original was staged anyway")
+        #expect(harness.memoPatches.isEmpty, "an edit that cannot be completed was sent")
     }
 }

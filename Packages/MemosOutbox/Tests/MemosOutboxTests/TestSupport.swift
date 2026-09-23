@@ -89,6 +89,7 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     private var scheduled: [Scheduled] = []
     private var cancelled: [OutboxTaskIdentity] = []
     private var pretendInFlight: [OutboxTaskIdentity]
+    private var park: (@Sendable () async -> Void)?
 
     init(inFlight: [OutboxTaskIdentity] = []) {
         self.pretendInFlight = inFlight
@@ -112,7 +113,22 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     /// What the authority answered, in order, each time this executor was reached.
     var authorityVerdicts: [Bool] { lock.withLock { verdicts } }
 
-    func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { pretendInFlight } }
+    func inFlight() async -> [OutboxTaskIdentity] {
+        let hook = lock.withLock {
+            let taken = park
+            park = nil
+            return taken
+        }
+        await hook?()
+        return lock.withLock { pretendInFlight }
+    }
+
+    /// Run INSIDE `inFlight()` before it answers, so a test can put a second call into the hop the
+    /// first suspends on; the call that runs it clears it, so only the first enumeration parks.
+    var beforeInFlight: (@Sendable () async -> Void)? {
+        get { lock.withLock { park } }
+        set { lock.withLock { park = newValue } }
+    }
 
     /// Set after the harness knows the job and file ids a relaunch would have left behind.
     func pretend(inFlight identities: [OutboxTaskIdentity]) {
@@ -870,4 +886,21 @@ final class Counter: @unchecked Sendable {
     func increment() { lock.withLock { value += 1 } }
 
     var count: Int { lock.withLock { value } }
+}
+
+/// A latch a test can wait on from one side and open from the other.
+actor Latch {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        isOpen = true
+        for continuation in waiting { continuation.resume() }
+        waiting = []
+    }
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
 }

@@ -79,19 +79,24 @@ struct PatchIdentityTests {
         #expect(try body(request)["attachment_uids"] as? [String] == ["att-1", "att-1"])
     }
 
-    @Test(
-        "an edit that cannot name a kept picture leaves the list alone and still adds the new one"
-    )
-    func anUnnamedOriginalOmitsTheList() throws {
+    @Test("an edit that cannot name a kept picture is not sent at all")
+    func anUnnamedOriginalRefusesTheWholeEdit() throws {
         let kept = Fixture.file(uploadUID: "u1")
         var added = Fixture.file(uploadUID: "u2")
         added.stagedForEdit = true
-        let job = edited(files: [kept, added])
+
+        #expect(throws: OutboxRequests.Failure.incompleteEdit) {
+            _ = try OutboxRequests.patchMemo(
+                baseURL: Fixture.server, token: "pat-token", job: edited(files: [kept, added]))
+        }
+
+        // The control the throw needs: the same edit with that original named goes out whole, so
+        // what stopped the request above was the picture nothing could name.
+        var named = kept
+        named.attachmentUID = "att-1"
         let request = try OutboxRequests.patchMemo(
-            baseURL: Fixture.server, token: "pat-token", job: job)
-        let sent = try body(request)
-        #expect(sent["attachment_uids"] == nil)
-        #expect(sent["upload_uids"] as? [String] == ["u2"])
+            baseURL: Fixture.server, token: "pat-token", job: edited(files: [named, added]))
+        #expect(try body(request)["attachment_uids"] as? [String] == ["att-1", "u2"])
     }
 
     @Test("the create's answer hands back the bytes each attachment was stored under")
