@@ -27,11 +27,18 @@ private final class MemoServer: @unchecked Sendable {
     private var lostCreateResponses: Int
     private var lostPatchResponses: Int
     private let replayStatus: Int
+    private var patchRefusals: [Int]
 
-    init(losingResponses: Int = 0, losingPatchResponses: Int = 0, replayStatus: Int = 201) {
+    init(
+        losingResponses: Int = 0,
+        losingPatchResponses: Int = 0,
+        replayStatus: Int = 201,
+        refusingPatchesWith patchRefusals: [Int] = []
+    ) {
         lostCreateResponses = losingResponses
         lostPatchResponses = losingPatchResponses
         self.replayStatus = replayStatus
+        self.patchRefusals = patchRefusals
     }
 
     var memoCount: Int { lock.withLock { order.count } }
@@ -74,6 +81,11 @@ private final class MemoServer: @unchecked Sendable {
         let object = Self.object(request)
         let editKey = object["edit_key"] as? String ?? ""
         return lock.withLock {
+            // Scripted refusals are answered before the memo is touched, so a case can say what
+            // the server answered without also saying that the edit was applied.
+            if !patchRefusals.isEmpty {
+                return OutboxHTTPResponse(statusCode: patchRefusals.removeFirst())
+            }
             guard var memo = memos[uid] else { return OutboxHTTPResponse(statusCode: 404) }
             if !appliedEdits.contains(editKey) {
                 appliedEdits.insert(editKey)
@@ -944,8 +956,8 @@ struct PatchCompletionTests {
         #expect(body["upload_uids"] as? [String] == ["uC"])
     }
 
-    @Test("an original whose bytes this device no longer holds refuses the re-submit")
-    func anOriginalWhoseBytesAreGoneRefusesTheResubmit() async throws {
+    @Test("an original whose bytes this device no longer holds is taken, then stops the change")
+    func anOriginalWhoseBytesAreGoneHoldsTheCapture() async throws {
         let harness = try harness(server: MemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
@@ -964,13 +976,354 @@ struct PatchCompletionTests {
         try FileManager.default.removeItem(
             at: harness.repository.mediaURL(job: prepared, file: prepared.files[1]))
 
+        // The editor is not where a retained original is missed: the sheet asked for a change it
+        // could describe, and the one place that can tell is the drain that has to name the file.
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+        await settle(harness, job.id)
+
+        let held = try #require(await harness.repository.job(job.id))
+        #expect(held.state == .held)
+        #expect(held.holdReason == .editIncomplete)
+        #expect(held.editUnansweredSince == nil, "a change that was never sent froze the capture")
+        #expect(held.files[1].stagedForEdit != true, "an unreadable original was staged anyway")
+        #expect(harness.memoPatches.isEmpty, "an edit that cannot be completed was sent")
+    }
+
+    // MARK: - What an unanswered edit survives
+
+    @Test("a refusal answered before the edit key was read leaves the change unanswered")
+    func aRefusalBeforeTheKeyLeavesTheEditUnanswered() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        // Lost first, refused second: the refusal has to find a capture whose edit is already
+        // owed, which is the state a replay is answered in.
+        let server = MemoServer(losingResponses: 1, refusingPatchesWith: [503, 401])
+        let harness = try harness(server: server, clock: clock)
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+
+        let waiting = try #require(await harness.repository.job(job.id))
+        clock.advance(waiting.nextAttemptAt.timeIntervalSince(clock.now) + 1)
+        await settle(harness, job.id)
+
+        #expect(harness.memoPatches.count == 2, "the refusal was never replayed into")
+        let refused = try #require(await harness.repository.job(job.id))
+        #expect(refused.state == .held)
+        #expect(refused.holdReason == .serverRefused)
+        #expect(
+            refused.editSentAt != nil,
+            "an answer that never looked at the key was read as the edit's fate")
+        #expect(await harness.outbox.cancel(job.id) == nil, "the unanswered change was taken back")
         #expect(
             await harness.outbox.resubmit(job.id, draft: textEdited(draft))
-                == .refused(.pictureMissing(filename: "b.heic")))
+                == .refused(.editInFlight))
+    }
 
-        let untouched = try #require(await harness.repository.job(job.id))
+    @Test("Try again releases a hold carrying an unanswered edit, and replays the same key")
+    func retryReleasesAHoldCarryingAnUnansweredEdit() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let harness = try harness(server: server, clock: clock)
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+        let carried = try #require(await harness.repository.job(job.id))
+        let minted = try #require(carried.editKey)
+        #expect(carried.editSentAt != nil, "the premise: the edit is owed")
+        // The hold a capture made under another account wakes up in, reached while its change is
+        // still owed: the account is right again, so Try again is the whole way out.
+        _ = try await standing(harness, carried) {
+            $0.state = .held
+            $0.holdReason = .accountMismatch
+        }
+        clock.advance(600)
+
+        await harness.outbox.retry(job.id)
+        await settle(harness, job.id)
+
+        #expect(harness.memoPatches.count == 2, "the held capture never replayed its change")
+        for transmission in harness.memoPatches {
+            #expect(try sent(transmission)["edit_key"] as? String == minted)
+        }
+        #expect(server.editApplications == 1)
+        #expect(await harness.repository.job(job.id) == nil, "the released capture never finished")
+    }
+
+    @Test("a re-submit made before the create resolved still names every picture the memo keeps")
+    func aResubmitBeforeTheCreateResolvesNamesEveryPicture() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 1))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        // The premise: nothing has resolved yet, so the re-submit cannot make anything nameable
+        // against a memo it cannot name.
+        #expect(await harness.repository.job(job.id)?.resolvedMemoUID == nil)
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        let wanted = editedDraft(draft, picking: try newPicture(harness))
+        #expect(await harness.outbox.resubmit(job.id, draft: wanted) == .accepted)
+        _ = try await stagedUpload(harness, job.id)
+
+        await settle(harness, job.id, passes: 6)
+
+        #expect(harness.memoPatches.count == 1, "the edit never reached the wire")
+        let body = try sent(try #require(harness.memoPatches.first))
         #expect(
-            untouched.files[1].stagedForEdit != true, "an unreadable original was staged anyway")
-        #expect(harness.memoPatches.isEmpty, "an edit that cannot be completed was sent")
+            (body["attachment_uids"] as? [String])?.count == 3,
+            "the edit dropped a picture the memo keeps")
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    @Test("a relaunch on a manifest whose retained original is unnamed sends it again")
+    func aRelaunchRecoversAnUnnamedRetainedOriginal() async throws {
+        let server = MemoServer(losingResponses: 1)
+        let first = try harness(server: server)
+        defer { first.cleanUp() }
+        let job = try await capture(
+            first, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(first, job)
+        await first.outbox.drain()
+        // The manifest a relaunch finds: the create committed, one of the two originals named by
+        // the memo, the edit written down and not yet on the wire.
+        let prepared = try await standing(
+            first, try #require(await first.repository.job(job.id))
+        ) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = nil
+            $0.pendingEdit = PendingEdit(
+                content: "the pier, the day after",
+                visibility: "PUBLIC",
+                capturedAt: Self.edited,
+                fileIDs: $0.files.map(\.id)
+            )
+        }
+
+        let second = try harness(root: first.root, server: server)
+        await second.outbox.drain()
+
+        let staged = try #require(await second.repository.job(job.id))
+        #expect(
+            staged.files[1].stagedForEdit == true,
+            "the relaunch left an original the memo cannot name unnameable")
+        #expect(staged.files[1].bytesConfirmed == 0)
+        #expect(
+            staged.files[1].uploadUID != prepared.files[1].uploadUID,
+            "the unnamed original kept the uid the create's upload consumed")
+        #expect(staged.files[0].stagedForEdit != true, "a named original was sent again")
+
+        _ = try await stagedUpload(second, job.id)
+        await settle(second, job.id, passes: 6)
+
+        #expect(second.memoPatches.count == 1)
+        let body = try sent(try #require(second.memoPatches.first))
+        #expect(body["attachment_uids"] as? [String] == ["att-u1", "uC"])
+        #expect(await second.repository.job(job.id) == nil)
+    }
+
+    // MARK: - What settles the change, and what only stops it
+
+    @Test("a refusal the frozen body earned settles the change and gives the capture back")
+    func aRefusalDecidedOnTheFrozenBodySettlesTheEdit() async throws {
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1, refusingPatchesWith: [422]))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+        await settle(harness, job.id)
+
+        let refused = try #require(await harness.repository.job(job.id))
+        #expect(refused.state == .held)
+        #expect(
+            refused.editUnansweredSince == nil,
+            "an answer about this body left the change owed")
+        #expect(
+            await harness.outbox.cancel(job.id) != nil,
+            "a settled change kept the capture frozen")
+    }
+
+    @Test("a memo that is gone answers nothing about the change, so the capture stays frozen")
+    func aMemoGoneRefusalDoesNotSettleTheEdit() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 1))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        // Pointed at a memo the server never committed, which is how the real 404 is earned:
+        // answered before the key is looked up.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m404"
+        }
+        #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
+        await settle(harness, job.id)
+
+        let held = try #require(await harness.repository.job(job.id))
+        #expect(held.state == .held)
+        #expect(held.holdReason == .memoGone)
+        #expect(held.editUnansweredSince != nil, "an answer about the memo was read as the key's")
+        #expect(await harness.outbox.cancel(job.id) == nil, "the owed change was taken back")
+    }
+
+    @Test("Try again does nothing while this launch is still transmitting the change")
+    func retryWhileTheEditIsClaimedInThisLaunchIsANoOp() async throws {
+        let entered = Latch()
+        let released = Latch()
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1),
+            completion: { PatchParking($0, entered: entered, released: released) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        // Its own drain is what reaches the parked edit, so the call has to be left running.
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        #expect(await entered.wait(within: 2), "the edit never reached the completion double")
+        let parked = try #require(await harness.repository.job(job.id))
+        #expect(parked.editUnansweredSince != nil, "the premise: the change is claimed")
+
+        await harness.outbox.retry(job.id)
+
+        let after = try #require(await harness.repository.job(job.id))
+        #expect(after == parked, "Try again moved a capture whose transmission is outstanding")
+        #expect(harness.memoPatches.isEmpty, "a claimed change went out a second time")
+
+        await released.open()
+        #expect(await resubmitting.value == .accepted)
+    }
+
+    @Test("an original this device can no longer read stops the change before it is claimed")
+    func anUnreadableRetainedOriginalHoldsBeforeTheClaim() async throws {
+        let server = MemoServer(losingResponses: 1)
+        let first = try harness(server: server)
+        defer { first.cleanUp() }
+        let job = try await capture(
+            first, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(first, job)
+        await first.outbox.drain()
+        let prepared = try await standing(
+            first, try #require(await first.repository.job(job.id))
+        ) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = nil
+            $0.pendingEdit = PendingEdit(
+                content: "the pier, the day after",
+                visibility: "PUBLIC",
+                capturedAt: Self.edited,
+                fileIDs: $0.files.map(\.id)
+            )
+        }
+        try FileManager.default.removeItem(
+            at: first.repository.mediaURL(job: prepared, file: prepared.files[1]))
+
+        let second = try harness(root: first.root, server: server)
+        await second.outbox.drain()
+
+        let held = try #require(await second.repository.job(job.id))
+        #expect(held.state == .held)
+        #expect(held.holdReason == .editIncomplete)
+        #expect(
+            held.editUnansweredSince == nil,
+            "a change that was never sent froze the capture")
+        #expect(held.files[1].stagedForEdit != true, "an unreadable original was staged anyway")
+        #expect(second.memoPatches.isEmpty, "a change that cannot be built was sent")
+    }
+
+    @Test("a kept picture the manifest no longer lists stops the change at the request")
+    func aKeptPictureWithNoFileHoldsAtThePreparation() async throws {
+        let entered = Latch()
+        let released = Latch()
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1),
+            completion: { PatchParking($0, entered: entered, released: released) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        // Every file the manifest holds is complete, so nothing is re-staged and the gate passes:
+        // the kept picture that names no file can surface nowhere but the request itself.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = "att-u2"
+            $0.pendingEdit = PendingEdit(
+                content: "the pier, the day after",
+                visibility: "PUBLIC",
+                capturedAt: Self.edited,
+                fileIDs: $0.files.map(\.id) + [UUID()]
+            )
+        }
+
+        await harness.outbox.drain()
+
+        let held = try #require(await harness.repository.job(job.id))
+        #expect(held.state == .held)
+        #expect(held.holdReason == .editIncomplete)
+        #expect(held.editUnansweredSince == nil, "a change that was never built froze the capture")
+        #expect(harness.memoPatches.isEmpty)
+        #expect(
+            await entered.wait(within: 1) == false,
+            "a request that could not be built was sent anyway")
+        await released.open()
+    }
+
+    @Test("a change that was never built can still be taken back after Try again")
+    func aChangeHeldBeforeTheClaimStaysTakeBackable() async throws {
+        let harness = try harness(server: MemoServer(losingResponses: 1))
+        defer { harness.cleanUp() }
+        let job = try await capture(
+            harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = "att-u2"
+            $0.pendingEdit = PendingEdit(
+                content: "the pier, the day after",
+                visibility: "PUBLIC",
+                capturedAt: Self.edited,
+                fileIDs: $0.files.map(\.id) + [UUID()]
+            )
+        }
+        await harness.outbox.drain()
+        #expect(await harness.repository.job(job.id)?.holdReason == .editIncomplete)
+
+        await harness.outbox.retry(job.id)
+        await settle(harness, job.id, passes: 2)
+
+        let again = try #require(await harness.repository.job(job.id))
+        #expect(
+            again.holdReason == .editIncomplete,
+            "a second attempt built what the first could not")
+        #expect(again.editUnansweredSince == nil, "a re-entry that never reached the wire froze it")
+        #expect(harness.memoPatches.isEmpty)
+        #expect(
+            await harness.outbox.cancel(job.id) != nil,
+            "a change that was never sent could not be taken back")
     }
 }
