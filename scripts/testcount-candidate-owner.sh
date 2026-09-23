@@ -20,8 +20,9 @@
 #                      as evidence of whichever run wrote it, not as this run's. A failed deletion
 #                      promotes nothing.
 # A name the destination already holds (an earlier run's result bundle) is replaced, never merged
-# into. After any failure the staging folder stays where it is, named on the line; the next run's
-# startup cleanup discards it and names it again.
+# into. After any failure the staging folder stays where it is, named on the line; the next run of
+# this branch that reaches its copyback discards it there and names it again — a run refused
+# earlier leaves it untouched, because that point is reached before the lane lock.
 #
 # Usage: testcount-candidate-owner.sh <staging dir> <artifacts dir> <run token>
 # Exit:  0 = the stamp is this run's: the candidate, if one came back, and the rest were promoted and
