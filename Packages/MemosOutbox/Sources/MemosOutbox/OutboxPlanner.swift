@@ -44,6 +44,9 @@ public enum OutboxPlanner {
         // The binding is checked before anything else, including before the hold state: a job
         // captured under another account must never reach a request, whatever else is true of it.
         guard job.binding.matches(credentials) else { return .hold(.accountMismatch) }
+        // A capture a person has taken back to the editor is not the queue's to send, whatever
+        // else is true of it. The mark is the fence; the date it parks is only what the row shows.
+        if job.cancelledAt != nil { return .wait(until: job.nextAttemptAt) }
         if job.state == .held { return .hold(job.holdReason ?? .serverRefused) }
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
 
@@ -137,7 +140,13 @@ extension UploadJob {
     public func backingOff(at now: Date, error: String) -> UploadJob {
         with {
             $0.attemptCount += 1
-            $0.nextAttemptAt = RetrySchedule.nextAttempt(afterFailure: $0.attemptCount, from: now)
+            // A marked job keeps the date the mark parked: an answer that outlived a cancel must
+            // not schedule the capture the editor now holds.
+            if $0.cancelledAt == nil {
+                $0.nextAttemptAt = RetrySchedule.nextAttempt(
+                    afterFailure: $0.attemptCount, from: now
+                )
+            }
             $0.state = .waiting
             $0.lastError = error
             // A backoff waits on the clock, so whatever it was waiting for before is no longer
@@ -173,8 +182,9 @@ extension UploadJob {
     ///
     /// Nothing it owns goes anywhere: the manifest stays, so the idempotency key and the account
     /// the capture was made under travel to the re-submit instead of being minted again, and the
-    /// originals stay where the job already holds them. The next attempt is put out of reach so
-    /// that no pass sends it while the editor has it.
+    /// originals stay where the job already holds them. The mark itself is what keeps every pass
+    /// off the capture — each wake point refuses a marked job — and the date parked here is what
+    /// the pending row shows, not what stops a send.
     public func cancelled(at now: Date) -> UploadJob {
         with {
             $0.cancelledAt = now
@@ -202,7 +212,10 @@ extension UploadJob {
             $0.patchAttempt = 0
             $0.state = .creating
             $0.waitReason = nil
-            $0.nextAttemptAt = .distantFuture
+            // Due now: what keeps the create from being sent again is that the edit branch takes
+            // every pass in which the planner could answer `.createMemo` again, and a job still
+            // missing a file's bytes is answered `.startUpload` rather than a create.
+            $0.nextAttemptAt = .distantPast
         }
     }
 

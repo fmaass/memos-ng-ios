@@ -172,13 +172,23 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var cancelledAt: Date?
     /// The memo a create resolved to, once the server named it.
     public var resolvedMemoUID: String?
-    /// The key an edit of that memo is applied under, so a replayed apply is the same apply.
+    /// The key the edit below is applied under, minted once per logical edit and kept across
+    /// every transmission of that edit, so a replay is the same apply rather than a second one.
+    /// It is not the create's idempotency key: a second edit of the same memo is a different edit
+    /// and carries a different key.
     public var editKey: String?
-    /// How often the pending edit has been claimed. It is moved through the fenced write, so two
-    /// launches cannot both take it.
+    /// How often the pending edit has been put on the wire, moved through the fenced write. A
+    /// relaunch deliberately claims the edit again — that is the recovery — and this counts those
+    /// claims rather than preventing them; what makes the extra transmission harmless is the key
+    /// above, which turns it into a replay of the same edit.
     public var patchAttempt: Int?
     /// What the editor changed while the create was in flight, still owed to the memo above.
     public var pendingEdit: PendingEdit?
+    /// When the pending edit above was last put on the wire, cleared the moment an outcome says it
+    /// is owed again. While it is set the edit is immutable: the capture cannot be taken back to
+    /// the editor, because the body the server is answering about is the one on disk. Optional
+    /// because a manifest written before this existed has none, and absent means "not in flight".
+    public var editSentAt: Date?
     /// The uids the memo's OWN pictures carry, as the create's answer named them, in that answer's
     /// order.
     ///
@@ -207,6 +217,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         editKey: String? = nil,
         patchAttempt: Int? = nil,
         pendingEdit: PendingEdit? = nil,
+        editSentAt: Date? = nil,
         resolvedAttachmentUIDs: [String]? = nil
     ) {
         self.id = id
@@ -227,6 +238,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.editKey = editKey
         self.patchAttempt = patchAttempt
         self.pendingEdit = pendingEdit
+        self.editSentAt = editSentAt
         self.resolvedAttachmentUIDs = resolvedAttachmentUIDs
     }
 

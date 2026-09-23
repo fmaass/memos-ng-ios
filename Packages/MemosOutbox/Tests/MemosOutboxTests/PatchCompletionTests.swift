@@ -581,7 +581,10 @@ struct PatchCompletionTests {
         #expect(carried.resolvedMemoUID == "m1")
         #expect(carried.editKey == minted)
 
-        let second = try harness(root: first.root, server: server)
+        // The backoff that lost answer wrote is honoured across the relaunch too, so the second
+        // lifetime reads the same manifest on a clock that has moved past the wait.
+        let later = MutableClock(carried.nextAttemptAt.addingTimeInterval(1))
+        let second = try harness(root: first.root, server: server, clock: later)
         await settle(second, job.id)
 
         // Two transmissions across the two lifetimes, byte-identical and under the same key, and

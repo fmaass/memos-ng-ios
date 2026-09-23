@@ -15,9 +15,10 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// drain, and hands the job to the ordinary backoff instead.
     static let maxStepsPerPass = 32
 
-    /// The jobs whose edit this launch has already put on the wire. In memory on purpose: it is
-    /// the claim that keeps two invocations inside one launch from being two requests, and a
-    /// relaunch is meant to ask again.
+    /// The jobs whose edit is on the wire right now. In memory on purpose: it is the claim that
+    /// keeps two invocations inside one launch from being two requests, and a relaunch is meant to
+    /// ask again. A job is in here only while an answer is outstanding — every outcome that leaves
+    /// the edit still owed gives the claim back, so the backoff it was put into can be served.
     private var editsTransmitted: Set<UUID> = []
 
     private let repository: any OutboxPersisting
@@ -171,6 +172,10 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
         guard let job = await repository.job(jobID) else { return }
+        // A capture the editor holds is not retried from here: its way back into the queue is the
+        // re-submit that clears the mark. Nothing is written, so the manifest the editor was handed
+        // stays exactly as it was taken back.
+        guard job.cancelledAt == nil else { return }
         // A stalled upload is retried by moving the file to a NEW attempt: the task still holding
         // the old one is then distinguishable from its replacement, which is what lets a late
         // answer from it be ignored instead of rewinding the cursor its successor is moving.
@@ -182,11 +187,17 @@ public actor OutboxEngine: OutboxChunkHandling {
         // Fenced, and BEFORE anything is cancelled: nothing is torn down on a state nobody wrote.
         // The other order would leave a job whose only live task was cancelled and whose manifest
         // still names the attempt that task was sent under.
-        guard await save(released, matching: job) != nil else {
+        guard let saved = await save(released, matching: job) else {
             await onChange()
             return
         }
-        let live = await scheduler.inFlight().filter { $0.jobID == jobID }
+        // Only the tasks this retry left behind. A task already carrying the attempt the write
+        // above minted IS the replacement — cancelling it would tear down the transfer this call
+        // exists to start. A legacy task carries no attempt at all and is never the replacement.
+        let bumped = Dictionary(uniqueKeysWithValues: saved.files.map { ($0.id, $0.uploadAttempt) })
+        let live = await scheduler.inFlight().filter {
+            $0.jobID == jobID && $0.attempt != (bumped[$0.fileID] ?? nil)
+        }
         if !live.isEmpty {
             await scheduler.cancel(live)
         }
@@ -196,16 +207,23 @@ public actor OutboxEngine: OutboxChunkHandling {
     private func advance(_ job: UploadJob, credentials: OutboxCredentials) async {
         var current = job
         for _ in 0..<Self.maxStepsPerPass {
+            // A capture taken back to the editor is answered by nothing: not the edit below, not
+            // the planner, not a step this pass already earned.
+            guard current.cancelledAt == nil else { return }
             // Asked again for every step, beside `permitsNetwork` and for the same reason: the
             // only honest moment is the moment before a request would go out, and each of the
             // three actions below produces one.
             guard mayStillSend(credentials) else { return }
-            // Before the planner, and deliberately: a job that is owed an edit parks its next
-            // attempt in the far future so that no pass sends its create a third time, and the
-            // planner can only answer `.wait` for it. The edit is the one thing still owed, so it
-            // is asked for here — from the manifest, which is the only place a relaunch can read
-            // it from.
-            if current.pendingEdit != nil, current.resolvedMemoUID != nil, current.state != .held {
+            // Before the planner, and deliberately: this branch takes every pass in which the
+            // planner could answer `.createMemo` again, which is what keeps a create whose memo is
+            // already named from being sent a third time. It is asked for from the manifest, the
+            // only place a relaunch can read it from. Its own backoff is honoured here — a refused
+            // edit waits like anything else — and a file still missing bytes goes through the
+            // planner first, because an edit names the memo's complete picture list and a staged
+            // picture has no uid until it is uploaded.
+            if current.pendingEdit != nil, current.resolvedMemoUID != nil, current.state != .held,
+                clock() >= current.nextAttemptAt, current.files.allSatisfy(\.isComplete)
+            {
                 guard permitsNetwork() else {
                     await waitForNetwork(current)
                     return
@@ -462,7 +480,7 @@ public actor OutboxEngine: OutboxChunkHandling {
                 return await save(
                     creating.awaitingPatch(
                         uid: uid,
-                        editKey: creating.idempotencyKey.uuidString,
+                        editKey: creating.editKey ?? creating.idempotencyKey.uuidString,
                         attachments: attachments
                     ),
                     matching: creating
@@ -511,21 +529,32 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     /// The edit owed to the memo the create resolved to, applied.
     ///
-    /// ONE transmission per launch, claimed synchronously here before any hop. Two overlapping
+    /// ONE transmission at a time, claimed synchronously here before any hop. Two overlapping
     /// invocations of this — a drain, and the `advance` a finished chunk re-enters — must be one
-    /// request on the wire, and the second is REFUSED rather than joined: a launch that has
-    /// already asked is waiting for its answer, and asking again buys nothing the edit key does
-    /// not already give. A relaunch claims afresh on purpose — that is the whole recovery — and it
-    /// is safe because the key makes the second transmission a replay rather than a second edit.
+    /// request on the wire, and the second is REFUSED rather than joined: this job is waiting for
+    /// an answer, and asking again buys nothing the edit key does not already give. The claim is
+    /// given back the moment an outcome leaves the edit still owed, so the backoff that outcome
+    /// wrote can be served by a later pass; only an applied edit keeps it, and that job is gone.
+    /// A relaunch claims afresh on purpose — that is the whole recovery — and it is safe because
+    /// the key makes the second transmission a replay rather than a second edit.
     private func applyEdit(_ job: UploadJob, credentials: OutboxCredentials) async {
         guard editsTransmitted.insert(job.id).inserted else { return }
         // Nothing is sent on a state nobody wrote, and the written value is what every outcome
-        // below is judged against — the same rule the create is sent under.
+        // below is judged against — the same rule the create is sent under. The same write records
+        // that the edit is in flight, which is what makes the body the server is answering about
+        // immutable until it answers.
         guard
             let claimed = await save(
-                job.with { $0.patchAttempt = ($0.patchAttempt ?? 0) + 1 }, matching: job
+                job.with {
+                    $0.patchAttempt = ($0.patchAttempt ?? 0) + 1
+                    $0.editSentAt = clock()
+                },
+                matching: job
             )
-        else { return }
+        else {
+            editsTransmitted.remove(job.id)
+            return
+        }
         switch await completion.patch(
             job: claimed, credentials: credentials, under: authority(under: credentials)
         ) {
@@ -536,22 +565,43 @@ public actor OutboxEngine: OutboxChunkHandling {
             await repository.delete(claimed, ifStillCurrent: claimed)
             await onChange()
         case .retry(let message):
-            await save(claimed.backingOff(at: clock(), error: message), matching: claimed)
+            // Still owed, and no longer in flight: the same body will be replayed under the same
+            // key once its backoff is up, so the claim goes back with the write that says so.
+            await save(
+                claimed.backingOff(at: clock(), error: message).with { $0.editSentAt = nil },
+                matching: claimed
+            )
+            editsTransmitted.remove(job.id)
         case .refused(let message, let refused):
             // Not decided here: `save` hops into `OutboxRepository`, and a renewal landing in that
             // hop is exactly what this fence is about, so both outcomes travel and the choice is
             // made where the write is.
             if let refused {
                 await save(
-                    claimed.held(.serverRefused, error: message),
+                    claimed.held(.serverRefused, error: message).with { $0.editSentAt = nil },
                     ifStillCurrent: refused.issuedUnder,
                     matching: claimed,
                     else: claimed.backingOff(at: clock(), error: refused.supersededMessage)
+                        .with { $0.editSentAt = nil }
                 )
             } else {
-                await save(claimed.held(.serverRefused, error: message), matching: claimed)
+                await save(
+                    claimed.held(.serverRefused, error: message).with { $0.editSentAt = nil },
+                    matching: claimed
+                )
             }
+            editsTransmitted.remove(job.id)
         }
+    }
+
+    /// Drops whatever this job still has in flight, and writes nothing.
+    ///
+    /// The manifest is the caller's to write — a cancel writes its mark first and then asks for
+    /// this — so that nothing is ever torn down on a state nobody wrote.
+    public func abandonTasks(jobID: UUID) async {
+        let live = await scheduler.inFlight().filter { $0.jobID == jobID }
+        guard !live.isEmpty else { return }
+        await scheduler.cancel(live)
     }
 
     // MARK: - chunk answers
@@ -564,6 +614,11 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// thrown away because nobody was signed in yet is a chunk re-uploaded for no reason.
     public func handle(_ result: ChunkResult) async {
         guard let job = await repository.job(result.identity.jobID) else { return }
+        // A capture a person has taken back to the editor: the bytes this answer reports are no
+        // longer the queue's business, and banking them would move a manifest the editor holds.
+        // Before the chunk is dropped and before anything is written, so the job is left exactly
+        // as the cancel wrote it.
+        guard job.cancelledAt == nil else { return }
         // An answer from a superseded attempt — a task a reconcile cancelled, or a duplicate that
         // outlived the one whose answer already landed. The job has moved on, and applying this
         // would rewind the cursor and re-send bytes the server already holds.

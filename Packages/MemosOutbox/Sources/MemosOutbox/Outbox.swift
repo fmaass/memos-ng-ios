@@ -300,15 +300,21 @@ public final class Outbox {
     ///
     /// The write is fenced on the manifest this call read, so a pass that advanced or finished the
     /// capture inside that read wins and nothing is handed back. A capture is taken back or it is
-    /// finished, never both.
+    /// finished, never both. It is REFUSED outright while an edit of it is on the wire: the body
+    /// the server is answering about cannot be edited under it, so the answer is waited for and
+    /// the person may take the capture back after it — nothing is written by the refusal.
     public func cancel(_ jobID: UUID) async -> RestoredDraft? {
         guard let snapshot = await repository.job(jobID) else { return nil }
+        guard snapshot.editSentAt == nil else { return nil }
         let taken = snapshot.cancelled(at: Date())
         let written = try? await repository.save(
             taken, ifStillCurrent: nil, matching: snapshot, else: taken
         )
         await refresh()
         guard let landed = written ?? nil else { return nil }
+        // After the mark landed, never before: a task torn down on a write that lost its fence
+        // would leave a live job whose transfer nobody is running.
+        await engine.abandonTasks(jobID: jobID)
         return draft(of: landed)
     }
 
@@ -341,6 +347,11 @@ public final class Outbox {
                 capturedAt: draft.capturedAt,
                 fileIDs: draft.pictures.map(\.id)
             )
+            // A different body is a different edit, and it is applied under its own key: reusing
+            // the key of an edit the server already applied would make this one a replay of that
+            // one and change nothing. Written here, so the key is on disk before the pass that
+            // sends it — a re-submit of the SAME draft never reaches this and keeps its key.
+            candidate.editKey = UUID().uuidString
         }
         let written = try? await repository.save(
             candidate, ifStillCurrent: nil, matching: snapshot, else: candidate
@@ -381,13 +392,32 @@ public final class Outbox {
         }
     }
 
+    /// The capture as it now stands, which is the edit when one is pending: an edit taken while
+    /// the create was in flight is what the person last left, and handing back the create's body
+    /// instead would lose it the moment the capture is taken back a second time. The pictures are
+    /// the edit's own list, in its order — one it removed is gone, one it staged is here.
     private func draft(of job: UploadJob) -> RestoredDraft {
-        RestoredDraft(
+        let content: String
+        let visibility: String?
+        let capturedAt: Date
+        let pictures: [OutboxFile]
+        if let edit = job.pendingEdit {
+            content = edit.content
+            visibility = edit.visibility
+            capturedAt = edit.capturedAt
+            pictures = edit.fileIDs.compactMap { id in job.files.first { $0.id == id } }
+        } else {
+            content = job.content
+            visibility = job.visibility
+            capturedAt = job.capturedAt
+            pictures = job.files
+        }
+        return RestoredDraft(
             jobID: job.id,
-            content: job.content,
-            visibility: job.visibility,
-            capturedAt: job.capturedAt,
-            pictures: job.files.map {
+            content: content,
+            visibility: visibility,
+            capturedAt: capturedAt,
+            pictures: pictures.map {
                 RestoredDraft.Picture(
                     id: $0.id,
                     url: repository.mediaURL(job: job, file: $0),
