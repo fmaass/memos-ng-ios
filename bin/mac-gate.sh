@@ -407,7 +407,8 @@ open_run_log() {
   mkdir -p "$artifacts" || die_refuse "cannot create the artifacts directory $artifacts"
   # The test-count candidate is this run's or nobody's: an earlier run's copy would outlive any
   # run that ends before the copyback — a refused mirror, a failed step — and be the one the
-  # documented `cp` records. Removed here, before any exit this run can take.
+  # documented `cp` records. Removed here, before any exit this run can take; a copyback that
+  # fetched an earlier run's folder from the build host is answered by the stamp check after it.
   rm -f "$artifacts/testcount-baseline.tsv"
   : > "$log" || die_refuse "cannot write $log"
 }
@@ -1025,6 +1026,7 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 cd "$GATE_TARGET" || { echo "remote: cannot enter $GATE_TARGET"; exit 2; }
 rm -rf .gate-artifacts && mkdir -p .gate-artifacts
+printf '%s\n' "$GATE_RUN_TOKEN" > .gate-artifacts/run-token
 XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG.xcresult"
 # Build scratch lives OUTSIDE the mirrored tree. Inside it, `swift format lint --recursive .`
 # would walk the dependency checkouts SwiftPM drops in DerivedData and lint other people's code;
@@ -2344,9 +2346,20 @@ fi
 say "--- step: copyback ---"
 # This copy only adds (not `--delete`, which would also take this run's log, written only on this
 # side); the candidate an earlier run may have left here went at open_run_log, so afterwards a
-# candidate is here only if this copy brought one.
+# candidate is here only if this copy brought one. What it brings is whatever the build host's
+# folder holds, and a remote that stopped before clearing that folder leaves the previous run's
+# there, so the candidate stays only if the folder carries this run's stamp, the `run-token` the
+# remote writes right after clearing it. Without the script to ask, nothing here can tell whose
+# candidate it is, so it goes.
 rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
 record copyback "${PIPESTATUS[0]}"
+candidate_owner="$repo_root/scripts/testcount-candidate-owner.sh"
+if [ -x "$candidate_owner" ]; then
+  "$candidate_owner" "$artifacts" "$RUN_TOKEN" 2>&1 | tee -a "$log"
+else
+  rm -f "$artifacts/testcount-baseline.tsv"
+  say "testcount candidate: removed, $candidate_owner is missing or not executable"
+fi
 say "artifacts   : $artifacts"
 
 end_run

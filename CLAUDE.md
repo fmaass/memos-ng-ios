@@ -64,7 +64,9 @@ merges, headroom at a merge is zero. Every run that obtained the counts writes t
 recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
 never by hand; a run that never obtained counts — no result bundle, a failing `xcresulttool`, JSON
 it cannot parse or walk — exits non-zero and leaves no candidate, and a step that an earlier
-failing step skipped leaves nothing behind either.
+failing step skipped leaves nothing behind either, because the candidate goes when the run opens
+its log and one the copyback fetches stays only when it came back beside this run's token in
+`run-token`, the stamp the build host writes right after clearing its artifacts folder.
 Changing that tracked file is a reviewed act that an audit of the change has to see and justify — a
 reduction is named in the change that makes it, with the tests it retired — and no mechanism in the
 gate accepts or rejects a baseline change on its own. It ends with one summary line of every step's exit code and
