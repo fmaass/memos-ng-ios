@@ -201,11 +201,13 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var patchAttempt: Int?
     /// What the editor changed while the create was in flight, still owed to the memo above.
     public var pendingEdit: PendingEdit?
-    /// When the pending edit above was last claimed for transmission — written before the request
-    /// is built, so it does not say the server saw it — cleared only where an outcome proves it
-    /// is owed again. While it is set the edit is immutable: the capture cannot be taken back to
-    /// the editor, because the body the server is answering about is the one on disk. Optional
-    /// because a manifest written before this existed has none, and absent means "not in flight".
+    /// When this logical edit was FIRST claimed for transmission — written once the request has
+    /// been built and before it is sent, and kept at that first instant across every replay, so a
+    /// re-transmission does not make the capture look newly uncertain. Cleared only by an edit the
+    /// server applied or by a refusal the frozen body determines; while it is set, no answer about
+    /// this key has come back, so the body, the picture list and the key are frozen and the
+    /// capture cannot be taken back to the editor. Optional because a manifest written before this
+    /// existed has none, and absent means the key's fate is known.
     public var editUnansweredSince: Date?
 
     private enum CodingKeys: String, CodingKey {

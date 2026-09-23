@@ -318,23 +318,38 @@ public actor OutboxRepository {
         return jobs.sorted { $0.capturedAt < $1.capturedAt }
     }
 
-    /// One job, or nil when nothing actionable stands under that id.
+    /// What stands under an id, with "could not be read" told apart from "is not there".
+    ///
+    /// Absence is the one answer that authorises a fresh enqueue, so it is never inferred from a
+    /// failure to look. A manifest an earlier read set aside is gone from the active path, and
+    /// reading that as absence would make a second memo out of the same capture.
     ///
     /// A manifest that cannot be decoded is quarantined here too, so that a background wake — which
     /// only ever asks for the one job its chunk belongs to — still sets aside what it cannot read,
     /// and the next refresh says so, rather than answering "no such capture" for ever.
-    public func job(_ id: UUID) -> UploadJob? {
+    public func presence(_ id: UUID) -> JobPresence {
         let url = manifestURL(id)
         switch readJob(at: url) {
         case .decoded(let job):
-            return job
+            return .present(job)
         case .undecodable(let reason):
             quarantine(url, reason: reason)
-            return nil
-        case .unreadable, .vanished:
-            return nil
+            return .unreadable
+        case .unreadable:
+            return .unreadable
+        case .vanished:
+            // The active path is empty, which on its own says nothing: the capture may have
+            // finished, or some earlier read may have set its manifest aside. Only the quarantine
+            // can tell those apart, and a lookup that cannot answer is not an answer.
+            guard let setAside = try? files(surfacingAs: id, in: quarantineRoot) else {
+                return .unreadable
+            }
+            return setAside.isEmpty ? .absent : .unreadable
         }
     }
+
+    /// One job, or nil when nothing actionable stands under that id.
+    public func job(_ id: UUID) -> UploadJob? { presence(id).job }
 
     public func save(_ job: UploadJob) throws {
         _ = try persist(job)
@@ -825,3 +840,18 @@ public actor OutboxRepository {
 }
 
 extension OutboxRepository: OutboxPersisting {}
+
+/// What a lookup by id found, with the two kinds of nothing kept apart.
+///
+/// `absent` is a promise — the queue and the quarantine both looked and neither holds a manifest
+/// under that id — and it is the only one of the three a fresh enqueue may be built on.
+public enum JobPresence: Sendable, Equatable {
+    case present(UploadJob)
+    case absent
+    case unreadable
+
+    public var job: UploadJob? {
+        if case .present(let job) = self { return job }
+        return nil
+    }
+}

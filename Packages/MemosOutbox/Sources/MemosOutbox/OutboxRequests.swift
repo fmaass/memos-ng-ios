@@ -105,8 +105,8 @@ public enum OutboxRequests {
         // entry DELETES that picture, so an original that could not be named takes the whole list
         // out of the request ENTIRELY, as `incompleteEdit`: the job holds, whole, and nothing
         // partial is ever sent. A retained original the create's answer did not name is made
-        // nameable at re-submit by uploading it again, so this throw is a broken invariant
-        // rather than an ordinary state.
+        // nameable before the edit is claimed, so this is the net under that recovery, not a path
+        // the ordinary sequence takes.
         let attachmentUIDs = try edit.fileIDs.map { id -> String in
             if staged.contains(id) {
                 guard let uid = job.file(id)?.uploadUID else { throw Failure.incompleteEdit }

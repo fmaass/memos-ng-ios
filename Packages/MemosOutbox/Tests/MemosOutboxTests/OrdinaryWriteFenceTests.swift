@@ -694,8 +694,9 @@ struct OrdinaryWriteFenceLivenessTests {
         #expect(saved.holdReason == .storageFailed, "the storage failure is not what held it")
         #expect(
             saved.editUnansweredSince == harness.now,
-            "the hold took the marker from the candidate, so a change still on the wire reads as "
-                + "answered")
+            Comment(
+                rawValue: "the hold took the marker from the candidate, so a change still on the "
+                    + "wire reads as answered"))
     }
 }
 

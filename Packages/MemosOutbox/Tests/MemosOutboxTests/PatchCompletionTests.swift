@@ -148,12 +148,14 @@ private final class PatchParking: MemoCompleting, @unchecked Sendable {
 
     func patch(
         job: UploadJob,
+        request: URLRequest,
         credentials: OutboxCredentials,
         under authority: SendAuthority
     ) async -> MemoPatchOutcome {
         await entered.open()
         await released.wait()
-        return await inner.patch(job: job, credentials: credentials, under: authority)
+        return await inner.patch(
+            job: job, request: request, credentials: credentials, under: authority)
     }
 }
 
@@ -1097,6 +1099,9 @@ struct PatchCompletionTests {
         let prepared = try await standing(
             first, try #require(await first.repository.job(job.id))
         ) {
+            // A committed create leaves no backoff of its own behind.
+            $0.attemptCount = 0
+            $0.nextAttemptAt = .distantPast
             $0.resolvedMemoUID = "m1"
             $0.editKey = UUID().uuidString
             $0.files[0].attachmentUID = "att-u1"
@@ -1169,6 +1174,10 @@ struct PatchCompletionTests {
         // answered before the key is looked up.
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
             $0.resolvedMemoUID = "m404"
+            // The answer that committed it named both pictures; a manifest without them says the
+            // create folded them away, which is a different witness.
+            $0.files[0].attachmentUID = "att-u1"
+            $0.files[1].attachmentUID = "att-u2"
         }
         #expect(await harness.outbox.resubmit(job.id, draft: textEdited(draft)) == .accepted)
         await settle(harness, job.id)
@@ -1265,6 +1274,9 @@ struct PatchCompletionTests {
         // Every file the manifest holds is complete, so nothing is re-staged and the gate passes:
         // the kept picture that names no file can surface nowhere but the request itself.
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            // A committed create leaves no backoff of its own behind.
+            $0.attemptCount = 0
+            $0.nextAttemptAt = .distantPast
             $0.resolvedMemoUID = "m1"
             $0.editKey = UUID().uuidString
             $0.files[0].attachmentUID = "att-u1"
@@ -1299,6 +1311,9 @@ struct PatchCompletionTests {
         _ = try await uploaded(harness, job)
         await harness.outbox.drain()
         _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            // A committed create leaves no backoff of its own behind.
+            $0.attemptCount = 0
+            $0.nextAttemptAt = .distantPast
             $0.resolvedMemoUID = "m1"
             $0.editKey = UUID().uuidString
             $0.files[0].attachmentUID = "att-u1"

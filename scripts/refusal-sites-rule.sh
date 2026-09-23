@@ -263,7 +263,9 @@ pin "'await wipeCredential()' in SessionStore.swift" 7 \
   "$(grep -caF 'await wipeCredential()' "$session_store")" \
   "An eighth call is an eighth way a response can end a session."
 # The receiver varies — six read 'job.held(' and 'current.held(' — so the grep is on the method.
-pin "'.held(' in OutboxEngine.swift" 8 \
+# Seven since the refused arm stopped writing the same hold twice: the settlement decision now
+# rides on the value written, not on which of two branches wrote it.
+pin "'.held(' in OutboxEngine.swift" 7 \
   "$(grep -caF '.held(' "$outbox_engine")" \
   "A new hold is a new way a refusal can strand a capture behind a 'sign in again'."
 # And the other half of the hold, which MOVED to OutboxRefusal when the status mapping did: the

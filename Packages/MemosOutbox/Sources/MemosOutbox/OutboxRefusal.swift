@@ -29,6 +29,12 @@ public struct OutboxRefusal: Sendable, Equatable {
         self.what = what
     }
 
+    /// Whether this refusal is decided by the body this edit is frozen on, and so says the same
+    /// thing about every transmission of that key. A 401 or 403 is answered before the key is
+    /// looked up, a 404 says the memo is gone rather than that this edit never applied, a 429 and
+    /// a 5xx answer nothing.
+    public var deterministicOnTheFrozenBody: Bool { statusCode == 422 }
+
     /// What the queue should do about it.
     ///
     /// Two cases rather than three: every status this lane meets resolves to one of them, and a

@@ -175,7 +175,7 @@ struct PendingMemoPresentationTests {
             case .unreadableManifest:
                 #expect(PendingMemoPresentation.action(for: held) == [.remove])
                 #expect(PendingMemoPresentation.rows(for: [held])[0].actions == [.remove])
-            case .accountMismatch, .serverRefused, .storageFailed:
+            case .accountMismatch, .serverRefused, .storageFailed, .editIncomplete, .memoGone:
                 #expect(PendingMemoPresentation.action(for: held) == [.retry])
                 #expect(PendingMemoPresentation.rows(for: [held])[0].actions == [.retry])
             }

@@ -55,9 +55,11 @@ public enum MemoPatchOutcome: Sendable, Equatable {
     case applied
     /// Try again with the same edit key: a timeout, a 5xx, a lost connection.
     case retry(String)
-    /// A refusal that repeating cannot fix, and which GRANT earned it when the server is the one
-    /// that refused — read where the write happens, an actor hop away, exactly as a create's is.
-    case refused(String, OutboxRefusal?)
+    /// A refusal that repeating cannot fix, and which GRANT earned it — read where the write
+    /// happens, an actor hop away, exactly as a create's is. Never optional: the one refusal this
+    /// lane could raise without a server is the local build, which now happens before the edit is
+    /// claimed and never reaches here.
+    case refused(String, OutboxRefusal)
 }
 
 /// The seam the completion path lives behind.
@@ -74,9 +76,13 @@ public protocol MemoCompleting: Sendable {
         under authority: SendAuthority
     ) async -> MemoCompletionOutcome
 
-    /// Applies the edit a restored draft left to the memo the create resolved to.
+    /// Sends the edit a restored draft left to the memo the create resolved to.
+    ///
+    /// - Parameter request: already built, and built before the edit was claimed — so the one way
+    ///   this can fail is the wire, and an edit that could not be built never froze the capture.
     func patch(
         job: UploadJob,
+        request: URLRequest,
         credentials: OutboxCredentials,
         under authority: SendAuthority
     ) async -> MemoPatchOutcome
@@ -89,6 +95,7 @@ extension MemoCompleting {
     /// that never reached a server is entitled to give. The endpoint below overrides it.
     public func patch(
         job: UploadJob,
+        request: URLRequest,
         credentials: OutboxCredentials,
         under authority: SendAuthority
     ) async -> MemoPatchOutcome {
@@ -193,20 +200,10 @@ public struct MemoCompletionEndpoint: MemoCompleting {
 
     public func patch(
         job: UploadJob,
+        request: URLRequest,
         credentials: OutboxCredentials,
         under authority: SendAuthority
     ) async -> MemoPatchOutcome {
-        let request: URLRequest
-        do {
-            request = try OutboxRequests.patchMemo(
-                baseURL: credentials.serverBaseURL,
-                token: credentials.token,
-                job: job
-            )
-        } catch {
-            return .refused("The edit could not be prepared: \(error.localizedDescription)", nil)
-        }
-
         let response: OutboxHTTPResponse
         do {
             response = try await http.perform(request, under: authority)
