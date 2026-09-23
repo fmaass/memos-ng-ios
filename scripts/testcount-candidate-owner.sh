@@ -10,11 +10,14 @@
 # clears the folder, so the stamp tells the two apart: the candidate stays only when `run-token`
 # holds exactly the token and one LF, and every other folder loses it, a stale stamp with it.
 #
-# A sweep, not a verdict: the gate's verdict stays its step exit codes, so every outcome but a
-# usage error exits 0 and says what it did on one line.
+# Every outcome says what it did on one line. Keeping or removing is not a failure; a removal it
+# decided on and could not carry out is, because a line saying "do not record this" is not a fence
+# and the stale candidate would sit beside a copyback that looked clean.
 #
 # Usage: testcount-candidate-owner.sh <artifacts dir> <run token>
-# Exit:  0 = the folder was judged (the line says how); 2 = usage error, nothing was touched
+# Exit:  0 = the folder was judged and every removal it decided on was done (the line says how)
+#        1 = a removal it decided on failed, so a candidate or stamp that is not this run's remains
+#        2 = usage error, nothing was touched
 set -uo pipefail
 
 if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
@@ -36,9 +39,13 @@ if [ -f "$stamp" ] && printf '%s\n' "$token" | cmp -s - "$stamp"; then
   exit 0
 fi
 
+rc=0
 if [ -e "$stamp" ]; then
   why="stamp differs"
-  rm -f "$stamp" || echo "testcount candidate: could not remove the stale stamp $stamp"
+  if ! rm -f "$stamp"; then
+    echo "testcount candidate: could not remove the stale stamp $stamp"
+    rc=1
+  fi
 else
   why="stamp absent"
 fi
@@ -47,8 +54,9 @@ if [ -e "$candidate" ]; then
     echo "testcount candidate: removed, $why — it is not this run's"
   else
     echo "testcount candidate: $why, and it could NOT be removed: $candidate is not this run's, do not record it"
+    rc=1
   fi
 else
   echo "testcount candidate: none came back ($why)"
 fi
-exit 0
+exit "$rc"

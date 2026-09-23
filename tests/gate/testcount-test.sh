@@ -40,7 +40,9 @@ EXCERPT="$here/fixtures/testcount-xcresult-excerpt.json"
 VERDICT="$repo_root/scripts/testcount-verdict.sh"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/gate-testcount-XXXXXX")" || { echo "FAIL: cannot make a temp dir"; exit 1; }
-trap 'rm -rf "$tmp"' EXIT
+# The write permission a case takes off its folder is given back here too, so a case that dies
+# half-way cannot leave a tree `rm -rf` refuses.
+trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 
 fails=0
 cases=0
@@ -568,6 +570,19 @@ else
   else
     bad "a call missing its run token exited 0 — it judged a stamp against nothing"; show
   fi
+
+  # A removal it decided on and could not carry out is the one failure it has: the folder is made
+  # read-only, so the stale candidate cannot be unlinked, and the permission is given back before
+  # anything is judged.
+  d="$(owner_dir stuck)"
+  chmod 500 "$d"
+  run_owner "$d" "$tok"
+  chmod 700 "$d"
+  if [ "$RC" -eq 1 ] && [ -f "$d/testcount-baseline.tsv" ] && has "could NOT be removed"; then
+    ok "a stale candidate that cannot be removed fails the script (exit 1) and says so"
+  else
+    bad "a stale candidate that could not be removed was answered with exit $RC, or without its line"; show
+  fi
 fi
 if [ "$owner_control" -ne 1 ]; then
   echo "FAIL: no candidate was ever kept — an owner script that removed every candidate would pass the cases that remove"
@@ -591,6 +606,15 @@ if [ -n "$copy_line" ] && [ -n "$owner_line" ] && [ "$owner_line" -gt "$copy_lin
   ok "the copyback asks the owner script after its rsync (control: the rsync is on line $copy_line)"
 else
   bad "the copyback does not name the owner script after its rsync (rsync ${copy_line:-none}, owner ${owner_line:-none})"
+fi
+# The script's exit only fails anything if the copyback step records it, so the one record of that
+# step comes after the call and records the folded code.
+record_line="$(grep -n '^record copyback "\$copyback_rc"$' "$GATE" | head -n1 | cut -d: -f1)"
+if [ -n "$owner_line" ] && [ -n "$record_line" ] && [ "$record_line" -gt "$owner_line" ] \
+   && grep -q '^  owner_rc="\${PIPESTATUS\[0\]}"$' "$GATE"; then
+  ok "the copyback step records the owner script's exit, after asking it"
+else
+  bad "the copyback step does not record the owner script's exit after the call (owner ${owner_line:-none}, record ${record_line:-none})"
 fi
 
 # --- verdict ----------------------------------------------------------------------------------------

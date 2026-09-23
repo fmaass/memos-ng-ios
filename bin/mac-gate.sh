@@ -2349,17 +2349,22 @@ say "--- step: copyback ---"
 # candidate is here only if this copy brought one. What it brings is whatever the build host's
 # folder holds, and a remote that stopped before clearing that folder leaves the previous run's
 # there, so the candidate stays only if the folder carries this run's stamp, the `run-token` the
-# remote writes right after clearing it. Without the script to ask, nothing here can tell whose
-# candidate it is, so it goes.
+# remote writes right after clearing it. A removal that script decided on and could not carry out
+# fails the copyback step, so the summary says so; the step's code is the first non-zero of the
+# copy's and the script's. Without the script to ask, nothing here can tell whose candidate it is,
+# so it goes.
 rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
-record copyback "${PIPESTATUS[0]}"
+copyback_rc="${PIPESTATUS[0]}"
 candidate_owner="$repo_root/scripts/testcount-candidate-owner.sh"
 if [ -x "$candidate_owner" ]; then
   "$candidate_owner" "$artifacts" "$RUN_TOKEN" 2>&1 | tee -a "$log"
+  owner_rc="${PIPESTATUS[0]}"
+  [ "$copyback_rc" -ne 0 ] || copyback_rc="$owner_rc"
 else
   rm -f "$artifacts/testcount-baseline.tsv"
   say "testcount candidate: removed, $candidate_owner is missing or not executable"
 fi
+record copyback "$copyback_rc"
 say "artifacts   : $artifacts"
 
 end_run
