@@ -55,6 +55,27 @@ struct PatchIdentityTests {
         #expect(binding[second.id] == "att-2")
     }
 
+    /// A replayed create answers with the memo's CURRENT pictures. A digest there that matches
+    /// nothing here is the server naming other bytes — a picture another client replaced — and
+    /// order must not name this device's original as it.
+    @Test(
+        "a complete answer whose digests match nothing leaves every picture unnamed",
+        arguments: [["other-1", "other-2"], ["other-1", nil]] as [[String?]]
+    )
+    func unboundWhenPresentDigestsDisagree(answered: [String?]) {
+        let first = Fixture.file(uploadUID: "u1")
+        let second = Fixture.file(uploadUID: "u2")
+        let binding = OutboxAttachmentIdentity.bind(
+            files: [first, second],
+            digests: [first.id: "d1", second.id: "d2"],
+            answer: [
+                ResolvedAttachment(uid: "att-1", sha256: answered[0]),
+                ResolvedAttachment(uid: "att-2", sha256: answered[1]),
+            ]
+        )
+        #expect(binding.isEmpty, "order named a picture the server's digest says is not it")
+    }
+
     @Test("a short answer nothing matches leaves every picture unnamed rather than guessed")
     func unboundWhenTheCountsDiffer() {
         let first = Fixture.file(uploadUID: "u1")

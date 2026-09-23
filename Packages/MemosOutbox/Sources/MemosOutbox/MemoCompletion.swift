@@ -57,7 +57,7 @@ public enum MemoPatchOutcome: Sendable, Equatable {
     case retry(String)
     /// A refusal that repeating cannot fix, and which GRANT earned it — read where the write
     /// happens, an actor hop away, exactly as a create's is. Never optional: the one refusal this
-    /// lane could raise without a server is the local build, which now happens before the edit is
+    /// lane could raise without a server is the local build, which happens before the edit is
     /// claimed and never reaches here.
     case refused(String, OutboxRefusal)
 }

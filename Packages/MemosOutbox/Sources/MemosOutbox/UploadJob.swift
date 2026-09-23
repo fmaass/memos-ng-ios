@@ -96,10 +96,13 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// The uid the memo's own picture carries, once the create's answer has been matched to this
     /// original. It is the ONLY name an edit may use for a picture the memo already holds — an
     /// upload uid is not one — and it is written once, where that answer is applied. Optional and
-    /// last, so a manifest written before this existed decodes unchanged and reads as unnamed,
-    /// which is what an edit then treats as "leave the memo's pictures alone".
+    /// last, so a manifest written before this existed decodes unchanged and reads as unnamed. An
+    /// edit never names an unnamed original by a guess: before the edit is claimed it is uploaded
+    /// again and named by that upload, or, where this device can no longer read it, the edit holds
+    /// as incomplete.
     public var attachmentUID: String?
-    /// Set on a picture picked while the capture was back in the editor, and only there.
+    /// Set on a picture picked while the capture was back in the editor, and on a kept original
+    /// uploaded again because the create's answer could not name it (`stageUnnamedOriginals`).
     ///
     /// It is what keeps that picture OUT of the create: the create is replayed exactly as it was
     /// first sent — that is what resolves an uncertain create to the memo it made rather than to a
@@ -192,13 +195,13 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// every transmission of that edit, so a replay is the same apply rather than a second one.
     /// A second edit of the same memo is a different edit and mints a key of its own — but a
     /// create that resolved while an edit was already owed and no key had been minted adopts the
-    /// create's idempotency key here, once (OutboxEngine.swift:531).
+    /// create's idempotency key here, once (`OutboxEngine.complete`).
     public var editKey: String?
     /// How often the pending edit has been CLAIMED for transmission, advanced by the fenced write
-    /// that precedes building the request — so it counts intents to send, not arrivals. A
-    /// relaunch deliberately claims the edit again — that is the recovery — and this counts those
-    /// claims rather than preventing them; what makes the extra transmission harmless is the key
-    /// above, which turns it into a replay of the same edit.
+    /// made after the request is built and before it is sent — so it counts intents to send, not
+    /// arrivals. A relaunch deliberately claims the edit again — that is the recovery — and this
+    /// counts those claims rather than preventing them; what makes the extra transmission harmless
+    /// is the key above, which turns it into a replay of the same edit.
     public var patchAttempt: Int?
     /// What the editor changed while the create was in flight, still owed to the memo above.
     public var pendingEdit: PendingEdit?

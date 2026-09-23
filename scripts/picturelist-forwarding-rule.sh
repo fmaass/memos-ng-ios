@@ -24,8 +24,8 @@
 #
 # The positive control is the other half. A count of one proves nothing on its own if the file it
 # read was the wrong file, or a stub, or arrived empty: the same run requires `attaching:` — the
-# forwarding that has been on both of those lines since before this rule — to appear at least once
-# in each host. A file that has lost that has lost the save call altogether, so the fence above
+# forwarding on both of those lines, which this rule did not introduce — to appear at least once in
+# each host. A file that has lost that has lost the save call altogether, so the fence above
 # would be reading a screen that no longer saves anything.
 #
 # Both counts read UNCOMMENTED text only. Swift has two comment forms and both are removed first:

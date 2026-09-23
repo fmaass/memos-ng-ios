@@ -7,9 +7,11 @@ import Foundation
 /// can be shorter than the list that was sent and its order alone proves nothing. What survives
 /// the fold is the bytes — the server's `sha256` is taken over exactly what this device uploaded,
 /// and this device still has those bytes — so identity is established by content first, and by
-/// order only where the two lists correspond exactly. An original neither reaches stays unnamed,
-/// which the edit reads as "do not touch the memo's pictures": a picture the outbox cannot name
-/// must never be a picture the outbox deletes.
+/// order only where the answer carries no digest at all and the two lists correspond exactly. An
+/// original neither reaches stays unnamed, and an edit never names it by a guess: before the edit
+/// it is uploaded again and named by that upload, or, where this device can no longer read it, the
+/// edit holds and the person takes the capture back. Either way the list the edit sends names only
+/// uids this device proved, so a picture the outbox cannot name is never one it deletes.
 public enum OutboxAttachmentIdentity {
     /// - Parameters:
     ///   - files: the originals the create sent, in capture order.
@@ -36,12 +38,16 @@ public enum OutboxAttachmentIdentity {
         }
         guard bound.isEmpty else { return bound }
 
-        // Nothing matched by content — either the store has not hashed these parts yet or this
-        // device could not read its own copies. Order is then the only correspondence left, and it
-        // only holds while the answer accounts for every original: one entry short means a fold
-        // happened somewhere in the list, and every picture after it would be named as its
-        // neighbour.
-        guard files.count == answer.count else { return [:] }
+        // Nothing matched by content. Order is the only correspondence left, and only where the
+        // answer carries NO `sha256` on any entry — a server that does not hash — and accounts for
+        // every original. A digest that is present and matches nothing is the server saying these
+        // are other bytes: a replayed create answers with the memo's CURRENT pictures, and one
+        // another client replaced would otherwise be named as the original it replaced. One entry
+        // short means a fold happened somewhere in the list, and every picture after it would be
+        // named as its neighbour.
+        guard answer.allSatisfy({ $0.sha256 == nil }), files.count == answer.count else {
+            return [:]
+        }
         for (index, file) in files.enumerated() { bound[file.id] = answer[index].uid }
         return bound
     }

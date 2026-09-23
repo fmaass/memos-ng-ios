@@ -384,7 +384,7 @@ struct PendingSection: View {
     let verdict: UploadVerdict
     let retry: (UUID) -> Void
     let remove: (UUID) -> Void
-    /// Cancel on a capture still moving, and Try again on one already stopped: both ask the queue
+    /// Cancel on a capture still moving, and Reopen on one already stopped: both ask the queue
     /// for the draft and open the editor on what comes back.
     let restore: (UUID) -> Void
 
