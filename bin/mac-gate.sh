@@ -2338,6 +2338,11 @@ fi
 
 # --- (7) copy the evidence back ---------------------------------------------------------------
 say "--- step: copyback ---"
+# The copy below only adds, so a candidate an earlier run left in this folder would outlive a run
+# that obtained no counts and be the one the documented `cp` records. It goes first: afterwards a
+# candidate is here only if this copy brought one. Not `--delete`, which would also take this
+# run's log, written only on this side.
+rm -f "$artifacts/testcount-baseline.tsv"
 rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/" 2>&1 | tee -a "$log"
 record copyback "${PIPESTATUS[0]}"
 say "artifacts   : $artifacts"
