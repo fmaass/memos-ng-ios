@@ -122,7 +122,7 @@ struct LiveWriteTests {
         let configuration = try #require(ServerConfiguration(serverAddress: server))
         let client = APIClientFactory.make(configuration: configuration) { token }
         let store = TimelineStore()
-        let marker = "live-picture-probe do-not-keep b23-p4"
+        let marker = "live-picture-probe do-not-keep"
 
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "live-picture-probe-\(UUID().uuidString)")
