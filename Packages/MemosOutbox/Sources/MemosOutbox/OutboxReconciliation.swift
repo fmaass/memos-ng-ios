@@ -43,6 +43,9 @@ public enum OutboxReconciliation {
         for task in inFlight {
             guard let job = jobsByID[task.jobID],
                 job.state != .held,
+                // A capture taken back to the editor wants nothing from its task. `cancel` writes
+                // the mark before it tears the task down, so a relaunch between the two finds both.
+                job.cancelledAt == nil,
                 !claimed.contains(job.id),
                 let file = job.file(task.fileID),
                 file.uploadUID != nil,

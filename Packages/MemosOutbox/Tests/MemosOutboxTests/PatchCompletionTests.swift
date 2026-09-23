@@ -886,6 +886,52 @@ struct PatchCompletionTests {
         #expect(await harness.repository.job(job.id) == nil)
     }
 
+    /// The fence can hold and the removal still fail. A delete that answered yes without asking
+    /// the disk left the claim kept on a capture still standing, and every later pass of this
+    /// launch refused it before sending anything.
+    @Test("an applied edit whose manifest could not be removed replays the same key")
+    func anAppliedEditWhoseRemovalFailedKeepsTheJobAndReplaysTheKey() async throws {
+        let entered = Latch()
+        let released = Latch()
+        let harness = try harness(
+            server: MemoServer(losingResponses: 1),
+            completion: { PatchParking($0, entered: entered, released: released) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [(name: "a.heic", bytes: 400)])
+        _ = try await uploaded(harness, job)
+        await harness.outbox.drain()
+        // The state a relaunch finds: the server took the memo and the answer was lost.
+        _ = try await standing(harness, try #require(await harness.repository.job(job.id))) {
+            $0.resolvedMemoUID = "m1"
+            $0.editKey = UUID().uuidString
+            $0.files[0].attachmentUID = "att-u1"
+        }
+        let draft = try #require(await harness.outbox.cancel(job.id))
+        let resubmitting = Task { await harness.outbox.resubmit(job.id, draft: textEdited(draft)) }
+        #expect(
+            await entered.wait(within: 2), "the edit never reached the completion double")
+        // Nothing moves the manifest: the fence holds, and only the removal fails.
+        let restore = try Fixture.permissions(
+            0o500, on: harness.root.appending(path: "outbox/jobs"))
+        defer { restore() }
+        await released.open()
+        #expect(await resubmitting.value == .accepted)
+
+        let survivor = try #require(
+            await harness.repository.job(job.id), "the premise: the manifest could not be removed")
+        #expect(survivor.pendingEdit != nil)
+        let key = try #require(survivor.editKey)
+
+        restore()
+        await settle(harness, job.id)
+
+        try #require(harness.memoPatches.count == 2, "the kept claim refused every later pass")
+        #expect(try sent(harness.memoPatches[1])["edit_key"] as? String == key)
+        #expect(harness.server.editApplications == 1, "the replay made a second edit")
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
     @Test("an edit whose answer was lost holds the capture until the server answers definitely")
     func aLostEditAnswerKeepsTheCaptureUntilItIsSettled() async throws {
         let clock = MutableClock(Date().addingTimeInterval(60))

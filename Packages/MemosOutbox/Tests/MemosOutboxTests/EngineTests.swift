@@ -414,6 +414,48 @@ struct EngineTests {
         #expect(saved.lastError != nil)
     }
 
+    /// A chunk answer re-enters `advance` with whoever is signed in when it lands, and a capture
+    /// with its create resolved goes from there straight to its edit — which builds the request
+    /// from those credentials. Another account's edit must not reach that account's server.
+    @Test("a chunk answer after an account switch sends nothing of the other account's edit")
+    func anEditCapturedUnderAnotherAccountIsHeldOnReentry() async throws {
+        let harness = try await Harness.make(
+            bytes: 400,
+            http: .standard(),
+            credentials: Fixture.credentials(server: Fixture.otherServer, owner: "someone-else")
+        )
+        defer { harness.cleanUp() }
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].chunkSize = 400
+        job.files[0].stagedForEdit = true
+        job.resolvedMemoUID = "m1"
+        job.editKey = "k1"
+        job.pendingEdit = PendingEdit(
+            content: "on the beach, and then the ferry",
+            visibility: "PRIVATE",
+            capturedAt: harness.now,
+            fileIDs: [job.files[0].id]
+        )
+        job.state = .uploading
+        job.nextAttemptAt = harness.now
+        try await harness.repository.save(job)
+
+        await harness.engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(jobID: job.id, fileID: job.files[0].id, offset: 0),
+                statusCode: 200,
+                body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+            )
+        )
+
+        #expect(harness.http.requests.isEmpty, "a request went out under the wrong account")
+        let saved = try #require(await harness.reload())
+        #expect(saved.files[0].isComplete, "the premise: the answer completed the picture")
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .accountMismatch)
+    }
+
     @Test("nothing drains while nobody is signed in")
     func signedOut() async throws {
         let harness = try await Harness.make(bytes: 1000, http: .standard(), credentials: nil)
@@ -548,6 +590,33 @@ actor RecordingChunkHandler: OutboxChunkHandling {
 
 @Suite("Adoption before draining")
 struct AdoptionOrderingTests {
+    /// `cancel` writes its mark, then tears the task down; a relaunch between the two finds a
+    /// capture back in the editor with its chunk still on the background session. Adopted, that
+    /// chunk would go up and its answer be dropped.
+    @Test("a task whose capture was taken back is cancelled at relaunch, not adopted")
+    func aCancelledCapturesSurvivingTaskIsNotAdopted() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].chunkSize = 400
+        job.files[0].bytesConfirmed = 400
+        job.state = .uploading
+        let task = OutboxTaskIdentity(
+            jobID: job.id, fileID: job.files[0].id, offset: 400,
+            attempt: job.files[0].uploadAttempt)
+        #expect(
+            OutboxReconciliation.plan(jobs: [job], inFlight: [task]).adopted == [task],
+            "control: the same task on a capture still queued is adopted")
+        try await harness.repository.save(job.cancelled(at: harness.now))
+        harness.scheduler.pretend(inFlight: [task])
+
+        let plan = try await harness.engine.reconcile()
+
+        #expect(plan.adopted.isEmpty, "a task the cancel had given up was adopted")
+        #expect(harness.scheduler.cancellations == [task])
+    }
+
     /// G3. The replay used to run in a Task nobody waited on, and a drain can start beside it. The
     /// two are not siblings, so `isDraining` does not exclude them from each other, and the
     /// interleaving is a lost cursor: the drain retains a job at offset 0 and awaits its probe, the

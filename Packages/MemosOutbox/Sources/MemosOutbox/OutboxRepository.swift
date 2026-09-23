@@ -160,7 +160,8 @@ public protocol OutboxPersisting: Sendable {
     /// A capture a person took back between a request and its answer is no longer that answer's to
     /// destroy, and the originals it names are the only copies there are.
     ///
-    /// - Returns: whether the manifest on disk was still `snapshot` and was therefore removed.
+    /// - Returns: whether the manifest on disk was still `snapshot` AND is now gone. A removal that
+    ///   failed answers false, exactly as a moved manifest does: the capture is still queued.
     @discardableResult
     func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool
     func sweepOrphans() async throws -> SweepOutcome
@@ -415,6 +416,14 @@ public actor OutboxRepository {
     @discardableResult
     public func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) -> Bool {
         guard let onDisk = self.job(snapshot.id), onDisk == snapshot else { return false }
+        // Asked of the disk, not of the call: a removal that failed leaves the capture queued, and
+        // a caller told otherwise acts on a job that is still there. A manifest already missing is
+        // gone all the same. The originals stay while it stands, so it never names deleted files.
+        let manifest = manifestURL(job.id)
+        try? FileManager.default.removeItem(at: manifest)
+        guard !FileManager.default.fileExists(atPath: manifest.path(percentEncoded: false)) else {
+            return false
+        }
         delete(job)
         return true
     }

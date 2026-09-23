@@ -20,8 +20,8 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// keeps two invocations inside one launch from being two requests, and a relaunch is meant to
     /// ask again. It is claimed in `applyEdit` before the fenced write and given back by every
     /// outcome that leaves this job alive — a failed claim, a retry, a refusal, and an applied edit
-    /// whose terminal delete lost its fence. Only an applied edit that DELETED the job keeps it,
-    /// because nothing can ask about a job that is gone.
+    /// whose terminal delete lost its fence or could not remove the manifest. Only an applied edit
+    /// that DELETED the job keeps it, because nothing can ask about a job that is gone.
     private var editsTransmitted: Set<UUID> = []
 
     private let repository: any OutboxPersisting
@@ -217,6 +217,14 @@ public actor OutboxEngine: OutboxChunkHandling {
     }
 
     private func advance(_ job: UploadJob, credentials: OutboxCredentials) async {
+        // The planner's first question, asked here too because the edit branch below builds a
+        // request from these credentials before the planner is reached. Asked on entry rather
+        // than by each caller: a chunk answer re-enters with whoever is signed in NOW, and a job
+        // captured under another account must reach no request down any path into this loop.
+        guard job.binding.matches(credentials) else {
+            await hold(job, reason: .accountMismatch)
+            return
+        }
         var current = job
         for _ in 0..<Self.maxStepsPerPass {
             // A capture taken back to the editor is answered by nothing: not the edit below, not
@@ -643,9 +651,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             // relaunch that finished the same edit first, is no longer this pass's to act on — and
             // this delete takes the person's only copy of the pictures with it.
             guard await repository.delete(claimed, ifStillCurrent: claimed) else {
-                // The manifest moved under the PATCH, so this pass is not the one that destroys it:
-                // the claim goes back and the job stands whole — `pendingEdit` and `editKey` intact
-                // — so the next drain replays the SAME key and the delete is tried again.
+                // The manifest moved under the PATCH, or this device could not remove it, so this
+                // pass has not destroyed it: the claim goes back and the job stands whole —
+                // `pendingEdit` and `editKey` intact — so the next drain replays the SAME key and
+                // the delete is tried again.
                 editsTransmitted.remove(job.id)
                 await onChange()
                 return
