@@ -165,20 +165,36 @@ struct PendingMemoPresentationTests {
         #expect(PendingMemoPresentation.rows(for: [unwritable])[0].actions == [.retry])
     }
 
-    @Test("every hold offers exactly one thing, and only the unreadable one offers Remove")
+    @Test("every hold offers exactly what its reason leaves, with and without an unanswered change")
     func actionPerHoldReason() {
         // The switch is what makes this exhaustive: a hold reason added later does not compile
-        // until someone has said what its row lets a person do about it.
+        // until someone has said what its row lets a person do about it — both while a change
+        // the server has not answered stands and while none does.
         for reason in HoldReason.allCases {
             let held = job(state: .held, holdReason: reason)
+            var unanswered = held
+            unanswered.editUnansweredSince = capture
+            let expected: (answered: [PendingAction], whileUnanswered: [PendingAction])
             switch reason {
             case .unreadableManifest:
-                #expect(PendingMemoPresentation.action(for: held) == [.remove])
-                #expect(PendingMemoPresentation.rows(for: [held])[0].actions == [.remove])
-            case .accountMismatch, .serverRefused, .storageFailed, .editIncomplete, .memoGone:
-                #expect(PendingMemoPresentation.action(for: held) == [.retry])
-                #expect(PendingMemoPresentation.rows(for: [held])[0].actions == [.retry])
+                expected = ([.remove], [.remove])
+            case .memoGone:
+                expected = ([.retry, .remove], [.retry, .remove])
+            case .editIncomplete:
+                expected = ([.reopen, .retry], [.retry])
+            case .accountMismatch, .serverRefused, .storageFailed:
+                expected = ([.retry], [.retry])
             }
+            let (answered, whileUnanswered) = expected
+            #expect(PendingMemoPresentation.action(for: held) == answered, "\(reason)")
+            #expect(
+                PendingMemoPresentation.rows(for: [held])[0].actions == answered, "\(reason)")
+            #expect(
+                PendingMemoPresentation.action(for: unanswered) == whileUnanswered,
+                "\(reason) with an unanswered change")
+            #expect(
+                PendingMemoPresentation.rows(for: [unanswered])[0].actions == whileUnanswered,
+                "\(reason) with an unanswered change")
         }
         // A hold with no reason recorded is still a hold a person may clear.
         #expect(PendingMemoPresentation.action(for: job(state: .held)) == [.retry])
@@ -247,12 +263,12 @@ struct PendingMemoPresentationTests {
         #expect(!row.needsAttention, "an upload doing its job is not a row asking for a person")
     }
 
-    /// An edit already on the wire can be neither taken back nor sent again, so the row offers
-    /// nothing while that edit is claimed. The queue is what refuses the cancel and what replays
-    /// the edit itself, where the job's state is owned; what this fences is the row promising
-    /// either one, which the queue would then have to refuse.
-    @Test("a capture whose edit is already on the wire offers nothing")
-    func anEditOnTheWireOffersNothing() {
+    /// An edit the server has not answered can be neither taken back nor sent again by hand, so
+    /// the row offers nothing while it stands. The queue is what refuses the cancel and what
+    /// replays the edit itself, where the job's state is owned; what this fences is the row
+    /// promising either one, which the queue would then have to refuse.
+    @Test("a capture whose edit is already unanswered offers nothing")
+    func anUnansweredEditOffersNothing() {
         var sending = job(state: .uploading)
         sending.editUnansweredSince = capture
 
@@ -260,13 +276,125 @@ struct PendingMemoPresentationTests {
             PendingMemoPresentation.action(for: sending) == [],
             "the queue refuses both while the edit is unresolved")
         let sentence = PendingMemoPresentation.status(for: sending)
-        #expect(sentence == "Sending your change — waiting for the server's answer")
+        #expect(
+            sentence == "Your change hasn't been answered yet — it will be sent again until it is")
         #expect(
             PendingMemoPresentation.action(for: job(state: .uploading)) == [.cancel, .retry],
             "the same capture with nothing on the wire still offers Cancel")
         #expect(
             PendingMemoPresentation.status(for: job(state: .uploading)) == "Uploading 100%",
             "and still counts its bytes")
+    }
+
+    /// The backoff is part of an unanswered change, not a pause from it: nothing is on the wire
+    /// while the queue waits, yet the change stands and the next replay sends it again under the
+    /// same key. So the row says the change is unanswered — never that it is being sent, and never
+    /// anything that reads as given up — and it still offers nothing to press.
+    @Test("a capture waiting out its backoff says its change is still unanswered")
+    func anUnansweredEditInBackoffSaysSo() {
+        var backingOff = job(state: .waiting, attemptCount: 2, lastError: "Service Unavailable")
+        backingOff.nextAttemptAt = capture.addingTimeInterval(600)
+        backingOff.editUnansweredSince = capture
+
+        #expect(
+            PendingMemoPresentation.status(for: backingOff, now: capture)
+                == "Your change hasn't been answered yet — it will be sent again until it is")
+        #expect(PendingMemoPresentation.action(for: backingOff) == [])
+    }
+
+    /// Three holds a person could not tell apart by their buttons, told apart by what each one
+    /// leaves them. A memo the server no longer has may come back, so Try again stays, and Remove
+    /// is the way out that does not pretend the change was answered. A change refused while it was
+    /// still unanswered — a 401 or a 403 — is not a deleted memo, and Remove there would throw
+    /// away a capture whose change may already have landed. A refusal with nothing unanswered keeps
+    /// the row it always had.
+    @Test("a memo gone from the server, a refused unanswered change and a plain refusal differ")
+    func threeRefusalsThreeRows() {
+        var gone = job(state: .held, holdReason: .memoGone)
+        gone.editUnansweredSince = capture
+        var refusedUnanswered = job(
+            state: .held, holdReason: .serverRefused, lastError: "You may not change this memo")
+        refusedUnanswered.editUnansweredSince = capture
+        let refused = job(state: .held, holdReason: .serverRefused, lastError: "File too large")
+
+        let goneRow = PendingMemoPresentation.rows(for: [gone])[0]
+        #expect(goneRow.actions == [.retry, .remove])
+        #expect(goneRow.status == "This memo is no longer on the server")
+        #expect(goneRow.needsAttention)
+
+        let refusedUnansweredRow = PendingMemoPresentation.rows(for: [refusedUnanswered])[0]
+        #expect(refusedUnansweredRow.actions == [.retry])
+        #expect(refusedUnansweredRow.status == "You may not change this memo")
+        #expect(refusedUnansweredRow.needsAttention)
+
+        let refusedRow = PendingMemoPresentation.rows(for: [refused])[0]
+        #expect(refusedRow.actions == [.retry])
+        #expect(refusedRow.status == "File too large")
+        #expect(refusedRow.needsAttention)
+    }
+
+    /// A change stopped before it was ever sent — a picture it keeps is missing from this device —
+    /// leaves the capture wholly the person's: nothing reached the server, so nothing unanswered
+    /// needs protecting, and the row offers the editor back beside Try again. The press has to
+    /// land on the way back into the editor rather than on the retry, and what that way hands the
+    /// sheet has to open on the capture's own words. Whether the queue hands the draft back for
+    /// such a hold is the queue's own witness; this is the row's half and the sheet's.
+    @Test("a change stopped before it was sent offers the editor back, and the press reaches it")
+    @MainActor
+    func anIncompleteEditReopensTheEditor() async {
+        let stopped = job(
+            content: "on the beach\nwith the dog", state: .held, holdReason: .editIncomplete)
+        var unanswered = stopped
+        unanswered.editUnansweredSince = capture
+
+        #expect(PendingMemoPresentation.action(for: stopped) == [.reopen, .retry])
+        let row = PendingMemoPresentation.rows(for: [stopped])[0]
+        #expect(row.actions == [.reopen, .retry])
+        #expect(row.needsAttention)
+        #expect(row.status == "A picture this memo keeps is missing from this device")
+        #expect(
+            PendingMemoPresentation.action(for: unanswered) == [.retry],
+            "once a change is unanswered the queue's rule wins, and the editor is not offered")
+
+        final class Presses {
+            var reopened: [UUID] = []
+            var retried: [UUID] = []
+        }
+        let presses = Presses()
+        await PressProbe.withScreen(
+            List {
+                PendingSection(
+                    jobs: [stopped],
+                    lastProgressAt: [:],
+                    verdict: .permitted,
+                    retry: { presses.retried.append($0) },
+                    remove: { _ in },
+                    restore: { presses.reopened.append($0) }
+                )
+            },
+            height: 400
+        ) { screen in
+            await screen.settle(turns: 5)
+            // The editor is drawn first, as the row offers it, so it is the first control that
+            // answers to this label.
+            #expect(screen.press("Try again"), "the row drew no control to press")
+            await screen.settle(turns: 5)
+        }
+        #expect(presses.reopened == [stopped.id])
+        #expect(presses.retried.isEmpty, "the press reached Try again instead of the editor")
+
+        let draft = RestoredDraft(
+            jobID: stopped.id, content: stopped.content, visibility: nil,
+            capturedAt: stopped.capturedAt, pictures: [])
+        await PressProbe.withScreen(
+            ComposeView(
+                mode: .create(restoring: ComposeRestore(draft)), imports: ComposeImports()
+            ) { _ in .saved },
+            height: 852
+        ) { screen in
+            await screen.settle(turns: 50, until: { screen.says("on the beach") })
+            #expect(screen.says("on the beach"), "the editor did not open on the capture's words")
+        }
     }
 
     /// The frozen percentage, named. A capture whose bytes stopped moving is the one thing the
