@@ -64,8 +64,11 @@ merges, headroom at a merge is zero. Every run that obtained the counts writes t
 recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
 never by hand. A candidate at that path was put there by the run you are reading — pass or fail —
 through its validated copyback and nothing else: the run's first act, before it reads its
-arguments or refuses anything, removes any candidate and any `incoming-*` staging folder an earlier
-run left; the copyback lands in `.gate-artifacts/incoming-<run token>/`, never at that path; and
+arguments or refuses anything, removes any candidate at that path; the copyback first discards
+every staging folder present, which at that point can only be one an earlier run abandoned,
+because the lane lock serialises runs of a branch (a shared explicit `MAC_GATE_ARTIFACTS` across
+branches is outside that promise), and then lands in `.gate-artifacts/incoming-<run token>/`, never
+at that path; and
 `scripts/testcount-candidate-owner.sh` promotes the candidate only when it came back beside this
 run's token in `run-token`, the stamp the build host writes on the same chain that clears its
 artifacts folder. So a run that never obtained counts — no result bundle, a failing `xcresulttool`,

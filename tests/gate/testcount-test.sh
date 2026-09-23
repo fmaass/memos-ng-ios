@@ -638,20 +638,25 @@ if [ "$owner_control" -ne 1 ]; then
   fails=$((fails + 1))
 fi
 
-# The startup cleanup (A1, A5, A6, A7). Driven through the gate itself, from outside any git tree,
+# The startup cleanup (A1, A5, A6). Driven through the gate itself, from outside any git tree,
 # with an explicit artifacts folder and no build host: the run is refused, and the refusal comes
-# after the cleanup, so an earlier run's candidate and staging are gone and each staging is named.
+# after the cleanup, so an earlier run's candidate is gone. A staging folder is left exactly as it
+# was, and unnamed: startup is reached before the lane lock, so a discard there could take a live
+# run's staging mid-copy — abandoned staging is discarded in the copyback instead (below).
 start_art="$tmp/startup/artifacts"
 mkdir -p "$start_art/incoming-feedfacefeedface"
 printf 'MemosAPITests\t1\n' > "$start_art/testcount-baseline.tsv"
 printf 'MemosAPITests\t1\n' > "$start_art/incoming-feedfacefeedface/testcount-baseline.tsv"
 OUT="$(cd "$tmp/startup" && env -u MAC_GATE_HOST -u MAC_GATE_BRANCH MAC_GATE_ARTIFACTS="$start_art" "$GATE" 2>&1)"; RC=$?
-if [ "$RC" -eq 2 ] && [ ! -e "$start_art/testcount-baseline.tsv" ] && [ ! -e "$start_art/incoming-feedfacefeedface" ] \
-   && has "MAC_GATE_HOST is not set" \
-   && has "discarding abandoned staging $start_art/incoming-feedfacefeedface from an earlier run"; then
-  ok "a run refused for a missing host has already removed a stale candidate and named each abandoned staging folder it discarded"
+if [ "$RC" -eq 2 ] && [ ! -e "$start_art/testcount-baseline.tsv" ] && has "MAC_GATE_HOST is not set"; then
+  ok "a run refused for a missing host has already removed a stale candidate"
 else
-  bad "a run refused for a missing host left a stale candidate or staging folder, or did not name it (exit $RC)"; show
+  bad "a run refused for a missing host left a stale candidate, or refused for another reason (exit $RC)"; show
+fi
+if [ "$RC" -eq 2 ] && [ -f "$start_art/incoming-feedfacefeedface/testcount-baseline.tsv" ] && ! has "discarding abandoned staging"; then
+  ok "a run refused at startup leaves a staging folder untouched and unnamed — it holds no lane lock"
+else
+  bad "a run refused at startup discarded or named a staging folder it holds no lock over (exit $RC)"; show
 fi
 # A5: a cleanup that cannot remove the stale candidate refuses on its own line, naming the file, and
 # nothing after it runs — the host refusal that would follow never prints.
@@ -665,6 +670,39 @@ if [ "$RC" -eq 2 ] && [ -f "$start_art/testcount-baseline.tsv" ] \
   ok "a stale candidate the cleanup cannot remove refuses the run (exit 2), naming it, before anything else runs"
 else
   bad "an unremovable stale candidate was answered with exit $RC, or not named, or later checks still ran"; show
+fi
+
+# A7, the discard of abandoned staging, taken out of the copyback and run directly: one line per
+# folder it discards, every folder gone, and a folder it cannot remove fails the step's code.
+discard_src="$(sed -n '/^for abandoned in "\$artifacts"\/incoming-\*; do$/,/^done$/p' "$GATE")"
+if [ -z "$discard_src" ]; then
+  bad "the copyback's discard loop was not found in the gate, so no case below exercised it"
+else
+  run_discard() { # $1 = the artifacts folder; sets OUT and RC (the folded copyback code)
+    OUT="$(artifacts="$1" log="$1/discard.log" bash -c 'say() { printf "%s\n" "$*"; }; copyback_rc=0
+'"$discard_src"'
+exit "$copyback_rc"' 2>&1)"; RC=$?
+  }
+  d_art="$tmp/discard/artifacts"
+  mkdir -p "$d_art/incoming-aaaa/MemosNG.xcresult" "$d_art/incoming-bbbb" "$d_art/keep"
+  printf 'x\n' > "$d_art/incoming-bbbb/testcount-baseline.tsv"
+  run_discard "$d_art"
+  lines="$(printf '%s\n' "$OUT" | grep -c '^discarding abandoned staging .* from an earlier run$')"
+  if [ "$RC" -eq 0 ] && [ "$lines" -eq 2 ] && has "$d_art/incoming-aaaa" && has "$d_art/incoming-bbbb" \
+     && [ ! -e "$d_art/incoming-aaaa" ] && [ ! -e "$d_art/incoming-bbbb" ] && [ -d "$d_art/keep" ]; then
+    ok "two abandoned staging folders are discarded with one line each, and nothing else is touched"
+  else
+    bad "the discard printed $lines line(s) for two folders, or left one, or touched another (exit $RC)"; show
+  fi
+  mkdir -p "$d_art/incoming-cccc/sub" && printf 'x\n' > "$d_art/incoming-cccc/sub/f"
+  chmod 555 "$d_art/incoming-cccc/sub"
+  run_discard "$d_art"
+  chmod 755 "$d_art/incoming-cccc/sub"
+  if [ "$RC" -ne 0 ] && has "could not remove the abandoned staging $d_art/incoming-cccc"; then
+    ok "a staging folder the discard cannot remove fails the copyback step's code (exit $RC) and says so"
+  else
+    bad "a staging folder the discard could not remove left the copyback code at $RC, or said nothing"; show
+  fi
 fi
 
 # Both halves of the mechanism are in the gate's text, in the order that makes them mean anything.
@@ -705,6 +743,15 @@ if [ -n "$copy_line" ] && [ -n "$staged_line" ] && [ -n "$owner_line" ] && [ -n 
   ok "the copy lands in incoming-<token>, the staging line follows it, the owner script follows that, and the step records its exit last"
 else
   bad "the copyback order is not rsync to incoming-, staged line, owner call, record (rsync ${copy_line:-none}, staged ${staged_line:-none}, owner ${owner_line:-none}, record ${record_line:-none})"
+fi
+discard_line="$(first_code_line '^for abandoned in "\$artifacts"/incoming-\*; do$')"
+n_discard="$(grep -v '^[[:space:]]*#' "$GATE" | grep -c 'incoming-\*')"
+ret_line="$(first_code_line '^remote_rc="\${PIPESTATUS\[1\]}"$')"
+if [ -n "$discard_line" ] && [ -n "$ret_line" ] && [ -n "$copy_line" ] && [ -n "$loop_line" ] && [ "$n_discard" -eq 1 ] \
+   && [ "$discard_line" -gt "$ret_line" ] && [ "$discard_line" -lt "$copy_line" ] && [ "$discard_line" -gt "$loop_line" ]; then
+  ok "abandoned staging is discarded in the copyback, after the remote returns and before this run's copy, and nowhere else"
+else
+  bad "the staging discard is not the one loop between the remote's return and the copy (discard ${discard_line:-none}, count $n_discard, remote ${ret_line:-none}, rsync ${copy_line:-none}, argument loop ${loop_line:-none})"
 fi
 # A3: one copyback serves both modes. One copy of the artifacts folder, one owner call, one record,
 # all at the top level, and no top-level exit between the remote's return and the copy.
