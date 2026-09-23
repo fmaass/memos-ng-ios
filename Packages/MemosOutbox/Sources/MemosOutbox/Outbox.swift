@@ -70,8 +70,13 @@ public final class Outbox {
     /// waiting on it is not the thing that hears it change.
     public let uploadPreferences: UploadPreferences
 
+    /// Whether the queue may send right now, and why not. Recomputed on the two events that can
+    /// change the answer — the network moving and the toggle — never polled.
+    public private(set) var uploadVerdict: UploadVerdict = .permitted
+
     private let repository: OutboxRepository
     private let credentials: any OutboxCredentialsProviding
+    private let network: any NetworkPathProviding
     private let engine: OutboxEngine
     private let changes: OutboxChangeBox
     private let attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)?
@@ -101,6 +106,7 @@ public final class Outbox {
         self.changes = changes
         self.repository = repository
         self.credentials = credentials
+        self.network = network
         self.uploadPreferences = preferences
         self.engine = OutboxEngine(
             repository: repository,
@@ -118,8 +124,12 @@ public final class Outbox {
         // act on them. A job put down for the wrong network has to move when the network changes
         // or when the person changes their mind — waiting for the next launch would make the
         // toggle a promise the app keeps tomorrow.
-        network.onPathChange { [weak self] in await self?.drain() }
-        preferences.onChange { [weak self] in await self?.drain() }
+        network.onPathChange { [weak self] in await self?.reconsiderUploads() }
+        preferences.onChange { [weak self] in await self?.reconsiderUploads() }
+        uploadVerdict = UploadVerdict(
+            policy: UploadNetworkPolicy(allowsMobileData: preferences.allowsMobileData),
+            path: network.currentPath()
+        )
     }
 
     /// The composed outbox: the app group's container, the one background session, and the live
@@ -232,6 +242,18 @@ public final class Outbox {
     public func mediaURL(for job: UploadJob) -> URL? {
         guard let file = job.files.first else { return nil }
         return repository.mediaURL(job: job, file: file)
+    }
+
+    /// The two events that can change the answer, answered once: what the queue may do now, and
+    /// then the drain that acts on it. `NetworkPathProviding` and `UploadPreferences` each hold
+    /// exactly ONE handler, so this is the registration the drain already had, not a second
+    /// observer beside it.
+    private func reconsiderUploads() async {
+        uploadVerdict = UploadVerdict(
+            policy: UploadNetworkPolicy(allowsMobileData: uploadPreferences.allowsMobileData),
+            path: network.currentPath()
+        )
+        await drain()
     }
 
     public func drain() async {
