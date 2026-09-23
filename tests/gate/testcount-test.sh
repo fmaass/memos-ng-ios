@@ -40,7 +40,9 @@ EXCERPT="$here/fixtures/testcount-xcresult-excerpt.json"
 VERDICT="$repo_root/scripts/testcount-verdict.sh"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/gate-testcount-XXXXXX")" || { echo "FAIL: cannot make a temp dir"; exit 1; }
-trap 'rm -rf "$tmp"' EXIT
+# The write permission a case takes off its folder is given back here too, so a case that dies
+# half-way cannot leave a tree `rm -rf` refuses.
+trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 
 fails=0
 cases=0
@@ -490,6 +492,129 @@ if [ -s "$step" ] && grep -q 'GATE_TEST_BUNDLES' "$step"; then
   fi
 else
   bad "no s_testcount function could be read out of $GATE — the two checks it carries proved nothing"
+fi
+
+# --- (g) whose candidate came back ----------------------------------------------------------------
+# The copyback fetches whatever the build host's artifacts folder holds, and that folder is cleared
+# only by the remote script: a remote that stopped before clearing it leaves the previous run's
+# candidate to be copied back as if it were this one's. So the remote stamps the folder with this
+# run's token right after clearing it, and scripts/testcount-candidate-owner.sh keeps the candidate
+# only when the stamp reads exactly that token. Each case below is run against a folder built here;
+# every case that depends on the decision fails when the decision is inverted.
+OWNER="$repo_root/scripts/testcount-candidate-owner.sh"
+owner_control=0
+tok="0123456789abcdef"
+owner_dir() { # $1 = a name; prints a fresh folder holding a candidate
+  local d="$tmp/owner-$1"
+  mkdir -p "$d" && printf 'MemosAPITests\t38\n' > "$d/testcount-baseline.tsv" && printf '%s' "$d"
+}
+run_owner() { OUT="$("$OWNER" "$@" 2>&1)"; RC=$?; }
+if [ ! -x "$OWNER" ]; then
+  bad "$OWNER is missing or not executable, so no copyback could tell this run's candidate from an earlier one's"
+else
+  d="$(owner_dir equal)"; printf '%s\n' "$tok" > "$d/run-token"
+  run_owner "$d" "$tok"
+  if [ "$RC" -eq 0 ] && [ -f "$d/testcount-baseline.tsv" ] && [ -f "$d/run-token" ]; then
+    ok "a candidate stamped with this run's token is kept"; owner_control=1
+  else
+    bad "a candidate stamped with this run's token was not kept (exit $RC)"; show
+  fi
+
+  d="$(owner_dir differs)"; printf '%s\n' "fedcba9876543210" > "$d/run-token"
+  run_owner "$d" "$tok"
+  if [ "$RC" -eq 0 ] && [ ! -e "$d/testcount-baseline.tsv" ] && [ ! -e "$d/run-token" ] \
+     && has "stamp differs"; then
+    ok "a candidate stamped by another run is removed, its stamp with it, and the reason is printed"
+  else
+    bad "a candidate stamped by another run survived, or its stamp did, or no reason was printed (exit $RC)"; show
+  fi
+
+  d="$(owner_dir extra)"; printf '%s\nsomething else\n' "$tok" > "$d/run-token"
+  run_owner "$d" "$tok"
+  if [ "$RC" -eq 0 ] && [ ! -e "$d/testcount-baseline.tsv" ] && has "stamp differs"; then
+    ok "a stamp holding this run's token and anything more is not this run's stamp"
+  else
+    bad "a stamp holding this run's token plus a second line was accepted (exit $RC)"; show
+  fi
+
+  d="$(owner_dir absent)"
+  run_owner "$d" "$tok"
+  if [ "$RC" -eq 0 ] && [ ! -e "$d/testcount-baseline.tsv" ] && has "stamp absent"; then
+    ok "a candidate with no stamp at all is removed and the reason is printed"
+  else
+    bad "a candidate with no stamp survived, or no reason was printed (exit $RC)"; show
+  fi
+
+  d="$tmp/owner-nothing"; mkdir -p "$d"
+  run_owner "$d" "$tok"
+  if [ "$RC" -eq 0 ] && [ -z "$(ls -A "$d")" ]; then
+    ok "a folder with no candidate and no stamp is left empty, exit 0"
+  else
+    bad "a folder with nothing in it was answered with exit $RC or gained a file: $(ls -A "$d" | tr '\n' ' ')"; show
+  fi
+
+  # The same absence, with this run's stamp present: nothing may be created, and nothing this run
+  # wrote may be taken away — which is where an inverted decision shows even with no candidate.
+  d="$tmp/owner-stamp-only"; mkdir -p "$d"; printf '%s\n' "$tok" > "$d/run-token"
+  run_owner "$d" "$tok"
+  if [ "$RC" -eq 0 ] && [ "$(ls -A "$d")" = "run-token" ]; then
+    ok "a folder holding only this run's stamp is left exactly as it was, exit 0"
+  else
+    bad "a folder holding only this run's stamp was answered with exit $RC or changed: $(ls -A "$d" | tr '\n' ' ')"; show
+  fi
+
+  d="$(owner_dir usage)"
+  run_owner "$d"
+  if [ "$RC" -ne 0 ]; then
+    ok "a call missing its run token is a usage error (exit $RC)"
+  else
+    bad "a call missing its run token exited 0 — it judged a stamp against nothing"; show
+  fi
+
+  # A removal it decided on and could not carry out is the one failure it has: the folder is made
+  # read-only, so the stale candidate cannot be unlinked, and the permission is given back before
+  # anything is judged.
+  d="$(owner_dir stuck)"
+  chmod 500 "$d"
+  run_owner "$d" "$tok"
+  chmod 700 "$d"
+  if [ "$RC" -eq 1 ] && [ -f "$d/testcount-baseline.tsv" ] && has "could NOT be removed"; then
+    ok "a stale candidate that cannot be removed fails the script (exit 1) and says so"
+  else
+    bad "a stale candidate that could not be removed was answered with exit $RC, or without its line"; show
+  fi
+fi
+if [ "$owner_control" -ne 1 ]; then
+  echo "FAIL: no candidate was ever kept — an owner script that removed every candidate would pass the cases that remove"
+  fails=$((fails + 1))
+fi
+
+# Both halves of the mechanism are in the gate's text, in the order that makes them mean anything:
+# the remote stamps the folder AFTER it clears it (a stamp written before the clear is erased with
+# it), and the local side asks the owner script AFTER the copy (asked before, it judges the folder
+# the copy is about to overwrite).
+clear_line="$(grep -n '^rm -rf .gate-artifacts && mkdir -p .gate-artifacts$' "$GATE" | head -n1 | cut -d: -f1)"
+stamp_line="$(grep -n '^printf .%s\\n. "\$GATE_RUN_TOKEN" > .gate-artifacts/run-token$' "$GATE" | head -n1 | cut -d: -f1)"
+if [ -n "$clear_line" ] && [ -n "$stamp_line" ] && [ "$stamp_line" -gt "$clear_line" ]; then
+  ok "the remote stamps its artifacts folder with this run's token after clearing it"
+else
+  bad "the remote does not stamp its artifacts folder after clearing it (clear ${clear_line:-none}, stamp ${stamp_line:-none})"
+fi
+copy_line="$(grep -n 'rsync -a -e ssh "\$host:\$target/.gate-artifacts/"' "$GATE" | head -n1 | cut -d: -f1)"
+owner_line="$(grep -n 'testcount-candidate-owner\.sh' "$GATE" | grep -v '^[0-9]*:[[:space:]]*#' | head -n1 | cut -d: -f1)"
+if [ -n "$copy_line" ] && [ -n "$owner_line" ] && [ "$owner_line" -gt "$copy_line" ]; then
+  ok "the copyback asks the owner script after its rsync (control: the rsync is on line $copy_line)"
+else
+  bad "the copyback does not name the owner script after its rsync (rsync ${copy_line:-none}, owner ${owner_line:-none})"
+fi
+# The script's exit only fails anything if the copyback step records it, so the one record of that
+# step comes after the call and records the folded code.
+record_line="$(grep -n '^record copyback "\$copyback_rc"$' "$GATE" | head -n1 | cut -d: -f1)"
+if [ -n "$owner_line" ] && [ -n "$record_line" ] && [ "$record_line" -gt "$owner_line" ] \
+   && grep -q '^  owner_rc="\${PIPESTATUS\[0\]}"$' "$GATE"; then
+  ok "the copyback step records the owner script's exit, after asking it"
+else
+  bad "the copyback step does not record the owner script's exit after the call (owner ${owner_line:-none}, record ${record_line:-none})"
 fi
 
 # --- verdict ----------------------------------------------------------------------------------------
