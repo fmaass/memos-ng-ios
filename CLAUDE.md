@@ -62,11 +62,19 @@ was last recorded — and because the baseline is re-recorded from a branch's fi
 merges, headroom at a merge is zero. Every run that obtained the counts writes them to
 `.gate-artifacts/testcount-baseline.tsv` before any of them is judged, so a deliberate reduction is
 recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
-never by hand; a run that never obtained counts — no result bundle, a failing `xcresulttool`, JSON
-it cannot parse or walk — exits non-zero and leaves no candidate, and a step that an earlier
-failing step skipped leaves nothing behind either, because the candidate goes when the run opens
-its log and one the copyback fetches stays only when it came back beside this run's token in
-`run-token`, the stamp the build host writes right after clearing its artifacts folder.
+never by hand. A candidate at that path was put there by the run you are reading — pass or fail —
+through its validated copyback and nothing else: the run's first act, before it reads its
+arguments or refuses anything, removes any candidate and any `incoming-*` staging folder an earlier
+run left; the copyback lands in `.gate-artifacts/incoming-<run token>/`, never at that path; and
+`scripts/testcount-candidate-owner.sh` promotes the candidate only when it came back beside this
+run's token in `run-token`, the stamp the build host writes on the same chain that clears its
+artifacts folder. So a run that never obtained counts — no result bundle, a failing `xcresulttool`,
+JSON it cannot parse or walk — exits non-zero and leaves no candidate, and neither does a step that
+an earlier failing step skipped, nor a run interrupted before the promotion. A run that refused
+before it began names, in its refusal, any file it could not clear. The documented path is
+`<repo root>/.gate-artifacts/testcount-baseline.tsv` or `$MAC_GATE_ARTIFACTS/testcount-baseline.tsv`;
+a run that can resolve neither has no such path and clears none — it cannot identify its
+destination, which says nothing about a candidate elsewhere on disk.
 Changing that tracked file is a reviewed act that an audit of the change has to see and justify — a
 reduction is named in the change that makes it, with the tests it retired — and no mechanism in the
 gate accepts or rejects a baseline change on its own. It ends with one summary line of every step's exit code and

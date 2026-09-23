@@ -494,127 +494,233 @@ else
   bad "no s_testcount function could be read out of $GATE — the two checks it carries proved nothing"
 fi
 
-# --- (g) whose candidate came back ----------------------------------------------------------------
+# --- (g) whose candidate reaches the documented path ------------------------------------------------
 # The copyback fetches whatever the build host's artifacts folder holds, and that folder is cleared
 # only by the remote script: a remote that stopped before clearing it leaves the previous run's
 # candidate to be copied back as if it were this one's. So the remote stamps the folder with this
-# run's token right after clearing it, and scripts/testcount-candidate-owner.sh keeps the candidate
-# only when the stamp reads exactly that token. Each case below is run against a folder built here;
-# every case that depends on the decision fails when the decision is inverted.
+# run's token on the same chain as the clear, the copy lands in a staging folder of this run's, and
+# scripts/testcount-candidate-owner.sh promotes the candidate to the documented path only when the
+# staged stamp reads exactly that token. Each case below is run against folders built here; every
+# case that depends on the decision fails when the decision is inverted.
 OWNER="$repo_root/scripts/testcount-candidate-owner.sh"
 owner_control=0
 tok="0123456789abcdef"
-owner_dir() { # $1 = a name; prints a fresh folder holding a candidate
-  local d="$tmp/owner-$1"
-  mkdir -p "$d" && printf 'MemosAPITests\t38\n' > "$d/testcount-baseline.tsv" && printf '%s' "$d"
+# $1 = a name. Sets A (the artifacts folder) and S (this run's staging folder inside it), with a
+# candidate, a build log and a result-bundle directory staged, as a copyback would leave them.
+owner_case() {
+  A="$tmp/owner-$1/artifacts"
+  S="$A/incoming-$tok"
+  mkdir -p "$S/MemosNG.xcresult" \
+    && printf 'MemosAPITests\t38\n' > "$S/testcount-baseline.tsv" \
+    && printf 'build log\n' > "$S/build.log" \
+    && printf 'bundle\n' > "$S/MemosNG.xcresult/Info.plist"
 }
 run_owner() { OUT="$("$OWNER" "$@" 2>&1)"; RC=$?; }
+evidence_promoted() { [ -f "$A/build.log" ] && [ -f "$A/MemosNG.xcresult/Info.plist" ]; }
 if [ ! -x "$OWNER" ]; then
   bad "$OWNER is missing or not executable, so no copyback could tell this run's candidate from an earlier one's"
 else
-  d="$(owner_dir equal)"; printf '%s\n' "$tok" > "$d/run-token"
-  run_owner "$d" "$tok"
-  if [ "$RC" -eq 0 ] && [ -f "$d/testcount-baseline.tsv" ] && [ -f "$d/run-token" ]; then
-    ok "a candidate stamped with this run's token is kept"; owner_control=1
+  owner_case equal; printf '%s\n' "$tok" > "$S/run-token"
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 0 ] && [ -f "$A/testcount-baseline.tsv" ] && [ -f "$A/run-token" ] \
+     && evidence_promoted && [ ! -e "$S" ]; then
+    ok "a candidate staged beside this run's stamp is moved to the documented path, the rest with it, the staging folder gone"
+    owner_control=1
   else
-    bad "a candidate stamped with this run's token was not kept (exit $RC)"; show
+    bad "a candidate staged beside this run's stamp was not promoted, or the staging folder stayed (exit $RC)"; show
   fi
 
-  d="$(owner_dir differs)"; printf '%s\n' "fedcba9876543210" > "$d/run-token"
-  run_owner "$d" "$tok"
-  if [ "$RC" -eq 0 ] && [ ! -e "$d/testcount-baseline.tsv" ] && [ ! -e "$d/run-token" ] \
-     && has "stamp differs"; then
-    ok "a candidate stamped by another run is removed, its stamp with it, and the reason is printed"
+  # A result bundle an earlier run left at the destination is replaced, not merged into or nested.
+  owner_case replace; printf '%s\n' "$tok" > "$S/run-token"
+  mkdir -p "$A/MemosNG.xcresult" && printf 'old\n' > "$A/MemosNG.xcresult/old.txt"
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 0 ] && [ -f "$A/MemosNG.xcresult/Info.plist" ] && [ ! -e "$A/MemosNG.xcresult/old.txt" ] \
+     && [ ! -e "$A/MemosNG.xcresult/MemosNG.xcresult" ] && [ -f "$A/testcount-baseline.tsv" ]; then
+    ok "an earlier run's result bundle at the destination is replaced by this run's, not merged or nested"
   else
-    bad "a candidate stamped by another run survived, or its stamp did, or no reason was printed (exit $RC)"; show
+    bad "an earlier run's result bundle was merged into or nested under this run's (exit $RC): $(find "$A/MemosNG.xcresult" | tr '\n' ' ')"; show
   fi
 
-  d="$(owner_dir extra)"; printf '%s\nsomething else\n' "$tok" > "$d/run-token"
-  run_owner "$d" "$tok"
-  if [ "$RC" -eq 0 ] && [ ! -e "$d/testcount-baseline.tsv" ] && has "stamp differs"; then
+  owner_case differs; printf '%s\n' "fedcba9876543210" > "$S/run-token"
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 3 ] && [ ! -e "$A/testcount-baseline.tsv" ] && [ ! -e "$S" ] && evidence_promoted \
+     && has "stamp differs" && has "not as this run's"; then
+    ok "a candidate staged beside another run's stamp is discarded, the rest promoted as evidence, the reason printed (exit 3)"
+  else
+    bad "a candidate staged beside another run's stamp reached the documented path, or the rest was not promoted, or no reason was printed (exit $RC)"; show
+  fi
+
+  owner_case extra; printf '%s\nsomething else\n' "$tok" > "$S/run-token"
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 3 ] && [ ! -e "$A/testcount-baseline.tsv" ] && has "stamp differs"; then
     ok "a stamp holding this run's token and anything more is not this run's stamp"
   else
     bad "a stamp holding this run's token plus a second line was accepted (exit $RC)"; show
   fi
 
-  d="$(owner_dir absent)"
-  run_owner "$d" "$tok"
-  if [ "$RC" -eq 0 ] && [ ! -e "$d/testcount-baseline.tsv" ] && has "stamp absent"; then
-    ok "a candidate with no stamp at all is removed and the reason is printed"
+  owner_case absent
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 3 ] && [ ! -e "$A/testcount-baseline.tsv" ] && [ ! -e "$S" ] && evidence_promoted \
+     && has "stamp absent"; then
+    ok "a candidate staged with no stamp at all is discarded, the rest promoted, the reason printed (exit 3)"
   else
-    bad "a candidate with no stamp survived, or no reason was printed (exit $RC)"; show
+    bad "a candidate staged with no stamp reached the documented path, or no reason was printed (exit $RC)"; show
   fi
 
-  d="$tmp/owner-nothing"; mkdir -p "$d"
-  run_owner "$d" "$tok"
-  if [ "$RC" -eq 0 ] && [ -z "$(ls -A "$d")" ]; then
-    ok "a folder with no candidate and no stamp is left empty, exit 0"
+  # A copy that failed before it created the staging folder: nothing to judge, nothing created.
+  A="$tmp/owner-nostaging/artifacts"; S="$A/incoming-$tok"; mkdir -p "$A"
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 3 ] && [ -z "$(ls -A "$A")" ] && has "stamp absent"; then
+    ok "a staging folder the copy never created is answered as an absent stamp, and nothing is created (exit 3)"
   else
-    bad "a folder with nothing in it was answered with exit $RC or gained a file: $(ls -A "$d" | tr '\n' ' ')"; show
+    bad "a missing staging folder was answered with exit $RC or created something: $(ls -A "$A" | tr '\n' ' ')"; show
   fi
 
-  # The same absence, with this run's stamp present: nothing may be created, and nothing this run
-  # wrote may be taken away — which is where an inverted decision shows even with no candidate.
-  d="$tmp/owner-stamp-only"; mkdir -p "$d"; printf '%s\n' "$tok" > "$d/run-token"
-  run_owner "$d" "$tok"
-  if [ "$RC" -eq 0 ] && [ "$(ls -A "$d")" = "run-token" ]; then
-    ok "a folder holding only this run's stamp is left exactly as it was, exit 0"
+  # This run's stamp and no candidate: nothing may be created at the documented path, and the stamp
+  # this run wrote is promoted — where an inverted decision shows even with no candidate.
+  A="$tmp/owner-stamp-only/artifacts"; S="$A/incoming-$tok"; mkdir -p "$S"; printf '%s\n' "$tok" > "$S/run-token"
+  run_owner "$S" "$A" "$tok"
+  if [ "$RC" -eq 0 ] && [ "$(ls -A "$A")" = "run-token" ] && has "none came back"; then
+    ok "a staging folder holding only this run's stamp promotes the stamp and nothing else, exit 0"
   else
-    bad "a folder holding only this run's stamp was answered with exit $RC or changed: $(ls -A "$d" | tr '\n' ' ')"; show
+    bad "a staging folder holding only this run's stamp was answered with exit $RC or left: $(ls -A "$A" | tr '\n' ' ')"; show
   fi
 
-  d="$(owner_dir usage)"
-  run_owner "$d"
-  if [ "$RC" -ne 0 ]; then
-    ok "a call missing its run token is a usage error (exit $RC)"
+  owner_case usage; printf '%s\n' "$tok" > "$S/run-token"
+  run_owner "$S" "$A"
+  if [ "$RC" -eq 2 ] && [ ! -e "$A/testcount-baseline.tsv" ] && [ -f "$S/testcount-baseline.tsv" ]; then
+    ok "a call missing its run token is a usage error that touches nothing (exit 2)"
   else
-    bad "a call missing its run token exited 0 — it judged a stamp against nothing"; show
+    bad "a call missing its run token was answered with exit $RC, or moved something"; show
   fi
 
-  # A removal it decided on and could not carry out is the one failure it has: the folder is made
-  # read-only, so the stale candidate cannot be unlinked, and the permission is given back before
-  # anything is judged.
-  d="$(owner_dir stuck)"
-  chmod 500 "$d"
-  run_owner "$d" "$tok"
-  chmod 700 "$d"
-  if [ "$RC" -eq 1 ] && [ -f "$d/testcount-baseline.tsv" ] && has "could NOT be removed"; then
-    ok "a stale candidate that cannot be removed fails the script (exit 1) and says so"
+  # A4: on this run's stamp the candidate is promoted first and alone. The destination is made
+  # read-only so that rename fails; nothing else may then be promoted and the staging folder stays.
+  owner_case stuck-rename; printf '%s\n' "$tok" > "$S/run-token"
+  chmod 555 "$A"
+  run_owner "$S" "$A" "$tok"
+  chmod 755 "$A"
+  if [ "$RC" -eq 1 ] && [ ! -e "$A/testcount-baseline.tsv" ] && [ -f "$S/testcount-baseline.tsv" ] \
+     && [ -f "$S/build.log" ] && [ ! -e "$A/build.log" ] && has "$S"; then
+    ok "a candidate that cannot be renamed into place fails the script (exit 1), promotes nothing and keeps the staging folder, named"
   else
-    bad "a stale candidate that could not be removed was answered with exit $RC, or without its line"; show
+    bad "a failed candidate rename was answered with exit $RC, or something was promoted, or the staging folder went"; show
+  fi
+
+  # A4: on a stamp that is not this run's the candidate is deleted first. The staging folder is made
+  # read-only so that deletion fails; nothing may then be promoted.
+  owner_case stuck-delete; printf '%s\n' "fedcba9876543210" > "$S/run-token"
+  chmod 555 "$S"
+  run_owner "$S" "$A" "$tok"
+  chmod 755 "$S"
+  if [ "$RC" -eq 1 ] && [ -f "$S/testcount-baseline.tsv" ] && [ ! -e "$A/testcount-baseline.tsv" ] \
+     && [ ! -e "$A/build.log" ] && has "could NOT be removed"; then
+    ok "a candidate not this run's that cannot be deleted fails the script (exit 1) and promotes nothing"
+  else
+    bad "an undeletable candidate not this run's was answered with exit $RC, or something was promoted"; show
+  fi
+
+  # A4: after the candidate, a file of the rest that cannot be moved up is a failure too, and the
+  # staging folder stays. An earlier result bundle at the destination that cannot be replaced does it.
+  owner_case stuck-rest; printf '%s\n' "$tok" > "$S/run-token"
+  mkdir -p "$A/MemosNG.xcresult/Data" && printf 'old\n' > "$A/MemosNG.xcresult/Data/old"
+  chmod 555 "$A/MemosNG.xcresult/Data"
+  run_owner "$S" "$A" "$tok"
+  chmod 755 "$A/MemosNG.xcresult/Data"
+  if [ "$RC" -eq 1 ] && [ -d "$S" ] && [ -f "$A/testcount-baseline.tsv" ]; then
+    ok "a staged file that cannot be moved up after the candidate fails the script (exit 1) and keeps the staging folder"
+  else
+    bad "a failed move of the rest was answered with exit $RC, or the staging folder went"; show
   fi
 fi
 if [ "$owner_control" -ne 1 ]; then
-  echo "FAIL: no candidate was ever kept — an owner script that removed every candidate would pass the cases that remove"
+  echo "FAIL: no candidate was ever promoted — an owner script that discarded every candidate would pass the cases that discard"
   fails=$((fails + 1))
 fi
 
-# Both halves of the mechanism are in the gate's text, in the order that makes them mean anything:
-# the remote stamps the folder AFTER it clears it (a stamp written before the clear is erased with
-# it), and the local side asks the owner script AFTER the copy (asked before, it judges the folder
-# the copy is about to overwrite).
-clear_line="$(grep -n '^rm -rf .gate-artifacts && mkdir -p .gate-artifacts$' "$GATE" | head -n1 | cut -d: -f1)"
-stamp_line="$(grep -n '^printf .%s\\n. "\$GATE_RUN_TOKEN" > .gate-artifacts/run-token$' "$GATE" | head -n1 | cut -d: -f1)"
-if [ -n "$clear_line" ] && [ -n "$stamp_line" ] && [ "$stamp_line" -gt "$clear_line" ]; then
-  ok "the remote stamps its artifacts folder with this run's token after clearing it"
+# The startup cleanup (A1, A5, A6, A7). Driven through the gate itself, from outside any git tree,
+# with an explicit artifacts folder and no build host: the run is refused, and the refusal comes
+# after the cleanup, so an earlier run's candidate and staging are gone and each staging is named.
+start_art="$tmp/startup/artifacts"
+mkdir -p "$start_art/incoming-feedfacefeedface"
+printf 'MemosAPITests\t1\n' > "$start_art/testcount-baseline.tsv"
+printf 'MemosAPITests\t1\n' > "$start_art/incoming-feedfacefeedface/testcount-baseline.tsv"
+OUT="$(cd "$tmp/startup" && env -u MAC_GATE_HOST -u MAC_GATE_BRANCH MAC_GATE_ARTIFACTS="$start_art" "$GATE" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && [ ! -e "$start_art/testcount-baseline.tsv" ] && [ ! -e "$start_art/incoming-feedfacefeedface" ] \
+   && has "MAC_GATE_HOST is not set" \
+   && has "discarding abandoned staging $start_art/incoming-feedfacefeedface from an earlier run"; then
+  ok "a run refused for a missing host has already removed a stale candidate and named each abandoned staging folder it discarded"
 else
-  bad "the remote does not stamp its artifacts folder after clearing it (clear ${clear_line:-none}, stamp ${stamp_line:-none})"
+  bad "a run refused for a missing host left a stale candidate or staging folder, or did not name it (exit $RC)"; show
 fi
-copy_line="$(grep -n 'rsync -a -e ssh "\$host:\$target/.gate-artifacts/"' "$GATE" | head -n1 | cut -d: -f1)"
-owner_line="$(grep -n 'testcount-candidate-owner\.sh' "$GATE" | grep -v '^[0-9]*:[[:space:]]*#' | head -n1 | cut -d: -f1)"
-if [ -n "$copy_line" ] && [ -n "$owner_line" ] && [ "$owner_line" -gt "$copy_line" ]; then
-  ok "the copyback asks the owner script after its rsync (control: the rsync is on line $copy_line)"
+# A5: a cleanup that cannot remove the stale candidate refuses on its own line, naming the file, and
+# nothing after it runs — the host refusal that would follow never prints.
+printf 'MemosAPITests\t1\n' > "$start_art/testcount-baseline.tsv"
+chmod 555 "$start_art"
+OUT="$(cd "$tmp/startup" && env -u MAC_GATE_HOST -u MAC_GATE_BRANCH MAC_GATE_ARTIFACTS="$start_art" "$GATE" 2>&1)"; RC=$?
+chmod 755 "$start_art"
+if [ "$RC" -eq 2 ] && [ -f "$start_art/testcount-baseline.tsv" ] \
+   && has "stale candidate left in place — not this run's" && has "$start_art/testcount-baseline.tsv" \
+   && ! has "MAC_GATE_HOST is not set"; then
+  ok "a stale candidate the cleanup cannot remove refuses the run (exit 2), naming it, before anything else runs"
 else
-  bad "the copyback does not name the owner script after its rsync (rsync ${copy_line:-none}, owner ${owner_line:-none})"
+  bad "an unremovable stale candidate was answered with exit $RC, or not named, or later checks still ran"; show
 fi
-# The script's exit only fails anything if the copyback step records it, so the one record of that
-# step comes after the call and records the folded code.
-record_line="$(grep -n '^record copyback "\$copyback_rc"$' "$GATE" | head -n1 | cut -d: -f1)"
-if [ -n "$owner_line" ] && [ -n "$record_line" ] && [ "$record_line" -gt "$owner_line" ] \
+
+# Both halves of the mechanism are in the gate's text, in the order that makes them mean anything.
+first_code_line() { grep -n "$1" "$GATE" | grep -v '^[0-9]*:[[:space:]]*#' | head -n1 | cut -d: -f1; }
+# The cleanup's own refusals are the first calls in the text; every other refusal comes after it.
+art_line="$(first_code_line '\(^\|[[:space:]]\)artifacts="')"
+cleanup_line="$(first_code_line 'rm -f "\$artifacts/testcount-baseline.tsv"')"
+first_refusal="$(first_code_line 'die_refuse "')"
+refuse_line="$(grep -n 'die_refuse "' "$GATE" | grep -v '^[0-9]*:[[:space:]]*#' | grep -v 'left in place — not this run' | head -n1 | cut -d: -f1)"
+loop_line="$(first_code_line '^while \[ \$# -gt 0 \]; do$')"
+if [ -n "$art_line" ] && [ -n "$cleanup_line" ] && [ -n "$first_refusal" ] && [ -n "$refuse_line" ] && [ -n "$loop_line" ] \
+   && [ "$art_line" -lt "$first_refusal" ] && [ "$art_line" -lt "$cleanup_line" ] && [ "$cleanup_line" -lt "$first_refusal" ] \
+   && [ "$cleanup_line" -lt "$refuse_line" ] && [ "$cleanup_line" -lt "$loop_line" ]; then
+  ok "the artifacts folder is resolved, then cleaned, before the argument loop and the first refusal (control: first refusal on line $refuse_line)"
+else
+  bad "the startup order is not resolve, clean, then arguments and refusals (artifacts ${art_line:-none}, cleanup ${cleanup_line:-none}, loop ${loop_line:-none}, refusal ${refuse_line:-none})"
+fi
+removals="$(grep -v '^[[:space:]]*#' "$GATE" | grep -c 'rm -f "\$artifacts/testcount-baseline.tsv"')"
+if [ "$removals" -eq 1 ]; then
+  ok "the documented path is removed in exactly one place, the startup cleanup"
+else
+  bad "the documented path is removed in $removals places — a sweep outside the startup cleanup is back, or the cleanup is gone"
+fi
+if grep -q "^rm -rf .gate-artifacts && mkdir -p .gate-artifacts && printf '%s\\\\n' \"\$GATE_RUN_TOKEN\" > .gate-artifacts/run-token || " "$GATE" \
+   && ! grep -q '^printf .%s\\n. "\$GATE_RUN_TOKEN" > .gate-artifacts/run-token$' "$GATE"; then
+  ok "the remote stamp is on the same && chain as the clear, and that chain's failure is handled"
+else
+  bad "the remote stamp is not on the clear's && chain, or a separate stamp line remains"
+fi
+copy_line="$(first_code_line '^rsync -a -e ssh "\$host:\$target/.gate-artifacts/" "\$artifacts/incoming-\$RUN_TOKEN/"')"
+staged_line="$(first_code_line '^say "copyback: staged in ')"
+owner_line="$(first_code_line '^  "\$candidate_owner" "\$staging" "\$artifacts" "\$RUN_TOKEN"')"
+record_line="$(first_code_line '^record copyback "\$copyback_rc"$')"
+if [ -n "$copy_line" ] && [ -n "$staged_line" ] && [ -n "$owner_line" ] && [ -n "$record_line" ] \
+   && [ "$copy_line" -lt "$staged_line" ] && [ "$staged_line" -lt "$owner_line" ] && [ "$owner_line" -lt "$record_line" ] \
+   && grep -q '^staging="\$artifacts/incoming-\$RUN_TOKEN"$' "$GATE" \
    && grep -q '^  owner_rc="\${PIPESTATUS\[0\]}"$' "$GATE"; then
-  ok "the copyback step records the owner script's exit, after asking it"
+  ok "the copy lands in incoming-<token>, the staging line follows it, the owner script follows that, and the step records its exit last"
 else
-  bad "the copyback step does not record the owner script's exit after the call (owner ${owner_line:-none}, record ${record_line:-none})"
+  bad "the copyback order is not rsync to incoming-, staged line, owner call, record (rsync ${copy_line:-none}, staged ${staged_line:-none}, owner ${owner_line:-none}, record ${record_line:-none})"
+fi
+# A3: one copyback serves both modes. One copy of the artifacts folder, one owner call, one record,
+# all at the top level, and no top-level exit between the remote's return and the copy.
+n_copy="$(grep -v '^[[:space:]]*#' "$GATE" | grep -c 'rsync .*\.gate-artifacts/"')"
+n_owner="$(grep -v '^[[:space:]]*#' "$GATE" | grep -c '"\$candidate_owner" "')"
+n_record="$(grep -c '^record copyback ' "$GATE")"
+remote_ret="$(first_code_line '^remote_rc="\${PIPESTATUS\[1\]}"$')"
+early_exit=""
+if [ -n "$remote_ret" ] && [ -n "$copy_line" ]; then
+  early_exit="$(sed -n "${remote_ret},${copy_line}p" "$GATE" | grep -nE '^(exit|end_run|summary_and_exit|quick_summary_and_exit)\b' | head -n1)"
+fi
+if [ "$n_copy" -eq 1 ] && [ "$n_owner" -eq 1 ] && [ "$n_record" -eq 1 ] && [ -n "$remote_ret" ] && [ -n "$copy_line" ] \
+   && [ -z "$early_exit" ]; then
+  ok "quick and full runs reach the one copyback: one rsync, one owner call, one record, no exit after the remote returns (control: remote returns on line $remote_ret)"
+else
+  bad "the copyback is not one block both modes reach (rsync $n_copy, owner $n_owner, record $n_record, remote ${remote_ret:-none}, early exit: ${early_exit:-none})"
 fi
 
 # --- verdict ----------------------------------------------------------------------------------------
