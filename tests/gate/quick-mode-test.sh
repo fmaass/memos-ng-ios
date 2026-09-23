@@ -87,7 +87,7 @@ refuse "--bundle with a trailing space"      "contains whitespace"              
 
 # --- the fixture ----------------------------------------------------------------------------------
 # A repository shaped like this one in the only ways the local half of the gate reads: a HEAD, an
-# origin/main to measure against, a project.yml with the version keys, the two named selftests and
+# origin/main to measure against, a project.yml with the version keys, the named selftests and
 # the lane reaper the preflight script carries over.
 new_repo() {
   local name="$1" work="$tmp/$1" origin="$tmp/$1.git"
@@ -108,7 +108,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok"\nexit 0\n' "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
   done

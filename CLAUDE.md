@@ -45,8 +45,29 @@ uncommented line — neither save call site can be reached from a test, both bei
 behind a sheet that never presents — with the `attaching:` forwarding beside it as the control) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
-exclusions, with the operation count it read as the control) → a
-per-bundle test-count check. It ends with one summary line of every step's exit code and
+exclusions, with the operation count it read as the control) → the
+per-bundle test-count check, which asks two questions: whether every bundle EXECUTED at least one
+case, and whether each bundle's executed count is still at or above the row
+`tests/gate/testcount-baseline.tsv` records for it (`bundle<TAB>count`, one row per bundle, no
+header; the arithmetic is `scripts/testcount-verdict.sh`). A count below its row fails the step
+naming the bundle, the baseline and the observed count. Equal or above passes, and a rise never
+asks for the baseline to be touched. The baseline must name exactly the bundles the run wanted,
+neither short of one nor naming one more, so a run whose bundle list differs from the tracked
+baseline fails at testcount, and that is intended: the full gate's verdict is only valid over the
+default bundle list, and adding or removing a bundle re-records the baseline in the same change. A
+baseline that is absent, unreadable or malformed fails too — a count nobody recorded is not a zero.
+What the comparison catches is the loss of a test that RAN: it does not catch the deletion of a
+test that was skipped, nor a reduction that stays inside headroom accumulated since the baseline
+was last recorded — and because the baseline is re-recorded from a branch's final tree before it
+merges, headroom at a merge is zero. Every run that obtained the counts writes them to
+`.gate-artifacts/testcount-baseline.tsv` before any of them is judged, so a deliberate reduction is
+recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
+never by hand; a run that never obtained counts — no result bundle, a failing `xcresulttool`, JSON
+it cannot parse or walk — exits non-zero and leaves no candidate, and a step that an earlier
+failing step skipped leaves nothing behind either.
+Changing that tracked file is a reviewed act that an audit of the change has to see and justify — a
+reduction is named in the change that makes it, with the tests it retired — and no mechanism in the
+gate accepts or rejects a baseline change on its own. It ends with one summary line of every step's exit code and
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
 
