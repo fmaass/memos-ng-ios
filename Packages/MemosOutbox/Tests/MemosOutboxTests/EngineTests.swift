@@ -617,6 +617,95 @@ struct AdoptionOrderingTests {
         #expect(harness.scheduler.cancellations == [task])
     }
 
+    /// A chunk answer is the engine's own entry point, so it can land while `reconcile` waits for
+    /// the session to list its tasks: the answer moves the row on and hands the successor task
+    /// over, and the list then names that successor. Planned against a row read BEFORE the wait,
+    /// the successor looks like a task at an offset or term the job never asked for, and a live
+    /// transfer is torn down for a reason that stopped being true while the list was being read.
+    @Test(
+        "a successor handed over while the tasks are listed is adopted, not cancelled",
+        arguments: ["the cursor advanced", "the attempt was bumped"]
+    )
+    func aSuccessorHandedOverMidEnumerationIsNotCancelled(handOff: String) async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].chunkSize = 400
+        job.files[0].bytesConfirmed = 400
+        job.files[0].uploadAttempt = 1
+        job.state = .uploading
+        try await harness.repository.save(job)
+        var moved = job
+        if handOff == "the cursor advanced" {
+            moved.files[0].bytesConfirmed = 800
+        } else {
+            moved.files[0].uploadAttempt = 2
+        }
+        let successor = OutboxTaskIdentity(
+            jobID: job.id, fileID: job.files[0].id, offset: moved.files[0].bytesConfirmed,
+            attempt: moved.files[0].uploadAttempt)
+        #expect(
+            OutboxReconciliation.plan(jobs: [job], inFlight: [successor]).cancelled == [successor],
+            "control: against the row as it stood before the hand-off, the successor is a misfit")
+        let handedOver = moved
+        let repository = harness.repository
+        let scheduler = harness.scheduler
+        scheduler.beforeInFlight = {
+            do {
+                try await repository.save(handedOver)
+            } catch {
+                Issue.record("the hand-off could not write its row: \(error)")
+            }
+            scheduler.pretend(inFlight: [successor])
+        }
+
+        let plan = try await harness.engine.reconcile()
+
+        #expect(harness.scheduler.cancellations.isEmpty, "a live successor was cancelled")
+        #expect(plan.adopted == [successor])
+        #expect(plan.drainable.isEmpty, "a job with its successor in flight was offered to a drain")
+    }
+
+    /// The mirror of the case above: the answer lands AFTER the tasks were listed and before the
+    /// rows are read. The list still names the chunk that was just answered, the rows already name
+    /// the successor that answer handed over, and nothing on the list matches them — so the job
+    /// looks idle, a drain is offered it, and the successor's bytes go on the wire a second time.
+    @Test("a successor handed over after the tasks were listed is not sent a second time")
+    func aSuccessorHandedOverAfterEnumerationIsNotSentTwice() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let first = try #require(harness.scheduler.uploads.first)
+        #expect(first.identity.offset == 0, "control: the drain sent the chunk at offset 0")
+        harness.scheduler.pretend(inFlight: [first.identity])
+        let engine = harness.engine
+        let scheduler = harness.scheduler
+        scheduler.afterInFlight = {
+            await engine.handle(
+                ChunkResult(
+                    identity: first.identity,
+                    statusCode: 200,
+                    body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+                )
+            )
+            if let successor = scheduler.uploads.last?.identity {
+                scheduler.pretend(inFlight: [successor])
+            }
+        }
+
+        await harness.engine.drain()
+
+        let atSuccessor = harness.scheduler.uploads.filter { $0.identity.offset == 400 }
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 400,
+            "control: the answer reached the cursor inside the gap")
+        #expect(atSuccessor.count == 1, "the successor's chunk went on the wire twice")
+        let successor = try #require(atSuccessor.first).identity
+        #expect(
+            !harness.scheduler.cancellations.contains(successor), "a live successor was cancelled")
+    }
+
     /// G3. The replay used to run in a Task nobody waited on, and a drain can start beside it. The
     /// two are not siblings, so `isDraining` does not exclude them from each other, and the
     /// interleaving is a lost cursor: the drain retains a job at offset 0 and awaits its probe, the

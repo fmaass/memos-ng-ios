@@ -38,6 +38,12 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// because every request means the same thing — look at the queue again — so one more pass
     /// answers all of them.
     private var drainRequested = false
+    /// Moves on every hand-off and every answer, so `reconcile` can tell a pair of snapshots that
+    /// nothing moved under from one that something did.
+    private var handOffGeneration = 0
+    /// Answers and hand-offs still running: either can have written a row that names a task no
+    /// list can show yet, or be about to hand over one for a row already on disk.
+    private var handOffsInProgress = 0
     /// The jobs a `release` is running for, claimed synchronously before its first hop. A second
     /// release for one already releasing is REFUSED, not joined: the first call owns this job's
     /// next term, whether it has minted it yet or not, and a second bump would mint one for a
@@ -93,12 +99,32 @@ public actor OutboxEngine: OutboxChunkHandling {
             lastPersistenceFailure =
                 "The queue's housekeeping could not run on this device (lock error \(code))."
         }
-        let jobs = try await repository.loadJobs()
-        let plan = OutboxReconciliation.plan(jobs: jobs, inFlight: await scheduler.inFlight())
-        if !plan.cancelled.isEmpty {
-            await scheduler.cancel(plan.cancelled)
+        // An answer or a hand-off can land in either wait below: between the rows and the list it
+        // gets a live successor cancelled, between the list and the rows it gets a job whose
+        // successor is live drained a second time. So a pair counts only if nothing moved under it.
+        var adopted: [OutboxTaskIdentity] = []
+        for _ in 0..<40 {
+            let generation = handOffGeneration
+            guard handOffsInProgress == 0 else {
+                // Long enough in total for a chunk to be sliced and handed over.
+                try? await Task.sleep(for: .milliseconds(25))
+                continue
+            }
+            let inFlight = await scheduler.inFlight()
+            let jobs = try await repository.loadJobs()
+            let plan = OutboxReconciliation.plan(jobs: jobs, inFlight: inFlight)
+            guard generation == handOffGeneration, handOffsInProgress == 0 else {
+                adopted = plan.adopted
+                continue
+            }
+            if !plan.cancelled.isEmpty {
+                await scheduler.cancel(plan.cancelled)
+            }
+            return plan
         }
-        return plan
+        // Never settled: nothing is torn down or re-sent on a pair that kept moving; the next pass
+        // reconciles.
+        return ReconciliationPlan(adopted: adopted, cancelled: [], drainable: [])
     }
 
     // MARK: - draining
@@ -431,6 +457,12 @@ public actor OutboxEngine: OutboxChunkHandling {
         length: Int,
         credentials: OutboxCredentials
     ) async {
+        handOffGeneration += 1
+        handOffsInProgress += 1
+        defer {
+            handOffsInProgress -= 1
+            handOffGeneration += 1
+        }
         guard let file = job.file(fileID), let uploadUID = file.uploadUID else { return }
         let chunk: URL
         do {
@@ -711,6 +743,7 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// and needs a credential only for the parts that talk to the server again. A byte count
     /// thrown away because nobody was signed in yet is a chunk re-uploaded for no reason.
     public func handle(_ result: ChunkResult) async {
+        handOffGeneration += 1
         guard let job = await repository.job(result.identity.jobID) else { return }
         // A capture a person has taken back to the editor: the bytes this answer reports are no
         // longer the queue's business, and banking them would move a manifest the editor holds.
@@ -806,6 +839,13 @@ public actor OutboxEngine: OutboxChunkHandling {
         // The cursor moves HERE or not at all. Going on to the next chunk from a count only this
         // process holds is what makes the server's answer to it unusable: `handle` matches an
         // answer against the offset on disk, and one that no longer matches is thrown away.
+        // From its write on, this answer's row can name a successor no list shows yet. Not before:
+        // a "Try again" can drain inside the credential wait above, and must not wait on it.
+        handOffsInProgress += 1
+        defer {
+            handOffsInProgress -= 1
+            handOffGeneration += 1
+        }
         let written: UploadJob?
         if let refused {
             // `job` is the manifest as it stood when this answer was matched against it, at the top

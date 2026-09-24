@@ -90,6 +90,7 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     private var cancelled: [OutboxTaskIdentity] = []
     private var pretendInFlight: [OutboxTaskIdentity]
     private var park: (@Sendable () async -> Void)?
+    private var parkAfter: (@Sendable () async -> Void)?
 
     init(inFlight: [OutboxTaskIdentity] = []) {
         self.pretendInFlight = inFlight
@@ -120,7 +121,22 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
             return taken
         }
         await hook?()
-        return lock.withLock { pretendInFlight }
+        let listed = lock.withLock { pretendInFlight }
+        let after = lock.withLock {
+            let taken = parkAfter
+            parkAfter = nil
+            return taken
+        }
+        await after?()
+        return listed
+    }
+
+    /// Run INSIDE `inFlight()` once the list is taken but before it is handed back, so a test can
+    /// put a hand-off between the caller's enumeration and whatever it reads next; only the first
+    /// enumeration runs it.
+    var afterInFlight: (@Sendable () async -> Void)? {
+        get { lock.withLock { parkAfter } }
+        set { lock.withLock { parkAfter = newValue } }
     }
 
     /// Run INSIDE `inFlight()` before it answers, so a test can put a second call into the hop the
