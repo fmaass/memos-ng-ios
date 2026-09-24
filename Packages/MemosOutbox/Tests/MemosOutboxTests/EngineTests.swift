@@ -667,6 +667,45 @@ struct AdoptionOrderingTests {
         #expect(plan.drainable.isEmpty, "a job with its successor in flight was offered to a drain")
     }
 
+    /// The mirror of the case above: the answer lands AFTER the tasks were listed and before the
+    /// rows are read. The list still names the chunk that was just answered, the rows already name
+    /// the successor that answer handed over, and nothing on the list matches them — so the job
+    /// looks idle, a drain is offered it, and the successor's bytes go on the wire a second time.
+    @Test("a successor handed over after the tasks were listed is not sent a second time")
+    func aSuccessorHandedOverAfterEnumerationIsNotSentTwice() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        let first = try #require(harness.scheduler.uploads.first)
+        #expect(first.identity.offset == 0, "control: the drain sent the chunk at offset 0")
+        harness.scheduler.pretend(inFlight: [first.identity])
+        let engine = harness.engine
+        let scheduler = harness.scheduler
+        scheduler.afterInFlight = {
+            await engine.handle(
+                ChunkResult(
+                    identity: first.identity,
+                    statusCode: 200,
+                    body: Data(#"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#.utf8)
+                )
+            )
+            if let successor = scheduler.uploads.last?.identity {
+                scheduler.pretend(inFlight: [successor])
+            }
+        }
+
+        await harness.engine.drain()
+
+        let atSuccessor = harness.scheduler.uploads.filter { $0.identity.offset == 400 }
+        #expect(
+            try #require(await harness.reload()).files[0].bytesConfirmed == 400,
+            "control: the answer reached the cursor inside the gap")
+        #expect(atSuccessor.count == 1, "the successor's chunk went on the wire twice")
+        let successor = try #require(atSuccessor.first).identity
+        #expect(
+            !harness.scheduler.cancellations.contains(successor), "a live successor was cancelled")
+    }
+
     /// G3. The replay used to run in a Task nobody waited on, and a drain can start beside it. The
     /// two are not siblings, so `isDraining` does not exclude them from each other, and the
     /// interleaving is a lost cursor: the drain retains a job at offset 0 and awaits its probe, the
