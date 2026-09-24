@@ -617,6 +617,56 @@ struct AdoptionOrderingTests {
         #expect(harness.scheduler.cancellations == [task])
     }
 
+    /// A chunk answer is the engine's own entry point, so it can land while `reconcile` waits for
+    /// the session to list its tasks: the answer moves the row on and hands the successor task
+    /// over, and the list then names that successor. Planned against a row read BEFORE the wait,
+    /// the successor looks like a task at an offset or term the job never asked for, and a live
+    /// transfer is torn down for a reason that stopped being true while the list was being read.
+    @Test(
+        "a successor handed over while the tasks are listed is adopted, not cancelled",
+        arguments: ["the cursor advanced", "the attempt was bumped"]
+    )
+    func aSuccessorHandedOverMidEnumerationIsNotCancelled(handOff: String) async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].chunkSize = 400
+        job.files[0].bytesConfirmed = 400
+        job.files[0].uploadAttempt = 1
+        job.state = .uploading
+        try await harness.repository.save(job)
+        var moved = job
+        if handOff == "the cursor advanced" {
+            moved.files[0].bytesConfirmed = 800
+        } else {
+            moved.files[0].uploadAttempt = 2
+        }
+        let successor = OutboxTaskIdentity(
+            jobID: job.id, fileID: job.files[0].id, offset: moved.files[0].bytesConfirmed,
+            attempt: moved.files[0].uploadAttempt)
+        #expect(
+            OutboxReconciliation.plan(jobs: [job], inFlight: [successor]).cancelled == [successor],
+            "control: against the row as it stood before the hand-off, the successor is a misfit")
+        let handedOver = moved
+        let repository = harness.repository
+        let scheduler = harness.scheduler
+        scheduler.beforeInFlight = {
+            do {
+                try await repository.save(handedOver)
+            } catch {
+                Issue.record("the hand-off could not write its row: \(error)")
+            }
+            scheduler.pretend(inFlight: [successor])
+        }
+
+        let plan = try await harness.engine.reconcile()
+
+        #expect(harness.scheduler.cancellations.isEmpty, "a live successor was cancelled")
+        #expect(plan.adopted == [successor])
+        #expect(plan.drainable.isEmpty, "a job with its successor in flight was offered to a drain")
+    }
+
     /// G3. The replay used to run in a Task nobody waited on, and a drain can start beside it. The
     /// two are not siblings, so `isDraining` does not exclude them from each other, and the
     /// interleaving is a lost cursor: the drain retains a job at offset 0 and awaits its probe, the

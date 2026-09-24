@@ -93,8 +93,10 @@ public actor OutboxEngine: OutboxChunkHandling {
             lastPersistenceFailure =
                 "The queue's housekeeping could not run on this device (lock error \(code))."
         }
+        // Tasks first: a hand-off saves its row before its task, so rows read after cover the list.
+        let inFlight = await scheduler.inFlight()
         let jobs = try await repository.loadJobs()
-        let plan = OutboxReconciliation.plan(jobs: jobs, inFlight: await scheduler.inFlight())
+        let plan = OutboxReconciliation.plan(jobs: jobs, inFlight: inFlight)
         if !plan.cancelled.isEmpty {
             await scheduler.cancel(plan.cancelled)
         }
