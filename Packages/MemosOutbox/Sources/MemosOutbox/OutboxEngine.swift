@@ -41,8 +41,8 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// Moves on every hand-off and every answer, so `reconcile` can tell a pair of snapshots that
     /// nothing moved under from one that something did.
     private var handOffGeneration = 0
-    /// Hand-offs between their `.uploading` write and the session taking the task: a row that
-    /// already names a task no list can show yet.
+    /// Answers and hand-offs still running: either can have written a row that names a task no
+    /// list can show yet, or be about to hand over one for a row already on disk.
     private var handOffsInProgress = 0
     /// The jobs a `release` is running for, claimed synchronously before its first hop. A second
     /// release for one already releasing is REFUSED, not joined: the first call owns this job's
@@ -103,10 +103,11 @@ public actor OutboxEngine: OutboxChunkHandling {
         // gets a live successor cancelled, between the list and the rows it gets a job whose
         // successor is live drained a second time. So a pair counts only if nothing moved under it.
         var adopted: [OutboxTaskIdentity] = []
-        for _ in 0..<8 {
+        for _ in 0..<40 {
             let generation = handOffGeneration
             guard handOffsInProgress == 0 else {
-                await Task.yield()
+                // Long enough in total for a chunk to be sliced and handed over.
+                try? await Task.sleep(for: .milliseconds(25))
                 continue
             }
             let inFlight = await scheduler.inFlight()
@@ -838,6 +839,13 @@ public actor OutboxEngine: OutboxChunkHandling {
         // The cursor moves HERE or not at all. Going on to the next chunk from a count only this
         // process holds is what makes the server's answer to it unusable: `handle` matches an
         // answer against the offset on disk, and one that no longer matches is thrown away.
+        // From its write on, this answer's row can name a successor no list shows yet. Not before:
+        // a "Try again" can drain inside the credential wait above, and must not wait on it.
+        handOffsInProgress += 1
+        defer {
+            handOffsInProgress -= 1
+            handOffGeneration += 1
+        }
         let written: UploadJob?
         if let refused {
             // `job` is the manifest as it stood when this answer was matched against it, at the top
