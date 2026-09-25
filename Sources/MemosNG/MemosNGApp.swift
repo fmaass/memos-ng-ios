@@ -73,6 +73,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     /// the drain acts on the object it was given, and a switch it never hears about is a switch
     /// that only takes effect on the next launch.
     private(set) var uploadSettings: UploadSettings?
+    /// The two lifecycle observers feeding the outbox's scheduling gate, kept for the life of the
+    /// process.
+    private var lifecycleObservers: [any NSObjectProtocol] = []
 
     func application(
         _ application: UIApplication,
@@ -96,6 +99,22 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // with the server's own byte count in it. Nothing here waits on a session: recording what
         // already happened is not a send.
         if let outbox { Task { @MainActor in await outbox.adopt() } }
+        // New work starts only while the app is active (decision 9): a wake finishes what the
+        // system already holds and sends a finished capture's memo, nothing more. The UIApplication
+        // notifications rather than the delegate methods, which a scene-based app is not sent.
+        // Both close and open synchronously, on the main queue they are delivered on.
+        lifecycleObservers = [
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { _ = self.outbox?.appBecameActive() }
+            },
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { self.outbox?.appEnteredBackground() }
+            },
+        ]
         // Registration has to happen before launch finishes, whatever else is true of this
         // launch. The queue is named EXPLICITLY: with `nil` the system delivers the launch handler
         // on a background queue, where assuming main-actor isolation is a trap rather than a hop —
@@ -111,20 +130,32 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         return true
     }
 
-    /// The system woke the app because a background upload finished. The completion handler is
-    /// stored for the session's delegate to fire once it has drained its events — calling it early
-    /// is how an app stops being woken at all.
+    /// The system woke the app because a background upload finished, on either of the outbox's
+    /// sessions. The completion handler is held under that session's identifier until the session
+    /// has drained its events AND this wake's own work is over — calling it early is how an app
+    /// stops being woken at all (`OutboxBackgroundCompletion`).
     func application(
         _ application: UIApplication,
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
-        guard identifier == OutboxSession.identifier else {
+        let wake = OutboxBackgroundCompletion.shared.beginWake(
+            for: identifier, handler: completionHandler
+        )
+        guard let wake else {
             completionHandler()
             return
         }
-        OutboxBackgroundCompletion.shared.store(completionHandler)
-        Task { @MainActor in await self.startOutbox() }
+        Task { @MainActor in await self.startOutbox(holding: wake) }
+    }
+
+    /// `startOutbox`, holding the system's handlers until the outbox is quiescent.
+    private func startOutbox(holding wake: WakeWork) async {
+        guard let outbox else {
+            wake.leave()
+            return
+        }
+        await outbox.wake(holding: wake) { await self.startOutbox() }
     }
 
     /// Everything a background launch has to do before the queue can move.
@@ -164,6 +195,8 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         scheduleRefresh()
 
         let run = BackgroundRun()
+        // Entered BEFORE the work starts, so a session's handler held meanwhile waits for it too.
+        let wake = OutboxBackgroundCompletion.shared.enterWake()
         // Set BEFORE the work starts. The system may expire a task the moment it hands it over,
         // and whichever of the two arrives first, the system is told exactly once — never twice,
         // and never not at all, which is what gets an app's background time taken away.
@@ -173,7 +206,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         }
         run.attach(
             Task { @MainActor in
-                await self.startOutbox()
+                await self.startOutbox(holding: wake)
                 if run.claimCompletion() {
                     task.setTaskCompleted(success: !Task.isCancelled)
                 }
