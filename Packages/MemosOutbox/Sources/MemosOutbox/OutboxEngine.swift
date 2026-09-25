@@ -10,11 +10,14 @@ import Foundation
 /// one chunk is in flight per job, and its offset comes from the server's own count, never from
 /// local arithmetic. And a job leaves the outbox on ONE condition — the memo was created with
 /// every original linked to it; everything else is a retry, and nothing is ever dropped.
-public actor OutboxEngine: OutboxChunkHandling {
+public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// A ceiling on how many decisions one job may take in a single pass. It is not a retry limit
     /// (there is none): it stops a server that keeps answering "recover this" from spinning the
     /// drain, and hands the job to the ordinary backoff instead.
     static let maxStepsPerPass = 32
+    /// How many times one whole-lane advance plans again after the listing hop saw `owned` move,
+    /// before it hands the row to another drain instead.
+    static let maxPlanRestarts = 4
 
     /// The jobs holding this launch's one PATCH claim. In memory on purpose: it is the claim that
     /// keeps two invocations inside one launch from being two requests, and a relaunch is meant to
@@ -63,6 +66,33 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// Whether the app may start new work. Consulted here only as an early skip; the fence is the
     /// sender, which asks it through the authority a work send carries (`SendPurpose.work`).
     private let schedulingGate: SchedulingGate
+    /// The whole lane's session, when this engine is composed with one. Without it no capture is
+    /// ever put on the whole lane, which keeps every composition that predates it unchanged.
+    private let uploads: (any OutboxUploadScheduling)?
+    /// Whole tasks handed to `replace`, by identifier, with the file each was carrying. Their own
+    /// answers are superseded by the successor's term, whenever they arrive — a cancelled task
+    /// still answers, without a status.
+    private var replacing: [Int: WholeFileRef] = [:]
+    /// Files something in this engine is working on right now, counted: an answer being applied,
+    /// a hand-off that has not yet given the file its task, or a replacement from the call to
+    /// `replace` until the scheduler reports it settled — deferral and successor included. Such
+    /// a file is never a candidate to send again — its task can be finished and gone from the list
+    /// while the success it produced is still on its way to disk, and a retry then would move the
+    /// file's term past that success and throw it away. Claimed synchronously, before any hop.
+    private var owned: [WholeFileRef: Int] = [:]
+    /// Moves on every claim and every release in `owned`. A pass that read the task listing across
+    /// a hop compares it: unchanged, the listing and `owned` describe one instant; moved, a claim
+    /// or a settlement landed inside the hop — a successor created and released, say — and the
+    /// listing may be missing the very task that now carries the file.
+    private var ownershipGeneration = 0
+    /// Whole tasks whose terminal answer has reached `handle` in this launch. A listed task counts
+    /// as carrying its file — whatever its term, `.canceling` included — until it is here, is
+    /// listed as completed, or is gone from a fresh listing. Keyed by task, naming its row, and
+    /// pruned once a listing no longer names the task or its row is gone, released or abandoned,
+    /// so it does not grow with the life of the process.
+    private(set) var ended: [Int: UUID] = [:]
+    /// Drains `requestDrain` has started that have not begun yet, so quiescence waits for them.
+    private var drainsKicked = 0
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -84,9 +114,11 @@ public actor OutboxEngine: OutboxChunkHandling {
         preferences: UploadPreferences,
         clock: @escaping @Sendable () -> Date = Date.init,
         onChange: @escaping @Sendable () async -> Void = {},
-        schedulingGate: SchedulingGate = SchedulingGate()
+        schedulingGate: SchedulingGate = SchedulingGate(),
+        uploads: (any OutboxUploadScheduling)? = nil
     ) {
         self.schedulingGate = schedulingGate
+        self.uploads = uploads
         self.repository = repository
         self.credentials = credentials
         self.http = http
@@ -105,6 +137,38 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// scheduled — that ordering is what keeps a relaunch from uploading the same bytes twice.
     @discardableResult
     public func reconcile() async throws -> ReconciliationPlan {
+        let plan = try await reconcileChunks()
+        try await reconcileWhole()
+        return plan
+    }
+
+    /// The whole lane's half of `reconcile`: a task this lane cannot read, and a task no row needs
+    /// any more, are cancelled. Cancelling sends nothing, so it is not new work and a wake does it
+    /// too. A file whose record has no task is left to the planner, which sends it again only while
+    /// scheduling is open.
+    private func reconcileWhole() async throws {
+        guard let uploads, handOffsInProgress == 0 else { return }
+        let generation = handOffGeneration
+        let owners = ownershipGeneration
+        let answeredBefore = Set(ended.keys)
+        let unreadable = Set(await uploads.cancelUnreadable())
+        let tasks = await uploads.tasks()
+        let jobs = try await repository.loadJobs()
+        pruneEnded(answeredBefore, listing: tasks, rows: Set(jobs.map(\.id)))
+        // The same rule as the chunk lane's: a pair something moved under is not acted on — and a
+        // replacement settling in between is such a move, its successor possibly in neither read.
+        guard generation == handOffGeneration, owners == ownershipGeneration,
+            handOffsInProgress == 0
+        else { return }
+        let stale = WholeReconciliation.plan(jobs: jobs, tasks: tasks).cancelled.filter {
+            !unreadable.contains($0) && replacing[$0] == nil
+        }
+        if !stale.isEmpty {
+            await uploads.cancel(stale)
+        }
+    }
+
+    private func reconcileChunks() async throws -> ReconciliationPlan {
         switch try await repository.sweepOrphans() {
         case .swept, .deferred(.contended):
             // A pass that deferred deleted nothing, which costs disk and never correctness:
@@ -187,6 +251,24 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     private var isQuiescent: Bool {
         !isDraining && !drainRequested && continuationsInFlight == 0 && creating.isEmpty
+            && drainsKicked == 0
+    }
+
+    /// Asks for another pass without waiting for it: folded into the running drain when there is
+    /// one, started on its own otherwise. Never awaited from inside other work — a pass run inline
+    /// would meet that work's own in-progress marks and give up on the row it was asked for.
+    private func requestDrain() {
+        guard !isDraining else {
+            drainRequested = true
+            return
+        }
+        drainsKicked += 1
+        Task { await self.kickedDrain() }
+    }
+
+    private func kickedDrain() async {
+        drainsKicked -= 1
+        await drain()
     }
 
     /// Wakes every waiter so each asks again; the loop in `untilQuiescent` is the judge.
@@ -244,6 +326,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             await onChange()
             return
         }
+        await replaceMismatched(credentials)
         for job in candidates {
             await advance(job, credentials: credentials)
         }
@@ -280,6 +363,8 @@ public actor OutboxEngine: OutboxChunkHandling {
             await onChange()
             return
         }
+        // Released: its ended tasks are behind the new terms and are forgotten.
+        pruneEnded(of: jobID)
         // Only the tasks this retry left behind. A task already carrying the attempt the write
         // above minted IS the replacement — cancelling it would tear down the transfer this call
         // exists to start. A legacy task carries no attempt at all and is never the replacement.
@@ -288,6 +373,18 @@ public actor OutboxEngine: OutboxChunkHandling {
             inFlight: await scheduler.inFlight(), bumped: bumped, jobID: jobID)
         if !live.isEmpty {
             await scheduler.cancel(live)
+        }
+        if let uploads {
+            let superseded = await uploads.tasks().compactMap { listing -> Int? in
+                guard let task = WholeTaskIdentity(taskDescription: listing.taskDescription),
+                    task.jobID == jobID,
+                    (saved.file(task.fileID)?.uploadAttempt ?? 0) != task.attempt
+                else { return nil }
+                return listing.taskIdentifier
+            }
+            if !superseded.isEmpty {
+                await uploads.cancel(superseded)
+            }
         }
         await onChange()
     }
@@ -353,6 +450,10 @@ public actor OutboxEngine: OutboxChunkHandling {
                 }
                 // A file still needs its bytes, or the backoff has not run out. The planner below
                 // uploads or waits, whichever it is, and a later pass re-enters here.
+            }
+            if uploads != nil, current.lane == .whole || Self.claimsWhole(current) {
+                await advanceWhole(current, credentials: credentials)
+                return
             }
             switch OutboxPlanner.nextAction(
                 for: current, credentials: credentials, now: clock()
@@ -456,9 +557,11 @@ public actor OutboxEngine: OutboxChunkHandling {
     ///
     /// Written down only when the manifest does not already say it, so a phone that stays on
     /// mobile data for a week does not rewrite every manifest on every drain.
-    private func waitForNetwork(_ job: UploadJob) async {
-        guard job.state != .waiting || job.waitReason != .homeNetwork else { return }
-        await save(job.waitingForNetwork(), matching: job)
+    /// - Returns: false when the fence refused the write: the row moved and says something else.
+    @discardableResult
+    private func waitForNetwork(_ job: UploadJob) async -> Bool {
+        guard job.state != .waiting || job.waitReason != .homeNetwork else { return true }
+        return await save(job.waitingForNetwork(), matching: job) != nil
     }
 
     // MARK: - the four calls
@@ -832,8 +935,17 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// this — so that nothing is ever torn down on a state nobody wrote.
     public func abandonTasks(jobID: UUID) async {
         let live = await scheduler.inFlight().filter { $0.jobID == jobID }
-        guard !live.isEmpty else { return }
-        await scheduler.cancel(live)
+        if !live.isEmpty {
+            await scheduler.cancel(live)
+        }
+        guard let uploads else { return }
+        let whole = await uploads.tasks().compactMap { listing -> Int? in
+            WholeTaskIdentity(taskDescription: listing.taskDescription)?.jobID == jobID
+                ? listing.taskIdentifier : nil
+        }
+        if !whole.isEmpty {
+            await uploads.cancel(whole)
+        }
     }
 
     // MARK: - chunk answers
@@ -995,6 +1107,486 @@ public actor OutboxEngine: OutboxChunkHandling {
         await onChange()
     }
 
+    // MARK: - the whole lane
+
+    /// Whether a row nothing has started yet goes on the whole lane when this engine carries one.
+    ///
+    /// Claimed at the first hand-off rather than at enqueue, so a row an older build or the share
+    /// extension wrote needs no change of its own. A row any file of which already has a session
+    /// began on the chunk lane and finishes there, and a row owed an edit is left to that path.
+    static func claimsWhole(_ job: UploadJob) -> Bool {
+        job.transport == nil && !job.files.isEmpty
+            && job.files.allSatisfy { $0.uploadUID == nil }
+            && job.resolvedMemoUID == nil && job.pendingEdit == nil && job.state != .creating
+    }
+
+    /// One whole-lane capture's next step. Every file it sends goes in ONE hand-off, so a
+    /// background wake only has answers to collect and a memo to create.
+    private func advanceWhole(_ job: UploadJob, credentials: OutboxCredentials) async {
+        guard let uploads else { return }
+        for _ in 0...Self.maxPlanRestarts {
+            guard await passWhole(job.id, credentials: credentials, on: uploads) else { return }
+        }
+        // Every plan met a queue that moved under it: another drain, asked for and not awaited —
+        // the caller may be an answer still holding its in-progress marks.
+        requestDrain()
+    }
+
+    /// One plan for one whole-lane row, carried out. True when it must be planned again: a claim
+    /// or a release in `owned` landed while the row and the listing were being read, so the two
+    /// no longer describe one instant.
+    private func passWhole(
+        _ jobID: UUID, credentials: OutboxCredentials, on uploads: any OutboxUploadScheduling
+    ) async -> Bool {
+        // Taken before the row and the listing are read, and compared once both are in hand.
+        let observed = ownershipGeneration
+        // Planned from the row as it stands now, not the caller's copy: a replacement or an answer
+        // may have moved a file's term since, and a plan from the older copy opens a session on
+        // the server that its fenced write then refuses.
+        guard var current = await repository.job(jobID) else { return false }
+        for _ in 0..<Self.maxStepsPerPass {
+            guard current.cancelledAt == nil, mayStillSend(credentials) else { return false }
+            // The gate decides the ACTION here: while the app is not active the planner answers a
+            // memo create or a wait, never an upload (decision 9).
+            switch OutboxPlanner.nextWholeAction(
+                for: current, credentials: credentials, now: clock(),
+                schedulingOpen: schedulingGate.isOpen
+            ) {
+            case .hold(let reason):
+                // A refused write ends this pass having done nothing, on a row another writer
+                // moved — perhaps one that skipped a file this pass owned. Ask again, here and at
+                // every refused write below.
+                if await !hold(current, reason: reason) { requestDrain() }
+                return false
+            case .wait:
+                return false
+            case .upload(let starting, let retrying):
+                guard permitsNetwork() else {
+                    if await !waitForNetwork(current) { requestDrain() }
+                    return false
+                }
+                // A file a live task is carrying is not sent again: the planner cannot see tasks.
+                // Nor is one this engine is still applying an answer to or handing off: whoever
+                // owns it advances the row once its own work has landed.
+                let carried = await carriedFiles(of: current, on: uploads)
+                // A claim or release inside those hops makes the row, the listing and `owned` three
+                // different instants: plan again from the read.
+                guard ownershipGeneration == observed else { return true }
+                let start = starting.filter { !carried.contains($0) && !isOwned(jobID, $0) }
+                let retry = retrying.filter { !carried.contains($0) && !isOwned(jobID, $0) }
+                guard !start.isEmpty || !retry.isEmpty else { return false }
+                // Claimed here, with no hop since the check: a settlement landing after it cannot
+                // free a file this pass is about to send. `handOffWhole` releases each one.
+                for fileID in start + retry { own(WholeFileRef(jobID: jobID, fileID: fileID)) }
+                await handOffWhole(
+                    current, starting: start, retrying: retry, credentials: credentials,
+                    on: uploads
+                )
+                return false
+            case .createMemo:
+                guard permitsNetwork() else {
+                    if await !waitForNetwork(current) { requestDrain() }
+                    return false
+                }
+                guard creating.insert(current.id).inserted else { return false }
+                let next = await complete(current, credentials: credentials)
+                creating.remove(current.id)
+                settle()
+                guard let next else { return false }
+                current = next
+            }
+        }
+        let backedOff = await save(
+            current.backingOff(at: clock(), error: "The server kept asking to start over."),
+            matching: current
+        )
+        if backedOff == nil { requestDrain() }
+        return false
+    }
+
+    /// The files of this job some listed task is still carrying — at any term, in any state short
+    /// of completed, `.canceling` included — unless its terminal answer has already arrived. A
+    /// cancelled predecessor keeps its file until it has ended: a new task beside it would be two
+    /// uploads of one file. A file being replaced is owned for the whole replacement besides.
+    private func carriedFiles(
+        of job: UploadJob, on uploads: any OutboxUploadScheduling
+    ) async -> Set<UUID> {
+        let answeredBefore = Set(ended.keys)
+        let listing = await uploads.tasks()
+        pruneEnded(answeredBefore, listing: listing)
+        var carried = Set<UUID>()
+        for task in listing where task.state != .completed && ended[task.taskIdentifier] == nil {
+            guard let identity = WholeTaskIdentity(taskDescription: task.taskDescription),
+                identity.jobID == job.id
+            else { continue }
+            carried.insert(identity.fileID)
+        }
+        return carried
+    }
+
+    /// Forgets the ended tasks a listing no longer names — only those whose answer had arrived
+    /// before the listing was asked for, since a listing taken earlier says nothing of a task
+    /// created after it — and, given the rows, every ended task whose row is gone.
+    private func pruneEnded(
+        _ answeredBefore: Set<Int>, listing: [WholeTaskListing], rows: Set<UUID>? = nil
+    ) {
+        let listed = Set(listing.map(\.taskIdentifier))
+        for id in answeredBefore {
+            guard let jobID = ended[id] else { continue }
+            if !listed.contains(id) || rows.map({ !$0.contains(jobID) }) == true {
+                ended[id] = nil
+            }
+        }
+    }
+
+    /// Forgets every ended task of one row: it was released or abandoned.
+    private func pruneEnded(of jobID: UUID) {
+        ended = ended.filter { $0.value != jobID }
+    }
+
+    private func isOwned(_ jobID: UUID, _ fileID: UUID) -> Bool {
+        owned[WholeFileRef(jobID: jobID, fileID: fileID)] != nil
+    }
+
+    private func own(_ ref: WholeFileRef) {
+        owned[ref, default: 0] += 1
+        ownershipGeneration += 1
+    }
+
+    private func disown(_ ref: WholeFileRef) {
+        guard let count = owned[ref] else { return }
+        owned[ref] = count > 1 ? count - 1 : nil
+        ownershipGeneration += 1
+    }
+
+    /// Opens a session for every file that needs one, writes them ONCE with the row `.uploading`
+    /// on the whole lane, then hands every file to the session. Retrying files move to their own
+    /// next term first (`retryingWhole`); a sibling's term never moves.
+    private func handOffWhole(
+        _ job: UploadJob,
+        starting: [UUID],
+        retrying: [UUID],
+        credentials: OutboxCredentials,
+        on uploads: any OutboxUploadScheduling
+    ) async {
+        handOffGeneration += 1
+        handOffsInProgress += 1
+        defer {
+            handOffsInProgress -= 1
+            handOffGeneration += 1
+        }
+        let sending = Set(starting + retrying)
+        // The caller claimed every file before this was entered. Each stays owned until the session
+        // has its task, so an answer landing for a sibling mid-loop cannot send it again; one that
+        // never gets that far is released on the way out.
+        var unsent = Set(sending.map { WholeFileRef(jobID: job.id, fileID: $0) })
+        defer {
+            for ref in unsent { disown(ref) }
+        }
+        var candidate = retrying.reduce(job) { $0.retryingWhole(fileID: $1) }
+            .with { $0.transport = .whole }
+        for file in candidate.files where sending.contains(file.id) {
+            guard let session = await openSession(file, of: job, credentials: credentials) else {
+                return
+            }
+            candidate = candidate.startingUpload(fileID: file.id, session: session)
+        }
+        // Nothing is handed to the session on a state nobody wrote: the answer to each task is
+        // matched against this write.
+        let uploading = candidate.with { $0.state = .uploading }
+        guard let saved = await save(uploading, matching: job) else {
+            // The row moved under this hand-off — perhaps by a pass that skipped these very files
+            // because this hand-off owned them. Nobody else will send them: ask again.
+            requestDrain()
+            return
+        }
+        // One authority for every file, asked again by the scheduler for each one: the gate
+        // closing between two files stops the second, and nothing is written for it.
+        let work = authority(under: credentials, for: .work)
+        for file in saved.files where sending.contains(file.id) && !file.isComplete {
+            guard let uploadUID = file.uploadUID else { continue }
+            _ = await uploads.upload(
+                OutboxRequests.wholeUpload(
+                    baseURL: credentials.serverBaseURL,
+                    token: credentials.token,
+                    uploadUID: uploadUID,
+                    allowsMobileData: preferences.allowsMobileData
+                ),
+                fromFile: repository.mediaURL(job: saved, file: file),
+                for: WholeFileRef(jobID: saved.id, fileID: file.id),
+                attempt: file.uploadAttempt ?? 0,
+                under: work,
+                issuedUnder: credentials.epoch
+            )
+            let ref = WholeFileRef(jobID: saved.id, fileID: file.id)
+            if unsent.remove(ref) != nil { disown(ref) }
+        }
+    }
+
+    /// The upload session for one file, or nil where the POST did not produce one — having written
+    /// whatever that outcome calls for, fenced on `job`, or nothing for a closed gate. Where the
+    /// fence refuses that write the row carries neither the outcome nor a task for this file, and
+    /// a sibling's continuation may have skipped the file while this call owned it: another drain
+    /// is asked for.
+    private func openSession(
+        _ file: OutboxFile, of job: UploadJob, credentials: OutboxCredentials
+    ) async -> OutboxWire.UploadSession? {
+        let request: URLRequest
+        do {
+            request = try OutboxRequests.startUpload(
+                baseURL: credentials.serverBaseURL, token: credentials.token, file: file
+            )
+        } catch {
+            // Unreachable for the reason `startUpload`'s is, and written through `hold` so the
+            // refusal pins count one hold site per decision rather than one per lane.
+            if await !hold(job, reason: .serverRefused) { requestDrain() }
+            return nil
+        }
+        let sending = authority(under: credentials, for: .work)
+        let response: OutboxHTTPResponse
+        do {
+            response = try await http.perform(request, under: sending)
+        } catch {
+            if error is SendAuthorityWithdrawn, sending.withdrawal() == .scheduling { return nil }
+            let backedOff = await save(
+                job.backingOff(at: clock(), error: "The server could not be reached."),
+                matching: job
+            )
+            if backedOff == nil { requestDrain() }
+            return nil
+        }
+        guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
+            // Sent under the credential held now, so its refusal holds under a known epoch.
+            let refused = OutboxRefusal(
+                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload"
+            )
+            let disposed = await save(
+                job.applying(refused.disposition(assumingCurrent: true), at: clock()),
+                ifStillCurrent: refused.issuedUnder,
+                matching: job,
+                else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
+            )
+            if disposed == nil { requestDrain() }
+            return nil
+        }
+        return session
+    }
+
+    /// Tasks whose request allows other networks than the person's choice now are replaced: the
+    /// successor is built only once the old task has ended (`BackgroundUploadScheduler.replace`).
+    /// Sending a successor is new work, so this runs only while scheduling is open.
+    private func replaceMismatched(_ credentials: OutboxCredentials) async {
+        guard let uploads, schedulingGate.isOpen else { return }
+        _ = await uploads.reexamineDeferred()
+        let allowsMobileData = preferences.allowsMobileData
+        for task in await uploads.mismatched(allowsMobileData: allowsMobileData) {
+            guard replacing[task.taskIdentifier] == nil else { continue }
+            let ref = WholeFileRef(jobID: task.identity.jobID, fileID: task.identity.fileID)
+            // The mismatch list is older than this instant. Admitted only on a fresh listing read
+            // with `owned` unchanged across it, in which the task is still live and nothing in
+            // this engine owns its file: an owner is already deciding that file, and a task gone
+            // or ended has a continuation of its own.
+            let observed = ownershipGeneration
+            let live = await uploads.tasks().contains {
+                $0.taskIdentifier == task.taskIdentifier && $0.state != .completed
+            }
+            guard ownershipGeneration == observed else {
+                requestDrain()
+                continue
+            }
+            guard live, ended[task.taskIdentifier] == nil, owned[ref] == nil else { continue }
+            replacing[task.taskIdentifier] = ref
+            // Owned before `replace` is entered and until the scheduler says the replacement is
+            // over: through a deferral, and past the successor's write until its task exists.
+            own(ref)
+            _ = await uploads.replace(
+                task, under: authority(under: credentials, for: .work),
+                onSettled: { sent in await self.replacementSettled(ref, sent: sent) }
+            ) {
+                await self.successor(
+                    replacing: task.identity, credentials: credentials,
+                    allowsMobileData: allowsMobileData
+                )
+            }
+        }
+    }
+
+    /// A replacement is over. One that sent no successor — its write fenced out, its authority
+    /// withdrawn, nothing left to send — may leave a sendable row that every other pass skipped
+    /// while this one owned it, so it asks for another pass.
+    private func replacementSettled(_ ref: WholeFileRef, sent: WholeTask?) {
+        disown(ref)
+        if sent == nil { requestDrain() }
+    }
+
+    /// The replacement for one file, built after its old task has ended: the file's own next
+    /// term and a fresh session, written, and the request that sends it under the choice now.
+    private func successor(
+        replacing old: WholeTaskIdentity,
+        credentials: OutboxCredentials,
+        allowsMobileData: Bool
+    ) async -> WholeSuccessor? {
+        guard mayStillSend(credentials),
+            let job = await repository.job(old.jobID),
+            job.lane == .whole, job.cancelledAt == nil, job.state != .held,
+            let file = job.file(old.fileID),
+            (file.uploadAttempt ?? 0) == old.attempt,
+            !file.isComplete
+        else { return nil }
+        let retried = job.retryingWhole(fileID: old.fileID)
+        guard let fresh = retried.file(old.fileID),
+            let session = await openSession(fresh, of: job, credentials: credentials),
+            let saved = await save(
+                retried.startingUpload(fileID: old.fileID, session: session), matching: job
+            ),
+            let sent = saved.file(old.fileID),
+            let uploadUID = sent.uploadUID
+        else { return nil }
+        return WholeSuccessor(
+            request: OutboxRequests.wholeUpload(
+                baseURL: credentials.serverBaseURL,
+                token: credentials.token,
+                uploadUID: uploadUID,
+                allowsMobileData: allowsMobileData
+            ),
+            file: repository.mediaURL(job: saved, file: sent),
+            ref: WholeFileRef(jobID: saved.id, fileID: sent.id),
+            attempt: sent.uploadAttempt ?? 0,
+            epoch: credentials.epoch
+        )
+    }
+
+    /// Called by the upload session, possibly in a process launched for this alone.
+    ///
+    /// The answer is applied to its ONE file by the repository, rebased onto the manifest as it
+    /// stands at the write (`applyFileAnswer`), so two files answering together both land. What
+    /// follows is the ordinary step, which while the app is not active can only be the memo
+    /// create of a row whose every file is now on the server.
+    public func handle(_ answer: WholeAnswer) async {
+        continuationsInFlight += 1
+        defer {
+            continuationsInFlight -= 1
+            settle()
+        }
+        handOffGeneration += 1
+        // Whatever it says, an answer is its task's end: it carries its file no longer.
+        ended[answer.taskIdentifier] = answer.identity.jobID
+        // A task handed to `replace` is superseded by its successor's term, whatever it says —
+        // including the status-less answer its own cancellation produces.
+        guard replacing[answer.taskIdentifier] == nil else { return }
+        let identity = answer.identity
+        // Owned from here until the answer has landed, so a sibling's continuation cannot send
+        // this file again while its success is still on the way to disk.
+        let ref = WholeFileRef(jobID: identity.jobID, fileID: identity.fileID)
+        own(ref)
+        var owning = true
+        defer { if owning { disown(ref) } }
+        guard let job = await repository.job(identity.jobID), job.cancelledAt == nil else {
+            // Gone or taken back: none of the row's tasks has a file left to hold back.
+            pruneEnded(of: identity.jobID)
+            return
+        }
+        guard job.lane == .whole, let file = job.file(identity.fileID) else { return }
+        guard (file.uploadAttempt ?? 0) == identity.attempt else {
+            // A superseded task has ended — a Try again's predecessor, say. The file it was holding
+            // back can go now, and nothing else will ask for it.
+            requestDrain()
+            return
+        }
+        let change: WholeFileChange
+        switch WholeOutcome.classify(
+            statusCode: answer.statusCode,
+            bytesReceived: OutboxWire.decodeSession(answer.body)?.bytesReceived,
+            byteSize: file.byteSize
+        ) {
+        case .completed(let bytes):
+            change = .confirmed(bytes)
+        case .retryWhole:
+            change = .retryWhole
+        case .backOff:
+            change = .backOff(
+                answer.statusCode.map { "The upload failed (\($0))." }
+                    ?? answer.errorDescription ?? "The upload did not finish."
+            )
+        case .refused(let statusCode):
+            change = .refused(
+                OutboxRefusal(statusCode: statusCode, issuedUnder: identity.epoch, what: "upload")
+            )
+        case .unreadable:
+            guard let asked = await askWhereItStands(job, fileID: identity.fileID) else { return }
+            change = asked
+        }
+        let provenance = identity.provenance(
+            currentLaunch: uploads?.launch ?? OutboxUploadSession.processLaunch
+        )
+        // Marked in progress for the write only, and released before the continuation below: a
+        // drain that continuation asks for must not meet this answer's own mark.
+        handOffsInProgress += 1
+        let written: UploadJob?
+        // The rebase refused — the file's term moved under this answer, say by a Try again whose
+        // own drain skipped the file while this answer owned it — or a storage failure's hold
+        // refused: the row stands as another writer left it, so it is asked about again once this
+        // answer's mark is released. Not a row gone, and not one whose memo create has begun: that
+        // create owns its next step.
+        var refused = false
+        do {
+            written = try await repository.applyFileAnswer(
+                jobID: identity.jobID,
+                fileID: identity.fileID,
+                attempt: identity.attempt,
+                outcome: change,
+                presented: provenance,
+                at: clock()
+            )
+            lastPersistenceFailure = nil
+            if written == nil, let now = await repository.job(identity.jobID) {
+                refused = now.state != .creating
+            }
+        } catch {
+            lastPersistenceFailure = Self.storageMessage(error)
+            refused = await !holdUnsaved(job, error: error, matching: job)
+            written = nil
+        }
+        handOffsInProgress -= 1
+        handOffGeneration += 1
+        disown(ref)
+        owning = false
+        if refused { requestDrain() }
+        await onChange()
+        guard let written,
+            let credentials = await credentials.currentCredentials(),
+            mayStillSend(credentials)
+        else { return }
+        await advance(written, credentials: credentials)
+        await onChange()
+    }
+
+    /// A success whose body said nothing readable: one HEAD, while the app is active. Nil when
+    /// nothing is to be written — the gate is closed or the network is not one to use; the row is
+    /// then a record with no task, and the next open-gate pass sends the file again whole.
+    private func askWhereItStands(_ job: UploadJob, fileID: UUID) async -> WholeFileChange? {
+        guard schedulingGate.isOpen, permitsNetwork(),
+            let credentials = await credentials.currentCredentials(),
+            let byteSize = job.file(fileID)?.byteSize
+        else { return nil }
+        switch await resync(job, fileID: fileID, credentials: credentials) {
+        case .resynced(let resynced):
+            guard let file = resynced.file(fileID), file.uploadUID != nil else {
+                return .retryWhole
+            }
+            switch WholeOutcome.classify(
+                statusCode: 200, bytesReceived: file.bytesConfirmed, byteSize: byteSize
+            ) {
+            case .completed(let bytes): return .confirmed(bytes)
+            default: return .retryWhole
+            }
+        case .withheld:
+            return nil
+        case .unanswered:
+            return .backOff("The server's answer was unreadable.")
+        }
+    }
+
     // MARK: - helpers
 
     /// What a send is for, which decides whether it carries the scheduling gate.
@@ -1073,9 +1665,11 @@ public actor OutboxEngine: OutboxChunkHandling {
         return true
     }
 
-    private func hold(_ job: UploadJob, reason: HoldReason) async {
-        guard job.state != .held || job.holdReason != reason else { return }
-        await save(job.held(reason, error: Self.message(for: reason)), matching: job)
+    /// - Returns: false when the fence refused the write: the row moved and says something else.
+    @discardableResult
+    private func hold(_ job: UploadJob, reason: HoldReason) async -> Bool {
+        guard job.state != .held || job.holdReason != reason else { return true }
+        return await save(job.held(reason, error: Self.message(for: reason)), matching: job) != nil
     }
 
     /// An ORDINARY write: no server has said anything about a credential, so there is no epoch to
@@ -1139,12 +1733,14 @@ public actor OutboxEngine: OutboxChunkHandling {
     ///   resurrect exactly what the fence above refused to resurrect. There is no unconditional
     ///   form: every caller of both `save`s has a snapshot, so a recovery without one would be a
     ///   second answer to a question this file answers once.
+    /// - Returns: false when the hold was not written — refused by the fence, or failed too.
+    @discardableResult
     private func holdUnsaved(
         _ job: UploadJob,
         error: any Error,
         matching snapshot: UploadJob
-    ) async {
-        guard job.state != .held || job.holdReason != .storageFailed else { return }
+    ) async -> Bool {
+        guard job.state != .held || job.holdReason != .storageFailed else { return true }
         // The marker comes from the SNAPSHOT, never from the candidate: the candidate is the write
         // that did not happen, and one of them clears the marker. Taking it from there would put a
         // settled capture on disk over an edit the server never answered.
@@ -1155,12 +1751,13 @@ public actor OutboxEngine: OutboxChunkHandling {
             // I decided about" and not a second one here. The epoch is deliberately unknown — a
             // storage failure is not the server's word about a credential — and the fallback is
             // unreachable because unknown reads as current.
-            _ = try await repository.save(
+            return try await repository.save(
                 held, ifStillCurrent: nil, matching: snapshot, else: held
-            )
+            ) != nil
         } catch {
             // Nothing more can be written. It is already reported above, and the next pass finds
             // the job exactly as the last write that did land left it.
+            return false
         }
     }
 
