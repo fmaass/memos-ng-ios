@@ -70,6 +70,20 @@ public enum WaitReason: String, Codable, Sendable, Equatable, CaseIterable {
     case homeNetwork
 }
 
+/// Which background transport carries a capture's bytes.
+///
+/// The lane is chosen once per capture and persisted with it, because a relaunch has to know which
+/// session's tasks the row's files ride on. A manifest written before the second lane existed has
+/// no such field, and that reads as `.chunk`: every row an older build began finishes on the lane
+/// it began on.
+public enum UploadTransport: String, Codable, Sendable, Equatable {
+    /// One slice per task on the chunk session, resumed at the offset the server confirmed.
+    case chunk
+    /// One task per file carrying the whole original from its first byte, sent again whole when it
+    /// fails.
+    case whole
+}
+
 /// One captured file, and how much of it the SERVER says it has.
 ///
 /// `bytesConfirmed` is only ever written from a server answer (the PATCH response body or the
@@ -213,6 +227,9 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// capture cannot be taken back to the editor. Optional because a manifest written before this
     /// existed has none, and absent means the key's fate is known.
     public var editUnansweredSince: Date?
+    /// The lane this capture's bytes travel on, once one was chosen. Optional and last, so a
+    /// manifest written before the choice existed decodes unchanged — `lane` says what nil means.
+    public var transport: UploadTransport?
 
     private enum CodingKeys: String, CodingKey {
         case id, idempotencyKey, content, visibility, capturedAt, files, binding, state
@@ -221,6 +238,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         // Every manifest already written spells it this way, and a rename that re-spelled it would
         // read as "no change is owed" on every capture a person is already carrying.
         case editUnansweredSince = "editSentAt"
+        case transport
     }
 
     public init(
@@ -242,7 +260,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         editKey: String? = nil,
         patchAttempt: Int? = nil,
         pendingEdit: PendingEdit? = nil,
-        editUnansweredSince: Date? = nil
+        editUnansweredSince: Date? = nil,
+        transport: UploadTransport? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -263,7 +282,12 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.patchAttempt = patchAttempt
         self.pendingEdit = pendingEdit
         self.editUnansweredSince = editUnansweredSince
+        self.transport = transport
     }
+
+    /// The lane a capture is on. Nil is every row begun before the lane was recorded, and those
+    /// were all begun on the chunk lane.
+    public var lane: UploadTransport { transport ?? .chunk }
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteSize } }
 
