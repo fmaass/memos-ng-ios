@@ -1,14 +1,25 @@
 import Foundation
 
-/// A task as the upload session lists it: the handle a cancel is sent to, and a description that
-/// may say anything, or nothing.
+/// A task as the upload session lists it: the handle a cancel is sent to, a description that may
+/// say anything, or nothing, the networks its original request allows, and where it is in its life.
 public struct WholeTaskListing: Sendable, Equatable {
     public var taskIdentifier: Int
     public var taskDescription: String?
+    /// The network flags of the request the task was created with; nil when the session lists no
+    /// request for it, which no flag comparison can then show to be right.
+    public var access: WholeTaskNetworkAccess?
+    public var state: WholeTaskState
 
-    public init(taskIdentifier: Int, taskDescription: String?) {
+    public init(
+        taskIdentifier: Int,
+        taskDescription: String?,
+        access: WholeTaskNetworkAccess? = nil,
+        state: WholeTaskState = .running
+    ) {
         self.taskIdentifier = taskIdentifier
         self.taskDescription = taskDescription
+        self.access = access
+        self.state = state
     }
 }
 
