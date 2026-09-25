@@ -19,6 +19,7 @@ private actor RecordingWholeHandler: WholeAnswerHandling {
     private(set) var received: [WholeAnswer] = []
 
     func handle(_ answer: WholeAnswer) async { received.append(answer) }
+    func unreadableTaskEnded() async {}
 }
 
 private enum Upload {
@@ -387,6 +388,36 @@ struct BackgroundUploadSchedulerTests {
         #expect(session.createdTasks.isEmpty)
     }
 
+    @Test("no task is created while a task nobody can read is still listed")
+    func unreadableListedTaskRefusesUploads() async {
+        let session = ScriptedUploadTaskSession(listing: [
+            WholeTaskListing(taskIdentifier: 7, taskDescription: "garbage")
+        ])
+        let delegate = UploadSessionDelegate()
+        let scheduler = Upload.scheduler(on: session, delegate: delegate)
+        let ref = WholeFileRef(jobID: UUID(), fileID: UUID())
+        let file = URL(fileURLWithPath: "/dev/null")
+        #expect(await scheduler.cancelUnreadable() == [7])
+
+        let refused = await scheduler.upload(
+            Upload.request(), fromFile: file, for: ref, attempt: 0, under: .unfenced,
+            issuedUnder: 1
+        )
+        #expect(refused == nil)
+        #expect(session.createdTasks.isEmpty)
+
+        delegate.complete(
+            taskIdentifier: 7, taskDescription: "garbage", statusCode: nil,
+            errorDescription: "cancelled"
+        )
+        let sent = await scheduler.upload(
+            Upload.request(), fromFile: file, for: ref, attempt: 0, under: .unfenced,
+            issuedUnder: 1
+        )
+        #expect(sent != nil)
+        #expect(session.createdTasks.count == 1)
+    }
+
     @Test("a task whose description cannot be read is cancelled, not dropped")
     func unreadableTasksAreCancelled() async {
         let readable = Upload.identity()
@@ -581,6 +612,8 @@ private actor ParkingWholeHandler: WholeAnswerHandling {
         self.gate = gate
         self.parkingOn = taskIdentifier
     }
+
+    func unreadableTaskEnded() async {}
 
     func handle(_ answer: WholeAnswer) async {
         if answer.taskIdentifier == parkingOn { await gate.pass() }

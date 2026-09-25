@@ -328,9 +328,10 @@ public final class SessionStore {
     /// layer above: a capture parked while the phone was off the network needs somebody to try
     /// again, and the only event that says trying is worth it is this one.
     private let onVerified: (@MainActor @Sendable () -> Void)?
-    /// What to do the moment this device stops holding a credential — the app wires the outbox's
-    /// cancellation of every background upload to it.
-    private let onCredentialWiped: (@MainActor @Sendable () -> Void)?
+    /// What to do the moment an account's grant is withdrawn — a wipe, or another account signing
+    /// in over it — with the authority epoch that withdrawal moved to. The app wires the outbox's
+    /// cancellation of the background uploads still presenting the old credential to it.
+    private let onAccountWithdrawn: (@MainActor @Sendable (Int) -> Void)?
     /// Where a diagnostic line goes, injected the same way the sleeper is.
     ///
     /// It exists so the log BOUNDARY can be watched rather than re-derived. A guardrail that
@@ -371,7 +372,7 @@ public final class SessionStore {
         snapshots: TimelineSnapshotStore? = nil,
         routes: (any RouteStatusMonitoring)? = nil,
         onVerified: (@MainActor @Sendable () -> Void)? = nil,
-        onCredentialWiped: (@MainActor @Sendable () -> Void)? = nil,
+        onAccountWithdrawn: (@MainActor @Sendable (Int) -> Void)? = nil,
         // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
         // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
         // and a named default would have to be public to be referenced from one.
@@ -391,7 +392,7 @@ public final class SessionStore {
         self.identity = identity
         self.lastKnownUser = lastKnownUser
         self.onVerified = onVerified
-        self.onCredentialWiped = onCredentialWiped
+        self.onAccountWithdrawn = onAccountWithdrawn
         self.diagnostics =
             diagnostics ?? { line in MemosLog.session.error("\(line, privacy: .public)") }
         self.routes = routes
@@ -1702,6 +1703,9 @@ public final class SessionStore {
         client = nil
         credential = nil
         endIncarnation()
+        // The account the licence above belonged to — none, on a first sign-in — is withdrawn at
+        // this epoch, exactly as a wipe withdraws it; its uploads still hold its token.
+        onAccountWithdrawn?(epoch.current)
         let installing = sessionGeneration
         await invalidateIdentityScopedState()
         // That call awaits the snapshot removal, and a sign-out or another installation can
@@ -1841,7 +1845,7 @@ public final class SessionStore {
         // After the epoch moved, so nothing the outbox starts from here presents this credential,
         // and before any await: a background upload holds its own copy of the token and goes on
         // sending it until it is cancelled.
-        onCredentialWiped?()
+        onAccountWithdrawn?(epoch.current)
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false

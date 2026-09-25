@@ -30,6 +30,9 @@ public struct WholeAnswer: Sendable, Equatable {
 /// Who is told when a whole-file task finishes.
 public protocol WholeAnswerHandling: Sendable {
     func handle(_ answer: WholeAnswer) async
+    /// A task this lane cannot read has ended. It answers nothing, but it was holding every file
+    /// back (`OutboxEngine.carriedFiles`), and its end is what releases them.
+    func unreadableTaskEnded() async
 }
 
 /// Which tasks have ended, as their terminal callbacks said.
@@ -160,6 +163,16 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         // A task this lane cannot read has nothing to apply its answer to. It still ended, which
         // the line above has already said.
         guard let identity = WholeTaskIdentity(taskDescription: taskDescription) else {
+            // It answers nothing, but it was holding every file back, and nothing else will say
+            // that it has stopped. Unattached, there is nothing to tell: adoption drains anyway.
+            let handler: (any WholeAnswerHandling)? = lock.withLock { self.handler }
+            if let handler {
+                pending.enter()
+                Task {
+                    await handler.unreadableTaskEnded()
+                    pending.leave()
+                }
+            }
             return true
         }
         deliver(
@@ -263,6 +276,9 @@ public actor BackgroundUploadScheduler {
     private var replacementsClaimed: Set<Int> = []
     /// Successors whose predecessor was still listed when the bound ran out, by that predecessor.
     private var deferred: [Int: DeferredSuccessor] = [:]
+    /// The tasks nobody can read that the last `cancelUnreadable` found, each until it has ended.
+    /// Any one of them may be carrying any file, so while one is live no task is created at all.
+    private var unreadableLive: Set<Int> = []
     private var observing = false
 
     public init(appGroup: String = OutboxDefaults.appGroup) {
@@ -320,6 +336,9 @@ public actor BackgroundUploadScheduler {
         under authority: SendAuthority,
         issuedUnder epoch: Int
     ) -> WholeTask? {
+        // The one place every task is created — a first hand-off, a retry and a replacement's
+        // successor alike — so the barrier is asked here, synchronously, beside the authority.
+        guard unreadableLive.allSatisfy({ delegate.terminations.hasEnded($0) }) else { return nil }
         guard authority.holds() else { return nil }
         let identity = WholeTaskIdentity(
             jobID: ref.jobID, fileID: ref.fileID, attempt: attempt, launch: launch, epoch: epoch
@@ -347,6 +366,8 @@ public actor BackgroundUploadScheduler {
             await session.cancel(taskIdentifier: task.taskIdentifier)
             cancelled.append(task.taskIdentifier)
         }
+        // Replaced, not added to: a task gone from this listing has left the session.
+        unreadableLive = Set(cancelled)
         return cancelled
     }
 

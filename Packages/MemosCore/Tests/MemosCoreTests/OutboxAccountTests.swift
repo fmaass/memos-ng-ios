@@ -114,11 +114,16 @@ struct OutboxAccountTests {
                             ? Stub.empty(.noContent) : Stub.json(Stub.user)
                     }
                 },
-                onCredentialWiped: { heard.epochs.append(heard.session?.epoch.current ?? -1) }
+                onAccountWithdrawn: { withdrawn in
+                    heard.epochs.append(withdrawn)
+                    heard.read.append(heard.session?.epoch.current ?? -1)
+                }
             )
             heard.session = session
             await session.signIn(serverAddress: signInServer, token: "pat-token")
             let before = session.epoch.current
+            // The sign-in itself withdrew whatever stood before it; only what follows is asked.
+            let signedIn = heard.epochs.count
 
             if revoking {
                 _ = await session.signOut()
@@ -126,11 +131,44 @@ struct OutboxAccountTests {
                 await session.signOutWithoutRevoking()
             }
 
-            #expect(heard.epochs.count == 1, "revoking: \(revoking)")
+            let signingOut = heard.epochs.dropFirst(signedIn)
+            #expect(signingOut.count == 1, "revoking: \(revoking)")
+            #expect(heard.epochs == heard.read, "the epoch handed over is the one standing")
             // Told only once nothing can present the withdrawn credential any more.
-            #expect(heard.epochs.allSatisfy { $0 > before }, "revoking: \(revoking)")
+            #expect(signingOut.allSatisfy { $0 > before }, "revoking: \(revoking)")
             #expect(await provider(for: session).currentCredentials() == nil)
         }
+    }
+
+    @Test("another account signing in over this one tells the outbox, before anything is awaited")
+    func accountReplacementTellsTheOutbox() async throws {
+        let heard = Withdrawals()
+        let whoami = Self.whoamiPerToken
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token, handler: whoami)
+            },
+            onAccountWithdrawn: { withdrawn in
+                heard.epochs.append(withdrawn)
+                heard.read.append(heard.session?.epoch.current ?? -1)
+            }
+        )
+        heard.session = session
+        await session.signIn(serverAddress: signInServer, token: "pat-a")
+        let granted = try #require(await provider(for: session).currentCredentials())
+        // A sign-in withdraws whatever licence stood before it, none included, so A's own counts
+        // once; every one of them is handed over BEFORE the grant it installs exists.
+        let before = heard.epochs.count
+        #expect(heard.epochs.allSatisfy { $0 <= granted.epoch })
+
+        await session.signIn(serverAddress: signInServer, token: "pat-b")
+
+        #expect(heard.epochs.count == before + 1)
+        // Handed over with the epoch the replacement moved to, past the one A's grant held.
+        #expect(heard.epochs.last.map { $0 > granted.epoch } == true)
+        #expect(heard.epochs == heard.read)
+        #expect(try #require(await provider(for: session).currentCredentials()).token == "pat-b")
     }
 
     /// The synchronous half: what the drain asks immediately before each request it sends.
@@ -155,5 +193,6 @@ struct OutboxAccountTests {
 @MainActor
 private final class Withdrawals {
     var epochs: [Int] = []
+    var read: [Int] = []
     weak var session: SessionStore?
 }

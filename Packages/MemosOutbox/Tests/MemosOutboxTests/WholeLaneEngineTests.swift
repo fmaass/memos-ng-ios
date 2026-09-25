@@ -243,7 +243,8 @@ private struct WholeRig {
         prepare: @Sendable (UploadJob) -> UploadJob? = { _ in nil },
         wrapUploads: (@Sendable (BackgroundUploadScheduler) -> any OutboxUploadScheduling)? = nil,
         network: StubNetworkPath = StubNetworkPath(),
-        chunksInFlight: [OutboxTaskIdentity] = []
+        chunksInFlight: [OutboxTaskIdentity] = [],
+        launch: UUID = UUID()
     ) async throws -> WholeRig {
         let root = try Fixture.temporaryDirectory()
         let provider = SwitchableCredentials(Fixture.credentials())
@@ -296,7 +297,6 @@ private struct WholeRig {
         }
         let session = ScriptedUploadTaskSession(listing: listing(job), onCancel: onCancel)
         let delegate = UploadSessionDelegate()
-        let launch = UUID()
         // The replace barrier's bound is spent on this clock, one pause at a time, never slept.
         let barrier = MutableClock(now)
         let uploads = BackgroundUploadScheduler(
@@ -794,6 +794,69 @@ struct WholeLaneEngineTests {
         #expect(!successor.request.allowsExpensiveNetworkAccess)
     }
 
+    @Test("a task nobody can read ending is itself what sends the files it held back")
+    func unreadableEndReleasesTheBarrier() async throws {
+        let rig = try await WholeRig.make(
+            listing: { _ in
+                [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
+            },
+            onCancel: .staysListed
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.isEmpty, "the premise: the barrier held")
+
+        // It ends and leaves the list. Nobody drains: no network change, no foreground, no tap.
+        rig.session.forget(7)
+        rig.delegate.complete(
+            taskIdentifier: 7, taskDescription: "not|a|whole|task", statusCode: nil,
+            errorDescription: "cancelled"
+        )
+        #expect(try await rig.eventually { rig.session.createdTasks.count == 2 })
+        await rig.engine.untilQuiescent()
+    }
+
+    @Test("mobile data turned off, then the app backgrounded before the drain: the task stops")
+    func toggleOffCancelsUnderAClosedGate() async throws {
+        let rig = try await WholeRig.make(onCancel: .leavesListing(after: 1))
+        defer { rig.cleanUp() }
+        await rig.preferences.set(true)
+        await rig.engine.drain()
+        let old = rig.session.createdTasks.map(\.taskIdentifier)
+        #expect(old.count == 2)
+
+        await rig.preferences.set(false)
+        rig.gate.close()
+        await rig.engine.drain()
+
+        // Cancelling is not new work; the successor is, and it waits for the foreground.
+        #expect(Set(rig.session.cancelledIdentifiers) == Set(old))
+        #expect(rig.session.createdTasks.count == 2)
+    }
+
+    @Test("the chunk session's sign-out cancel reaches a task nobody can read")
+    func chunkCancelEveryTaskReachesUnreadable() async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.uploadTask(
+            with: URLRequest(url: URL(string: "https://memos.example.invalid/api/uploads/x")!),
+            from: Data()
+        )
+        task.taskDescription = "not|a|chunk"
+        // A task never resumed is not listed; one resumed and suspended is, and cannot finish.
+        task.resume()
+        task.suspend()
+        try #require(task.state == .suspended, "the premise: it is still live")
+        let listed = await session.allTasks.map(\.taskIdentifier)
+        try #require(listed.contains(task.taskIdentifier), "the premise: the session lists it")
+        let scheduler = BackgroundChunkScheduler(session: session)
+        #expect(await scheduler.inFlight().isEmpty, "the premise: the lane cannot read it")
+
+        await scheduler.cancelEveryTask()
+
+        #expect(task.state == .canceling || task.state == .completed)
+    }
+
     @Test("a listed task nobody can read holds back every file until it has left the list")
     func unreadableTaskIsABarrier() async throws {
         let rig = try await WholeRig.make(
@@ -817,28 +880,40 @@ struct WholeLaneEngineTests {
     @Test("a sign-out cancels every task of both sessions, and their late answers send nothing")
     func signOutAbandonsEveryTask() async throws {
         let chunk = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 0)
+        let launch = UUID()
         let rig = try await WholeRig.make(
             listing: { job in
-                [
+                let file = job.files[0].id
+                let described = { (id: Int, launch: UUID, epoch: Int) in
                     WholeTaskListing(
-                        taskIdentifier: 7,
+                        taskIdentifier: id,
                         taskDescription: WholeTaskIdentity(
-                            jobID: job.id, fileID: job.files[0].id, attempt: 0, launch: UUID(),
-                            epoch: 0
+                            jobID: job.id, fileID: file, attempt: 0, launch: launch, epoch: epoch
                         ).taskDescription
-                    ),
+                    )
+                }
+                return [
+                    // Another launch's: nothing says it was not sent for the account whose grant
+                    // just ended.
+                    described(7, UUID(), 9),
                     WholeTaskListing(taskIdentifier: 8, taskDescription: "not|a|whole|task"),
+                    // This launch's, under a grant newer than the withdrawal: the next account's
+                    // work, which a late sweep must not interrupt.
+                    described(9, launch, 5),
+                    described(10, launch, 2),
                 ]
             },
-            chunksInFlight: [chunk]
+            chunksInFlight: [chunk],
+            launch: launch
         )
         defer { rig.cleanUp() }
         // The session's credential is withdrawn first; the outbox is told after.
         rig.credentials.set(nil)
-        await rig.engine.abandonAllTasks()
+        await rig.engine.abandonAllTasks(withdrawnAt: 3)
 
+        #expect(rig.chunks.everyTaskCancellations == 1)
         #expect(rig.chunks.cancellations == [chunk])
-        #expect(Set(rig.session.cancelledIdentifiers) == [7, 8])
+        #expect(Set(rig.session.cancelledIdentifiers) == [7, 8, 10])
 
         // The cancelled task still answers. Nobody is signed in, so nothing is sent again.
         await rig.engine.handle(

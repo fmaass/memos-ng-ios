@@ -954,21 +954,35 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
     }
 
-    /// Every task either session holds, cancelled: the credential they present was withdrawn.
+    /// The tasks still presenting a grant withdrawn at `epoch`, cancelled.
     ///
-    /// Every one, readable or not and whichever launch made it: a background task keeps its bearer
-    /// header after this process has forgotten the token, and nothing but a cancel stops it
-    /// sending. Nothing is written — a late answer meets the credential fences like any other.
-    public func abandonAllTasks() async {
-        let live = await scheduler.inFlight()
-        if !live.isEmpty {
-            await scheduler.cancel(live)
-        }
+    /// A background task keeps its bearer header after this process has forgotten the token, and
+    /// nothing but a cancel stops it sending. Every chunk task goes, readable or not: its
+    /// description names no epoch. A whole task is kept only when it provably belongs to a later
+    /// grant — minted in this launch under an epoch at or past the withdrawal — because this runs
+    /// after a hop, and the next account may already have work out. Nothing is written: a late
+    /// answer meets the credential fences like any other.
+    public func abandonAllTasks(withdrawnAt epoch: Int) async {
+        await scheduler.cancelEveryTask()
         guard let uploads else { return }
-        let whole = await uploads.tasks().map(\.taskIdentifier)
-        if !whole.isEmpty {
-            await uploads.cancel(whole)
+        let launch = uploads.launch
+        let withdrawn = await uploads.tasks().compactMap { listing -> Int? in
+            if let identity = WholeTaskIdentity(taskDescription: listing.taskDescription),
+                identity.launch == launch, identity.epoch >= epoch
+            {
+                return nil
+            }
+            return listing.taskIdentifier
         }
+        if !withdrawn.isEmpty {
+            await uploads.cancel(withdrawn)
+        }
+    }
+
+    /// A task this lane could not read has ended: the files it held back may go now. A request,
+    /// never an awaited drain — the caller is the session's callback.
+    public func unreadableTaskEnded() async {
+        requestDrain()
     }
 
     // MARK: - chunk answers
@@ -1423,9 +1437,11 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// Tasks whose request allows other networks than the person's choice now are replaced: the
     /// successor is built only once the old task has ended (`BackgroundUploadScheduler.replace`).
-    /// Sending a successor is new work, so this runs only while scheduling is open.
+    /// Cancelling is not new work, so it runs whatever the gate says: a toggle turned off just
+    /// before the app left the foreground still stops the task. The successor is new work, and
+    /// the authority it is sent under carries the gate, so a closed one sends nothing.
     private func replaceMismatched(_ credentials: OutboxCredentials) async {
-        guard let uploads, schedulingGate.isOpen else { return }
+        guard let uploads else { return }
         _ = await uploads.reexamineDeferred()
         for task in await uploads.mismatched(allowsMobileData: preferences.allowsMobileData) {
             guard replacing[task.taskIdentifier] == nil else { continue }

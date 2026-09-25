@@ -113,6 +113,9 @@ public protocol OutboxChunkScheduling: Sendable {
         issuedUnder epoch: Int
     ) async
     func cancel(_ identities: [OutboxTaskIdentity]) async
+    /// Cancels every task the session holds, whatever its description says — the ones this lane
+    /// cannot read included: a withdrawn credential is still in their headers.
+    func cancelEveryTask() async
 }
 
 /// The background session's identity and its configuration, in one place so the properties that

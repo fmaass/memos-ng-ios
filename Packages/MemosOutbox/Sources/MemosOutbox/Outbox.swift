@@ -416,9 +416,10 @@ public final class Outbox {
         return draft(of: landed)
     }
 
-    /// The session's credential was withdrawn — a sign-out, with or without the revoke.
-    public func abandonAllTasks() async {
-        await engine.abandonAllTasks()
+    /// An account's grant was withdrawn — a sign-out, with or without the revoke, or another
+    /// account signing in over it — at this authority epoch.
+    public func abandonAllTasks(withdrawnAt epoch: Int) async {
+        await engine.abandonAllTasks(withdrawnAt: epoch)
     }
 
     /// Sends a restored draft again, on the SAME manifest.
