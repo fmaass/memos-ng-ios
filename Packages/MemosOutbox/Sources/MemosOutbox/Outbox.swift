@@ -80,6 +80,10 @@ public final class Outbox {
     private let engine: OutboxEngine
     private let changes: OutboxChangeBox
     private let attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)?
+    /// The whole lane's session, attached beside the chunk lane's in `adopt()`.
+    private let uploads: (any OutboxUploadScheduling)?
+    /// What the app feeds: open while it is active, closed otherwise (`appBecameActive`).
+    private let schedulingGate: SchedulingGate
     /// The adoption in flight, or the one that finished. It replaces an `isStarted` flag, which
     /// was set BEFORE the attachment was awaited: a second caller arriving inside that await saw
     /// the flag, skipped adoption and drained beside the replay. The two are not siblings, so the
@@ -101,9 +105,13 @@ public final class Outbox {
         // background `URLSession`, which is what the ordering below has to be tested through.
         attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)? = nil,
         // Open unless something feeds it; the engine's sends of new work ask it (`SchedulingGate`).
-        schedulingGate: SchedulingGate = SchedulingGate()
+        schedulingGate: SchedulingGate = SchedulingGate(),
+        // The whole lane. Without one no capture is ever put on it (`OutboxEngine`).
+        uploads: (any OutboxUploadScheduling)? = nil
     ) {
         self.attachScheduler = attachScheduler
+        self.uploads = uploads
+        self.schedulingGate = schedulingGate
         let changes = OutboxChangeBox()
         self.changes = changes
         self.repository = repository
@@ -120,7 +128,8 @@ public final class Outbox {
             preferences: preferences,
             clock: clock,
             onChange: { await changes.fire() },
-            schedulingGate: schedulingGate
+            schedulingGate: schedulingGate,
+            uploads: uploads
         )
         changes.attach { [weak self] in await self?.refresh() }
         // The two events that can make a held capture sendable, wired to the only thing that can
@@ -135,7 +144,7 @@ public final class Outbox {
         )
     }
 
-    /// The composed outbox: the app group's container, the one background session, and the live
+    /// The composed outbox: the app group's container, both background sessions, and the live
     /// completion path. Falls back to the app's own container when the app group is unreachable —
     /// a missing entitlement must degrade to "queues locally", never to "loses the capture".
     public static func live(
@@ -151,19 +160,80 @@ public final class Outbox {
         let repository = try OutboxRepository(
             root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) }
         )
+        // Both sessions are created HERE, synchronously, while the app is still launching: the
+        // system delivers a finished task's answer to whichever session in the process carries its
+        // identifier, and one that finds none is not delivered at all.
         let scheduler = BackgroundChunkScheduler(appGroup: appGroup)
-        let http = URLSessionHTTPPerformer()
-        let outbox = Outbox(
+        return composed(
+            repository: repository,
+            credentials: credentials,
+            http: URLSessionHTTPPerformer(),
+            chunks: scheduler,
+            attachChunks: { handler in await scheduler.attach(handler) },
+            uploads: BackgroundUploadScheduler(appGroup: appGroup),
+            network: NetworkPathMonitor(),
+            preferences: UploadPreferences.live(appGroup: appGroup)
+        )
+    }
+
+    /// What `live` composes, over whichever sessions it is handed — so a test composes the same
+    /// outbox over scripted ones.
+    ///
+    /// The whole lane is not optional here: this is the composition that puts new captures on it.
+    /// The scheduling gate starts CLOSED, because a process is launched before it is active — and
+    /// may never become active, when the system launched it only to deliver an answer — and new
+    /// work waits for `appBecameActive`.
+    public static func composed(
+        repository: OutboxRepository,
+        credentials: any OutboxCredentialsProviding,
+        http: any OutboxHTTPPerforming,
+        chunks: any OutboxChunkScheduling,
+        attachChunks: @escaping @Sendable (any OutboxChunkHandling) async -> Void,
+        uploads: any OutboxUploadScheduling,
+        network: any NetworkPathProviding,
+        preferences: UploadPreferences
+    ) -> Outbox {
+        Outbox(
             repository: repository,
             credentials: credentials,
             http: http,
-            scheduler: scheduler,
+            scheduler: chunks,
             completion: MemoCompletionEndpoint(http: http),
-            network: NetworkPathMonitor(),
-            preferences: UploadPreferences.live(appGroup: appGroup),
-            attachScheduler: { handler in await scheduler.attach(handler) }
+            network: network,
+            preferences: preferences,
+            attachScheduler: attachChunks,
+            schedulingGate: SchedulingGate(isOpen: false),
+            uploads: uploads
         )
-        return outbox
+    }
+
+    /// The app is in front of someone: new work may start again, and what waited for this — a
+    /// capture queued while the app was away, bytes a wake banked — is looked at now.
+    ///
+    /// The gate opens synchronously, before this returns, so it can never land after an
+    /// `appEnteredBackground` that followed it. The drain is the returned task.
+    @discardableResult
+    public func appBecameActive() -> Task<Void, Never> {
+        schedulingGate.open()
+        return Task { await drain() }
+    }
+
+    /// The app left the foreground: nothing new starts until it is back. What is already with the
+    /// system goes on, and a finished capture's memo create still goes (decision 9).
+    public func appEnteredBackground() {
+        schedulingGate.close()
+    }
+
+    /// Runs a background wake and leaves it only once the engine is QUIESCENT, not merely once
+    /// `start` returns.
+    ///
+    /// `start` can return at once while a drain another entry point began — a confirmation's, say —
+    /// still owns a memo create: a second drain folds into the running one and returns. Leaving on
+    /// `start` alone would answer the system with that create still out.
+    public func wake(holding work: WakeWork, _ start: @MainActor () async -> Void) async {
+        await start()
+        await engine.untilQuiescent()
+        work.leave()
     }
 
     /// Take over what the last run left behind — WITHOUT sending anything.
@@ -182,7 +252,10 @@ public final class Outbox {
     /// same task, so no drain can begin while a replay is still landing.
     private func adopted() async {
         if let adoption { return await adoption.value }
-        let work = Task { @MainActor [self] in _ = await attachScheduler?(engine) }
+        let work = Task { @MainActor [self] in
+            _ = await attachScheduler?(engine)
+            await uploads?.attach(engine)
+        }
         adoption = work
         await work.value
     }

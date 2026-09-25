@@ -1,6 +1,7 @@
 import Foundation
 
-/// The system's "I woke you to finish this" callbacks, held until each session says it is done.
+/// The system's "I woke you to finish this" callbacks, held until each session says it is done AND
+/// the wake has finished its own work.
 ///
 /// It is a process-wide box rather than an injected dependency because the callback arrives at the
 /// app delegate, which the system creates, while the session that must drain first is owned by the
@@ -10,20 +11,106 @@ import Foundation
 /// Keyed by session identifier: the system hands over one callback per session it woke the app
 /// for, and one session finishing says nothing about the other. The unkeyed calls are the chunk
 /// session's, which is what they always were.
+///
+/// A handler fires when three things are true: it is stored, ITS session has said it finished
+/// delivering (`sessionFinished`) since it was stored, and no wake is still working (`WakeWork`).
+/// The session finishing is not enough on its own: a wake has to restore a session and send a
+/// finished capture's memo create, possibly waiting on a drain another entry point owns, and a
+/// process answered before that is a process the system may suspend mid-create. Nor may it wait
+/// forever — so every stored handler fires after `fallbackDelay` whatever is still going.
 @MainActor
 public final class OutboxBackgroundCompletion {
     public static let shared = OutboxBackgroundCompletion()
 
-    private var handlers: [String: () -> Void] = [:]
+    /// Under the roughly thirty seconds the system gives a woken app before it stops trusting it.
+    public nonisolated static let fallbackDelay: Duration = .seconds(25)
 
-    public init() {}
+    /// The identifiers of the sessions this outbox owns. A wake for any other is not ours.
+    public static let sessionIdentifiers: Set<String> = [
+        OutboxSession.identifier, OutboxUploadSession.identifier,
+    ]
+
+    private struct Held {
+        var run: () -> Void
+        /// Which storing this is, so a fallback armed for an earlier handler under the same key
+        /// can never fire a later one early.
+        var ticket: Int
+    }
+
+    private var handlers: [String: Held] = [:]
+    /// Sessions that said they finished delivering since their handler was stored.
+    private var finished: Set<String> = []
+    /// Wakes still working, whatever entry point began them.
+    private var wakes = 0
+    private var tickets = 0
+    private let fallback: @Sendable () async -> Void
+
+    /// - Parameter fallback: returns when a stored handler has waited long enough. Injected so a
+    ///   test can reach the deadline without sleeping it.
+    public init(
+        fallback: @escaping @Sendable () async -> Void = {
+            _ = try? await Task.sleep(for: OutboxBackgroundCompletion.fallbackDelay)
+        }
+    ) {
+        self.fallback = fallback
+    }
 
     public func store(_ handler: @escaping () -> Void) {
         store(handler, for: OutboxSession.identifier)
     }
 
+    /// Holds a session's handler, and arms its fallback. What its session said before this is
+    /// about an earlier batch of events, so it waits for this batch's own `sessionFinished`.
     public func store(_ handler: @escaping () -> Void, for identifier: String) {
-        handlers[identifier] = handler
+        tickets += 1
+        let ticket = tickets
+        handlers[identifier] = Held(run: handler, ticket: ticket)
+        finished.remove(identifier)
+        let fallback = fallback
+        Task { @MainActor [weak self] in
+            await fallback()
+            self?.fire(for: identifier, ticket: ticket)
+        }
+    }
+
+    /// The system woke the app for one of this outbox's sessions: its handler is held, and the
+    /// wake's own work is entered — synchronously, before any hop, so the session finishing in the
+    /// very next callback cannot release the handler ahead of it.
+    /// - Returns: the wake to leave once its work is over, or nil when the identifier is not one of
+    ///   this outbox's sessions — the caller answers the system at once.
+    public func beginWake(for identifier: String, handler: @escaping () -> Void) -> WakeWork? {
+        guard Self.sessionIdentifiers.contains(identifier) else { return nil }
+        store(handler, for: identifier)
+        return enterWake()
+    }
+
+    /// Work a wake does that every held handler waits for — a background refresh's included.
+    public func enterWake() -> WakeWork {
+        wakes += 1
+        return WakeWork(owner: self)
+    }
+
+    func wakeLeft() {
+        wakes -= 1
+        for identifier in finished.sorted() {
+            fireIfReleased(identifier)
+        }
+    }
+
+    /// The session has delivered its events and its delegate has applied them.
+    public func sessionFinished(for identifier: String) {
+        finished.insert(identifier)
+        fireIfReleased(identifier)
+    }
+
+    /// Whether this session said it finished since its handler was stored and has not fired yet.
+    public func hasFinished(_ identifier: String) -> Bool { finished.contains(identifier) }
+
+    private func fireIfReleased(_ identifier: String) {
+        guard wakes == 0, handlers[identifier] != nil, finished.contains(identifier) else {
+            return
+        }
+        fire(for: identifier)
     }
 
     public var isPending: Bool { isPending(for: OutboxSession.identifier) }
@@ -36,8 +123,34 @@ public final class OutboxBackgroundCompletion {
 
     /// Fires the one callback stored for this session, and forgets it: a second call finds nothing.
     public func fire(for identifier: String) {
+        finished.remove(identifier)
         let pending = handlers.removeValue(forKey: identifier)
-        pending?()
+        pending?.run()
+    }
+
+    private func fire(for identifier: String, ticket: Int) {
+        guard handlers[identifier]?.ticket == ticket else { return }
+        fire(for: identifier)
+    }
+}
+
+/// One wake's own work, entered before it starts and left once it is over.
+///
+/// Left exactly once: a second `leave` does nothing, so one wake can never release a hold another
+/// wake still has on the system's handlers.
+@MainActor
+public final class WakeWork {
+    private let owner: OutboxBackgroundCompletion
+    private var isLeft = false
+
+    init(owner: OutboxBackgroundCompletion) {
+        self.owner = owner
+    }
+
+    public func leave() {
+        guard !isLeft else { return }
+        isLeft = true
+        owner.wakeLeft()
     }
 }
 
@@ -139,6 +252,13 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     private var epochs: [String: Int] = [:]
     /// What is still being written to disk. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
+    /// Where "finished" is reported; nil is the process-wide box the app delegate stores into.
+    private let completion: OutboxBackgroundCompletion?
+
+    public init(completion: OutboxBackgroundCompletion? = nil) {
+        self.completion = completion
+        super.init()
+    }
 
     func record(epoch: Int, for identity: OutboxTaskIdentity) {
         lock.withLock { epochs[identity.taskDescription] = epoch }
@@ -224,8 +344,11 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// the system told — answering earlier is an invitation to be suspended mid-write, with the
     /// server's byte count banked nowhere.
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        let completion = completion
         pending.onDrained {
-            Task { @MainActor in OutboxBackgroundCompletion.shared.fire() }
+            Task { @MainActor in
+                (completion ?? .shared).sessionFinished(for: OutboxSession.identifier)
+            }
         }
     }
 }

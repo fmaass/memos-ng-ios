@@ -88,6 +88,13 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// The replace barrier's evidence: every terminal callback lands here, cancelled ones and ones
     /// whose description cannot be read included.
     let terminations = TaskTerminations()
+    /// Where "finished" is reported; nil is the process-wide box the app delegate stores into.
+    private let completion: OutboxBackgroundCompletion?
+
+    public init(completion: OutboxBackgroundCompletion? = nil) {
+        self.completion = completion
+        super.init()
+    }
 
     /// AWAITS the replay, so nothing that starts after adoption returns can overtake an answer the
     /// session delivered before it. Answers that arrive while it runs are drained by the same loop,
@@ -187,9 +194,10 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        let completion = completion
         pending.onDrained {
             Task { @MainActor in
-                OutboxBackgroundCompletion.shared.fire(for: OutboxUploadSession.identifier)
+                (completion ?? .shared).sessionFinished(for: OutboxUploadSession.identifier)
             }
         }
     }
