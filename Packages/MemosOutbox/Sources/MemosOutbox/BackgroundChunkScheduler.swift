@@ -1,28 +1,42 @@
 import Foundation
 
-/// The system's "I woke you to finish this" callback, held until the session says it is done.
+/// The system's "I woke you to finish this" callbacks, held until each session says it is done.
 ///
 /// It is a process-wide box rather than an injected dependency because the callback arrives at the
 /// app delegate, which the system creates, while the session that must drain first is owned by the
 /// outbox. Failing to call it eventually stops the system from waking the app at all, so it is
 /// stored in exactly one place and fired exactly once.
+///
+/// Keyed by session identifier: the system hands over one callback per session it woke the app
+/// for, and one session finishing says nothing about the other. The unkeyed calls are the chunk
+/// session's, which is what they always were.
 @MainActor
 public final class OutboxBackgroundCompletion {
     public static let shared = OutboxBackgroundCompletion()
 
-    private var handler: (() -> Void)?
+    private var handlers: [String: () -> Void] = [:]
 
     public init() {}
 
     public func store(_ handler: @escaping () -> Void) {
-        self.handler = handler
+        store(handler, for: OutboxSession.identifier)
     }
 
-    public var isPending: Bool { handler != nil }
+    public func store(_ handler: @escaping () -> Void, for identifier: String) {
+        handlers[identifier] = handler
+    }
+
+    public var isPending: Bool { isPending(for: OutboxSession.identifier) }
+
+    public func isPending(for identifier: String) -> Bool { handlers[identifier] != nil }
 
     public func fire() {
-        let pending = handler
-        handler = nil
+        fire(for: OutboxSession.identifier)
+    }
+
+    /// Fires the one callback stored for this session, and forgets it: a second call finds nothing.
+    public func fire(for identifier: String) {
+        let pending = handlers.removeValue(forKey: identifier)
         pending?()
     }
 }

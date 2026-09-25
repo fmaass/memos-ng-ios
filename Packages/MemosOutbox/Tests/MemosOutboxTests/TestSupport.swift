@@ -934,3 +934,109 @@ actor Latch {
         await withCheckedContinuation { waiting.append($0) }
     }
 }
+
+/// The whole lane's upload session, scripted: it lists what a test says it holds, records what the
+/// scheduler starts and cancels, and ends a cancelled task only when the test says so.
+///
+/// It substitutes the session, not the scheduler: `BackgroundUploadScheduler` is the unit under
+/// test, and every decision it makes from a listing is made against this one.
+final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
+    /// What a cancel does to the listing.
+    enum OnCancel {
+        /// The task is marked cancelling and stays listed, and no terminal callback follows —
+        /// the case the replace barrier exists for.
+        case staysListed
+        /// The task is gone from the listing that many listings after the cancel.
+        case leavesListing(after: Int)
+    }
+
+    struct Created: Sendable, Equatable {
+        var taskIdentifier: Int
+        var request: URLRequest
+        var file: URL
+        var description: String
+    }
+
+    private let lock = NSLock()
+    private var listed: [WholeTaskListing]
+    private var created: [Created] = []
+    private var cancelled: [Int] = []
+    private var listings = 0
+    private var leavesAt: [Int: Int] = [:]
+    private var nextIdentifier: Int
+    private let onCancel: OnCancel
+    private var heldListing: TestGate?
+
+    init(
+        listing: [WholeTaskListing] = [],
+        onCancel: OnCancel = .staysListed,
+        firstIdentifier: Int = 1000
+    ) {
+        self.listed = listing
+        self.onCancel = onCancel
+        self.nextIdentifier = firstIdentifier
+    }
+
+    var createdTasks: [Created] { lock.withLock { created } }
+    var cancelledIdentifiers: [Int] { lock.withLock { cancelled } }
+    var listingCount: Int { lock.withLock { listings } }
+
+    /// The task leaves the listing now, as a task the system has finished with does.
+    func forget(_ taskIdentifier: Int) {
+        lock.withLock { listed.removeAll { $0.taskIdentifier == taskIdentifier } }
+    }
+
+    /// The next listing is TAKEN, then held on `gate` before it is returned: a snapshot its caller
+    /// is still awaiting while other work runs and the session moves on.
+    func holdNextListing(on gate: TestGate) {
+        lock.withLock { heldListing = gate }
+    }
+
+    func allTasks() async -> [WholeTaskListing] {
+        let (snapshot, hold) = lock.withLock {
+            listings += 1
+            let now = listings
+            listed.removeAll { task in
+                leavesAt[task.taskIdentifier].map { now >= $0 } ?? false
+            }
+            let taken = heldListing
+            heldListing = nil
+            return (listed, taken)
+        }
+        await hold?.pass()
+        return snapshot
+    }
+
+    func uploadTask(with request: URLRequest, fromFile file: URL, description: String) -> Int {
+        lock.withLock {
+            let id = nextIdentifier
+            nextIdentifier += 1
+            created.append(
+                Created(taskIdentifier: id, request: request, file: file, description: description)
+            )
+            listed.append(
+                WholeTaskListing(
+                    taskIdentifier: id,
+                    taskDescription: description,
+                    access: WholeTaskNetworkAccess(request: request),
+                    state: .running
+                )
+            )
+            return id
+        }
+    }
+
+    func cancel(taskIdentifier: Int) async {
+        lock.withLock {
+            cancelled.append(taskIdentifier)
+            switch onCancel {
+            case .staysListed:
+                for index in listed.indices where listed[index].taskIdentifier == taskIdentifier {
+                    listed[index].state = .canceling
+                }
+            case .leavesListing(let after):
+                leavesAt[taskIdentifier] = listings + after
+            }
+        }
+    }
+}

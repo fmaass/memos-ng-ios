@@ -52,6 +52,28 @@ public enum OutboxRequests {
         return request
     }
 
+    /// The whole-file PATCH: one request at offset 0 carrying the entire original, which the
+    /// contract allows ("any length from 1 byte to the bytes remaining"). Like the chunk, its body
+    /// is a file handed to the background session, never set here.
+    ///
+    /// The networks it may use travel on the REQUEST, not the session: the session's configuration
+    /// is fixed for the life of the process, while the person's choice is not, and the request is
+    /// what the system keeps with the task — so the choice a task was sent under can be read back
+    /// after a relaunch and the task replaced when it no longer matches.
+    public static func wholeUpload(
+        baseURL: URL,
+        token: String,
+        uploadUID: String,
+        allowsMobileData: Bool
+    ) -> URLRequest {
+        var request = chunk(baseURL: baseURL, token: token, uploadUID: uploadUID, offset: 0)
+        let access = WholeTaskNetworkAccess.policy(allowsMobileData: allowsMobileData)
+        request.allowsCellularAccess = access.allowsCellular
+        request.allowsExpensiveNetworkAccess = access.allowsExpensive
+        request.allowsConstrainedNetworkAccess = access.allowsConstrained
+        return request
+    }
+
     /// The offset HEAD: the server's own count of what it holds, which is the only number the
     /// outbox resumes from.
     public static func offset(baseURL: URL, token: String, uploadUID: String) -> URLRequest {

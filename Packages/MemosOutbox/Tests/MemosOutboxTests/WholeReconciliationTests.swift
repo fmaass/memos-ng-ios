@@ -219,3 +219,43 @@ struct WholeReconciliationTests {
         #expect(plan.retryWhole == [WholeFileRef(jobID: job.id, fileID: file.id)])
     }
 }
+
+@Suite("Whole lane: a cancelled task leaves its file to be sent again")
+struct WholeStrandedRecordTests {
+    @Test("a task naming a file its capture no longer has is cancelled")
+    func missingFileIsCancelled() {
+        let kept = Matrix.file()
+        let job = Matrix.job([kept])
+        let gone = Matrix.file()
+        let task = Matrix.task(4, job, gone)
+
+        let plan = WholeReconciliation.plan(jobs: [job], tasks: [task])
+        #expect(plan.adopted.isEmpty)
+        #expect(plan.cancelled == [4])
+        #expect(plan.retryWhole == [WholeFileRef(jobID: job.id, fileID: kept.id)])
+    }
+
+    @Test("a task under a superseded term is cancelled, and its file is sent again")
+    func attemptMismatchRetries() {
+        let file = Matrix.file(attempt: 1)
+        let job = Matrix.job([file])
+        let stale = Matrix.task(4, job, file, attempt: 0)
+
+        let plan = WholeReconciliation.plan(jobs: [job], tasks: [stale])
+        #expect(plan.adopted.isEmpty)
+        #expect(plan.cancelled == [4])
+        #expect(plan.retryWhole == [WholeFileRef(jobID: job.id, fileID: file.id)])
+    }
+
+    @Test("an unreadable task is cancelled, and the file nothing carries is sent again")
+    func unreadableLeavesTheRecordToRetry() {
+        let file = Matrix.file()
+        let job = Matrix.job([file])
+        let tasks = [WholeTaskListing(taskIdentifier: 8, taskDescription: "garbage")]
+
+        let plan = WholeReconciliation.plan(jobs: [job], tasks: tasks)
+        #expect(plan.adopted.isEmpty)
+        #expect(plan.cancelled == [8])
+        #expect(plan.retryWhole == [WholeFileRef(jobID: job.id, fileID: file.id)])
+    }
+}

@@ -361,3 +361,119 @@ struct WholeOutcomeTests {
         #expect(classify(status) == .backOff)
     }
 }
+
+@Suite("Whole lane: a legacy row across a write")
+struct WholeLegacyRoundTripTests {
+    /// Compared as values, not bytes: key order and date spelling are the encoder's business, and
+    /// what must survive is every field the older build wrote.
+    @Test("a legacy manifest decoded and written back is the row its values describe")
+    func legacyRoundTripKeepsEveryField() throws {
+        let decoded = try WholeTransportTests.decoder().decode(
+            UploadJob.self, from: Data(WholeTransportTests.legacyManifest.utf8)
+        )
+        let rewritten = try WholeTransportTests.decoder().decode(
+            UploadJob.self, from: try WholeTransportTests.encoder().encode(decoded)
+        )
+        let instant = try #require(ISO8601DateFormatter().date(from: "2025-06-15T15:06:40Z"))
+        let file = OutboxFile(
+            id: try #require(UUID(uuidString: "9B2D4F60-1A3C-4E5F-8A7B-9C0D1E2F3A4B")),
+            relativePath: "file.bin",
+            filename: "IMG_0001.HEIC",
+            mime: "image/heic",
+            byteSize: 1024,
+            uploadUID: "u1",
+            bytesConfirmed: 512,
+            chunkSize: 5_242_880,
+            uploadAttempt: 2
+        )
+        let expected = UploadJob(
+            id: try #require(UUID(uuidString: "6F1C1E52-2D39-4E44-9E3B-0B1F4A1D8C01")),
+            idempotencyKey: try #require(UUID(uuidString: "0A3E7F5C-7B1B-4C8B-8F0E-2C4D6E8F0A12")),
+            content: "a note",
+            capturedAt: instant,
+            files: [file],
+            binding: AccountBinding(
+                serverBaseURL: try #require(URL(string: "https://memos.example.invalid")),
+                ownerSubject: "fabian"
+            ),
+            state: .uploading,
+            attemptCount: 0,
+            nextAttemptAt: instant
+        )
+
+        #expect(decoded == expected, "the legacy manifest did not decode to the values it holds")
+        #expect(rewritten == expected, "a field was lost or changed by the write")
+        #expect(rewritten.files == [file])
+        #expect(rewritten.transport == nil, "a write stamped a lane nobody chose")
+        #expect(rewritten.lane == .chunk)
+    }
+}
+
+@Suite("Whole lane: the description's numeric terms")
+struct WholeTaskIdentityBoundaryTests {
+    /// The initializer takes any attempt; a negative one is refused where it matters, when a
+    /// description is read back, so no task can be adopted under a term no manifest can hold.
+    @Test("an attempt below zero does not survive the disk; an epoch below zero does")
+    func numericBoundaries() {
+        let jobID = UUID()
+        let fileID = UUID()
+        let launch = UUID()
+        func identity(attempt: Int, epoch: Int) -> WholeTaskIdentity {
+            WholeTaskIdentity(
+                jobID: jobID, fileID: fileID, attempt: attempt, launch: launch, epoch: epoch
+            )
+        }
+
+        let negativeAttempt = identity(attempt: -1, epoch: 3)
+        #expect(WholeTaskIdentity(taskDescription: negativeAttempt.taskDescription) == nil)
+        let zero = identity(attempt: 0, epoch: 0)
+        #expect(WholeTaskIdentity(taskDescription: zero.taskDescription) == zero)
+        let largest = identity(attempt: Int.max, epoch: Int.max)
+        #expect(WholeTaskIdentity(taskDescription: largest.taskDescription) == largest)
+
+        // The epoch is compared for equality and nothing else, so its sign is not checked: a
+        // negative one comes back exactly as it went.
+        let negativeEpoch = identity(attempt: 1, epoch: -5)
+        let read = WholeTaskIdentity(taskDescription: negativeEpoch.taskDescription)
+        #expect(read == negativeEpoch)
+        #expect(read?.provenance(currentLaunch: launch) == .thisLaunch(epoch: -5))
+
+        // A term too large for the platform's integer is unreadable, not wrapped.
+        let big = "9223372036854775808"
+        let overflow = "\(jobID.uuidString)|\(fileID.uuidString)|0|\(big)|\(launch.uuidString)|3"
+        #expect(WholeTaskIdentity(taskDescription: overflow) == nil)
+    }
+}
+
+@Suite("Whole lane: a retry beside a file already part-way")
+struct RetryWholeSiblingBytesTests {
+    @Test("a picture retried while its video holds confirmed bytes: the video's bytes are kept")
+    func siblingKeepsConfirmedBytes() throws {
+        let picture = Whole.file(uploadUID: "p1", byteSize: 4096, bytesConfirmed: 1024)
+        let video = Whole.file(
+            uploadUID: "v1", byteSize: 900_000, bytesConfirmed: 300_000, attempt: 1
+        )
+        let job = Whole.job(files: [picture, video])
+
+        let retried = job.retryingWhole(fileID: picture.id)
+
+        let keptVideo = try #require(retried.file(video.id))
+        #expect(keptVideo == video)
+        #expect(keptVideo.bytesConfirmed == 300_000, "the video's confirmed bytes were dropped")
+        #expect(keptVideo.uploadAttempt == 1)
+        #expect(keptVideo.uploadUID == "v1")
+        #expect(retried.file(picture.id)?.bytesConfirmed == 0)
+        #expect(retried.file(picture.id)?.uploadAttempt == 1)
+
+        // The video's task, under its unchanged term, is still the one that carries it.
+        let videoTask = WholeTaskListing(
+            taskIdentifier: 2,
+            taskDescription: WholeTaskIdentity(
+                jobID: job.id, fileID: video.id, attempt: 1, launch: UUID(), epoch: 7
+            ).taskDescription
+        )
+        let plan = WholeReconciliation.plan(jobs: [retried], tasks: [videoTask])
+        #expect(plan.adopted.map(\.taskIdentifier) == [2])
+        #expect(plan.cancelled.isEmpty)
+    }
+}
