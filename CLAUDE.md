@@ -300,9 +300,11 @@ Writes to known pages resolve BY ID from here; name-search is discovery only.
 - Feature — Places: page:3855
 - Session Reviews chapter: chapter:3155
 - Decisions chapter: chapter:3154 (ADR-0001: page:3157; ADR-0004: page:3936 — the app versions inside
-  the shared API major; ADR-0005: page:3995 — superseded by ADR-0006; ADR-0006: page:4036 — proposed:
-  native resumable background URLSession uploads on iOS 26, memos-ng speaks the IETF resumable-upload
-  protocol, the tus 1.0 router and the chunk lane removed)
+  the shared API major; ADR-0005: page:3995 — superseded by ADR-0006; ADR-0006: page:4036 — superseded by ADR-0007;
+  ADR-0007: page:4044 — proposed: background uploads without resumption — one whole-file background
+  URLSession upload task per media file over the existing /api/uploads, retried whole on failure, no
+  resumable-upload protocol on either side; memos-ng removed its tus 1.0 router as 1.11.0, plan page 4043
+  in the memos-ng book)
 - Playbook — background uploads, native resumable (2026-09-24): page:4030 (chapter:3155; S1 handover
   page:4031)
 - Handover — search-renovation (WP-10 nightly package, 2026-09-23): page:3938 (chapter:3155); playbook
