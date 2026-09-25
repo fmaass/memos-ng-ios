@@ -171,6 +171,113 @@ struct OutboxAccountTests {
         #expect(try #require(await provider(for: session).currentCredentials()).token == "pat-b")
     }
 
+    /// A session that tells the outbox, and a whoami that answers per token unless told to fail.
+    private func withdrawingSession(
+        credentials: any CredentialStore, heard: Withdrawals, failing: Failing = Failing()
+    ) -> SessionStore {
+        let whoami = Self.whoamiPerToken
+        let session = SessionStore(
+            credentials: credentials,
+            makeClient: { _, token in
+                Stub.client(token: token) { request, body, operation in
+                    let bearer = request.headerFields[.authorization] ?? ""
+                    if failing.fails(bearer) { throw URLError(.timedOut) }
+                    return try await whoami(request, body, operation)
+                }
+            },
+            onAccountWithdrawn: { withdrawn in
+                heard.epochs.append(withdrawn)
+                heard.read.append(heard.session?.epoch.current ?? -1)
+            }
+        )
+        heard.session = session
+        return session
+    }
+
+    @Test("a replacement sign-in that fails still tells the outbox the standing grant has gone")
+    func aFailedReplacementSignInTellsTheOutbox() async throws {
+        let heard = Withdrawals()
+        let failing = Failing()
+        let session = withdrawingSession(
+            credentials: InMemoryCredentials(), heard: heard, failing: failing
+        )
+        await session.signIn(serverAddress: signInServer, token: "pat-a")
+        let granted = try #require(await provider(for: session).currentCredentials())
+        let before = heard.epochs.count
+        failing.fail("pat-b")
+
+        await session.signIn(serverAddress: signInServer, token: "pat-b")
+
+        #expect(session.state.user == nil, "the premise: the failure left nobody signed in")
+        #expect(heard.epochs.count == before + 1)
+        #expect(heard.epochs.last.map { $0 > granted.epoch } == true)
+        #expect(heard.epochs == heard.read)
+    }
+
+    @Test("a restore over a grant held only in memory tells the outbox, admitting the stored one")
+    func aRestoreThatAdmitsTellsTheOutbox() async throws {
+        let heard = Withdrawals()
+        let vault = FlakyCredentials()
+        let session = withdrawingSession(credentials: vault, heard: heard)
+        await session.signIn(serverAddress: signInServer, token: "pat-a")
+        vault.refuseWrites()
+        await session.signIn(serverAddress: signInServer, token: "pat-b")
+        let held = try #require(await provider(for: session).currentCredentials())
+        #expect(held.token == "pat-b", "the premise: B is held in memory, A is stored")
+        let before = heard.epochs.count
+
+        await session.restore()
+
+        #expect(try #require(await provider(for: session).currentCredentials()).token == "pat-a")
+        #expect(heard.epochs.count == before + 1)
+        #expect(heard.epochs.last.map { $0 > held.epoch } == true)
+        #expect(heard.epochs == heard.read)
+    }
+
+    @Test("a restore over a grant held only in memory tells the outbox, parking")
+    func aRestoreThatParksTellsTheOutbox() async throws {
+        let heard = Withdrawals()
+        let vault = FlakyCredentials()
+        let failing = Failing()
+        let session = withdrawingSession(credentials: vault, heard: heard, failing: failing)
+        await session.signIn(serverAddress: signInServer, token: "pat-a")
+        vault.refuseWrites()
+        await session.signIn(serverAddress: signInServer, token: "pat-b")
+        let held = try #require(await provider(for: session).currentCredentials())
+        #expect(held.token == "pat-b", "the premise: B is held in memory, A is stored")
+        let before = heard.epochs.count
+        failing.fail("pat-a")
+
+        await session.restore()
+
+        #expect(await provider(for: session).currentCredentials() == nil)
+        #expect(session.state.user == nil, "the premise: the restore parked")
+        #expect(heard.epochs.count == before + 1)
+        #expect(heard.epochs.last.map { $0 > held.epoch } == true)
+        #expect(heard.epochs == heard.read)
+    }
+
+    /// The control: a launch has presented nothing, and the tasks an earlier launch left are the
+    /// stored account's own, sending a token that is still good.
+    @Test("a launch's restore withdraws nothing, whether it admits or parks")
+    func aLaunchRestoreTellsTheOutboxNothing() async throws {
+        for parks in [false, true] {
+            let vault = InMemoryCredentials()
+            let first = session(credentials: vault, handler: Self.whoamiPerToken)
+            await first.signIn(serverAddress: signInServer, token: "pat-a")
+            let heard = Withdrawals()
+            let failing = Failing()
+            if parks { failing.fail("pat-a") }
+            let launched = withdrawingSession(credentials: vault, heard: heard, failing: failing)
+
+            await launched.restore()
+
+            let admitted = await provider(for: launched).currentCredentials() != nil
+            #expect(admitted != parks, "the premise, parks: \(parks)")
+            #expect(heard.epochs.isEmpty, "parks: \(parks)")
+        }
+    }
+
     /// The synchronous half: what the drain asks immediately before each request it sends.
     @Test("a grant stops standing the moment the session's authority moves")
     func aGrantStopsStandingWhenAuthorityMoves() async throws {
@@ -186,6 +293,18 @@ struct OutboxAccountTests {
             !provider.isCurrent(granted),
             "a request about to go out under an account that is gone is not sent"
         )
+    }
+}
+
+/// Which tokens the scripted server stops answering for, switched from the test.
+private final class Failing: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: Set<String> = []
+
+    func fail(_ token: String) { lock.withLock { _ = tokens.insert(token) } }
+
+    func fails(_ bearer: String) -> Bool {
+        lock.withLock { tokens.contains { bearer.contains($0) } }
     }
 }
 

@@ -86,6 +86,9 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// queue the drain is working through rather than going straight to the handler, where it
     /// could overtake an older answer for the same file still being replayed.
     private var replaying = false
+    /// A task nobody can read ended while adoption was replaying: told once the replay is over,
+    /// never ahead of an answer still buffered behind it.
+    private var unreadableEndedInReplay = false
     /// What is still being applied. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
     /// The replace barrier's evidence: every terminal callback lands here, cancelled ones and ones
@@ -116,10 +119,17 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
                 }
                 return waiting.removeFirst()
             }
-            guard let next else { return }
+            guard let next else { break }
             await handler.handle(next)
             pending.leave()
         }
+        let unreadableEnded: Bool = lock.withLock {
+            defer { unreadableEndedInReplay = false }
+            return unreadableEndedInReplay
+        }
+        guard unreadableEnded else { return }
+        await handler.unreadableTaskEnded()
+        pending.leave()
     }
 
     /// The body only accumulates; nothing is decided until the task's terminal callback.
@@ -165,7 +175,19 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         guard let identity = WholeTaskIdentity(taskDescription: taskDescription) else {
             // It answers nothing, but it was holding every file back, and nothing else will say
             // that it has stopped. Unattached, there is nothing to tell: adoption drains anyway.
-            let handler: (any WholeAnswerHandling)? = lock.withLock { self.handler }
+            // Mid-replay it waits for the replay: a drain started now would find a file whose
+            // finished answer is still buffered and send it again.
+            let handler: (any WholeAnswerHandling)? = lock.withLock {
+                guard let attached = self.handler else { return nil }
+                guard !replaying else {
+                    if !unreadableEndedInReplay {
+                        unreadableEndedInReplay = true
+                        pending.enter()
+                    }
+                    return nil
+                }
+                return attached
+            }
             if let handler {
                 pending.enter()
                 Task {
