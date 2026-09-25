@@ -308,6 +308,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             await onChange()
             return
         }
+        // Before the network is judged: a task the person's choice no longer allows must stop even
+        // when this pass may send nothing — turning mobile data off on cellular is exactly that
+        // pass. Its successor asks for the network itself, when it is built.
+        await replaceMismatched(credentials)
         // Before the probe, because the probe is itself a request: a phone on mobile data with the
         // toggle off spends nothing at all, and every candidate says what it is waiting for.
         guard permitsNetwork() else {
@@ -326,7 +330,6 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             await onChange()
             return
         }
-        await replaceMismatched(credentials)
         for job in candidates {
             await advance(job, credentials: credentials)
         }
@@ -452,8 +455,11 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // uploads or waits, whichever it is, and a later pass re-enters here.
             }
             if uploads != nil, current.lane == .whole || Self.claimsWhole(current) {
-                await advanceWhole(current, credentials: credentials)
-                return
+                // A create that resolved with an edit owed comes back to the edit branch above.
+                let handedBack = await advanceWhole(current, credentials: credentials)
+                guard let handedBack else { return }
+                current = handedBack
+                continue
             }
             switch OutboxPlanner.nextAction(
                 for: current, credentials: credentials, now: clock()
@@ -948,6 +954,23 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
     }
 
+    /// Every task either session holds, cancelled: the credential they present was withdrawn.
+    ///
+    /// Every one, readable or not and whichever launch made it: a background task keeps its bearer
+    /// header after this process has forgotten the token, and nothing but a cancel stops it
+    /// sending. Nothing is written — a late answer meets the credential fences like any other.
+    public func abandonAllTasks() async {
+        let live = await scheduler.inFlight()
+        if !live.isEmpty {
+            await scheduler.cancel(live)
+        }
+        guard let uploads else { return }
+        let whole = await uploads.tasks().map(\.taskIdentifier)
+        if !whole.isEmpty {
+            await uploads.cancel(whole)
+        }
+    }
+
     // MARK: - chunk answers
 
     /// Called by the background session, possibly in a process launched for this alone.
@@ -1122,30 +1145,51 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// One whole-lane capture's next step. Every file it sends goes in ONE hand-off, so a
     /// background wake only has answers to collect and a memo to create.
-    private func advanceWhole(_ job: UploadJob, credentials: OutboxCredentials) async {
-        guard let uploads else { return }
+    /// - Returns: the row, when its create resolved with an edit still owed: the edit is applied
+    ///   by `advance`, never by planning the create again.
+    private func advanceWhole(
+        _ job: UploadJob, credentials: OutboxCredentials
+    ) async -> UploadJob? {
+        guard let uploads else { return nil }
         for _ in 0...Self.maxPlanRestarts {
-            guard await passWhole(job.id, credentials: credentials, on: uploads) else { return }
+            switch await passWhole(job.id, credentials: credentials, on: uploads) {
+            case .done:
+                return nil
+            case .replan:
+                continue
+            case .handBack(let next):
+                return next
+            }
         }
         // Every plan met a queue that moved under it: another drain, asked for and not awaited —
         // the caller may be an answer still holding its in-progress marks.
         requestDrain()
+        return nil
     }
 
-    /// One plan for one whole-lane row, carried out. True when it must be planned again: a claim
-    /// or a release in `owned` landed while the row and the listing were being read, so the two
-    /// no longer describe one instant.
+    /// How one whole-lane plan ended.
+    private enum WholePass {
+        /// Nothing more for this pass.
+        case done
+        /// A claim or a release in `owned` landed while the row and the listing were being read,
+        /// so the two no longer describe one instant.
+        case replan
+        /// The memo was created and an edit is owed to it.
+        case handBack(UploadJob)
+    }
+
+    /// One plan for one whole-lane row, carried out.
     private func passWhole(
         _ jobID: UUID, credentials: OutboxCredentials, on uploads: any OutboxUploadScheduling
-    ) async -> Bool {
+    ) async -> WholePass {
         // Taken before the row and the listing are read, and compared once both are in hand.
         let observed = ownershipGeneration
         // Planned from the row as it stands now, not the caller's copy: a replacement or an answer
         // may have moved a file's term since, and a plan from the older copy opens a session on
         // the server that its fenced write then refuses.
-        guard var current = await repository.job(jobID) else { return false }
+        guard var current = await repository.job(jobID) else { return .done }
         for _ in 0..<Self.maxStepsPerPass {
-            guard current.cancelledAt == nil, mayStillSend(credentials) else { return false }
+            guard current.cancelledAt == nil, mayStillSend(credentials) else { return .done }
             // The gate decides the ACTION here: while the app is not active the planner answers a
             // memo create or a wait, never an upload (decision 9).
             switch OutboxPlanner.nextWholeAction(
@@ -1157,13 +1201,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // moved — perhaps one that skipped a file this pass owned. Ask again, here and at
                 // every refused write below.
                 if await !hold(current, reason: reason) { requestDrain() }
-                return false
+                return .done
             case .wait:
-                return false
+                return .done
             case .upload(let starting, let retrying):
                 guard permitsNetwork() else {
                     if await !waitForNetwork(current) { requestDrain() }
-                    return false
+                    return .done
                 }
                 // A file a live task is carrying is not sent again: the planner cannot see tasks.
                 // Nor is one this engine is still applying an answer to or handing off: whoever
@@ -1171,10 +1215,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 let carried = await carriedFiles(of: current, on: uploads)
                 // A claim or release inside those hops makes the row, the listing and `owned` three
                 // different instants: plan again from the read.
-                guard ownershipGeneration == observed else { return true }
+                guard ownershipGeneration == observed else { return .replan }
                 let start = starting.filter { !carried.contains($0) && !isOwned(jobID, $0) }
                 let retry = retrying.filter { !carried.contains($0) && !isOwned(jobID, $0) }
-                guard !start.isEmpty || !retry.isEmpty else { return false }
+                guard !start.isEmpty || !retry.isEmpty else { return .done }
                 // Claimed here, with no hop since the check: a settlement landing after it cannot
                 // free a file this pass is about to send. `handOffWhole` releases each one.
                 for fileID in start + retry { own(WholeFileRef(jobID: jobID, fileID: fileID)) }
@@ -1182,17 +1226,19 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                     current, starting: start, retrying: retry, credentials: credentials,
                     on: uploads
                 )
-                return false
+                return .done
             case .createMemo:
                 guard permitsNetwork() else {
                     if await !waitForNetwork(current) { requestDrain() }
-                    return false
+                    return .done
                 }
-                guard creating.insert(current.id).inserted else { return false }
+                guard creating.insert(current.id).inserted else { return .done }
                 let next = await complete(current, credentials: credentials)
                 creating.remove(current.id)
                 settle()
-                guard let next else { return false }
+                guard let next else { return .done }
+                // Planned again, this row would only be created again: every file is on the server.
+                if next.pendingEdit != nil, next.resolvedMemoUID != nil { return .handBack(next) }
                 current = next
             }
         }
@@ -1201,7 +1247,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             matching: current
         )
         if backedOff == nil { requestDrain() }
-        return false
+        return .done
     }
 
     /// The files of this job some listed task is still carrying — at any term, in any state short
@@ -1216,9 +1262,12 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         pruneEnded(answeredBefore, listing: listing)
         var carried = Set<UUID>()
         for task in listing where task.state != .completed && ended[task.taskIdentifier] == nil {
-            guard let identity = WholeTaskIdentity(taskDescription: task.taskDescription),
-                identity.jobID == job.id
-            else { continue }
+            // A task nobody can read may be carrying any file of any row, and its cancel is only
+            // a request: until it has left the list, every file counts as carried.
+            guard let identity = WholeTaskIdentity(taskDescription: task.taskDescription) else {
+                return Set(job.files.map(\.id))
+            }
+            guard identity.jobID == job.id else { continue }
             carried.insert(identity.fileID)
         }
         return carried
@@ -1378,8 +1427,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private func replaceMismatched(_ credentials: OutboxCredentials) async {
         guard let uploads, schedulingGate.isOpen else { return }
         _ = await uploads.reexamineDeferred()
-        let allowsMobileData = preferences.allowsMobileData
-        for task in await uploads.mismatched(allowsMobileData: allowsMobileData) {
+        for task in await uploads.mismatched(allowsMobileData: preferences.allowsMobileData) {
             guard replacing[task.taskIdentifier] == nil else { continue }
             let ref = WholeFileRef(jobID: task.identity.jobID, fileID: task.identity.fileID)
             // The mismatch list is older than this instant. Admitted only on a fresh listing read
@@ -1403,10 +1451,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 task, under: authority(under: credentials, for: .work),
                 onSettled: { sent in await self.replacementSettled(ref, sent: sent) }
             ) {
-                await self.successor(
-                    replacing: task.identity, credentials: credentials,
-                    allowsMobileData: allowsMobileData
-                )
+                await self.successor(replacing: task.identity, credentials: credentials)
             }
         }
     }
@@ -1421,12 +1466,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// The replacement for one file, built after its old task has ended: the file's own next
     /// term and a fresh session, written, and the request that sends it under the choice now.
+    ///
+    /// The choice and the network are read HERE, not where the replacement began: a deferred
+    /// successor is built whenever its predecessor ends, and the toggle can have moved again since.
     private func successor(
         replacing old: WholeTaskIdentity,
-        credentials: OutboxCredentials,
-        allowsMobileData: Bool
+        credentials: OutboxCredentials
     ) async -> WholeSuccessor? {
-        guard mayStillSend(credentials),
+        guard permitsNetwork(), mayStillSend(credentials),
             let job = await repository.job(old.jobID),
             job.lane == .whole, job.cancelledAt == nil, job.state != .held,
             let file = job.file(old.fileID),
@@ -1447,7 +1494,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 baseURL: credentials.serverBaseURL,
                 token: credentials.token,
                 uploadUID: uploadUID,
-                allowsMobileData: allowsMobileData
+                allowsMobileData: preferences.allowsMobileData
             ),
             file: repository.mediaURL(job: saved, file: sent),
             ref: WholeFileRef(jobID: saved.id, fileID: sent.id),

@@ -66,7 +66,11 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // Synchronous, because that is when the transition happens. What it starts is its own
         // task, and that task re-reads the authority before it drains — a confirmation is not a
         // promise that the session still exists by the time a drain gets a turn.
-        onVerified: { [weak self] in Task { @MainActor in await self?.drainOnConfirmation() } }
+        onVerified: { [weak self] in Task { @MainActor in await self?.drainOnConfirmation() } },
+        // A sign-out, revoked or not: the uploads the system is still carrying hold the old token.
+        onCredentialWiped: { [weak self] in
+            Task { @MainActor in await self?.outbox?.abandonAllTasks() }
+        }
     )
     private(set) var outbox: Outbox?
     /// Built from the outbox's own preference store rather than a second one over the same suite:

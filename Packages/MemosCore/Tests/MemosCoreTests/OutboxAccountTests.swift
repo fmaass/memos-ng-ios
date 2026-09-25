@@ -102,6 +102,37 @@ struct OutboxAccountTests {
         #expect(await provider(for: session).currentCredentials() == nil)
     }
 
+    @Test("both ways of signing out tell the outbox once, after the authority has moved")
+    func signingOutTellsTheOutbox() async {
+        for revoking in [true, false] {
+            let heard = Withdrawals()
+            let session = SessionStore(
+                credentials: InMemoryCredentials(),
+                makeClient: { _, token in
+                    Stub.client(token: token) { _, _, operation in
+                        operation == "native_logout_api_auth_native_logout_post"
+                            ? Stub.empty(.noContent) : Stub.json(Stub.user)
+                    }
+                },
+                onCredentialWiped: { heard.epochs.append(heard.session?.epoch.current ?? -1) }
+            )
+            heard.session = session
+            await session.signIn(serverAddress: signInServer, token: "pat-token")
+            let before = session.epoch.current
+
+            if revoking {
+                _ = await session.signOut()
+            } else {
+                await session.signOutWithoutRevoking()
+            }
+
+            #expect(heard.epochs.count == 1, "revoking: \(revoking)")
+            // Told only once nothing can present the withdrawn credential any more.
+            #expect(heard.epochs.allSatisfy { $0 > before }, "revoking: \(revoking)")
+            #expect(await provider(for: session).currentCredentials() == nil)
+        }
+    }
+
     /// The synchronous half: what the drain asks immediately before each request it sends.
     @Test("a grant stops standing the moment the session's authority moves")
     func aGrantStopsStandingWhenAuthorityMoves() async throws {
@@ -118,4 +149,11 @@ struct OutboxAccountTests {
             "a request about to go out under an account that is gone is not sent"
         )
     }
+}
+
+/// What the outbox heard from a sign-out, and the session it came from, read in the handler.
+@MainActor
+private final class Withdrawals {
+    var epochs: [Int] = []
+    weak var session: SessionStore?
 }

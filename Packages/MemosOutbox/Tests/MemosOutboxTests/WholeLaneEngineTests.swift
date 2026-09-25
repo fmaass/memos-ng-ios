@@ -222,6 +222,7 @@ private struct WholeRig {
     let launch: UUID
     let gate: SchedulingGate
     let credentials: SwitchableCredentials
+    let network: StubNetworkPath
     let preferences: UploadPreferences
     let preferencesName: String
     let clock: MutableClock
@@ -240,7 +241,9 @@ private struct WholeRig {
             nil,
         completion: [MemoCompletionOutcome] = [.created(uid: "m1")],
         prepare: @Sendable (UploadJob) -> UploadJob? = { _ in nil },
-        wrapUploads: (@Sendable (BackgroundUploadScheduler) -> any OutboxUploadScheduling)? = nil
+        wrapUploads: (@Sendable (BackgroundUploadScheduler) -> any OutboxUploadScheduling)? = nil,
+        network: StubNetworkPath = StubNetworkPath(),
+        chunksInFlight: [OutboxTaskIdentity] = []
     ) async throws -> WholeRig {
         let root = try Fixture.temporaryDirectory()
         let provider = SwitchableCredentials(Fixture.credentials())
@@ -302,7 +305,7 @@ private struct WholeRig {
         )
         let clock = MutableClock(now)
         let preferences = Fixture.preferences(allowsMobileData: false)
-        let chunks = ScriptedScheduler()
+        let chunks = ScriptedScheduler(inFlight: chunksInFlight)
         let completion = ScriptedCompletion(completion)
         let gate = SchedulingGate()
         let engine = OutboxEngine(
@@ -311,7 +314,7 @@ private struct WholeRig {
             http: http,
             scheduler: chunks,
             completion: completion,
-            network: StubNetworkPath(),
+            network: network,
             preferences: preferences.store,
             clock: { clock.now },
             schedulingGate: gate,
@@ -321,7 +324,8 @@ private struct WholeRig {
         return WholeRig(
             root: root, repository: repository, http: http, postStatus: postStatus,
             attempted: attempted, chunks: chunks, session: session, delegate: delegate,
-            launch: launch, gate: gate, credentials: provider, preferences: preferences.store,
+            launch: launch, gate: gate, credentials: provider, network: network,
+            preferences: preferences.store,
             preferencesName: preferences.name, clock: clock, completion: completion,
             engine: engine, job: job
         )
@@ -636,6 +640,9 @@ struct WholeLaneEngineTests {
                 errorDescription: "cancelled"
             )
         )
+        // Ended, it leaves the session's list, and only then are the files sent.
+        rig.session.forget(7)
+        await rig.engine.drain()
         await rig.engine.handle(
             try rig.answer(rig.task(for: rig.picture.id), status: 200, received: 1000)
         )
@@ -740,6 +747,117 @@ struct WholeLaneEngineTests {
         #expect(successors.count == 2)
         #expect(successors.allSatisfy { $0.request.allowsCellularAccess })
         #expect(try await rig.reload().files.map(\.uploadAttempt) == [1, 1])
+    }
+
+    @Test("mobile data turned off on cellular cancels each task though the pass may send nothing")
+    func toggleOffOnCellularCancels() async throws {
+        let rig = try await WholeRig.make(onCancel: .leavesListing(after: 1))
+        defer { rig.cleanUp() }
+        await rig.preferences.set(true)
+        await rig.network.move(to: .cellular)
+        await rig.engine.drain()
+        let old = rig.session.createdTasks.map(\.taskIdentifier)
+        #expect(old.count == 2)
+        let postsBefore = rig.attemptedUploadPosts
+
+        await rig.preferences.set(false)
+        await rig.engine.drain()
+
+        // The tasks the old choice let onto cellular are gone, and nothing replaces them until
+        // the phone is on a network the new choice allows.
+        #expect(Set(rig.session.cancelledIdentifiers) == Set(old))
+        #expect(rig.session.createdTasks.count == 2)
+        #expect(rig.attemptedUploadPosts == postsBefore)
+    }
+
+    @Test("a deferred successor goes out under the choice standing when it is sent")
+    func deferredSuccessorTakesCurrentChoice() async throws {
+        let rig = try await WholeRig.make(onCancel: .staysListed)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        await rig.preferences.set(true)
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2)
+        // Changed again while the replacement waits for the old task to end.
+        await rig.preferences.set(false)
+
+        rig.delegate.complete(
+            taskIdentifier: picture.taskIdentifier, taskDescription: picture.description,
+            statusCode: nil, errorDescription: "cancelled"
+        )
+        #expect(try await rig.eventually { rig.session.createdTasks.count == 3 })
+        await rig.engine.untilQuiescent()
+
+        let successor = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(!successor.request.allowsCellularAccess)
+        #expect(!successor.request.allowsExpensiveNetworkAccess)
+    }
+
+    @Test("a listed task nobody can read holds back every file until it has left the list")
+    func unreadableTaskIsABarrier() async throws {
+        let rig = try await WholeRig.make(
+            listing: { _ in
+                [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
+            },
+            onCancel: .staysListed
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        // Cancelled, and still listed: it may be carrying either file, so neither goes out.
+        #expect(rig.session.cancelledIdentifiers == [7])
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(rig.attemptedUploadPosts == 0)
+
+        rig.session.forget(7)
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2)
+    }
+
+    @Test("a sign-out cancels every task of both sessions, and their late answers send nothing")
+    func signOutAbandonsEveryTask() async throws {
+        let chunk = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 0)
+        let rig = try await WholeRig.make(
+            listing: { job in
+                [
+                    WholeTaskListing(
+                        taskIdentifier: 7,
+                        taskDescription: WholeTaskIdentity(
+                            jobID: job.id, fileID: job.files[0].id, attempt: 0, launch: UUID(),
+                            epoch: 0
+                        ).taskDescription
+                    ),
+                    WholeTaskListing(taskIdentifier: 8, taskDescription: "not|a|whole|task"),
+                ]
+            },
+            chunksInFlight: [chunk]
+        )
+        defer { rig.cleanUp() }
+        // The session's credential is withdrawn first; the outbox is told after.
+        rig.credentials.set(nil)
+        await rig.engine.abandonAllTasks()
+
+        #expect(rig.chunks.cancellations == [chunk])
+        #expect(Set(rig.session.cancelledIdentifiers) == [7, 8])
+
+        // The cancelled task still answers. Nobody is signed in, so nothing is sent again.
+        await rig.engine.handle(
+            WholeAnswer(
+                taskIdentifier: 7,
+                identity: WholeTaskIdentity(
+                    jobID: rig.job.id, fileID: rig.picture.id, attempt: 0, launch: UUID(),
+                    epoch: 0
+                ),
+                statusCode: nil,
+                body: Data()
+            )
+        )
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(rig.attemptedUploadPosts == 0)
+        #expect(rig.completion.idempotencyKeys.isEmpty)
+        #expect(await rig.repository.job(rig.job.id) != nil)
     }
 
     @Test("a deferred replacement's cancelled task answers without a status, and changes nothing")

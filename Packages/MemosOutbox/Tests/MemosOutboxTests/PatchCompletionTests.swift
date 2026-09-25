@@ -42,6 +42,7 @@ private final class MemoServer: @unchecked Sendable {
     }
 
     var memoCount: Int { lock.withLock { order.count } }
+    var memoUIDs: [String] { lock.withLock { order } }
     /// How many times an edit was actually APPLIED, which a transmission count cannot see.
     var editApplications: Int { lock.withLock { appliedEdits.count } }
     func memo(_ uid: String) -> Memo? { lock.withLock { memos[uid] } }
@@ -205,7 +206,8 @@ struct PatchCompletionTests {
         root existing: URL? = nil,
         server: MemoServer = MemoServer(),
         clock: MutableClock? = nil,
-        completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil
+        completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil,
+        uploads: (any OutboxUploadScheduling)? = nil
     ) throws -> Patching {
         let root = try existing ?? Fixture.temporaryDirectory()
         let provider = StaticCredentials(credentials: Fixture.credentials())
@@ -249,7 +251,8 @@ struct PatchCompletionTests {
             completion: completion?(endpoint) ?? endpoint,
             network: StubNetworkPath(),
             preferences: preferences.store,
-            clock: tick
+            clock: tick,
+            uploads: uploads
         )
         return Patching(
             root: root,
@@ -304,6 +307,45 @@ struct PatchCompletionTests {
                 candidate.files[index].bytesConfirmed = candidate.files[index].byteSize
             }
         }
+    }
+
+    @Test("a whole-lane capture taken back, edited and sent again: one create, then the edit")
+    func wholeLaneResubmitAppliesTheEdit() async throws {
+        let session = ScriptedUploadTaskSession(onCancel: .leavesListing(after: 1))
+        let delegate = UploadSessionDelegate()
+        let harness = try harness(
+            uploads: BackgroundUploadScheduler(session: session, delegate: delegate)
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [(name: "pier.heic", bytes: 1000)])
+        await harness.outbox.drain()
+        #expect(session.createdTasks.count == 1)
+
+        var edited = try #require(await harness.outbox.cancel(job.id))
+        edited.content = "the pier, the day after"
+        #expect(await harness.outbox.resubmit(job.id, draft: edited) == .accepted)
+        #expect(session.createdTasks.count == 2)
+        let sent = try #require(session.createdTasks.last)
+        let identity = try #require(WholeTaskIdentity(taskDescription: sent.description))
+
+        delegate.deliver(
+            WholeAnswer(
+                taskIdentifier: sent.taskIdentifier, identity: identity, statusCode: 200,
+                body: ScriptedHTTP.session(uid: "uC", chunkSize: 1, received: 1000).body
+            )
+        )
+        var waited = 0
+        while await harness.repository.job(job.id) != nil, waited < 300 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+
+        #expect(harness.memoPosts.count == 1)
+        #expect(harness.memoPatches.count == 1)
+        #expect(harness.server.editApplications == 1)
+        let uid = try #require(harness.server.memoUIDs.first)
+        #expect(harness.server.memo(uid)?.content == "the pier, the day after")
+        #expect(await harness.repository.job(job.id) == nil)
     }
 
     /// Drains until the job is gone or the passes run out: the create's resolution and the edit

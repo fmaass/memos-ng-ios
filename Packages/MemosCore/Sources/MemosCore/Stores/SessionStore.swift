@@ -328,6 +328,9 @@ public final class SessionStore {
     /// layer above: a capture parked while the phone was off the network needs somebody to try
     /// again, and the only event that says trying is worth it is this one.
     private let onVerified: (@MainActor @Sendable () -> Void)?
+    /// What to do the moment this device stops holding a credential — the app wires the outbox's
+    /// cancellation of every background upload to it.
+    private let onCredentialWiped: (@MainActor @Sendable () -> Void)?
     /// Where a diagnostic line goes, injected the same way the sleeper is.
     ///
     /// It exists so the log BOUNDARY can be watched rather than re-derived. A guardrail that
@@ -368,6 +371,7 @@ public final class SessionStore {
         snapshots: TimelineSnapshotStore? = nil,
         routes: (any RouteStatusMonitoring)? = nil,
         onVerified: (@MainActor @Sendable () -> Void)? = nil,
+        onCredentialWiped: (@MainActor @Sendable () -> Void)? = nil,
         // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
         // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
         // and a named default would have to be public to be referenced from one.
@@ -387,6 +391,7 @@ public final class SessionStore {
         self.identity = identity
         self.lastKnownUser = lastKnownUser
         self.onVerified = onVerified
+        self.onCredentialWiped = onCredentialWiped
         self.diagnostics =
             diagnostics ?? { line in MemosLog.session.error("\(line, privacy: .public)") }
         self.routes = routes
@@ -1833,6 +1838,10 @@ public final class SessionStore {
         client = nil
         credential = nil
         endIncarnation()
+        // After the epoch moved, so nothing the outbox starts from here presents this credential,
+        // and before any await: a background upload holds its own copy of the token and goes on
+        // sending it until it is cancelled.
+        onCredentialWiped?()
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false

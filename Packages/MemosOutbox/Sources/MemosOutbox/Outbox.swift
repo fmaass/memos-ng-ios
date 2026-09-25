@@ -416,6 +416,11 @@ public final class Outbox {
         return draft(of: landed)
     }
 
+    /// The session's credential was withdrawn — a sign-out, with or without the revoke.
+    public func abandonAllTasks() async {
+        await engine.abandonAllTasks()
+    }
+
     /// Sends a restored draft again, on the SAME manifest.
     ///
     /// The key and the account binding travel by identity rather than being stamped afresh — which
