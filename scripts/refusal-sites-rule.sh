@@ -313,8 +313,9 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
   "$(grep -caF 'self.credential = ' "$session_store")" \
   "A second assignment is a second moment a credential becomes this device's."
 # 34: AttemptTermTests, CancelTests, PatchCompletionTests and RecoveryTests each construct one, the
-# real repository on a directory of its own.
-pin "'OutboxRepository(' constructions" 34 \
+# real repository on a directory of its own. 36: WholeLaneEngineTests adds two — its rig, fed the
+# credential predicate, and the legacy-manifest rebase, which no drain is behind.
+pin "'OutboxRepository(' constructions" 36 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

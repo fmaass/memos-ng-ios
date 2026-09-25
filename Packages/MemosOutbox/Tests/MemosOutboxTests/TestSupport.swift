@@ -453,6 +453,22 @@ actor GatedPersistence: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    /// Forwarded to the real repository's rebase ungated: the protocol's default would route an
+    /// answer through the gated save above and spend a hold a test meant for a drain's write.
+    func applyFileAnswer(
+        jobID: UUID,
+        fileID: UUID,
+        attempt: Int,
+        outcome: WholeFileChange,
+        presented: WholeTaskProvenance,
+        at instant: Date
+    ) async throws -> UploadJob? {
+        try await inner.applyFileAnswer(
+            jobID: jobID, fileID: fileID, attempt: attempt, outcome: outcome,
+            presented: presented, at: instant
+        )
+    }
 }
 
 /// Supersedes the grant on the way INTO the write — the hop `OutboxEngine` makes into

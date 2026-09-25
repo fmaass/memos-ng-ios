@@ -215,11 +215,12 @@ public struct WholeSuccessor: Sendable {
     }
 }
 
-/// A successor waiting for its predecessor to end: the authority it will be sent under, and the
-/// closure that builds it.
+/// A successor waiting for its predecessor to end: the authority it will be sent under, the
+/// closure that builds it, and the report that the replacement is over.
 private struct DeferredSuccessor: Sendable {
     var authority: SendAuthority
     var build: @Sendable () async -> WholeSuccessor?
+    var settled: @Sendable (WholeTask?) async -> Void = { _ in }
 }
 
 /// What `replace` did.
@@ -247,7 +248,7 @@ public actor BackgroundUploadScheduler {
 
     private let session: any UploadTaskSession
     private let delegate: UploadSessionDelegate
-    private let launch: UUID
+    public nonisolated let launch: UUID
     private let now: @Sendable () -> Date
     private let pause: @Sendable () async -> Void
     /// Every task handed to `replace` in this process. Identifiers are not reused within a session.
@@ -321,6 +322,14 @@ public actor BackgroundUploadScheduler {
         return WholeTask(taskIdentifier: taskIdentifier, identity: identity)
     }
 
+    /// Asks the session to cancel these tasks. A cancel is a request, not a barrier: a task whose
+    /// file is sent again goes through `replace`.
+    public func cancel(_ taskIdentifiers: [Int]) async {
+        for id in taskIdentifiers {
+            await session.cancel(taskIdentifier: id)
+        }
+    }
+
     /// Cancels every task whose description this lane cannot read, and names them. Left alone, such
     /// a task keeps sending a file nobody is waiting for.
     public func cancelUnreadable() async -> [Int] {
@@ -368,9 +377,27 @@ public actor BackgroundUploadScheduler {
         under authority: SendAuthority,
         successor: @escaping @Sendable () async -> WholeSuccessor?
     ) async -> WholeReplacement {
+        await replace(task, under: authority, onSettled: { _ in }, successor: successor)
+    }
+
+    /// `replace`, reporting through `onSettled` when the replacement is over: after the successor's
+    /// task has been created, with that task, or with nil once no successor will be — the
+    /// authority withdrawn, the closure returning nil, or the call refused. Exactly once for every
+    /// call, a deferred one included, whose report waits for its send. A caller that keeps a file
+    /// from being sent again for the span of a replacement releases it there, so the interval
+    /// between the closure's write and the task's creation is covered as well as the deferral.
+    public func replace(
+        _ task: WholeTask,
+        under authority: SendAuthority,
+        onSettled: @escaping @Sendable (WholeTask?) async -> Void,
+        successor: @escaping @Sendable () async -> WholeSuccessor?
+    ) async -> WholeReplacement {
         let id = task.taskIdentifier
-        guard replacementsClaimed.insert(id).inserted else { return .refused }
-        let pending = DeferredSuccessor(authority: authority, build: successor)
+        guard replacementsClaimed.insert(id).inserted else {
+            await onSettled(nil)
+            return .refused
+        }
+        let pending = DeferredSuccessor(authority: authority, build: successor, settled: onSettled)
         await session.cancel(taskIdentifier: id)
         guard await hasEnded(id) else {
             deferred[id] = pending
@@ -429,7 +456,14 @@ public actor BackgroundUploadScheduler {
         _ = await send(successor)
     }
 
+    /// Every successor goes out through here, and every one reports once it has, whatever happened.
     private func send(_ pending: DeferredSuccessor) async -> WholeTask? {
+        let sent = await build(pending)
+        await pending.settled(sent)
+        return sent
+    }
+
+    private func build(_ pending: DeferredSuccessor) async -> WholeTask? {
         // Asked before anything is built, so a withdrawn authority writes nothing.
         guard pending.authority.holds() else { return nil }
         guard let next = await pending.build() else { return nil }

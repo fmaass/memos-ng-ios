@@ -175,6 +175,19 @@ public protocol OutboxPersisting: Sendable {
     /// Where this job's copy of the original lives. The drain reads those bytes to answer a
     /// question only they can answer — which of the memo's pictures this original became.
     func mediaURL(job: UploadJob, file: OutboxFile) -> URL
+
+    /// One whole-file answer, rebased onto the manifest as it stands at the write: only that
+    /// file's fields move, so a sibling's completion that landed first is kept. Nil when the job is
+    /// gone, cancelled, held, off the whole lane, or the file has moved past `attempt`. A refusal's
+    /// disposition is chosen here from `presented` — an answer another launch earned backs off.
+    func applyFileAnswer(
+        jobID: UUID,
+        fileID: UUID,
+        attempt: Int,
+        outcome: WholeFileChange,
+        presented: WholeTaskProvenance,
+        at instant: Date
+    ) async throws -> UploadJob?
 }
 
 /// The outbox on disk.
@@ -400,6 +413,31 @@ public actor OutboxRepository {
         // As persisted, not as offered — see `persist`. A caller that fences its NEXT write on
         // this value is asking about the row on disk, so this has to BE the row on disk.
         return try persist(chosen)
+    }
+
+    /// The per-file rebase — see `OutboxPersisting.applyFileAnswer`. The read, the question about
+    /// the credential and the write are on this isolation with nothing awaited between them.
+    public func applyFileAnswer(
+        jobID: UUID,
+        fileID: UUID,
+        attempt: Int,
+        outcome: WholeFileChange,
+        presented: WholeTaskProvenance,
+        at instant: Date
+    ) throws -> UploadJob? {
+        guard let onDisk = job(jobID) else { return nil }
+        let stands: Bool
+        switch presented {
+        case .thisLaunch(let epoch): stands = stillCurrent(epoch)
+        case .unknown: stands = false
+        }
+        guard
+            let next = onDisk.applyingFileAnswer(
+                fileID: fileID, attempt: attempt, change: outcome, stillCurrent: stands,
+                at: instant
+            )
+        else { return nil }
+        return try persist(next)
     }
 
     /// A job leaves the outbox whole: the manifest goes first, so a crash between the two calls
