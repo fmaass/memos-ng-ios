@@ -99,7 +99,9 @@ public final class Outbox {
         // Passed in rather than assigned afterwards, so `adopt()` cannot be reached before the
         // thing it is supposed to await exists — and so the facade is drivable without a real
         // background `URLSession`, which is what the ordering below has to be tested through.
-        attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)? = nil
+        attachScheduler: (@Sendable (any OutboxChunkHandling) async -> Void)? = nil,
+        // Open unless something feeds it; the engine's sends of new work ask it (`SchedulingGate`).
+        schedulingGate: SchedulingGate = SchedulingGate()
     ) {
         self.attachScheduler = attachScheduler
         let changes = OutboxChangeBox()
@@ -117,7 +119,8 @@ public final class Outbox {
             network: network,
             preferences: preferences,
             clock: clock,
-            onChange: { await changes.fire() }
+            onChange: { await changes.fire() },
+            schedulingGate: schedulingGate
         )
         changes.attach { [weak self] in await self?.refresh() }
         // The two events that can make a held capture sendable, wired to the only thing that can
