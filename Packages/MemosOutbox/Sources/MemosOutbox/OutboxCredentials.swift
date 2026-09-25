@@ -102,20 +102,91 @@ private final class AttachedGrant: @unchecked Sendable {
     var current: PresentedGrant? { lock.withLock { grant } }
 }
 
+/// Whether the app may start new work right now: open while it is active, closed while it is not.
+///
+/// A box rather than a value because the question is asked where the bytes leave, an actor hop
+/// after anything could have read it, and the answer has to be the one true at THAT instant. It
+/// starts open, so a composition that never feeds it behaves exactly as it did before it existed.
+public final class SchedulingGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: Bool
+
+    public init(isOpen: Bool = true) {
+        self.state = isOpen
+    }
+
+    public var isOpen: Bool { lock.withLock { state } }
+
+    public func open() { lock.withLock { state = true } }
+
+    public func close() { lock.withLock { state = false } }
+}
+
+/// Which clause of an authority refused a send.
+///
+/// They mean different things to whoever sent. A credential that no longer stands is the account
+/// moving under the send, and what follows is the ordinary retry. A closed scheduling gate is the
+/// app not being active: nothing is wrong with the capture, so nothing about it is written — no
+/// backoff, no attempt, no hold — and the foreground picks it up where it stands.
+public enum SendWithdrawal: Sendable, Equatable {
+    case credential
+    case scheduling
+}
+
+/// The clause the last `holds()` found failing, in a box every copy of one authority shares — for
+/// the reason `AttachedGrant` is one: the verdict is taken on the copy that travelled.
+private final class RecordedWithdrawal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var withdrawal: SendWithdrawal?
+
+    func record(_ withdrawal: SendWithdrawal?) { lock.withLock { self.withdrawal = withdrawal } }
+    var current: SendWithdrawal? { lock.withLock { withdrawal } }
+}
+
 public struct SendAuthority: Sendable {
     private let stillCurrent: @Sendable () -> Bool
     private let currentCredential: @Sendable () -> PresentedGrant?
+    private let schedulingOpen: @Sendable () -> Bool
     private let attached = AttachedGrant()
+    private let verdict = RecordedWithdrawal()
 
+    /// - Parameter scheduling: the second clause, asked in the same instant as the first. Open by
+    ///   default: only a send that starts new work carries it (`SchedulingGate`).
     public init(
         _ stillCurrent: @escaping @Sendable () -> Bool,
-        credential: @escaping @Sendable () -> PresentedGrant? = { nil }
+        credential: @escaping @Sendable () -> PresentedGrant? = { nil },
+        scheduling: @escaping @Sendable () -> Bool = { true }
     ) {
         self.stillCurrent = stillCurrent
         self.currentCredential = credential
+        self.schedulingOpen = scheduling
     }
 
-    public func holds() -> Bool { stillCurrent() }
+    /// Both clauses, and which one failed is recorded for `withdrawal()`. The credential is asked
+    /// first: a send the account has moved under is that, whatever the app's state.
+    public func holds() -> Bool {
+        let failed: SendWithdrawal?
+        if !stillCurrent() {
+            failed = .credential
+        } else if !schedulingOpen() {
+            failed = .scheduling
+        } else {
+            failed = nil
+        }
+        verdict.record(failed)
+        return failed == nil
+    }
+
+    /// Which clause the last `holds()` on any copy of this authority found failing, or nil when it
+    /// held or nothing asked. Read by the sender after a withdrawal, to write nothing for a closed
+    /// gate.
+    public func withdrawal() -> SendWithdrawal? { verdict.current }
+
+    /// The credential clause alone, without recording anything.
+    ///
+    /// For judging an ANSWER: whether the credential a refusal was earned by has since been
+    /// replaced. A gate that closed while the request was out says nothing about that.
+    public func credentialHolds() -> Bool { stillCurrent() }
 
     /// The credential to present, read at the SAME instant the verdict is — which is why it lives
     /// here rather than being handed to a request before the hop.

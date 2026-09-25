@@ -60,6 +60,10 @@ public enum MemoPatchOutcome: Sendable, Equatable {
     /// lane could raise without a server is the local build, which happens before the edit is
     /// claimed and never reaches here.
     case refused(String, OutboxRefusal)
+    /// Not sent: the app stopped being active before the request left
+    /// (`SendWithdrawal.scheduling`). Nothing about the edit is decided, so nothing is written;
+    /// the foreground replays the key.
+    case withheld
 }
 
 /// The seam the completion path lives behind.
@@ -154,7 +158,7 @@ public struct MemoCompletionEndpoint: MemoCompleting {
         // device is holding, and holding the job on it strands a capture behind a "sign in again"
         // the person has already done. Retried, so the next pass sends under the current grant —
         // and if THAT is refused, its epoch is the current one and the job holds.
-        if response.statusCode == 401, !authority.holds() {
+        if response.statusCode == 401, !authority.credentialHolds() {
             return .retry("The credential this memo was sent under was replaced.")
         }
         return outcome(for: response, issuedUnder: credentials.epoch)
@@ -208,13 +212,15 @@ public struct MemoCompletionEndpoint: MemoCompleting {
         do {
             response = try await http.perform(request, under: authority)
         } catch is SendAuthorityWithdrawn {
+            if authority.withdrawal() == .scheduling { return .withheld }
             return .retry("The account this memo belongs to is not signed in any more.")
         } catch {
             return .retry(error.localizedDescription)
         }
         // The same fence the create carries, for the same reason: a 401 earned by a grant that has
-        // SINCE been replaced is not a refusal of the one this device holds.
-        if response.statusCode == 401, !authority.holds() {
+        // SINCE been replaced is not a refusal of the one this device holds. The credential clause
+        // alone — a gate that closed while this was out says nothing about the credential.
+        if response.statusCode == 401, !authority.credentialHolds() {
             return .retry("The credential this edit was sent under was replaced.")
         }
         return patchOutcome(for: response, issuedUnder: credentials.epoch)

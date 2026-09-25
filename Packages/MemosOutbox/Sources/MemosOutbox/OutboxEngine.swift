@@ -49,6 +49,20 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// next term, whether it has minted it yet or not, and a second bump would mint one for a
     /// transfer nobody scheduled.
     private var releasing: Set<UUID> = []
+    /// The jobs whose memo create is being sent, claimed synchronously before the first hop by
+    /// whichever of a drain pass or an answer continuation reaches it first. A second claimant is
+    /// REFUSED, not joined: the first owns the create and its outcome. Released on every outcome,
+    /// a successful delete included — after a delete the repository is the fence, because a save
+    /// against a row that is gone writes nothing and so sends nothing, and a claim kept past it
+    /// would refuse the replay a relaunch is entitled to send under the same key.
+    private var creating: Set<UUID> = []
+    /// Answer continuations still running (`handle`).
+    private var continuationsInFlight = 0
+    /// Callers of `untilQuiescent()`, resumed whenever something that keeps the engine busy ends.
+    private var quiescenceWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Whether the app may start new work. Consulted here only as an early skip; the fence is the
+    /// sender, which asks it through the authority a work send carries (`SendPurpose.work`).
+    private let schedulingGate: SchedulingGate
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -69,8 +83,10 @@ public actor OutboxEngine: OutboxChunkHandling {
         network: any NetworkPathProviding,
         preferences: UploadPreferences,
         clock: @escaping @Sendable () -> Date = Date.init,
-        onChange: @escaping @Sendable () async -> Void = {}
+        onChange: @escaping @Sendable () async -> Void = {},
+        schedulingGate: SchedulingGate = SchedulingGate()
     ) {
+        self.schedulingGate = schedulingGate
         self.repository = repository
         self.credentials = credentials
         self.http = http
@@ -143,11 +159,42 @@ public actor OutboxEngine: OutboxChunkHandling {
             return
         }
         isDraining = true
-        defer { isDraining = false }
         repeat {
             drainRequested = false
             await drainOnce()
         } while drainRequested
+        isDraining = false
+        settle()
+    }
+
+    /// Returns once nothing in this engine is still working: no drain pass running, no drain
+    /// requested, no answer continuation in flight and no memo create claimed.
+    ///
+    /// It waits for the OWNING work, whoever started it. A second `drain()` returns at once when a
+    /// pass is already running, so a caller that only awaited its own drain could be told the
+    /// engine is done while another entry point's create is still out.
+    ///
+    /// - Parameter parked: told each time the caller suspends, after it is registered — how a test
+    ///   learns the wait has begun without sleeping.
+    public func untilQuiescent(parked: @escaping @Sendable () -> Void = {}) async {
+        while !isQuiescent {
+            await withCheckedContinuation {
+                quiescenceWaiters.append($0)
+                parked()
+            }
+        }
+    }
+
+    private var isQuiescent: Bool {
+        !isDraining && !drainRequested && continuationsInFlight == 0 && creating.isEmpty
+    }
+
+    /// Wakes every waiter so each asks again; the loop in `untilQuiescent` is the judge.
+    private func settle() {
+        guard isQuiescent, !quiescenceWaiters.isEmpty else { return }
+        let waiters = quiescenceWaiters
+        quiescenceWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     private func drainOnce() async {
@@ -205,6 +252,9 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     /// Clears a hold — what "Try again" on a pending row does.
     public func release(jobID: UUID) async {
+        // A retry is new work, and new work waits for the app to be active. Nothing is written:
+        // the hold stands as it is and the next foreground's Try again finds it.
+        guard schedulingGate.isOpen else { return }
         // Claimed before any hop, per job: `inFlight()` suspends below and a second Try again
         // landing in that hop must not mint a second term.
         guard releasing.insert(jobID).inserted else { return }
@@ -277,6 +327,9 @@ public actor OutboxEngine: OutboxChunkHandling {
                 // nameable again writes to this device and asks nothing of the server, and a
                 // capture that waits for its backoff before it re-stages waits for the upload too.
                 if clock() >= current.nextAttemptAt, current.files.allSatisfy(\.isComplete) {
+                    // An edit is new work: it waits for the foreground, and nothing is claimed or
+                    // written for it here. The sender asks the same gate again (`applyEdit`).
+                    guard schedulingGate.isOpen else { return }
                     guard permitsNetwork() else {
                         await waitForNetwork(current)
                         return
@@ -310,6 +363,9 @@ public actor OutboxEngine: OutboxChunkHandling {
             case .wait:
                 return
             case .startUpload(let fileID):
+                // An early skip, and only that: the sender asks the gate again where the request
+                // leaves (`authority(under:for:)`).
+                guard schedulingGate.isOpen else { return }
                 guard permitsNetwork() else {
                     await waitForNetwork(current)
                     return
@@ -321,6 +377,7 @@ public actor OutboxEngine: OutboxChunkHandling {
                 else { return }
                 current = next
             case .uploadChunk(let fileID, let offset, let length):
+                guard schedulingGate.isOpen else { return }
                 guard permitsNetwork() else {
                     await waitForNetwork(current)
                     return
@@ -335,7 +392,12 @@ public actor OutboxEngine: OutboxChunkHandling {
                     await waitForNetwork(current)
                     return
                 }
-                guard let next = await complete(current, credentials: credentials) else { return }
+                // The one step a closed gate lets through, and one claimant at a time.
+                guard creating.insert(current.id).inserted else { return }
+                let next = await complete(current, credentials: credentials)
+                creating.remove(current.id)
+                settle()
+                guard let next else { return }
                 current = next
             }
         }
@@ -365,9 +427,18 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// `mayStillSend` answers on this actor; every send then hops to another one, and the hop is a
     /// suspension. What crosses it is this, so the last word before the bytes leave is spoken
     /// where they leave from (`SendAuthority`).
-    private func authority(under credentials: OutboxCredentials) -> SendAuthority {
+    ///
+    /// A send that starts new work also carries the scheduling gate, asked in the same instant.
+    /// The memo create and the health probe do not: finishing a transfer that has already happened
+    /// is the one thing a background wake is for, and the probe precedes it.
+    private func authority(
+        under credentials: OutboxCredentials, for purpose: SendPurpose
+    ) -> SendAuthority {
         let provider = self.credentials
-        return SendAuthority { provider.isCurrent(credentials) }
+        let stillCurrent: @Sendable () -> Bool = { provider.isCurrent(credentials) }
+        guard purpose == .work else { return SendAuthority(stillCurrent) }
+        let gate = schedulingGate
+        return SendAuthority(stillCurrent, scheduling: { gate.isOpen })
     }
 
     /// Whether bytes may leave this device RIGHT NOW.
@@ -394,8 +465,8 @@ public actor OutboxEngine: OutboxChunkHandling {
 
     private func isReachable(_ credentials: OutboxCredentials) async -> Bool {
         let request = OutboxRequests.health(baseURL: credentials.serverBaseURL)
-        guard let response = try? await http.perform(request, under: authority(under: credentials))
-        else { return false }
+        let probing = authority(under: credentials, for: .probe)
+        guard let response = try? await http.perform(request, under: probing) else { return false }
         return response.isSuccess
     }
 
@@ -418,8 +489,13 @@ public actor OutboxEngine: OutboxChunkHandling {
             await save(job.held(.serverRefused, error: error.localizedDescription), matching: job)
             return nil
         }
-        guard let response = try? await http.perform(request, under: authority(under: credentials))
-        else {
+        let sending = authority(under: credentials, for: .work)
+        let response: OutboxHTTPResponse
+        do {
+            response = try await http.perform(request, under: sending)
+        } catch {
+            // Withheld by the gate: nothing went out and nothing is wrong, so nothing is written.
+            if error is SendAuthorityWithdrawn, sending.withdrawal() == .scheduling { return nil }
             await save(
                 job.backingOff(at: clock(), error: "The server could not be reached."),
                 matching: job
@@ -501,7 +577,7 @@ public actor OutboxEngine: OutboxChunkHandling {
             request,
             fromFile: chunk,
             identity: identity,
-            under: authority(under: credentials),
+            under: authority(under: credentials, for: .work),
             issuedUnder: credentials.epoch
         )
     }
@@ -511,22 +587,32 @@ public actor OutboxEngine: OutboxChunkHandling {
         _ job: UploadJob,
         fileID: UUID,
         credentials: OutboxCredentials
-    ) async -> UploadJob? {
-        guard let file = job.file(fileID), let uploadUID = file.uploadUID else { return nil }
+    ) async -> Resync {
+        guard let file = job.file(fileID), let uploadUID = file.uploadUID else {
+            return .unanswered
+        }
         let request = OutboxRequests.offset(
             baseURL: credentials.serverBaseURL, token: credentials.token, uploadUID: uploadUID
         )
-        guard let response = try? await http.perform(request, under: authority(under: credentials))
-        else { return nil }
+        let sending = authority(under: credentials, for: .work)
+        let response: OutboxHTTPResponse
+        do {
+            response = try await http.perform(request, under: sending)
+        } catch {
+            if error is SendAuthorityWithdrawn, sending.withdrawal() == .scheduling {
+                return .withheld
+            }
+            return .unanswered
+        }
         if response.statusCode == 404 {
             // The session expired or was reaped. The ORIGINAL is untouched — it starts again.
-            return job.clearingLostUpload(fileID: fileID)
+            return .resynced(job.clearingLostUpload(fileID: fileID))
         }
         guard response.isSuccess,
             let raw = response.header(OutboxRequests.offsetHeader),
             let offset = Int64(raw)
-        else { return nil }
-        return job.advancing(fileID: fileID, bytesConfirmed: offset)
+        else { return .unanswered }
+        return .resynced(job.advancing(fileID: fileID, bytesConfirmed: offset))
     }
 
     /// The originals this create sent, named by the attachments the answer came back with.
@@ -582,8 +668,9 @@ public actor OutboxEngine: OutboxChunkHandling {
         guard let creating = await save(job.creatingMemo(), matching: job) else { return nil }
         // The manifest write above was an await; the create is the send it precedes, on another
         // executor again — so the authority travels rather than being asked here.
+        let sending = authority(under: credentials, for: .memoCreate)
         switch await completion.create(
-            job: creating, credentials: credentials, under: authority(under: credentials)
+            job: creating, credentials: credentials, under: sending
         ) {
         case .created(let uid, let attachments):
             // The capture leaves only when nothing is still owed to it. An edit taken while this
@@ -616,8 +703,18 @@ public actor OutboxEngine: OutboxChunkHandling {
             }
             var current = creating.applying(recovery)
             for fileID in recovery.resync {
-                if let next = await resync(current, fileID: fileID, credentials: credentials) {
+                switch await resync(current, fileID: fileID, credentials: credentials) {
+                case .resynced(let next):
                     current = next
+                case .unanswered:
+                    break
+                case .withheld:
+                    // The gate closed before the server could say where this upload stands. The
+                    // recovery is not written: written without that answer it reads as complete,
+                    // and the planner would send the same create again. The row stays as the
+                    // create's own write left it, and the foreground recovers it; a scheduling
+                    // withdrawal writes nothing, no backoff included.
+                    return nil
                 }
             }
             return await save(current, matching: creating)
@@ -676,7 +773,7 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
         switch await completion.patch(
             job: claimed, request: request, credentials: credentials,
-            under: authority(under: credentials)
+            under: authority(under: credentials, for: .work)
         ) {
         case .applied:
             // Fenced on the manifest this pass wrote: an answer that outlived a cancel, or a
@@ -692,6 +789,11 @@ public actor OutboxEngine: OutboxChunkHandling {
                 return
             }
             await onChange()
+        case .withheld:
+            // Never sent: the gate closed before the request left. Only the claim goes back; the
+            // manifest stays as the claim wrote it, `editUnansweredSince` included, so the
+            // foreground replays the same key, and no backoff delays it.
+            editsTransmitted.remove(job.id)
         case .retry(let message):
             // Still owed, and the transmission's fate unknown: the request may have reached the
             // server, so `editUnansweredSince` STAYS SET — the body and key it may be holding are immutable
@@ -743,6 +845,11 @@ public actor OutboxEngine: OutboxChunkHandling {
     /// and needs a credential only for the parts that talk to the server again. A byte count
     /// thrown away because nobody was signed in yet is a chunk re-uploaded for no reason.
     public func handle(_ result: ChunkResult) async {
+        continuationsInFlight += 1
+        defer {
+            continuationsInFlight -= 1
+            settle()
+        }
         handOffGeneration += 1
         guard let job = await repository.job(result.identity.jobID) else { return }
         // A capture a person has taken back to the editor: the bytes this answer reports are no
@@ -819,6 +926,12 @@ public actor OutboxEngine: OutboxChunkHandling {
         }
 
         if let askTheServer {
+            // Asking is new work, and it waits for the foreground: nothing is written, and the
+            // row — a record with no task — is drainable at the next open-gate pass.
+            guard schedulingGate.isOpen else {
+                await onChange()
+                return
+            }
             // Only the server can say where this upload stands, and asking is a request like any
             // other. On a network this capture may not use it is not asked: the capture parks,
             // with nothing counted against it, because nothing was tried.
@@ -827,11 +940,17 @@ public actor OutboxEngine: OutboxChunkHandling {
                 await onChange()
                 return
             }
-            if let credentials,
-                let resynced = await resync(job, fileID: fileID, credentials: credentials)
-            {
+            var asked = Resync.unanswered
+            if let credentials {
+                asked = await resync(job, fileID: fileID, credentials: credentials)
+            }
+            switch asked {
+            case .resynced(let resynced):
                 next = resynced
-            } else {
+            case .withheld:
+                await onChange()
+                return
+            case .unanswered:
                 next = job.backingOff(at: clock(), error: askTheServer)
             }
         }
@@ -877,6 +996,25 @@ public actor OutboxEngine: OutboxChunkHandling {
     }
 
     // MARK: - helpers
+
+    /// What a send is for, which decides whether it carries the scheduling gate.
+    enum SendPurpose: Equatable {
+        /// Starting or continuing an upload, asking where one stands, or sending an edit.
+        case work
+        /// Finishing a transfer that has already happened.
+        case memoCreate
+        /// The health GET before a pass.
+        case probe
+    }
+
+    /// What asking the server where an upload stands came to.
+    enum Resync {
+        case resynced(UploadJob)
+        /// No usable answer, or no request could be made: the caller backs off.
+        case unanswered
+        /// Not asked: the gate closed before the request left. The caller writes nothing.
+        case withheld
+    }
 
     /// Makes every retained original this edit keeps nameable again, before the edit is claimed.
     ///

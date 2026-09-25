@@ -21,11 +21,22 @@ final class ScriptedHTTP: OutboxHTTPPerforming, @unchecked Sendable {
     func perform(_ request: URLRequest, under authority: SendAuthority) async throws
         -> OutboxHTTPResponse
     {
+        lock.withLock { sendHook }?(request)
         // The double answers the same question the real performer does, so a test can put the
         // withdrawal between two sends and see the second one refused.
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
         lock.withLock { seen.append(request) }
         return try handler(request)
+    }
+
+    private var sendHook: (@Sendable (URLRequest) -> Void)?
+
+    /// Run the instant BEFORE the authority is asked, as `ScriptedScheduler.beforeUpload` is —
+    /// how a test puts a change inside the hop between the engine's decision to send and this
+    /// executor.
+    var beforeSend: (@Sendable (URLRequest) -> Void)? {
+        get { lock.withLock { sendHook } }
+        set { lock.withLock { sendHook = newValue } }
     }
 
     var requests: [URLRequest] { lock.withLock { seen } }
