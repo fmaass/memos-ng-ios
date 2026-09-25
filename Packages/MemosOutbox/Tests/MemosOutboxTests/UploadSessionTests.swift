@@ -20,6 +20,7 @@ private actor RecordingWholeHandler: WholeAnswerHandling {
 
     func handle(_ answer: WholeAnswer) async { received.append(answer) }
     func unreadableTaskEnded() async {}
+    func adoptionReplayed() async {}
 }
 
 private enum Upload {
@@ -618,6 +619,8 @@ private actor ParkingWholeHandler: WholeAnswerHandling {
     func unreadableTaskEnded() async {
         unreadableTold.append(received.map(\.taskIdentifier))
     }
+
+    func adoptionReplayed() async {}
 
     /// Whether it has been told a task nobody can read ended, within the bound.
     func toldUnreadable(within seconds: Double) async -> Bool {

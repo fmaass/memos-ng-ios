@@ -985,6 +985,12 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         requestDrain()
     }
 
+    /// Every buffered answer has landed, so a row passed over while they were held may be planned
+    /// again. A request, never an awaited drain — the caller is adoption itself.
+    public func adoptionReplayed() async {
+        requestDrain()
+    }
+
     // MARK: - chunk answers
 
     /// Called by the background session, possibly in a process launched for this alone.
@@ -1226,6 +1232,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // A file a live task is carrying is not sent again: the planner cannot see tasks.
                 // Nor is one this engine is still applying an answer to or handing off: whoever
                 // owns it advances the row once its own work has landed.
+                // A file whose finished task's answer adoption still holds is carried by nothing
+                // the listing shows, and planned now it would go again. Nothing is planned until
+                // the replay has landed; the replay's end asks for the drain that plans it.
+                guard await !uploads.holdsUnappliedAnswers() else { return .done }
                 let carried = await carriedFiles(of: current, on: uploads)
                 // A claim or release inside those hops makes the row, the listing and `owned` three
                 // different instants: plan again from the read.

@@ -33,6 +33,9 @@ public protocol WholeAnswerHandling: Sendable {
     /// A task this lane cannot read has ended. It answers nothing, but it was holding every file
     /// back (`OutboxEngine.carriedFiles`), and its end is what releases them.
     func unreadableTaskEnded() async
+    /// Adoption has applied every answer it held, at least one of them: whatever was left unplanned
+    /// while they were held may be planned now.
+    func adoptionReplayed() async
 }
 
 /// Which tasks have ended, as their terminal callbacks said.
@@ -111,6 +114,7 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
             self.handler = handler
             replaying = true
         }
+        var replayed = 0
         while true {
             let next: WholeAnswer? = lock.withLock {
                 guard !waiting.isEmpty else {
@@ -121,8 +125,10 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
             }
             guard let next else { break }
             await handler.handle(next)
+            replayed += 1
             pending.leave()
         }
+        if replayed > 0 { await handler.adoptionReplayed() }
         let unreadableEnded: Bool = lock.withLock {
             defer { unreadableEndedInReplay = false }
             return unreadableEndedInReplay
@@ -133,6 +139,11 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     /// The body only accumulates; nothing is decided until the task's terminal callback.
+    /// True from the first buffered answer until the replay that applies the last one is over.
+    var holdsUnappliedAnswers: Bool {
+        lock.withLock { replaying || (handler == nil && !waiting.isEmpty) }
+    }
+
     public func urlSession(
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
@@ -340,6 +351,10 @@ public actor BackgroundUploadScheduler {
     /// Every task the session holds, raw: readable or not, whatever process created it.
     public func tasks() async -> [WholeTaskListing] {
         await session.allTasks()
+    }
+
+    public func holdsUnappliedAnswers() async -> Bool {
+        delegate.holdsUnappliedAnswers
     }
 
     /// Hands one file to the session, whole.

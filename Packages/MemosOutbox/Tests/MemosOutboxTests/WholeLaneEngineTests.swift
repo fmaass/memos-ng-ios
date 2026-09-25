@@ -162,6 +162,8 @@ private actor PausingUploads: OutboxUploadScheduling {
         return await inner.tasks()
     }
 
+    func holdsUnappliedAnswers() async -> Bool { await inner.holdsUnappliedAnswers() }
+
     func upload(
         _ request: URLRequest,
         fromFile file: URL,
@@ -244,7 +246,8 @@ private struct WholeRig {
         wrapUploads: (@Sendable (BackgroundUploadScheduler) -> any OutboxUploadScheduling)? = nil,
         network: StubNetworkPath = StubNetworkPath(),
         chunksInFlight: [OutboxTaskIdentity] = [],
-        launch: UUID = UUID()
+        launch: UUID = UUID(),
+        attached: Bool = true
     ) async throws -> WholeRig {
         let root = try Fixture.temporaryDirectory()
         let provider = SwitchableCredentials(Fixture.credentials())
@@ -320,7 +323,7 @@ private struct WholeRig {
             schedulingGate: gate,
             uploads: withUploads ? (wrapUploads?(uploads) ?? uploads) : nil
         )
-        await uploads.attach(engine)
+        if attached { await uploads.attach(engine) }
         return WholeRig(
             root: root, repository: repository, http: http, postStatus: postStatus,
             attempted: attempted, chunks: chunks, session: session, delegate: delegate,
@@ -1381,6 +1384,56 @@ struct WholeLaneEngineTests {
         await rig.engine.handle(try rig.answer(retried, status: 200, received: 1000))
         #expect(try await rig.reload().files.allSatisfy { $0.isComplete })
         #expect(rig.completion.idempotencyKeys.count == 1)
+    }
+
+    /// A launch's adoption replays what the session buffered, one answer at a time, and the
+    /// first answer's own write advances its row. A file whose task has finished and whose answer
+    /// is still buffered is carried by nothing the row can see; re-planned then, it goes again.
+    @Test("adoption applies every buffered answer of a row before the row is planned again")
+    func adoptionReplaysBeforeReplanning() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        // Both finished while nothing was attached: the session lists neither any more, and
+        // their answers wait for adoption.
+        rig.session.forget(picture.taskIdentifier)
+        rig.session.forget(video.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        rig.delegate.deliver(try rig.answer(video, status: 200, received: 3000))
+
+        await rig.delegate.attach(rig.engine)
+        await rig.engine.untilQuiescent()
+
+        #expect(rig.attempts(of: rig.video.id) == [0])
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.uploadPosts == 2)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+    }
+
+    /// The other half: what the replay passed over is planned once it has landed, with nothing
+    /// else asked to happen — no network change, no foreground, no tap.
+    @Test("a retry an answer asked for during adoption goes once the replay has landed")
+    func adoptionEndPlansWhatItHeld() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        rig.session.forget(picture.taskIdentifier)
+        rig.session.forget(video.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        // The server lost the video's session: it is sent again whole, once.
+        rig.delegate.deliver(try rig.answer(video, status: 409))
+
+        await rig.delegate.attach(rig.engine)
+        #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0, 1] })
+        await rig.engine.untilQuiescent()
+
+        #expect(rig.attempts(of: rig.video.id) == [0, 1])
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.uploadPosts == 3)
     }
 
     @Test("an ended task is forgotten once the list no longer names it, or its row is gone")

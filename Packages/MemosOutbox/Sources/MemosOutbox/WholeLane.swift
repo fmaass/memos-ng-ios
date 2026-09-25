@@ -10,6 +10,9 @@ public protocol OutboxUploadScheduling: Sendable {
     var launch: UUID { get }
     func attach(_ handler: any WholeAnswerHandling) async
     func tasks() async -> [WholeTaskListing]
+    /// Whether a finished task's answer is still waiting to be applied: buffered before adoption,
+    /// or not yet reached by its replay. Such a file is carried by nothing a listing shows.
+    func holdsUnappliedAnswers() async -> Bool
     func upload(
         _ request: URLRequest,
         fromFile file: URL,
