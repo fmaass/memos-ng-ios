@@ -282,7 +282,8 @@ private struct WholeRig {
         network: StubNetworkPath = StubNetworkPath(),
         chunksInFlight: [OutboxTaskIdentity] = [],
         launch: UUID = UUID(),
-        attached: Bool = true
+        attached: Bool = true,
+        headStatus: Int = 500
     ) async throws -> WholeRig {
         let root = try Fixture.temporaryDirectory()
         let provider = SwitchableCredentials(Fixture.credentials())
@@ -323,6 +324,8 @@ private struct WholeRig {
                 return ScriptedHTTP.session(
                     uid: "u\(posts.count)", chunkSize: 5 * 1024 * 1024, received: 0
                 )
+            case ("HEAD", _):
+                return OutboxHTTPResponse(statusCode: headStatus)
             default:
                 return OutboxHTTPResponse(statusCode: 500)
             }
@@ -1558,6 +1561,35 @@ struct WholeLaneEngineTests {
         #expect(aTasks.count == 2, "A's bytes went out under B's credential")
         let row = try await rig.reload()
         #expect(row.state == .held, "the drain that follows holds A's row")
+    }
+
+    /// A success that says nothing readable asks the server where the upload stands. Asked under
+    /// another account, that server knows nothing of the upload, and its 404 would forget a file
+    /// the row's own server may already hold.
+    @Test("an unreadable success after an account switch asks no server and keeps its upload")
+    func unreadableSuccessKeepsTheRowsAccount() async throws {
+        let rig = try await WholeRig.make(headStatus: 404)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let uploadUID = try #require(try await rig.reload().file(rig.picture.id)?.uploadUID)
+        rig.credentials.set(Fixture.credentials(owner: "brenda", token: "pat-b"))
+
+        await rig.engine.handle(try rig.answer(picture, status: 200))
+        await rig.engine.untilQuiescent()
+
+        #expect(
+            rig.http.requests(method: "HEAD").isEmpty,
+            "A's upload was asked about under B's credential"
+        )
+        let row = try await rig.reload()
+        #expect(row.file(rig.picture.id)?.uploadUID == uploadUID, "A's upload was forgotten")
+        #expect(
+            (row.file(rig.picture.id)?.uploadAttempt ?? 0) == 0,
+            "A's file was put up to be sent again whole"
+        )
+        #expect(row.state == .held, "the drain that follows holds A's row")
+        #expect(row.holdReason == .accountMismatch)
     }
 
     @Test("an ended task is forgotten once the list no longer names it, or its row is gone")

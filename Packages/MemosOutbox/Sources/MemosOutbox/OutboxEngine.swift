@@ -697,6 +697,15 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         fileID: UUID,
         credentials: OutboxCredentials
     ) async -> Resync {
+        // Every offset HEAD passes here — a chunk's offset gap, an unreadable whole-file success,
+        // a create's recovery — so a row's account is asked here, as `openSession` asks it for a
+        // send. Asked under another account, that server knows nothing of this upload, and its
+        // 404 would forget a file the row's own server may already hold. Nothing is written; the
+        // drain that follows holds the row.
+        guard job.binding.matches(credentials) else {
+            requestDrain()
+            return .withheld
+        }
         guard let file = job.file(fileID), let uploadUID = file.uploadUID else {
             return .unanswered
         }
@@ -818,11 +827,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 case .unanswered:
                     break
                 case .withheld:
-                    // The gate closed before the server could say where this upload stands. The
-                    // recovery is not written: written without that answer it reads as complete,
-                    // and the planner would send the same create again. The row stays as the
-                    // create's own write left it, and the foreground recovers it; a scheduling
-                    // withdrawal writes nothing, no backoff included.
+                    // The gate closed, or the row's account is not the one presented, before the
+                    // server could say where this upload stands. The recovery is not written:
+                    // written without that answer it reads as complete, and the planner would
+                    // send the same create again. The row stays as the create's own write left
+                    // it, and the foreground recovers it — or, under another account, the drain
+                    // this asked for holds it; a scheduling withdrawal writes nothing, no backoff
+                    // included.
                     return nil
                 }
             }
@@ -1652,8 +1663,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     }
 
     /// A success whose body said nothing readable: one HEAD, while the app is active. Nil when
-    /// nothing is to be written — the gate is closed or the network is not one to use; the row is
-    /// then a record with no task, and the next open-gate pass sends the file again whole.
+    /// nothing is to be written — the gate is closed, the network is not one to use, or the row
+    /// belongs to another account; the row is then a record with no task, and the next open-gate
+    /// pass sends the file again whole, or holds it for its account.
     private func askWhereItStands(_ job: UploadJob, fileID: UUID) async -> WholeFileChange? {
         guard schedulingGate.isOpen, permitsNetwork(),
             let credentials = await credentials.currentCredentials(),
@@ -1694,7 +1706,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         case resynced(UploadJob)
         /// No usable answer, or no request could be made: the caller backs off.
         case unanswered
-        /// Not asked: the gate closed before the request left. The caller writes nothing.
+        /// Not asked: the gate closed before the request left, or the row belongs to an account
+        /// other than the one presented. The caller writes nothing.
         case withheld
     }
 
