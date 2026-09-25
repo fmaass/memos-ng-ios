@@ -1294,6 +1294,15 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             guard identity.jobID == job.id else { continue }
             carried.insert(identity.fileID)
         }
+        // A finished task leaves the listing, or shows as completed, before its answer has been
+        // applied. Until it has, the answer carries its file — for the attempt the row still names:
+        // an answer that moved its own file to a new attempt has stopped speaking for it.
+        for (ref, attempt) in await uploads.unappliedAnswers() where ref.jobID == job.id {
+            guard let file = job.file(ref.fileID), (file.uploadAttempt ?? 0) == attempt else {
+                continue
+            }
+            carried.insert(ref.fileID)
+        }
         return carried
     }
 
@@ -1404,6 +1413,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private func openSession(
         _ file: OutboxFile, of job: UploadJob, credentials: OutboxCredentials
     ) async -> OutboxWire.UploadSession? {
+        // Every whole-file send begins here — a first hand-off, a retry, a replacement's
+        // successor — so a row's account is asked here, not only by the drain's early filter,
+        // whose hold is a write something else can overtake. Nothing of the row's is sent under
+        // another account's credential; the drain that follows holds it.
+        guard job.binding.matches(credentials) else {
+            requestDrain()
+            return nil
+        }
         let request: URLRequest
         do {
             request = try OutboxRequests.startUpload(

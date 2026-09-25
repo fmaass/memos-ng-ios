@@ -17,6 +17,25 @@ private final class WholeBox<Value: Sendable>: @unchecked Sendable {
     func mutate(_ change: (inout Value) -> Void) { lock.withLock { change(&stored) } }
 }
 
+/// The engine behind a door: every answer waits on `gate` before the engine sees it.
+private actor DelayedEntry: WholeAnswerHandling {
+    private let engine: OutboxEngine
+    private let gate: TestGate
+
+    init(_ engine: OutboxEngine, gate: TestGate) {
+        self.engine = engine
+        self.gate = gate
+    }
+
+    func handle(_ answer: WholeAnswer) async {
+        await gate.pass()
+        await engine.handle(answer)
+    }
+
+    func unreadableTaskEnded() async { await engine.unreadableTaskEnded() }
+    func adoptionReplayed() async { await engine.adoptionReplayed() }
+}
+
 /// The real repository behind a gate that, once armed, stops the next write an ANSWER makes —
 /// whether that write is the per-file rebase or a fenced save — so a race test holds one answer
 /// open however the engine chooses to write it.
@@ -25,10 +44,23 @@ private actor AnswerWriteGate: OutboxPersisting {
     private let gate: TestGate
     private var armed = 0
     private var skipping = 0
+    private var beforeHold: (@Sendable (OutboxRepository) async -> Void)?
 
     init(_ inner: OutboxRepository, gate: TestGate) {
         self.inner = inner
         self.gate = gate
+    }
+
+    /// Runs `body` once, against the real repository, just before the next write that holds a row,
+    /// so that write meets a row something else has moved.
+    func interfereBeforeHold(_ body: @escaping @Sendable (OutboxRepository) async -> Void) {
+        beforeHold = body
+    }
+
+    private func interfereIfHolding(_ job: UploadJob) async {
+        guard job.state == .held, let body = beforeHold else { return }
+        beforeHold = nil
+        await body(inner)
     }
 
     /// Holds `count` writes, after letting the first `skipping` through.
@@ -52,6 +84,7 @@ private actor AnswerWriteGate: OutboxPersisting {
     func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
 
     func save(_ job: UploadJob) async throws {
+        await interfereIfHolding(job)
         await passIfArmed()
         try await inner.save(job)
     }
@@ -62,6 +95,7 @@ private actor AnswerWriteGate: OutboxPersisting {
         matching snapshot: UploadJob,
         else fallback: UploadJob
     ) async throws -> UploadJob? {
+        await interfereIfHolding(job)
         await passIfArmed()
         return try await inner.save(
             job, ifStillCurrent: epoch, matching: snapshot, else: fallback
@@ -163,6 +197,7 @@ private actor PausingUploads: OutboxUploadScheduling {
     }
 
     func holdsUnappliedAnswers() async -> Bool { await inner.holdsUnappliedAnswers() }
+    func unappliedAnswers() async -> [WholeFileRef: Int] { await inner.unappliedAnswers() }
 
     func upload(
         _ request: URLRequest,
@@ -1434,6 +1469,95 @@ struct WholeLaneEngineTests {
         #expect(rig.attempts(of: rig.video.id) == [0, 1])
         #expect(rig.attempts(of: rig.picture.id) == [0])
         #expect(rig.uploadPosts == 3)
+    }
+
+    /// A live answer is in flight between the session's callback and the engine: its task
+    /// already shows as finished, and nothing in the engine owns its file yet.
+    @Test("a finished task whose live answer has not been applied still carries its file")
+    func liveAnswerCarriesItsFile() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        let entry = TestGate()
+        await rig.delegate.attach(DelayedEntry(rig.engine, gate: entry))
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        rig.session.markCompleted(picture.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        await entry.waitUntilParked()
+
+        // Another pass, while the success waits at the engine's door.
+        await rig.engine.drain()
+
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.uploadPosts == 2)
+        #expect(rig.session.createdTasks.count == 2)
+        await entry.open()
+        let applied = try await rig.eventually {
+            try await rig.reload().file(rig.picture.id)?.isComplete == true
+        }
+        #expect(applied, "the original success lands")
+        await rig.engine.untilQuiescent()
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+    }
+
+    /// The account-mismatch hold is a write, and a sibling's answer can move the row under it. The
+    /// row's account is asked again where every whole-file send begins, so a replacement cannot
+    /// carry one account's file to another.
+    @Test("a replacement never opens a session for another account's row, hold or no hold")
+    func replacementKeepsTheRowsAccount() async throws {
+        let gated = WholeBox<AnswerWriteGate?>(nil)
+        let rig = try await WholeRig.make(
+            onCancel: .leavesListing(after: 1),
+            persistence: { repository in
+                let persistence = AnswerWriteGate(repository, gate: TestGate())
+                gated.value = persistence
+                return persistence
+            }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2, "the premise: A's two files are out")
+        let posted = rig.uploadPosts
+
+        // B signs in with a capture of its own queued, and A's tasks still outstanding.
+        let brenda = Fixture.credentials(owner: "brenda", token: "pat-b")
+        rig.credentials.set(brenda)
+        _ = try await rig.repository.enqueue(
+            content: "brenda's", visibility: "PRIVATE",
+            capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+            binding: Fixture.binding(owner: "brenda"),
+            sources: [
+                StagedSource(
+                    url: try Fixture.file(in: rig.root, named: "b.heic", bytes: 500),
+                    filename: "b.heic", mime: "image/heic"
+                )
+            ]
+        )
+        let pictureID = rig.picture.id
+        let jobID = rig.job.id
+        // A's picture lands between the hold's read and its write, so the hold loses.
+        await gated.value?.interfereBeforeHold { repository in
+            guard let row = await repository.job(jobID) else { return }
+            try? await repository.save(
+                row.updating(pictureID) { $0.bytesConfirmed = $0.byteSize }
+            )
+        }
+        await rig.preferences.set(true)
+
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+
+        let aPosts = rig.http.requests(method: "POST").dropFirst(posted).filter { request in
+            let body = request.httpBody.map { String(decoding: $0, as: UTF8.self) } ?? ""
+            return body.contains("picture.heic") || body.contains("video.mov")
+        }
+        #expect(aPosts.isEmpty, "A's file metadata went to a session under B's credential")
+        let aTasks = rig.session.createdTasks.filter {
+            WholeTaskIdentity(taskDescription: $0.description)?.jobID == jobID
+        }
+        #expect(aTasks.count == 2, "A's bytes went out under B's credential")
+        let row = try await rig.reload()
+        #expect(row.state == .held, "the drain that follows holds A's row")
     }
 
     @Test("an ended task is forgotten once the list no longer names it, or its row is gone")

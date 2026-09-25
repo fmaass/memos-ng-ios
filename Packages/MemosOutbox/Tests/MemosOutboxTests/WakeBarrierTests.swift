@@ -81,6 +81,7 @@ private actor ParkingAttachUploads: OutboxUploadScheduling {
 
     func tasks() async -> [WholeTaskListing] { await inner.tasks() }
     func holdsUnappliedAnswers() async -> Bool { await inner.holdsUnappliedAnswers() }
+    func unappliedAnswers() async -> [WholeFileRef: Int] { await inner.unappliedAnswers() }
 
     func upload(
         _ request: URLRequest,

@@ -1024,6 +1024,19 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
         lock.withLock { listed.removeAll { $0.taskIdentifier == taskIdentifier } }
     }
 
+    /// The task stays listed as finished: what a listing shows between the transfer's end and its
+    /// answer being applied.
+    func markCompleted(_ taskIdentifier: Int) {
+        lock.withLock {
+            listed = listed.map { task in
+                guard task.taskIdentifier == taskIdentifier else { return task }
+                var finished = task
+                finished.state = .completed
+                return finished
+            }
+        }
+    }
+
     /// The next listing is TAKEN, then held on `gate` before it is returned: a snapshot its caller
     /// is still awaiting while other work runs and the session moves on.
     func holdNextListing(on gate: TestGate) {

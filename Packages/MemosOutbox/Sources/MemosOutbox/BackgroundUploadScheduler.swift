@@ -92,6 +92,10 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// A task nobody can read ended while adoption was replaying: told once the replay is over,
     /// never ahead of an answer still buffered behind it.
     private var unreadableEndedInReplay = false
+    /// By task: the file and attempt of every answer taken and not yet applied. Entered at the
+    /// callback, before any hop, so no instant exists where the task shows finished and nothing
+    /// carries its file; left once the handler has returned.
+    private var unapplied: [Int: (ref: WholeFileRef, attempt: Int)] = [:]
     /// What is still being applied. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
     /// The replace barrier's evidence: every terminal callback lands here, cancelled ones and ones
@@ -125,6 +129,7 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
             }
             guard let next else { break }
             await handler.handle(next)
+            applied(next)
             replayed += 1
             pending.leave()
         }
@@ -139,6 +144,17 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     /// The body only accumulates; nothing is decided until the task's terminal callback.
+    /// See `OutboxUploadScheduling.unappliedAnswers`.
+    var unappliedAnswers: [WholeFileRef: Int] {
+        lock.withLock {
+            unapplied.values.reduce(into: [:]) { $0[$1.ref] = $1.attempt }
+        }
+    }
+
+    private func applied(_ answer: WholeAnswer) {
+        _ = lock.withLock { unapplied.removeValue(forKey: answer.taskIdentifier) }
+    }
+
     /// True from the first buffered answer until the replay that applies the last one is over.
     var holdsUnappliedAnswers: Bool {
         lock.withLock { replaying || (handler == nil && !waiting.isEmpty) }
@@ -226,6 +242,10 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         // callback, and the system must not be answered until this has been applied.
         pending.enter()
         let handler: (any WholeAnswerHandling)? = lock.withLock {
+            unapplied[answer.taskIdentifier] = (
+                WholeFileRef(jobID: answer.identity.jobID, fileID: answer.identity.fileID),
+                answer.identity.attempt
+            )
             guard let attached = self.handler, !replaying else {
                 waiting.append(answer)
                 return nil
@@ -235,6 +255,7 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         guard let handler else { return }
         Task {
             await handler.handle(answer)
+            applied(answer)
             pending.leave()
         }
     }
@@ -355,6 +376,10 @@ public actor BackgroundUploadScheduler {
 
     public func holdsUnappliedAnswers() async -> Bool {
         delegate.holdsUnappliedAnswers
+    }
+
+    public func unappliedAnswers() async -> [WholeFileRef: Int] {
+        delegate.unappliedAnswers
     }
 
     /// Hands one file to the session, whole.
