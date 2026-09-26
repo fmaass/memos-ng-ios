@@ -117,6 +117,7 @@ struct OutboxAccountTests {
                 onAccountWithdrawn: { withdrawn in
                     heard.epochs.append(withdrawn)
                     heard.read.append(heard.session?.epoch.current ?? -1)
+                    return nil
                 }
             )
             heard.session = session
@@ -140,6 +141,48 @@ struct OutboxAccountTests {
         }
     }
 
+    /// The outbox's cancellation is handed back by the hook, and a sign-out waits for it: a
+    /// sign-out that reported itself done first could leave a background upload presenting the
+    /// withdrawn credential behind a process the system then ends.
+    @Test("both ways of signing out are done only once the outbox has issued its cancellation")
+    func signingOutWaitsForTheCancellation() async {
+        for revoking in [true, false] {
+            let heard = Withdrawals()
+            let session = SessionStore(
+                credentials: InMemoryCredentials(),
+                makeClient: { _, token in
+                    Stub.client(token: token) { _, _, operation in
+                        operation == "native_logout_api_auth_native_logout_post"
+                            ? Stub.empty(.noContent) : Stub.json(Stub.user)
+                    }
+                },
+                onAccountWithdrawn: { withdrawn in
+                    heard.epochs.append(withdrawn)
+                    return Task { @MainActor in
+                        // Long enough that a sign-out not waiting for it is over first.
+                        try? await Task.sleep(for: .milliseconds(300))
+                        heard.read.append(withdrawn)
+                    }
+                }
+            )
+            await session.signIn(serverAddress: signInServer, token: "pat-token")
+
+            if revoking {
+                _ = await session.signOut()
+            } else {
+                await session.signOutWithoutRevoking()
+            }
+
+            let signedOut = heard.epochs.last
+            #expect(signedOut != nil, "revoking: \(revoking)")
+            #expect(
+                heard.read.contains { $0 == signedOut },
+                "the sign-out finished before the outbox issued its cancel (revoking: \(revoking))"
+            )
+            #expect(await provider(for: session).currentCredentials() == nil)
+        }
+    }
+
     @Test("another account signing in over this one tells the outbox, before anything is awaited")
     func accountReplacementTellsTheOutbox() async throws {
         let heard = Withdrawals()
@@ -152,6 +195,7 @@ struct OutboxAccountTests {
             onAccountWithdrawn: { withdrawn in
                 heard.epochs.append(withdrawn)
                 heard.read.append(heard.session?.epoch.current ?? -1)
+                return nil
             }
         )
         heard.session = session
@@ -188,6 +232,7 @@ struct OutboxAccountTests {
             onAccountWithdrawn: { withdrawn in
                 heard.epochs.append(withdrawn)
                 heard.read.append(heard.session?.epoch.current ?? -1)
+                return nil
             }
         )
         heard.session = session

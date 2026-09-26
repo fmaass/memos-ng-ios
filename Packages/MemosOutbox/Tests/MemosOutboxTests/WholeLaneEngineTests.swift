@@ -879,15 +879,27 @@ struct WholeLaneEngineTests {
     func chunkCancelEveryTaskReachesUnreadable() async throws {
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
-        let task = session.uploadTask(
-            with: URLRequest(url: URL(string: "https://memos.example.invalid/api/uploads/x")!),
-            from: Data()
-        )
-        task.taskDescription = "not|a|chunk"
         // A task never resumed is not listed; one resumed and suspended is, and cannot finish.
-        task.resume()
-        task.suspend()
-        try #require(task.state == .suspended, "the premise: it is still live")
+        // Resumed, it may fail before the suspend lands — the host does not resolve — so the
+        // premise is set up again until a task is caught live.
+        var live: URLSessionUploadTask?
+        for _ in 0..<50 {
+            let candidate = session.uploadTask(
+                with: URLRequest(url: URL(string: "https://memos.example.invalid/api/uploads/x")!),
+                from: Data()
+            )
+            candidate.taskDescription = "not|a|chunk"
+            candidate.resume()
+            candidate.suspend()
+            for _ in 0..<20 where candidate.state == .running {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            if candidate.state == .suspended {
+                live = candidate
+                break
+            }
+        }
+        let task = try #require(live, "the premise: a task is still live")
         let listed = await session.allTasks.map(\.taskIdentifier)
         try #require(listed.contains(task.taskIdentifier), "the premise: the session lists it")
         let scheduler = BackgroundChunkScheduler(session: session)

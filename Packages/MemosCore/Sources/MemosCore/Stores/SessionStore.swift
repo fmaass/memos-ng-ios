@@ -334,8 +334,10 @@ public final class SessionStore {
     private let onVerified: (@MainActor @Sendable () -> Void)?
     /// What to do the moment an account's grant is withdrawn — a wipe, or another account signing
     /// in over it — with the authority epoch that withdrawal moved to. The app wires the outbox's
-    /// cancellation of the background uploads still presenting the old credential to it.
-    private let onAccountWithdrawn: (@MainActor @Sendable (Int) -> Void)?
+    /// cancellation of the background uploads still presenting the old credential to it: whatever
+    /// must happen at the epoch move happens in the call, and the cancellation it starts is handed
+    /// back, so a sign-out can wait for it before it says it is done.
+    private let onAccountWithdrawn: (@MainActor @Sendable (Int) -> Task<Void, Never>?)?
     /// Where a diagnostic line goes, injected the same way the sleeper is.
     ///
     /// It exists so the log BOUNDARY can be watched rather than re-derived. A guardrail that
@@ -376,7 +378,7 @@ public final class SessionStore {
         snapshots: TimelineSnapshotStore? = nil,
         routes: (any RouteStatusMonitoring)? = nil,
         onVerified: (@MainActor @Sendable () -> Void)? = nil,
-        onAccountWithdrawn: (@MainActor @Sendable (Int) -> Void)? = nil,
+        onAccountWithdrawn: (@MainActor @Sendable (Int) -> Task<Void, Never>?)? = nil,
         // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
         // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
         // and a named default would have to be public to be referenced from one.
@@ -1588,9 +1590,10 @@ public final class SessionStore {
     /// and whenever a credential this process presented stops being the one presented — a failed
     /// replacement sign-in, a restore over a grant held only in memory — unless the caller puts
     /// that same credential back (`keeping`).
+    @discardableResult
     private func endIncarnation(
         withdrawingAccount: Bool = false, keeping kept: PresentedCredential? = nil
-    ) {
+    ) -> Task<Void, Never>? {
         let outgoing = presentedGrant
         presentedGrant = nil
         sessionGeneration += 1
@@ -1600,9 +1603,8 @@ public final class SessionStore {
         // renewal, which replaces the token without ending the session (`SessionEpoch`).
         epoch.bump()
         let withdrawnHere = outgoing.map { $0 !== kept } ?? false
-        if withdrawingAccount || withdrawnHere {
-            onAccountWithdrawn?(epoch.current)
-        }
+        guard withdrawingAccount || withdrawnHere else { return nil }
+        return onAccountWithdrawn?(epoch.current)
     }
 
     /// Everything scoped to the identity that is ending, removed at ONE boundary.
@@ -1865,7 +1867,7 @@ public final class SessionStore {
         // The outbox hears it inside, after the epoch moved, so nothing it starts from here
         // presents this credential, and before any await: a background upload holds its own copy
         // of the token and goes on sending it until it is cancelled.
-        endIncarnation(withdrawingAccount: true)
+        let cancelling = endIncarnation(withdrawingAccount: true)
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false
@@ -1878,7 +1880,12 @@ public final class SessionStore {
         // The identity-scoped list, LAST of the synchronous withdrawal: its own tail awaits the
         // snapshot removal, and nothing above may be left until after that.
         await invalidateIdentityScopedState()
-        // A sign-in can complete inside that await, and the credential in the keychain is then
+        // Not signed out until the outbox has at least issued the cancel of every upload still
+        // presenting this credential: awaited here, after the synchronous withdrawal above and
+        // before anything reports this sign-out done. A process ended before that point leaves
+        // the outbox's record of the withdrawal for the next launch to finish.
+        await cancelling?.value
+        // A sign-in can complete inside those awaits, and the credential in the keychain is then
         // ITS credential. Deleting it would sign out a session this method never knew about.
         guard owns(issued) else {
             MemosLog.session.info("a sign-out was overtaken before it deleted the credential")

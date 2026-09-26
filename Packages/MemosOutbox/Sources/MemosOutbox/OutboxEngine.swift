@@ -974,16 +974,19 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// after a hop, and the next account may already have work out. Nothing is written: a late
     /// answer meets the credential fences like any other.
     public func abandonAllTasks(withdrawnAt epoch: Int) async {
+        let launch = uploads?.launch ?? OutboxUploadSession.processLaunch
+        await abandonAllTasks(covering: OutboxWithdrawal(launch: launch, epoch: epoch))
+    }
+
+    /// The same, for a withdrawal recorded by this process or by one that ended before its
+    /// cancellation was issued (`OutboxWithdrawal.covers`).
+    public func abandonAllTasks(covering withdrawal: OutboxWithdrawal) async {
         await scheduler.cancelEveryTask()
         guard let uploads else { return }
         let launch = uploads.launch
         let withdrawn = await uploads.tasks().compactMap { listing -> Int? in
-            if let identity = WholeTaskIdentity(taskDescription: listing.taskDescription),
-                identity.launch == launch, identity.epoch >= epoch
-            {
-                return nil
-            }
-            return listing.taskIdentifier
+            let identity = WholeTaskIdentity(taskDescription: listing.taskDescription)
+            return withdrawal.covers(identity, currentLaunch: launch) ? listing.taskIdentifier : nil
         }
         if !withdrawn.isEmpty {
             await uploads.cancel(withdrawn)

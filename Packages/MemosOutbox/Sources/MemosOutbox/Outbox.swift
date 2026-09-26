@@ -255,6 +255,10 @@ public final class Outbox {
         let work = Task { @MainActor [self] in
             _ = await attachScheduler?(engine)
             await uploads?.attach(engine)
+            // A withdrawal whose cancellation the last process never issued, issued now — in
+            // every launch, whether or not anyone is signed in to drain with — and before any
+            // drain, which waits for this adoption.
+            await finishWithdrawal()
         }
         adoption = work
         await work.value
@@ -417,9 +421,24 @@ public final class Outbox {
     }
 
     /// An account's grant was withdrawn — a sign-out, with or without the revoke, or another
-    /// account signing in over it — at this authority epoch.
-    public func abandonAllTasks(withdrawnAt epoch: Int) async {
-        await engine.abandonAllTasks(withdrawnAt: epoch)
+    /// account signing in over it — at this authority epoch: written down before this returns.
+    ///
+    /// Synchronous, because the caller is the epoch move itself and nothing may be awaited there,
+    /// and on disk, because the cancellation it owes is issued later by a process the system may
+    /// terminate first. `finishWithdrawal` issues it; a record left by a process that died first
+    /// is issued by the next launch's adoption.
+    public func recordWithdrawal(at epoch: Int) {
+        let launch = uploads?.launch ?? OutboxUploadSession.processLaunch
+        repository.withdrawals.record(OutboxWithdrawal(launch: launch, epoch: epoch))
+    }
+
+    /// Cancels every task of both sessions the recorded withdrawal covers, and only once that
+    /// cancellation has been issued clears the record — unless a later withdrawal replaced it
+    /// meanwhile, which is left for its own.
+    public func finishWithdrawal() async {
+        guard let withdrawal = repository.withdrawals.pending() else { return }
+        await engine.abandonAllTasks(covering: withdrawal)
+        repository.withdrawals.clear(withdrawal)
     }
 
     /// Sends a restored draft again, on the SAME manifest.

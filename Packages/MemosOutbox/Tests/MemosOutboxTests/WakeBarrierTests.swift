@@ -468,3 +468,104 @@ struct OutboxCompositionTests {
         #expect(await harness.repository.job(second.id) == nil, "a closed gate held the create")
     }
 }
+
+@MainActor
+@Suite("A withdrawal outlives the process that recorded it")
+struct WithdrawalRecordTests {
+    /// The outbox a launch composes over `session`, as the process `launch` names.
+    private func outbox(
+        _ harness: Harness, session: ScriptedUploadTaskSession, launch: UUID
+    ) -> Outbox {
+        Outbox.composed(
+            repository: harness.repository,
+            credentials: harness.credentials,
+            http: harness.http,
+            chunks: harness.scheduler,
+            attachChunks: { _ in },
+            uploads: BackgroundUploadScheduler(session: session, launch: launch),
+            network: harness.network,
+            preferences: UploadPreferences(
+                defaults: UserDefaults(suiteName: harness.preferencesName)!
+            )
+        )
+    }
+
+    private func listing(
+        _ id: Int, _ job: UploadJob, launch: UUID, epoch: Int
+    ) -> WholeTaskListing {
+        WholeTaskListing(
+            taskIdentifier: id,
+            taskDescription: WholeTaskIdentity(
+                jobID: job.id, fileID: job.files[0].id, attempt: 0, launch: launch, epoch: epoch
+            ).taskDescription
+        )
+    }
+
+    @Test("a cancel the dying process never issued is issued by the next launch, signed out")
+    func aSignedOutLaunchFinishesTheWithdrawal() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000, http: Wake.server(), credentials: nil
+        )
+        defer { harness.cleanUp() }
+        let dead = UUID()
+        // The sign-out moved the epoch to 3 and recorded it; the process ended before any cancel.
+        outbox(harness, session: ScriptedUploadTaskSession(), launch: dead)
+            .recordWithdrawal(at: 3)
+        #expect(
+            harness.repository.withdrawals.pending() == OutboxWithdrawal(launch: dead, epoch: 3),
+            "the premise: the withdrawal is on disk"
+        )
+
+        // A fresh process over the same queue, nobody signed in, and the system still carrying
+        // the withdrawn account's uploads.
+        let session = ScriptedUploadTaskSession(listing: [
+            listing(7, harness.job, launch: dead, epoch: 2),
+            listing(8, harness.job, launch: UUID(), epoch: 9),
+            WholeTaskListing(taskIdentifier: 9, taskDescription: "not|a|whole|task"),
+            // Minted by the dying process after the withdrawal: the next account's.
+            listing(10, harness.job, launch: dead, epoch: 3),
+        ])
+        await outbox(harness, session: session, launch: UUID()).adopt()
+
+        #expect(Set(session.cancelledIdentifiers) == [7, 8, 9])
+        #expect(harness.scheduler.everyTaskCancellations == 1, "the chunk lane's too")
+        #expect(harness.repository.withdrawals.pending() == nil, "a cancel issued is not owed")
+    }
+
+    @Test("the record stays until the cancel is issued, and a later one outlives an earlier cancel")
+    func theRecordOutlivesItsCancel() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: Wake.server())
+        defer { harness.cleanUp() }
+        let launch = UUID()
+        let session = ScriptedUploadTaskSession(listing: [
+            listing(7, harness.job, launch: launch, epoch: 2)
+        ])
+        let facade = outbox(harness, session: session, launch: launch)
+        facade.recordWithdrawal(at: 3)
+        let listed = TestGate()
+        session.holdNextListing(on: listed)
+
+        let finishing = Task { @MainActor in await facade.finishWithdrawal() }
+        // Bounded, so a withdrawal that never lists turns this red instead of parking the bundle.
+        let parked = try await Wake.eventually { session.listingCount > 0 }
+        if !parked { await listed.open() }
+        try #require(parked, "the withdrawal never asked the session what it carries")
+        #expect(session.cancelledIdentifiers.isEmpty, "the premise: no cancel is issued yet")
+        #expect(
+            harness.repository.withdrawals.pending() == OutboxWithdrawal(launch: launch, epoch: 3),
+            "the record went before its cancel was issued"
+        )
+        // Another withdrawal lands while the first one's cancel is in flight.
+        facade.recordWithdrawal(at: 5)
+        await listed.open()
+        await finishing.value
+
+        #expect(session.cancelledIdentifiers == [7])
+        #expect(
+            harness.repository.withdrawals.pending() == OutboxWithdrawal(launch: launch, epoch: 5),
+            "the earlier cancel cleared a later withdrawal"
+        )
+        await facade.finishWithdrawal()
+        #expect(harness.repository.withdrawals.pending() == nil)
+    }
+}
