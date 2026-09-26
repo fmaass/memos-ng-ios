@@ -137,6 +137,28 @@ struct SessionNoiseTests {
         }
     }
 
+    /// The library page both tests below serve. It must be one the list decoder accepts, or the
+    /// ended-session test's empty library is a decoding failure and not the fence.
+    private nonisolated static var libraryPage: String {
+        "[\(Stub.libraryItem(uid: "x"))]"
+    }
+
+    /// The control on the ended-session test: the SAME page, answered to the session that asked
+    /// for it, fills the library. Without it, that test's `library.items.isEmpty` could be the
+    /// decoder refusing the body with the fence removed.
+    @Test("the page an ended session is refused is one a live session applies")
+    func theLibraryPageDecodesUnderALiveSession() async throws {
+        let session = await signedIn(handler: handler { Stub.json(Self.libraryPage) })
+        let library = MediaLibraryStore()
+        library.reports(to: session)
+        let live = try #require(session.activeHandle)
+
+        await library.refresh(using: live, baseURL: Stub.baseURL)
+
+        #expect(library.lastError == nil, "the page was refused before any fence was asked")
+        #expect(library.items.map(\.uid) == ["x"])
+    }
+
     /// B3, per store: an answer issued under one incarnation and applied under the next changes
     /// nothing at all — not the rows, not the counts, not the chips.
     @Test("a page answered for a session that has ended is not applied")
@@ -149,7 +171,7 @@ struct SessionNoiseTests {
                 switch operation {
                 case whoamiOperation: return Stub.json(Stub.user)
                 case "list_attachments_api_attachments_get":
-                    return Stub.json("[\(Stub.attachment(uid: "x", status: "ready"))]")
+                    return Stub.json(Self.libraryPage)
                 case "list_tags_api_tags_get":
                     return Stub.json(#"[{"name":"travel","count":3}]"#)
                 case "stats_heatmap_api_stats_heatmap_get":
