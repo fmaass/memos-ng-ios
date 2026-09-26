@@ -21,7 +21,8 @@ profile's `TEAMID.*` pattern and breaks device signing, and the app's keychain a
 on the application-groups entitlement instead; the share extension declares no keychain group;
 both declare the app group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
 check (below) → `xcodebuild test` (all five test bundles) → a read-back of the BUILT app and
-.appex (each one's `PrivacyInfo.xcprivacy`, its version keys and its export-compliance answer) →
+.appex (each one's `PrivacyInfo.xcprivacy`, held per bundle to exactly its declared required-reason
+codes by `scripts/privacy-manifest-verdict.py`, its version keys and its export-compliance answer) →
 a rebuild of every package with its warnings fatal, each against the tracked `Package.resolved`
 copied beside its manifest and refused any version that file does not name, so a fresh upstream
 tag cannot reach this step alone (`swift build -warnings-as-errors` for the four that declare
@@ -133,9 +134,15 @@ A task is not done until that summary line reads `| exit=0`. Never cite a piped 
 summary — the exit code is the verdict.
 
 The gate keeps its own complete log of every run at
-`MAC_GATE_ARTIFACTS/mac-gate-<branch>-<run token>.log` and names that path on the line before its
+`MAC_GATE_ARTIFACTS/mac-gate-<branch>-<run token>.log` and names that path two lines before its
 verdict, so two runs — two branches, or two runs of the same branch — can never write the same
-file. Any redirect of a gate's output by a caller uses a path unique to the branch and the run
+file. The line between them is `script      : sha256 <hex>`, the text of `bin/mac-gate.sh` the run
+executed: a run copies the script, and the helpers it hands to the build host or runs at the end
+(`scripts/reap-gate-lanes.sh`, `gate-work-dir.sh`, `gate-root-refusal.sh`,
+`testcount-candidate-owner.sh`, taken from the caller's repository), into a private directory under
+`$TMPDIR` at start and execs the copy, so an edit to the tree while a run is under way cannot change
+what it runs (`tests/gate/private-copy-test.sh` edits the script and a helper mid-run). The
+selftests under `tests/gate/` and the tree mirrored to the build host are still read from the tree. Any redirect of a gate's output by a caller uses a path unique to the branch and the run
 too, never a generic name in a shared directory: that is how one run's evidence gets truncated
 mid-write by another's (`tests/gate/concurrent-log-test.sh` holds the gate to its half of it).
 

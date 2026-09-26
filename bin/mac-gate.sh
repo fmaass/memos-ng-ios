@@ -158,6 +158,80 @@ if [ -n "$artifacts" ]; then
     || die_refuse "cannot remove $artifacts/testcount-baseline.tsv: stale candidate left in place — not this run's"
 fi
 
+# --- the run's private copy ----------------------------------------------------------------------
+# Bash reads a script as it runs it, so an edit to this file during a run is read at the old byte
+# offset in the NEW text. A gate once died at its summary line with a syntax error and no verdict,
+# after the build host had finished, because its worktree was edited mid-run (2026-09-09). So a run
+# copies this file, and every helper it hands to the build host or runs itself, into a private
+# directory and execs the copy: from then on the tree can change freely. The helpers come from the
+# CALLER's repository — the same `git rev-parse --show-toplevel` in the caller's directory the rest
+# of the run uses, which exec leaves where it was — never from wherever this file sits. Everything
+# above this point runs from the original text, and has to: the stale candidate goes before
+# anything can refuse, so the copy clears it again, which costs nothing.
+#
+# A copy knows it is one by where it runs from: a directory named mac-gate-run.*, named by
+# MAC_GATE_RUN_COPY, holding the marker only this bootstrap writes. Anything else — the variable
+# unset, or exported by a caller at some other directory — makes a fresh copy, because the copy's
+# directory is what the run removes when it ends. The variable is dropped as soon as it is read, so
+# a gate a selftest starts makes a copy of its own.
+GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh"
+gate_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi \
+    | awk '{print $1}'
+}
+gate_run_copy_is_own() {
+  local claimed="${MAC_GATE_RUN_COPY:-}" here
+  [ -n "$claimed" ] || return 1
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || return 1
+  [ "$here" = "$claimed" ] || return 1
+  case "${here##*/}" in mac-gate-run.*) ;; *) return 1 ;; esac
+  [ "$(cat "$here/.mac-gate-run-copy" 2>/dev/null)" = "$here" ]
+}
+if gate_run_copy_is_own; then
+  GATE_RUN_COPY="$MAC_GATE_RUN_COPY"
+  unset MAC_GATE_RUN_COPY
+else
+  unset MAC_GATE_RUN_COPY
+  gate_run_dir="$(mktemp -d "${TMPDIR:-/tmp}/mac-gate-run.XXXXXX")" \
+    || die_refuse "cannot create a private directory to run the gate from"
+  gate_run_dir="$(cd "$gate_run_dir" && pwd -P)" \
+    || die_refuse "cannot resolve the private directory $gate_run_dir"
+  gate_origin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  gate_caller_root="$(git rev-parse --show-toplevel 2>/dev/null)" || gate_caller_root=""
+  mkdir "$gate_run_dir/scripts" && cp -p "$gate_origin" "$gate_run_dir/mac-gate.sh" \
+    && printf '%s\n' "$gate_origin" > "$gate_run_dir/.mac-gate-origin" \
+    || { rm -rf "$gate_run_dir"; die_refuse "cannot copy $gate_origin into $gate_run_dir"; }
+  if [ -n "$gate_caller_root" ]; then
+    for gate_helper in $GATE_RUN_HELPERS; do
+      # A helper this tree does not have stays missing in the copy, and fails where it always did.
+      [ -e "$gate_caller_root/scripts/$gate_helper" ] || continue
+      cp -p "$gate_caller_root/scripts/$gate_helper" "$gate_run_dir/scripts/$gate_helper" \
+        || { rm -rf "$gate_run_dir"; die_refuse "cannot copy scripts/$gate_helper into $gate_run_dir"; }
+    done
+  fi
+  printf '%s\n' "$gate_run_dir" > "$gate_run_dir/.mac-gate-run-copy" \
+    || { rm -rf "$gate_run_dir"; die_refuse "cannot mark $gate_run_dir as this run's copy"; }
+  export MAC_GATE_RUN_COPY="$gate_run_dir"
+  exec "${BASH:-bash}" "$gate_run_dir/mac-gate.sh" "$@"
+fi
+remove_run_copy() {
+  [ -n "${GATE_RUN_COPY:-}" ] || return 0
+  rm -rf "$GATE_RUN_COPY"
+  GATE_RUN_COPY=""
+}
+trap 'remove_run_copy' EXIT
+GATE_SCRIPT_ORIGIN="$(cat "$GATE_RUN_COPY/.mac-gate-origin" 2>/dev/null)"
+GATE_SCRIPT_SHA256="$(gate_sha256 "$GATE_RUN_COPY/mac-gate.sh")"
+case "$GATE_SCRIPT_SHA256" in
+  [0-9a-f]*) [ "${#GATE_SCRIPT_SHA256}" -eq 64 ] \
+    || die_refuse "cannot name the sha256 of $GATE_RUN_COPY/mac-gate.sh" ;;
+  *) die_refuse "cannot name the sha256 of $GATE_RUN_COPY/mac-gate.sh" ;;
+esac
+# Selftest only: see the pause after the selftest step. Read once and dropped, so no child of this
+# run — a gate a selftest starts included — ever pauses.
+GATE_SELFTEST_PAUSE_DIR="${MAC_GATE_SELFTEST_PAUSE_DIR:-}"
+unset MAC_GATE_SELFTEST_PAUSE_DIR
+
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -516,7 +590,7 @@ die_locked() {
   exit 3
 }
 
-trap 'remove_gate_device; release_gate_lock' EXIT
+trap 'remove_gate_device; release_gate_lock; remove_run_copy' EXIT
 trap 'remove_gate_device; release_gate_lock; exit 130' INT
 trap 'remove_gate_device; release_gate_lock; exit 143' TERM
 trap 'remove_gate_device; release_gate_lock; exit 129' HUP
@@ -529,6 +603,8 @@ trap 'remove_gate_device; release_gate_lock; exit 129' HUP
   printf 'branch      : %s\n' "$branch"
   printf 'HEAD        : %s\n' "$head_sha"
   printf 'HEAD subject: %s\n' "$(git log -1 --pretty=%s)"
+  printf 'script      : %s (private copy of %s, sha256 %s)\n' \
+    "$GATE_RUN_COPY/mac-gate.sh" "$GATE_SCRIPT_ORIGIN" "$GATE_SCRIPT_SHA256"
   if [ -n "$SIMULATOR" ]; then
     printf 'simulator   : %s (MAC_GATE_SIMULATOR — shared device, no per-run isolation)\n' "$SIMULATOR"
   else
@@ -553,6 +629,7 @@ summary_and_exit() {
   for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
   line="$line | exit=$first_fail"
   say "run log     : $log"
+  say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   say "$line"
   exit "$first_fail"
 }
@@ -567,6 +644,7 @@ QUICK_BUILD_RC="-"
 QUICK_TESTS_RC="-"
 quick_summary_and_exit() {
   say "run log     : $log"
+  say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
@@ -606,6 +684,19 @@ for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
 done
 record selftest "$selftest_rc"
 [ "$first_fail" -eq 0 ] || end_run
+
+# Selftest only: tests/gate/private-copy-test.sh stops a run here, edits the tree it was started
+# from underneath it, and lets it go — the proof that the copy above is what runs. Without
+# MAC_GATE_SELFTEST_PAUSE_DIR this is nothing, and the wait is bounded so a test that dies cannot
+# hold a run for longer than a minute.
+if [ -n "$GATE_SELFTEST_PAUSE_DIR" ]; then
+  : > "$GATE_SELFTEST_PAUSE_DIR/paused"
+  gate_pause_waited=0
+  while [ ! -e "$GATE_SELFTEST_PAUSE_DIR/resume" ] && [ "$gate_pause_waited" -lt 600 ]; do
+    sleep 0.1
+    gate_pause_waited=$((gate_pause_waited + 1))
+  done
+fi
 
 # --- release-version authority ------------------------------------------------------------------
 # Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
@@ -721,12 +812,18 @@ preflight_out="$(
     printf "origin_fetched='%s'\n" "$(esc "$ORIGIN_FETCHED")"
     printf "reap_skip_reason='%s'\n" "$(esc "$reap_skip_reason")"
     printf "surviving_branches='%s'\n" "$(esc "$surviving_branches")"
-    cat "$repo_root/scripts/reap-gate-lanes.sh"
-    cat "$repo_root/scripts/gate-work-dir.sh"
+    cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
+    cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
+    cat "$GATE_RUN_COPY/scripts/gate-root-refusal.sh"
     cat <<'PRE_EOF'
 set -uo pipefail
 gate_root_raw="$HOME/build/memos-ng-ios/gate"
-mkdir -p "$gate_root_raw" || { echo "REFUSE cannot create the gate root"; exit 2; }
+# The refusal names the part of the path that stopped the mkdir (scripts/gate-root-refusal.sh); the
+# fallback keeps it a refusal if that helper did not come along.
+mkdir -p "$gate_root_raw" || {
+  gate_root_refusal "$gate_root_raw" 2>/dev/null || echo "REFUSE cannot create the gate root $gate_root_raw"
+  exit 2
+}
 gate_root="$(cd "$gate_root_raw" && pwd -P)" || { echo "REFUSE cannot resolve the gate root"; exit 2; }
 target_raw="$gate_root/$branch"
 # lexical normalisation of . and .. without touching the filesystem
@@ -1015,8 +1112,8 @@ say "--- step: remote ---"
   printf "GATE_QUICK='%s'\n" "$(esc "$QUICK")"
   printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
   printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
-  cat "$repo_root/scripts/reap-gate-lanes.sh"
-  cat "$repo_root/scripts/gate-work-dir.sh"
+  cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
+  cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
   cat <<'REMOTE_EOF'
 set -uo pipefail
 
@@ -1647,12 +1744,17 @@ PY
     echo "BUNDLE FAIL: project.yml does not name exactly one MARKETING_VERSION to expect"
     return 1
   }
-  /usr/bin/python3 - "$app" "$appex" "$GATE_MARKETING_VERSION" <<'PY'
-import plistlib, os, sys
+  # The privacy manifests are judged by a verdict of their own, so its refusals can be fed from
+  # tests/gate/privacy-manifest-test.sh without a build; this step only hands it each bundle's file.
+  local privacy_verdict="$GATE_TARGET/scripts/privacy-manifest-verdict.py"
+  [ -f "$privacy_verdict" ] || { echo "BUNDLE FAIL: $privacy_verdict is missing"; return 1; }
+  /usr/bin/python3 - "$app" "$appex" "$GATE_MARKETING_VERSION" "$privacy_verdict" <<'PY'
+import plistlib, os, subprocess, sys
 
 app, appex = sys.argv[1], sys.argv[2]
 # The expectation comes from project.yml, the one place the version is written.
 EXPECTED_SHORT_VERSION = sys.argv[3]
+PRIVACY_VERDICT = sys.argv[4]
 rc = 0
 
 def fail(msg):
@@ -1712,35 +1814,11 @@ def check(label, bundle, bundle_id):
         print("  ok: UIRequiresFullScreen absent")
 
     privacy_path = os.path.join(bundle, "PrivacyInfo.xcprivacy")
-    if not os.path.isfile(privacy_path):
-        fail("%s has no PrivacyInfo.xcprivacy at its bundle root" % label)
-        return
-    try:
-        privacy = load(privacy_path)
-    except Exception as error:
-        fail("%s PrivacyInfo.xcprivacy does not parse: %s" % (label, error))
-        return
-    print("  ok: PrivacyInfo.xcprivacy present at the bundle root")
-
-    if privacy.get("NSPrivacyTracking") is not False:
-        fail("%s NSPrivacyTracking is %r, expected false" % (label, privacy.get("NSPrivacyTracking")))
-    if privacy.get("NSPrivacyTrackingDomains") != []:
-        fail("%s NSPrivacyTrackingDomains is %r, expected empty"
-             % (label, privacy.get("NSPrivacyTrackingDomains")))
-    if privacy.get("NSPrivacyCollectedDataTypes") != []:
-        fail("%s NSPrivacyCollectedDataTypes is %r, expected empty"
-             % (label, privacy.get("NSPrivacyCollectedDataTypes")))
-
-    declared = {
-        entry.get("NSPrivacyAccessedAPIType"): entry.get("NSPrivacyAccessedAPITypeReasons")
-        for entry in privacy.get("NSPrivacyAccessedAPITypes", []) or []
-    }
-    reasons = declared.get("NSPrivacyAccessedAPICategoryFileTimestamp")
-    if reasons == ["C617.1"]:
-        print("  ok: file-timestamp category declared with reason C617.1")
-    else:
-        fail("%s declares file-timestamp reasons %r, expected ['C617.1']" % (label, reasons))
-    print("  declared API categories: %s" % (", ".join(sorted(declared)) or "(none)"))
+    # The verdict names every difference itself; the flush keeps its lines after this bundle's.
+    sys.stdout.flush()
+    verdict_rc = subprocess.call([sys.executable, PRIVACY_VERDICT, label, privacy_path])
+    if verdict_rc != 0:
+        fail("%s PrivacyInfo.xcprivacy refused by the privacy verdict (exit %d)" % (label, verdict_rc))
 
 check("app", app, "live.discomarder.memosng")
 check("extension", appex, "live.discomarder.memosng.share")
@@ -2396,7 +2474,7 @@ rsync_rc="${PIPESTATUS[0]}"
 [ "$copyback_rc" -ne 0 ] || copyback_rc="$rsync_rc"
 staging="$artifacts/incoming-$RUN_TOKEN"
 say "copyback: staged in $staging (rsync exit $rsync_rc)"
-candidate_owner="$repo_root/scripts/testcount-candidate-owner.sh"
+candidate_owner="$GATE_RUN_COPY/scripts/testcount-candidate-owner.sh"
 if [ -x "$candidate_owner" ]; then
   "$candidate_owner" "$staging" "$artifacts" "$RUN_TOKEN" 2>&1 | tee -a "$log"
   owner_rc="${PIPESTATUS[0]}"

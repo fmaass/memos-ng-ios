@@ -58,9 +58,12 @@ categories, for different code in each bundle:
 Nothing else in either bundle touches a required-reason API: nothing reads volume capacity,
 nothing asks for system uptime, and nothing enumerates keyboards. The gate reads both shipping
 bundles back and fails if a manifest is missing, does not parse, claims tracking, lists a tracking
-domain or a collected data type, or declares file-timestamp reasons other than exactly `C617.1`.
-It prints the declared category names but does not hold the user-defaults entry to a value, so the
-answers on the website come off the manifests themselves, not off the gate's log.
+domain or a collected data type, or declares file-timestamp reasons other than exactly `C617.1` or
+user-defaults reasons other than exactly `CA92.1` and `1C8F.1`, per bundle, naming the bundle and
+the difference (`scripts/privacy-manifest-verdict.py`, exercised by
+`tests/gate/privacy-manifest-test.sh`). It prints any other declared category but holds none to a
+value, and the answers on the website still come off the manifests themselves, not off the gate's
+log.
 
 ---
 
@@ -244,6 +247,17 @@ GUI, no Mac login password:
   it saw. The verdict is a pure function in `fastlane/lib/asc_readback.rb` so each of those
   assertions is unit-tested without talking to Apple:
   `ruby -Ifastlane/lib fastlane/test/asc_readback_test.rb`.
+- **The "What to Test" text comes from a tracked file.** `fastlane/TESTFLIGHT_NOTES.md` holds one
+  `## <marketing> (<build>)` section per build, newest first, and `fastlane beta` passes the
+  section matching the numbers read off the archive as `upload_to_testflight`'s `changelog:`. The
+  lane asks for it right after the archive, before the dSYM copy and the upload, and refuses when
+  the section is missing, empty, duplicated or longer than TestFlight's 4000 characters — a blank
+  changelog is the defect this closes, so it is never the fallback. So the section has to be on the
+  checkout before `fastlane beta` runs, one line per point (TestFlight shows plain text), in the
+  first person singular and with no ticket keys or internal host names: testers read it. Check it
+  before archiving with `fastlane testflight_notes version:<marketing> build:<n>`, which prints the
+  text `beta` would send and uploads nothing. The derivation is `fastlane/lib/release_notes.rb`,
+  tested by `ruby -Ifastlane/lib fastlane/test/release_notes_test.rb`.
 
 Secrets live only on merkur: `~/.config/memosng-ci.env` (0600, holds the key id / issuer / `.p8`
 path / CI keychain password) and the `.p8` itself (0600). Nothing signing-related is committed.
