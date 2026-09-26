@@ -34,6 +34,7 @@ struct MediaLibraryStoreTests {
             {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
             "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
             "renditions":[],"orphan":\(memoUid == nil),"memoUid":\(owner),\
+            "takenAt":"2026-09-26T10:00:00Z","filename":"\(uid).jpg",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
             "previewUrl":"/api/attachments/\(uid)/mobile",\
             "webUrl":"/api/attachments/\(uid)/web",\

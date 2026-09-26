@@ -334,6 +334,28 @@ enum Stub {
             """
     }
 
+    /// One row of `GET /api/attachments`: `AttachmentListItem`, NOT the memo's `AttachmentRef`
+    /// above. It has no `duration`, `position` or capture fields, and requires `orphan`, `memoUid`,
+    /// `takenAt` and `filename`, so a memo attachment served in its place is refused by the
+    /// decoder and a test reading an empty library would be reading that refusal.
+    ///
+    /// The row is a ready JPEG hanging on no memo — an orphan, which the library deliberately
+    /// lists.
+    static func libraryItem(uid: String) -> String {
+        return """
+            {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
+            "width":1000,"height":1000,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+            "renditions":[],"orphan":true,"memoUid":null,\
+            "takenAt":"2026-09-26T10:00:00Z","filename":"\(uid).jpg",\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
+            "previewUrl":"/api/attachments/\(uid)/mobile",\
+            "webUrl":"/api/attachments/\(uid)/web",\
+            "posterUrl":"/api/attachments/\(uid)/poster",\
+            "downloadUrl":"/api/attachments/\(uid)/original",\
+            "printUrl":"/api/attachments/\(uid)/print"}
+            """
+    }
+
     /// A memo's content is Markdown, so it carries newlines and quotes into these hand-built JSON
     /// bodies; unescaped they produce a body the real decoder rejects and a test that fails for
     /// the wrong reason.
