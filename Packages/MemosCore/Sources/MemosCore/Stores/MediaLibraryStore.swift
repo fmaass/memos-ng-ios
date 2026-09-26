@@ -49,6 +49,11 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// `filter` may only change through `setFilter`: the loaded rows and the cursor both describe
     /// one direction, and neither survives the other one being chosen (MEMNG-190).
     public private(set) var order: MediaLibraryOrder
+    /// Which tag the grid is narrowed to, or nil for every tag (MEMNG-513). Changed only through
+    /// `setTag`, for the reason `filter` only changes through `setFilter`. Deliberately NOT
+    /// persisted, unlike `order`: a tag left over from last time is a filter silently hiding
+    /// pictures, which is the worse failure.
+    public private(set) var tag: String?
 
     private var nextCursor: String?
     /// Which loaded list this is. Bumped wherever the list stops being the one an unanswered page
@@ -117,6 +122,20 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         generation += 1
     }
 
+    /// Narrows the grid to one tag, or widens it back to every tag with nil.
+    ///
+    /// It resets exactly what a tab change resets, for the same reason: the loaded rows and the
+    /// cursor both describe the list under the previous tag, and neither belongs under this one.
+    public func setTag(_ tag: String?) {
+        guard tag != self.tag else { return }
+        self.tag = tag
+        items = []
+        nextCursor = nil
+        hasMore = true
+        lastError = nil
+        generation += 1
+    }
+
     /// Empties the grid because this device is signed in as somebody else.
     ///
     /// The tab's view is not torn down and rebuilt on a subject swap — the signed-in root keeps
@@ -135,17 +154,18 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         generation += 1
     }
 
-    /// Which list a page in flight belongs to — the generation, the filter AND the direction,
-    /// because any of the three moving makes the answer a continuation of something nobody is
+    /// Which list a page in flight belongs to — the generation, the filter, the direction AND the
+    /// tag, because any of them moving makes the answer a continuation of something nobody is
     /// reading any more.
     private struct Lineage: Equatable {
         var generation: Int
         var filter: MediaLibraryFilter
         var order: MediaLibraryOrder
+        var tag: String?
     }
 
     private var lineage: Lineage {
-        Lineage(generation: generation, filter: filter, order: order)
+        Lineage(generation: generation, filter: filter, order: order, tag: tag)
     }
 
     /// Which lineage the first page in flight belongs to, or nil when none is. `isLoading` alone
@@ -176,6 +196,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 client,
                 filter: lineage.filter,
                 order: lineage.order,
+                tag: lineage.tag,
                 cursor: nil,
                 limit: pageSize,
                 baseURL: baseURL
@@ -235,6 +256,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     client,
                     filter: lineage.filter,
                     order: lineage.order,
+                    tag: lineage.tag,
                     cursor: cursor,
                     limit: pageSize,
                     baseURL: baseURL
@@ -361,6 +383,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         _ client: any APIProtocol,
         filter: MediaLibraryFilter,
         order: MediaLibraryOrder,
+        tag: String?,
         cursor: String?,
         limit: Int,
         baseURL: URL
@@ -374,7 +397,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     // Written as a member of the generated enum rather than through a name this
                     // file spells out: what the generator calls that type is the generator's to
                     // decide, and this call is the only place the app has to agree with it.
-                    order: order == .oldestFirst ? .asc : .desc
+                    order: order == .oldestFirst ? .asc : .desc,
+                    tag: tag
                 )
             )
         )
