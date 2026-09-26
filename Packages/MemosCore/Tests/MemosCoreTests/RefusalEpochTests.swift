@@ -65,6 +65,11 @@ struct RefusalEpochTests {
         let calls = Counter()
         let sleeper = RetryLadderSleeper(stoppingAfter: 2)
         let held = LockedValue<PresentedCredential?>(nil)
+        // The discarded answer schedules its replacement AT ONCE, and that retry presents the
+        // successor and earns a refusal of its own, which fires the hook again. Read after it, the
+        // premises below describe the retry instead of the request that earned the first 401, so
+        // every request sent after the successor was installed waits until they have been read.
+        let retryMayAnswer = Gate()
 
         let session = SessionStore(
             credentials: credentials,
@@ -81,6 +86,7 @@ struct RefusalEpochTests {
                     }
                 ) { request, _, _ in
                     calls.increment()
+                    if installed.get() { await retryMayAnswer.wait() }
                     seen.set(seen.get() + [request.headerFields[.authorization]])
                     guard refusing.get() else { return Stub.json(Stub.user) }
                     return Stub.empty(.unauthorized)
@@ -120,6 +126,7 @@ struct RefusalEpochTests {
         // task behind it, which is the second half of the rule and the easier half to lose.
         for _ in 0..<200 where calls.count <= before + 1 { await Task.yield() }
         #expect(calls.count > before + 1, "nothing was scheduled behind the discarded answer")
+        retryMayAnswer.open()
     }
 
     // MARK: - window 3: the raced sign-out
