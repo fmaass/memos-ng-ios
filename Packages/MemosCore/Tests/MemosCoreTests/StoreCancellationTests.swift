@@ -123,6 +123,7 @@ struct StoreCancellationTests {
 
             let timeline = TimelineStore()
             let library = MediaLibraryStore()
+            let tags = LibraryTagStore()
             let reads: [(String, @MainActor () async -> Void, @MainActor () -> String?)] = [
                 (
                     "timeline",
@@ -134,6 +135,7 @@ struct StoreCancellationTests {
                     { await library.refresh(using: client.handle, baseURL: Stub.baseURL) },
                     { library.lastError }
                 ),
+                ("tags", { await tags.load(for: .all, using: client.handle) }, { tags.lastError }),
             ]
 
             for (name, read, reported) in reads {

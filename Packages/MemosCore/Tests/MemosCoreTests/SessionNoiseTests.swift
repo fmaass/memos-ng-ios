@@ -71,17 +71,21 @@ struct SessionNoiseTests {
         #expect(session.verification == .verified, "and says nothing about the credential")
     }
 
-    @Test("the library follows the same rule")
+    @Test("the library and its tag menu follow the same rule")
     func theLibraryFollowsTheSameRule() async {
         let session = await signedIn(
             handler: handler { throw URLError(.notConnectedToInternet) }
         )
         let library = MediaLibraryStore()
+        let tags = LibraryTagStore()
         library.reports(to: session)
+        tags.reports(to: session)
 
         await library.refresh(using: session.activeHandle!, baseURL: Stub.baseURL)
+        await tags.load(for: .all, using: session.activeHandle!)
 
         #expect(library.lastError == nil)
+        #expect(tags.lastError == nil)
         guard case .unverified = session.verification else {
             Issue.record("expected .unverified, got \(session.verification)")
             return
@@ -155,32 +159,39 @@ struct SessionNoiseTests {
     /// nothing at all — not the rows, not the pictures.
     @Test("a page answered for a session that has ended is not applied")
     func aPageFromAnEndedSessionIsNotApplied() async throws {
-        // Each store gets the payload ITS decoder accepts. One list for both would fail the
-        // library decoder before its guard was ever reached, and the assertion below would then
-        // pass with the guard removed.
+        // Each store gets the payload ITS decoder accepts. One list for all three would fail the
+        // library and tag decoders before their guards were ever reached, and the assertions
+        // below would then pass with the guards removed.
         let session = await signedIn(
             handler: { _, _, operation in
                 switch operation {
                 case whoamiOperation: return Stub.json(Stub.user)
                 case "list_attachments_api_attachments_get":
                     return Stub.json(Self.libraryPage)
+                case "attachment_tags_api_attachments_tags_get":
+                    return Stub.json(#"[{"name":"travel","count":3}]"#)
                 default: return Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
                 }
             }
         )
         let timeline = TimelineStore()
         let library = MediaLibraryStore()
+        let tags = LibraryTagStore()
         timeline.reports(to: session)
         library.reports(to: session)
+        tags.reports(to: session)
         let underA = try #require(session.activeHandle)
 
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
 
         await timeline.refresh(using: underA, baseURL: Stub.baseURL)
         await library.refresh(using: underA, baseURL: Stub.baseURL)
+        await tags.load(for: .all, using: underA)
 
         #expect(timeline.memos.isEmpty, "a page for a session that has ended is not a list")
         #expect(library.items.isEmpty, "and neither is a page of attachments")
+        #expect(tags.tags.isEmpty, "nor a tag list")
+        #expect(tags.loadedFilter == nil)
     }
 
     /// R-B3, the failure direction — and the worst of it. A 401 issued under A and answered

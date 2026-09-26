@@ -136,6 +136,21 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         generation += 1
     }
 
+    /// Widens the grid back to every tag when the tag list, read for the kind on screen, no longer
+    /// names the chosen tag — a tag with no videos is absent under Videos, and a grid narrowed to
+    /// it would be an empty tab with no row in the menu to explain it. Answers whether it reset,
+    /// so the caller knows to read the grid again.
+    ///
+    /// Only an ANSWER for this store's own kind decides: a list not read yet, or read for another
+    /// kind, says nothing about whether the tag is there.
+    @discardableResult
+    public func dropTagIfAbsent(from list: LibraryTagStore) -> Bool {
+        guard let tag, list.loadedFilter == filter else { return false }
+        guard !list.tags.contains(where: { $0.name == tag }) else { return false }
+        setTag(nil)
+        return true
+    }
+
     /// Empties the grid because this device is signed in as somebody else.
     ///
     /// The tab's view is not torn down and rebuilt on a subject swap — the signed-in root keeps
