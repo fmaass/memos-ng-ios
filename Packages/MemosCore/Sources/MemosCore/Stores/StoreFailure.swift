@@ -13,9 +13,9 @@ import OpenAPIRuntime
 /// over a search that then worked perfectly.
 ///
 /// The lineage fence does not catch it, and cannot. A fence compares the request's lineage with
-/// the store's at the moment the answer lands, and the cancelling caller (`MemoSearch.typed`
-/// cancels its `work` task, then waits out its debounce before touching the store) has not moved
-/// the lineage yet — so the cancelled request is still, by that test, the current one. Cancellation
+/// the store's at the moment the answer lands, and a cancelling caller that cancels its own task
+/// and waits (a debounce, say) before touching the store has not moved the lineage yet — so the
+/// cancelled request is still, by that test, the current one. Cancellation
 /// has to be recognised for what it is instead of inferred from who else has been past.
 ///
 /// It is ONE place rather than one per store because the classification is the same everywhere and

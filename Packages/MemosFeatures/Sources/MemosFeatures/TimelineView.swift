@@ -63,30 +63,11 @@ public struct TimelineView: View {
     @State private var viewing: MediaViewerSelection?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
-    /// The search the loupe raised, its sheet, and the list it fills. Built fresh at every tap —
-    /// a term left over from last time is a filter silently hiding memos, which is the worse
-    /// failure (design note §5, Q4) — and kept here rather than inside the sheet because the
-    /// results screen the sheet pushes outlives the sheet.
-    ///
-    /// ONE object rather than a store beside a boolean. A sheet raised by a boolean draws whatever
-    /// its content closure can see when the presentation begins, and a content gated on a separate
-    /// optional draws nothing at all if that optional has not landed — a blank sheet with no
-    /// `.task` on it to load anything either, right until it is closed and opened again
-    /// (MEMNG-175). `SearchPresentation` carries the store in the item the sheet is raised FROM,
-    /// so the two cannot be out of step.
-    @State private var searchPresentation = SearchPresentation()
-    /// Set only for the one sheet close that is a hand-off to the results screen rather than
-    /// an abandonment, so `dismissSearch` knows not to reset the store the results screen has
-    /// just adopted.
-    @State private var handingOff = false
 
     public init() {}
 
     public var body: some View {
-        // The sheet is raised from an ITEM, and an item needs a binding into the presentation
-        // rather than to it.
-        @Bindable var presentation = searchPresentation
-        return NavigationStack(path: $path) {
+        NavigationStack(path: $path) {
             Group {
                 if let timeline {
                     content(timeline)
@@ -108,28 +89,16 @@ public struct TimelineView: View {
             .stackDestination(for: SettingsRoute.self) { _ in
                 SettingsView(signOut: signOut, avatar: avatar)
             }
-            // The memo is looked for in BOTH lists. A card tapped on the search results is a
-            // memo the home timeline has very often never loaded, and a destination that only
-            // knew the timeline pushed an empty screen for exactly those memos. Whichever list
-            // held it is also the list the detail screen edits, so an edit made from a result
-            // lands where it was read.
+            // The memo is looked for in the timeline, and then as the one a Library jump read
+            // for this push (`holder(of:)`); either way the detail screen edits through the
+            // timeline store.
             .stackDestination(for: MemoRoute.self) { route in
                 if let found = holder(of: route.uid) {
                     MemoDetailView(uid: route.uid, initial: found.memo, timeline: found.store)
                 }
             }
-            .navigationDestination(for: SearchResultsRoute.self) { _ in
-                if let search = searchPresentation.search {
-                    SearchResultsView(
-                        search: search,
-                        mediaZoom: mediaZoom,
-                        openMemo: { path.append(MemoRoute(uid: $0)) },
-                        openAttachment: { open($0, of: $1) }
-                    )
-                }
-            }
-            // Top-LEFT is the account's own face; top-RIGHT is the search loupe and then New
-            // memo, which stays rightmost. Which is which is decided in `TimelineToolbar` rather
+            // Top-LEFT is the gear into Settings; top-RIGHT is New memo, alone since the loupe
+            // went (MEMNG-513). Which is which is decided in `TimelineToolbar` rather
             // than here — a placement written inline in a screen that needs a live session to
             // construct is one no test can read back.
             //
@@ -138,52 +107,7 @@ public struct TimelineView: View {
                 TimelineToolbar(
                     composed: feedback.count,
                     openSettings: { path.append(SettingsRoute()) },
-                    search: { openSearch() },
                     newMemo: { composing = .create(restoring: nil) }
-                )
-            }
-            // Attached HERE, inside the stack, and not out on the chain that carries the compose
-            // sheet and the viewer: two presentations on one view is how one of them silently
-            // stops appearing, which is the reason the cover was moved out in the first place.
-            // `onDismiss` is bound so EVERY close funnels through one place — Done, the
-            // hand-off to the results screen, and an interactive swipe the app never hears
-            // about otherwise. A debounced or in-flight search that outlived the sheet would
-            // otherwise write its result into a model nobody is looking at.
-            .sheet(item: $presentation.session, onDismiss: dismissSearch) { raised in
-                SearchSheet(
-                    search: raised.search,
-                    loadHeatmap: { store in
-                        guard let handle = session.activeHandle else { return }
-                        // Named before the read, so a failure that never reached the server lands
-                        // in the session's one banner instead of on this card.
-                        store.reports(to: session)
-                        await store.load(using: handle)
-                    },
-                    chose: { choice in
-                        jump(to: choice.anchor)
-                        // The commit row is the sheet's one verb (MEMNG-187): the day is settled,
-                        // so the sheet goes and what is left on screen is the anchored list with
-                        // the notice on top of it naming the day. A scrub or a picked date is a
-                        // field being moved, and the sheet stays for the next correction. Which
-                        // of the two it is, is `SearchPresentation.chose` — decided where the
-                        // presentation lives, so it is a decision a test can drive.
-                        searchPresentation.chose(choice)
-                    },
-                    loadTags: { store in
-                        guard let handle = session.activeHandle else { return }
-                        store.reports(to: session)
-                        await store.load(using: handle)
-                    },
-                    runSearch: { query, text in raised.search.run(query, showing: text) },
-                    close: { searchPresentation.close() },
-                    showResults: {
-                        handingOff = true
-                        searchPresentation.close()
-                        path.append(SearchResultsRoute())
-                        // The depth it now sits at, so the live channel can tell a list somebody
-                        // is reading from one that is merely still in memory.
-                        searchPresentation.resultsPushed(atDepth: path.count)
-                    }
                 )
             }
         }
@@ -246,8 +170,7 @@ public struct TimelineView: View {
         .task {
             if timeline == nil {
                 let store = TimelineStore(
-                    // Every day this screen can be anchored at is a day the heatmap named, and
-                    // the heatmap's days are the server's UTC ones — see
+                    // The days this screen is anchored at are the server's UTC ones — see
                     // `HeatmapDateJump.anchorCalendar` for what reading them in the device's zone
                     // would hide.
                     calendar: HeatmapDateJump.anchorCalendar,
@@ -306,13 +229,6 @@ public struct TimelineView: View {
         // going false IS the teardown, and its going true again — foregrounded, signed in, and the
         // store now built by the task above — IS the restart.
         .task(id: mediaChannelRuns) { await runMediaChannel() }
-        // Every way back out of the results — Back, an interactive swipe, a pop to the root —
-        // shows up here as the stack getting shallower, which is the only signal any of them
-        // share. `stackChanged` decides what that means for the results screen; it is a depth
-        // and not an appearance for the reason `resultsDepth` gives.
-        .onChange(of: path.count) { _, depth in
-            searchPresentation.stackChanged(toDepth: depth)
-        }
         // A capture that leaves the queue has become a memo on the server; the list it belongs in
         // is reloaded so it does not appear to have vanished.
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
@@ -358,7 +274,7 @@ public struct TimelineView: View {
                 // is read out of `memos`.
                 jumped = memo
                 // The list came back anchored at that memo's day, which is a different list from
-                // the one that was on screen — the same landing a day chosen on the heatmap gets.
+                // the one that was on screen.
                 topWatch.settled()
                 restoreTop = nil
                 jumps += 1
@@ -643,56 +559,16 @@ public struct TimelineView: View {
         timeline.memos.first { $0.uid == uid }
     }
 
-    /// The list a memo was read from, and the memo. The timeline first: it is the canonical list,
-    /// and a memo in both is the same memo.
+    /// The list a memo was read from, and the memo. The timeline first: it is the canonical list.
     ///
-    /// The third case is a memo in NEITHER list: one reached by a jump from the Library, read from
-    /// the server for exactly this push. It is last because it is the only copy that is not part of
-    /// a list anything else is reading — the detail screen still edits through the timeline store,
+    /// The second case is a memo NOT in it: one reached by a jump from the Library, read from the
+    /// server for exactly this push. It is last because it is the only copy that is not part of a
+    /// list anything else is reading — the detail screen still edits through the timeline store,
     /// and this value only stands in until that store has one of its own.
     private func holder(of uid: String) -> (memo: Memo, store: TimelineStore)? {
         if let timeline, let memo = memo(uid, in: timeline) { return (memo, timeline) }
-        if let results = searchPresentation.search?.results, let memo = memo(uid, in: results) {
-            return (memo, results)
-        }
         if let timeline, let jumped, jumped.uid == uid { return (jumped, timeline) }
         return nil
-    }
-
-    /// Raises the sheet on a search that has never been used before.
-    ///
-    /// The client and the base URL are read here rather than inside the sheet because a search
-    /// without a session is not a search: signed out there is no timeline either, and a loupe that
-    /// opened an empty sheet would be the only control on the screen that pretended to work.
-    private func openSearch() {
-        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
-        let search = MemoSearch(
-            handle: handle,
-            baseURL: baseURL,
-            onUnauthorized: { [session] refusal in await session.handle(refusal) }
-        )
-        // The second `TimelineStore` in the app, and its failures are as much the session's as the
-        // first one's (`SessionReporting`).
-        search.reports(to: session)
-        searchPresentation.open(search)
-    }
-
-    /// Every way the sheet closes funnels through here.
-    ///
-    /// A hand-off to the results screen is the one close that is not an abandonment: the results
-    /// screen has just adopted this search's store — rows, cursor, AND any answer still on its
-    /// way. Cancelling that answer here left the reader on a spinner over nothing whenever the
-    /// network was slower than the dismissal animation (MEMNG-177, review round), so a hand-off
-    /// touches nothing; the sheet's own section loads end with their `.task`s on teardown. Every
-    /// other close (Done, an interactive swipe) abandons the search and resets it. The decision
-    /// itself is `SearchPresentation.closeAction`, where it is asserted.
-    private func dismissSearch() {
-        switch SearchPresentation.closeAction(handingOff: handingOff) {
-        case .adopt:
-            handingOff = false
-        case .abandon:
-            searchPresentation.search?.stop()
-        }
     }
 
     /// A tapped tile opens that attachment full screen, on the page it was tapped at — a video
@@ -724,18 +600,6 @@ public struct TimelineView: View {
     /// The reconciling read belongs to the CONNECTION, not to this call, so `consume` owns it and
     /// runs it at every open — see `MediaChannel.uidsToReconcile` for what a per-channel pass
     /// would miss. Everything this function does is hand over what a connection needs.
-    ///
-    /// The search's list is handed over as a CLOSURE, not as a second store, and deliberately not
-    /// as part of the task's key: a search is opened and left far more often than the app is put
-    /// away, and keying on it would close and reopen the connection every time. Read at each event
-    /// instead, so the results screen is patched from the moment it exists and the connection
-    /// never notices.
-    ///
-    /// WHICH lists those are is `SearchPresentation.liveResults`, and the answer is empty unless
-    /// its screen is on the stack: the store is kept after the reader walks back — emptying it
-    /// would cost them the rows and the cursor they walk into next time — so a channel that
-    /// followed the store rather than the screen would go on scanning a list nobody can see for
-    /// the rest of the session.
     private func runMediaChannel() async {
         guard mediaChannelRuns,
             let timeline,
@@ -754,7 +618,6 @@ public struct TimelineView: View {
                 authority: session.sendAuthority()
             ).stream(),
             into: timeline,
-            alongside: { [searchPresentation] in searchPresentation.liveResults },
             using: handle,
             baseURL: baseURL
         )
@@ -911,8 +774,7 @@ public struct TimelineView: View {
     ///
     /// One read, and it is the memos. The activity heatmap used to ride this signal too, which
     /// put a second request in front of every pull of a list nobody had asked a heatmap question
-    /// of (MEMNG-166); it belongs to the search sheet now and is read when that opens
-    /// (MEMNG-126).
+    /// of (MEMNG-166); it moved to the search sheet (MEMNG-126) and went with it (MEMNG-513).
     private func load() async {
         guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
         await timeline?.refresh(using: handle, baseURL: baseURL)
@@ -921,30 +783,6 @@ public struct TimelineView: View {
         // cannot say so: the server buckets a signed link's expiry, so a read a minute later
         // commonly hands back the identical URL and no tile sees anything change.
         MediaRetrySignal.shared.publish()
-    }
-
-    /// A day chosen on the sheet: the list comes back anchored at that day.
-    ///
-    /// Whether the sheet stays up over it is the CHOICE's to say, not this function's. A scrub
-    /// release or a picked date leaves it up (MEMNG-178): a scrubber that dismissed itself the
-    /// moment a finger came off would be usable exactly once per opening, and an accidental lift
-    /// mid-drag would be a jump nobody asked for with no way back but reopening the sheet. The
-    /// commit row settles the day and takes the sheet with it (MEMNG-187), which is what puts the
-    /// landing this produces in front of the reader.
-    ///
-    /// Anchored, not scrolled. The memo written on 4 June is a hundred cursor pages down a list
-    /// that is still being paged, so scrolling to it would mean fetching everything in between;
-    /// the server already takes `created_before` (`MemoQuery.anchor`), so the list is simply asked
-    /// for from that day backwards and the reader arrives at the top of it.
-    private func jump(to anchor: MemoQueryAnchor) {
-        guard let timeline else { return }
-        timeline.setQuery(MemoQuery(anchor: anchor))
-        topWatch.settled()
-        restoreTop = nil
-        Task {
-            await load()
-            jumps += 1
-        }
     }
 
     /// Back to now — the same list this screen opens with.

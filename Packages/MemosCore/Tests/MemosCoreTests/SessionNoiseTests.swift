@@ -71,25 +71,17 @@ struct SessionNoiseTests {
         #expect(session.verification == .verified, "and says nothing about the credential")
     }
 
-    @Test("the library, the heatmap and the tags follow the same rule")
-    func theOtherThreeStoresFollowTheSameRule() async {
+    @Test("the library follows the same rule")
+    func theLibraryFollowsTheSameRule() async {
         let session = await signedIn(
             handler: handler { throw URLError(.notConnectedToInternet) }
         )
         let library = MediaLibraryStore()
-        let heatmap = HeatmapStore()
-        let tags = TagStore()
         library.reports(to: session)
-        heatmap.reports(to: session)
-        tags.reports(to: session)
 
         await library.refresh(using: session.activeHandle!, baseURL: Stub.baseURL)
-        await heatmap.load(using: session.activeHandle!)
-        await tags.load(using: session.activeHandle!)
 
         #expect(library.lastError == nil)
-        #expect(heatmap.lastError == nil)
-        #expect(tags.lastError == nil)
         guard case .unverified = session.verification else {
             Issue.record("expected .unverified, got \(session.verification)")
             return
@@ -160,49 +152,35 @@ struct SessionNoiseTests {
     }
 
     /// B3, per store: an answer issued under one incarnation and applied under the next changes
-    /// nothing at all — not the rows, not the counts, not the chips.
+    /// nothing at all — not the rows, not the pictures.
     @Test("a page answered for a session that has ended is not applied")
     func aPageFromAnEndedSessionIsNotApplied() async throws {
-        // Each store gets the payload ITS decoder accepts. One list for all four would fail the
-        // library, tag and heatmap decoders before their guards were ever reached, and the
-        // assertions below would then pass with the guards removed.
+        // Each store gets the payload ITS decoder accepts. One list for both would fail the
+        // library decoder before its guard was ever reached, and the assertion below would then
+        // pass with the guard removed.
         let session = await signedIn(
             handler: { _, _, operation in
                 switch operation {
                 case whoamiOperation: return Stub.json(Stub.user)
                 case "list_attachments_api_attachments_get":
                     return Stub.json(Self.libraryPage)
-                case "list_tags_api_tags_get":
-                    return Stub.json(#"[{"name":"travel","count":3}]"#)
-                case "stats_heatmap_api_stats_heatmap_get":
-                    return Stub.json(#"{"2026-09-05":2}"#)
                 default: return Stub.json(Stub.memoList(["a", "b"], nextCursor: nil))
                 }
             }
         )
         let timeline = TimelineStore()
         let library = MediaLibraryStore()
-        let heatmap = HeatmapStore()
-        let tags = TagStore()
         timeline.reports(to: session)
         library.reports(to: session)
-        heatmap.reports(to: session)
-        tags.reports(to: session)
         let underA = try #require(session.activeHandle)
 
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_b")
 
         await timeline.refresh(using: underA, baseURL: Stub.baseURL)
         await library.refresh(using: underA, baseURL: Stub.baseURL)
-        await heatmap.load(using: underA)
-        await tags.load(using: underA)
 
         #expect(timeline.memos.isEmpty, "a page for a session that has ended is not a list")
         #expect(library.items.isEmpty, "and neither is a page of attachments")
-        #expect(!heatmap.hasLoaded, "and it is not an ANSWER either")
-        #expect(!tags.hasLoaded)
-        #expect(tags.tags.isEmpty)
-        #expect(heatmap.counts.isEmpty)
     }
 
     /// R-B3, the failure direction — and the worst of it. A 401 issued under A and answered

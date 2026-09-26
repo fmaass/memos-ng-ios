@@ -137,12 +137,12 @@ public enum MediaChannel {
     ///
     /// ## More than one list
     ///
-    /// The device has ONE connection, and the timeline is no longer the only loaded list: a search
-    /// pushes its results as a screen with a store of its own (`MemoSearch.results`), and while
-    /// that screen is up a photo finishing belongs on it exactly as much as on the timeline
-    /// underneath. So the event reaches every list named here, each judged separately — an
-    /// attachment uid means one memo, and the list that does not hold it is left untouched, which
-    /// is what `applyMediaEvent` answers for a list the uid is not in.
+    /// The device has ONE connection, and the timeline need not be the only loaded list: a screen
+    /// that holds a store of its own over the timeline is owed a photo finishing exactly as much
+    /// as the timeline underneath is (the search results screen was one until MEMNG-513; nothing
+    /// names a second list today). So the event reaches every list named here, each judged
+    /// separately — an attachment uid means one memo, and the list that does not hold it is left
+    /// untouched, which is what `applyMediaEvent` answers for a list the uid is not in.
     ///
     /// `alongside` is a CLOSURE, and read at every item rather than taken once. The channel runs
     /// under a `.task(id:)` whose key is whether it should run at all, so a list that arrives or

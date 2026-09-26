@@ -14,9 +14,9 @@ import Testing
 /// "Client encountered an error invoking list_memos … -999 cancelled" over a search that then
 /// worked.
 ///
-/// The lineage fence cannot cover it and is not asked to: `MemoSearch` cancels its in-flight work
-/// BEFORE anything moves the store's lineage, so at the moment the `-999` lands the cancelled
-/// request is still, by that test, the current one.
+/// The lineage fence cannot cover it and is not asked to: a caller that cancels its in-flight work
+/// BEFORE anything moves the store's lineage leaves the cancelled request, at the moment the
+/// `-999` lands, still the current one by that test.
 ///
 /// Everything below drives the REAL generated client over a scripted transport, so the error that
 /// reaches a store is the error the stack really produces — envelope and all — rather than one the
@@ -97,68 +97,9 @@ struct StoreCancellationTests {
 
     // MARK: - the stores
 
-    /// The ticket's own sequence: a search is in flight, the sheet goes away (or a chip supersedes
-    /// it), the store cancels — and the transport's `-999` must not become a sentence on screen.
-    @Test("a cancelled search says nothing about the cancellation")
-    func aCancelledSearchIsSilent() async {
-        let entered = Latch()
-        let release = Latch()
-        let search = MemoSearch(
-            handle: Stub.client { _, _, _ in
-                // What URLSession does to a transfer whose task is cancelled.
-                do {
-                    try await Self.hold(entered: entered, until: release)
-                } catch {
-                    throw URLError(.cancelled)
-                }
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }.handle,
-            baseURL: Stub.baseURL
-        )
-
-        search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
-        await entered.wait()
-        search.cancelInFlight()
-        release.signal()
-        await search.settled()
-
-        #expect(
-            search.results.lastError == nil,
-            "the app reported its own cancellation: \(search.results.lastError ?? "")"
-        )
-        if case .failed(let why) = search.outcome {
-            Issue.record("a cancelled search finished in a failed state: \(why)")
-        }
-    }
-
-    /// The other direction, and the one that must never be lost: a search the SERVER refused
-    /// still says so.
-    ///
-    /// The refusal is a 500 rather than a phone with no network, and that is the rule rather than
-    /// a detail of this test: a failure that never reached the server belongs to the session's one
-    /// banner and to no store's `lastError` (`SessionNoiseTests`). What is left here is the class
-    /// this test has always been about — a real answer, reported where the person asked.
-    @Test("a search that genuinely fails still says so")
-    func aFailedSearchStillReports() async {
-        let search = MemoSearch(
-            handle: Stub.client { _, _, _ in Stub.empty(.init(code: 500)) }.handle,
-            baseURL: Stub.baseURL,
-            coalescing: .milliseconds(1)
-        )
-
-        search.run(MemoQuery(tags: ["curated"]), showing: "#curated")
-        await search.settled()
-
-        #expect(search.results.lastError != nil, "a server that refused said nothing")
-        guard case .failed = search.outcome else {
-            Issue.record("a server that refused left the search in \(search.outcome)")
-            return
-        }
-    }
-
     /// The whole class, one store at a time. Each of these fences or supersedes a fetch, so each
-    /// of them can be handed its own cancellation — and all five now decide what to say about it
-    /// in one place rather than in five that drift.
+    /// of them can be handed its own cancellation — and all of them decide what to say about it
+    /// in one place rather than in several that drift.
     ///
     /// The control is a server that ANSWERED, because that is now the only failure a store reports
     /// at all: one that never reached the server goes to the session instead, once, and
@@ -181,8 +122,6 @@ struct StoreCancellationTests {
             }
 
             let timeline = TimelineStore()
-            let tags = TagStore()
-            let heatmap = HeatmapStore()
             let library = MediaLibraryStore()
             let reads: [(String, @MainActor () async -> Void, @MainActor () -> String?)] = [
                 (
@@ -190,8 +129,6 @@ struct StoreCancellationTests {
                     { await timeline.refresh(using: client.handle, baseURL: Stub.baseURL) },
                     { timeline.lastError }
                 ),
-                ("tags", { await tags.load(using: client.handle) }, { tags.lastError }),
-                ("heatmap", { await heatmap.load(using: client.handle) }, { heatmap.lastError }),
                 (
                     "library",
                     { await library.refresh(using: client.handle, baseURL: Stub.baseURL) },

@@ -464,32 +464,6 @@ struct RefusalEpochTests {
         #expect(supersededStore.lastError == nil, "and it wrote a sentence nobody earned")
     }
 
-    /// `TagStore` and `HeatmapStore` end nothing — they ask the read-only half of the rule — and
-    /// their arm is one more `else if` with NO `return`, so the spinner comes down either way.
-    @Test("TagStore.load and HeatmapStore.load — a sentence for one refusal, none for the other")
-    func reportingStores() async throws {
-        for renewing in [false, true] {
-            let signed = await signedIn(renewing: renewing)
-            let handle = try #require(signed.session.activeHandle)
-            let tags = TagStore()
-            tags.reports(to: signed.session)
-            let heatmap = HeatmapStore()
-            heatmap.reports(to: signed.session)
-
-            await tags.load(using: handle)
-            await heatmap.load(using: handle)
-
-            #expect(!tags.isLoading, "TagStore stranded its spinner")
-            #expect(!heatmap.isLoading, "HeatmapStore stranded its spinner")
-            #expect((tags.lastError != nil) == !renewing, "TagStore's sentence ignored the epoch")
-            #expect(
-                (heatmap.lastError != nil) == !renewing, "HeatmapStore's sentence ignored the epoch"
-            )
-            // Neither of them may end anything, whichever refusal it was.
-            #expect(signed.session.state.user != nil, "a reporting store ended a session")
-        }
-    }
-
     // MARK: - a refusal overtaken by an ESTABLISHMENT
 
     // The fence every store takes before `onUnauthorized` cannot see this ordering: at the instant
