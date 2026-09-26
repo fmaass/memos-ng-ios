@@ -18,6 +18,12 @@ public enum CaptureSource: String, Sendable, Equatable, Codable {
 /// Absence is the ordinary answer. A file with no date tags, a malformed one, a movie header that
 /// is zero or from 1904: all of them read as nothing at all, never as an error. A capture date the
 /// app cannot prove is worth less than no capture date.
+///
+/// A read that never heard the file out is a different fact, and it says so in `failure`. It
+/// still dates nothing — the Auto date and the order treat it exactly as they treat `.empty` —
+/// but it is not EQUAL to `.empty`, so a caller can tell "this photo has no date" from "this
+/// photo's date was not read", which on a busy phone is the difference between a fact about the
+/// file and a fact about the moment it was picked.
 public struct CaptureReading: Sendable, Equatable, Codable {
     /// The instant the file named outright, floored to the second.
     public var instant: Date?
@@ -25,15 +31,37 @@ public struct CaptureReading: Sendable, Equatable, Codable {
     public var civil: String?
     /// Which tag the reading came from, or nil when there was nothing to read.
     public var source: CaptureSource?
+    /// Why the file was not heard out, or nil when it was — including when it said nothing.
+    public var failure: CaptureReadFailure?
+    /// What the refusing decoder reported at the moment it refused — an ImageIO status, an
+    /// AVFoundation error domain and code — and never anything read out of the file.
+    public var detail: String?
 
-    public init(instant: Date? = nil, civil: String? = nil, source: CaptureSource? = nil) {
+    public init(
+        instant: Date? = nil, civil: String? = nil, source: CaptureSource? = nil,
+        failure: CaptureReadFailure? = nil, detail: String? = nil
+    ) {
         self.instant = instant
         self.civil = civil
         self.source = source
+        self.failure = failure
+        self.detail = detail
     }
 
     /// The file said nothing.
     public static let empty = CaptureReading()
+}
+
+/// Why a read answered without having heard the file out.
+public enum CaptureReadFailure: String, Sendable, Equatable, Codable {
+    /// The read had not finished when its deadline passed. A slow decoder on a loaded device is the
+    /// usual cause, which is why this is a failure and never a verdict on the file.
+    case deadline
+    /// The caller went away before the read answered.
+    case cancelled
+    /// The system decoder refused the file: AVFoundation threw while loading what was asked of it,
+    /// or ImageIO opened no source or no properties for it.
+    case undecodable
 }
 
 /// Where one attachment's capture read has got to.
