@@ -30,7 +30,9 @@ filter:
     - add_digest_recipient_api_admin_digest_recipients_post
     - append_chunk_api_uploads__upload_uid__patch
     - attach_rendition_api_attachments__uid__renditions_post
+    - attachment_buckets_api_attachments_buckets_get
     - attachment_meta_api_attachments__uid__get
+    - attachment_tags_api_attachments_tags_get
     - create_memo_api_memos_post
     - create_pat_api_pats_post
     - delete_attachment_api_attachments__uid__delete
