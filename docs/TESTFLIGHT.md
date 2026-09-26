@@ -58,9 +58,12 @@ categories, for different code in each bundle:
 Nothing else in either bundle touches a required-reason API: nothing reads volume capacity,
 nothing asks for system uptime, and nothing enumerates keyboards. The gate reads both shipping
 bundles back and fails if a manifest is missing, does not parse, claims tracking, lists a tracking
-domain or a collected data type, or declares file-timestamp reasons other than exactly `C617.1`.
-It prints the declared category names but does not hold the user-defaults entry to a value, so the
-answers on the website come off the manifests themselves, not off the gate's log.
+domain or a collected data type, or declares file-timestamp reasons other than exactly `C617.1` or
+user-defaults reasons other than exactly `CA92.1` and `1C8F.1`, per bundle, naming the bundle and
+the difference (`scripts/privacy-manifest-verdict.py`, exercised by
+`tests/gate/privacy-manifest-test.sh`). It prints any other declared category but holds none to a
+value, and the answers on the website still come off the manifests themselves, not off the gate's
+log.
 
 ---
 
