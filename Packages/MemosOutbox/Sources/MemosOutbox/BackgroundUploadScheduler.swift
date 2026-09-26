@@ -30,6 +30,12 @@ public struct WholeAnswer: Sendable, Equatable {
 /// Who is told when a whole-file task finishes.
 public protocol WholeAnswerHandling: Sendable {
     func handle(_ answer: WholeAnswer) async
+    /// A task this lane cannot read has ended. It answers nothing, but it was holding every file
+    /// back (`OutboxEngine.carriedFiles`), and its end is what releases them.
+    func unreadableTaskEnded() async
+    /// Adoption has applied every answer it held, at least one of them: whatever was left unplanned
+    /// while they were held may be planned now.
+    func adoptionReplayed() async
 }
 
 /// Which tasks have ended, as their terminal callbacks said.
@@ -83,6 +89,13 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// queue the drain is working through rather than going straight to the handler, where it
     /// could overtake an older answer for the same file still being replayed.
     private var replaying = false
+    /// A task nobody can read ended while adoption was replaying: told once the replay is over,
+    /// never ahead of an answer still buffered behind it.
+    private var unreadableEndedInReplay = false
+    /// By task: the file and attempt of every answer taken and not yet applied. Entered at the
+    /// callback, before any hop, so no instant exists where the task shows finished and nothing
+    /// carries its file; left once the handler has returned.
+    private var unapplied: [Int: (ref: WholeFileRef, attempt: Int)] = [:]
     /// What is still being applied. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
     /// The replace barrier's evidence: every terminal callback lands here, cancelled ones and ones
@@ -105,6 +118,7 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
             self.handler = handler
             replaying = true
         }
+        var replayed = 0
         while true {
             let next: WholeAnswer? = lock.withLock {
                 guard !waiting.isEmpty else {
@@ -113,13 +127,39 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
                 }
                 return waiting.removeFirst()
             }
-            guard let next else { return }
+            guard let next else { break }
             await handler.handle(next)
+            applied(next)
+            replayed += 1
             pending.leave()
         }
+        if replayed > 0 { await handler.adoptionReplayed() }
+        let unreadableEnded: Bool = lock.withLock {
+            defer { unreadableEndedInReplay = false }
+            return unreadableEndedInReplay
+        }
+        guard unreadableEnded else { return }
+        await handler.unreadableTaskEnded()
+        pending.leave()
     }
 
     /// The body only accumulates; nothing is decided until the task's terminal callback.
+    /// See `OutboxUploadScheduling.unappliedAnswers`.
+    var unappliedAnswers: [WholeFileRef: Int] {
+        lock.withLock {
+            unapplied.values.reduce(into: [:]) { $0[$1.ref] = $1.attempt }
+        }
+    }
+
+    private func applied(_ answer: WholeAnswer) {
+        _ = lock.withLock { unapplied.removeValue(forKey: answer.taskIdentifier) }
+    }
+
+    /// True from the first buffered answer until the replay that applies the last one is over.
+    var holdsUnappliedAnswers: Bool {
+        lock.withLock { replaying || (handler == nil && !waiting.isEmpty) }
+    }
+
     public func urlSession(
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
@@ -160,6 +200,28 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         // A task this lane cannot read has nothing to apply its answer to. It still ended, which
         // the line above has already said.
         guard let identity = WholeTaskIdentity(taskDescription: taskDescription) else {
+            // It answers nothing, but it was holding every file back, and nothing else will say
+            // that it has stopped. Unattached, there is nothing to tell: adoption drains anyway.
+            // Mid-replay it waits for the replay: a drain started now would find a file whose
+            // finished answer is still buffered and send it again.
+            let handler: (any WholeAnswerHandling)? = lock.withLock {
+                guard let attached = self.handler else { return nil }
+                guard !replaying else {
+                    if !unreadableEndedInReplay {
+                        unreadableEndedInReplay = true
+                        pending.enter()
+                    }
+                    return nil
+                }
+                return attached
+            }
+            if let handler {
+                pending.enter()
+                Task {
+                    await handler.unreadableTaskEnded()
+                    pending.leave()
+                }
+            }
             return true
         }
         deliver(
@@ -180,6 +242,10 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         // callback, and the system must not be answered until this has been applied.
         pending.enter()
         let handler: (any WholeAnswerHandling)? = lock.withLock {
+            unapplied[answer.taskIdentifier] = (
+                WholeFileRef(jobID: answer.identity.jobID, fileID: answer.identity.fileID),
+                answer.identity.attempt
+            )
             guard let attached = self.handler, !replaying else {
                 waiting.append(answer)
                 return nil
@@ -189,6 +255,7 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         guard let handler else { return }
         Task {
             await handler.handle(answer)
+            applied(answer)
             pending.leave()
         }
     }
@@ -263,6 +330,9 @@ public actor BackgroundUploadScheduler {
     private var replacementsClaimed: Set<Int> = []
     /// Successors whose predecessor was still listed when the bound ran out, by that predecessor.
     private var deferred: [Int: DeferredSuccessor] = [:]
+    /// The tasks nobody can read that the last `cancelUnreadable` found, each until it has ended.
+    /// Any one of them may be carrying any file, so while one is live no task is created at all.
+    private var unreadableLive: Set<Int> = []
     private var observing = false
 
     public init(appGroup: String = OutboxDefaults.appGroup) {
@@ -304,6 +374,14 @@ public actor BackgroundUploadScheduler {
         await session.allTasks()
     }
 
+    public func holdsUnappliedAnswers() async -> Bool {
+        delegate.holdsUnappliedAnswers
+    }
+
+    public func unappliedAnswers() async -> [WholeFileRef: Int] {
+        delegate.unappliedAnswers
+    }
+
     /// Hands one file to the session, whole.
     ///
     /// The authority is asked HERE, on the executor that creates the task, with nothing awaited
@@ -320,6 +398,9 @@ public actor BackgroundUploadScheduler {
         under authority: SendAuthority,
         issuedUnder epoch: Int
     ) -> WholeTask? {
+        // The one place every task is created — a first hand-off, a retry and a replacement's
+        // successor alike — so the barrier is asked here, synchronously, beside the authority.
+        guard unreadableLive.allSatisfy({ delegate.terminations.hasEnded($0) }) else { return nil }
         guard authority.holds() else { return nil }
         let identity = WholeTaskIdentity(
             jobID: ref.jobID, fileID: ref.fileID, attempt: attempt, launch: launch, epoch: epoch
@@ -347,6 +428,8 @@ public actor BackgroundUploadScheduler {
             await session.cancel(taskIdentifier: task.taskIdentifier)
             cancelled.append(task.taskIdentifier)
         }
+        // Replaced, not added to: a task gone from this listing has left the session.
+        unreadableLive = Set(cancelled)
         return cancelled
     }
 

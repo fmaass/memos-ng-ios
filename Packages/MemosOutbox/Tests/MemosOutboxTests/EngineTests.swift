@@ -1466,3 +1466,49 @@ struct SupersededRefusalTests {
         #expect(job.holdReason == nil)
     }
 }
+
+@Suite("Chunk answers after an account switch")
+struct ChunkAccountTests {
+    /// An offset gap asks the server where the upload stands. Asked under another account, that
+    /// server knows nothing of the upload, and its 404 would forget what the row's server holds.
+    @Test("a 409 after an account switch asks no server and keeps its upload")
+    func offsetGapKeepsTheRowsAccount() async throws {
+        let http = ScriptedHTTP { request in
+            switch (request.httpMethod ?? "", request.url?.path() ?? "") {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("HEAD", _):
+                return OutboxHTTPResponse(statusCode: 404)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+        let harness = try await Harness.make(bytes: 1000, http: http)
+        defer { harness.cleanUp() }
+        var started = harness.job
+        started.files[0].uploadUID = "u1"
+        started.files[0].chunkSize = 400
+        started.state = .uploading
+        try await harness.repository.save(started)
+        harness.credentials.set(Fixture.credentials(owner: "brenda", token: "pat-b"))
+
+        await harness.engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(
+                    jobID: started.id, fileID: started.files[0].id, offset: 0
+                ),
+                statusCode: 409
+            )
+        )
+        await harness.engine.untilQuiescent()
+
+        #expect(
+            http.requests(method: "HEAD").isEmpty,
+            "A's upload was asked about under B's credential"
+        )
+        let row = try #require(await harness.reload())
+        #expect(row.files[0].uploadUID == "u1", "A's upload was forgotten")
+        #expect(row.state == .held, "the drain that follows holds A's row")
+        #expect(row.holdReason == .accountMismatch)
+    }
+}

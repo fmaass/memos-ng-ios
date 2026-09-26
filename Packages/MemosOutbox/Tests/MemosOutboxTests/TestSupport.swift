@@ -99,6 +99,7 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
     private let lock = NSLock()
     private var scheduled: [Scheduled] = []
     private var cancelled: [OutboxTaskIdentity] = []
+    private var everyTaskCancelled = 0
     private var pretendInFlight: [OutboxTaskIdentity]
     private var park: (@Sendable () async -> Void)?
     private var parkAfter: (@Sendable () async -> Void)?
@@ -204,6 +205,16 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
 
     var uploads: [Scheduled] { lock.withLock { scheduled } }
     var cancellations: [OutboxTaskIdentity] { lock.withLock { cancelled } }
+    /// How many times every task was cancelled at once, unreadable ones included.
+    var everyTaskCancellations: Int { lock.withLock { everyTaskCancelled } }
+
+    func cancelEveryTask() async {
+        lock.withLock {
+            everyTaskCancelled += 1
+            cancelled.append(contentsOf: pretendInFlight)
+            pretendInFlight.removeAll()
+        }
+    }
 }
 
 /// The network this phone is on, as a test decides it is — and the event that says it changed.
@@ -1011,6 +1022,19 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
     /// The task leaves the listing now, as a task the system has finished with does.
     func forget(_ taskIdentifier: Int) {
         lock.withLock { listed.removeAll { $0.taskIdentifier == taskIdentifier } }
+    }
+
+    /// The task stays listed as finished: what a listing shows between the transfer's end and its
+    /// answer being applied.
+    func markCompleted(_ taskIdentifier: Int) {
+        lock.withLock {
+            listed = listed.map { task in
+                guard task.taskIdentifier == taskIdentifier else { return task }
+                var finished = task
+                finished.state = .completed
+                return finished
+            }
+        }
     }
 
     /// The next listing is TAKEN, then held on `gate` before it is returned: a snapshot its caller

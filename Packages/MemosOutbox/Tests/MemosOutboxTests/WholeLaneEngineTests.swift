@@ -17,6 +17,25 @@ private final class WholeBox<Value: Sendable>: @unchecked Sendable {
     func mutate(_ change: (inout Value) -> Void) { lock.withLock { change(&stored) } }
 }
 
+/// The engine behind a door: every answer waits on `gate` before the engine sees it.
+private actor DelayedEntry: WholeAnswerHandling {
+    private let engine: OutboxEngine
+    private let gate: TestGate
+
+    init(_ engine: OutboxEngine, gate: TestGate) {
+        self.engine = engine
+        self.gate = gate
+    }
+
+    func handle(_ answer: WholeAnswer) async {
+        await gate.pass()
+        await engine.handle(answer)
+    }
+
+    func unreadableTaskEnded() async { await engine.unreadableTaskEnded() }
+    func adoptionReplayed() async { await engine.adoptionReplayed() }
+}
+
 /// The real repository behind a gate that, once armed, stops the next write an ANSWER makes —
 /// whether that write is the per-file rebase or a fenced save — so a race test holds one answer
 /// open however the engine chooses to write it.
@@ -25,10 +44,23 @@ private actor AnswerWriteGate: OutboxPersisting {
     private let gate: TestGate
     private var armed = 0
     private var skipping = 0
+    private var beforeHold: (@Sendable (OutboxRepository) async -> Void)?
 
     init(_ inner: OutboxRepository, gate: TestGate) {
         self.inner = inner
         self.gate = gate
+    }
+
+    /// Runs `body` once, against the real repository, just before the next write that holds a row,
+    /// so that write meets a row something else has moved.
+    func interfereBeforeHold(_ body: @escaping @Sendable (OutboxRepository) async -> Void) {
+        beforeHold = body
+    }
+
+    private func interfereIfHolding(_ job: UploadJob) async {
+        guard job.state == .held, let body = beforeHold else { return }
+        beforeHold = nil
+        await body(inner)
     }
 
     /// Holds `count` writes, after letting the first `skipping` through.
@@ -52,6 +84,7 @@ private actor AnswerWriteGate: OutboxPersisting {
     func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
 
     func save(_ job: UploadJob) async throws {
+        await interfereIfHolding(job)
         await passIfArmed()
         try await inner.save(job)
     }
@@ -62,6 +95,7 @@ private actor AnswerWriteGate: OutboxPersisting {
         matching snapshot: UploadJob,
         else fallback: UploadJob
     ) async throws -> UploadJob? {
+        await interfereIfHolding(job)
         await passIfArmed()
         return try await inner.save(
             job, ifStillCurrent: epoch, matching: snapshot, else: fallback
@@ -162,6 +196,9 @@ private actor PausingUploads: OutboxUploadScheduling {
         return await inner.tasks()
     }
 
+    func holdsUnappliedAnswers() async -> Bool { await inner.holdsUnappliedAnswers() }
+    func unappliedAnswers() async -> [WholeFileRef: Int] { await inner.unappliedAnswers() }
+
     func upload(
         _ request: URLRequest,
         fromFile file: URL,
@@ -222,6 +259,7 @@ private struct WholeRig {
     let launch: UUID
     let gate: SchedulingGate
     let credentials: SwitchableCredentials
+    let network: StubNetworkPath
     let preferences: UploadPreferences
     let preferencesName: String
     let clock: MutableClock
@@ -240,7 +278,12 @@ private struct WholeRig {
             nil,
         completion: [MemoCompletionOutcome] = [.created(uid: "m1")],
         prepare: @Sendable (UploadJob) -> UploadJob? = { _ in nil },
-        wrapUploads: (@Sendable (BackgroundUploadScheduler) -> any OutboxUploadScheduling)? = nil
+        wrapUploads: (@Sendable (BackgroundUploadScheduler) -> any OutboxUploadScheduling)? = nil,
+        network: StubNetworkPath = StubNetworkPath(),
+        chunksInFlight: [OutboxTaskIdentity] = [],
+        launch: UUID = UUID(),
+        attached: Bool = true,
+        headStatus: Int = 500
     ) async throws -> WholeRig {
         let root = try Fixture.temporaryDirectory()
         let provider = SwitchableCredentials(Fixture.credentials())
@@ -281,6 +324,8 @@ private struct WholeRig {
                 return ScriptedHTTP.session(
                     uid: "u\(posts.count)", chunkSize: 5 * 1024 * 1024, received: 0
                 )
+            case ("HEAD", _):
+                return OutboxHTTPResponse(statusCode: headStatus)
             default:
                 return OutboxHTTPResponse(statusCode: 500)
             }
@@ -293,7 +338,6 @@ private struct WholeRig {
         }
         let session = ScriptedUploadTaskSession(listing: listing(job), onCancel: onCancel)
         let delegate = UploadSessionDelegate()
-        let launch = UUID()
         // The replace barrier's bound is spent on this clock, one pause at a time, never slept.
         let barrier = MutableClock(now)
         let uploads = BackgroundUploadScheduler(
@@ -302,7 +346,7 @@ private struct WholeRig {
         )
         let clock = MutableClock(now)
         let preferences = Fixture.preferences(allowsMobileData: false)
-        let chunks = ScriptedScheduler()
+        let chunks = ScriptedScheduler(inFlight: chunksInFlight)
         let completion = ScriptedCompletion(completion)
         let gate = SchedulingGate()
         let engine = OutboxEngine(
@@ -311,17 +355,18 @@ private struct WholeRig {
             http: http,
             scheduler: chunks,
             completion: completion,
-            network: StubNetworkPath(),
+            network: network,
             preferences: preferences.store,
             clock: { clock.now },
             schedulingGate: gate,
             uploads: withUploads ? (wrapUploads?(uploads) ?? uploads) : nil
         )
-        await uploads.attach(engine)
+        if attached { await uploads.attach(engine) }
         return WholeRig(
             root: root, repository: repository, http: http, postStatus: postStatus,
             attempted: attempted, chunks: chunks, session: session, delegate: delegate,
-            launch: launch, gate: gate, credentials: provider, preferences: preferences.store,
+            launch: launch, gate: gate, credentials: provider, network: network,
+            preferences: preferences.store,
             preferencesName: preferences.name, clock: clock, completion: completion,
             engine: engine, job: job
         )
@@ -636,6 +681,9 @@ struct WholeLaneEngineTests {
                 errorDescription: "cancelled"
             )
         )
+        // Ended, it leaves the session's list, and only then are the files sent.
+        rig.session.forget(7)
+        await rig.engine.drain()
         await rig.engine.handle(
             try rig.answer(rig.task(for: rig.picture.id), status: 200, received: 1000)
         )
@@ -740,6 +788,204 @@ struct WholeLaneEngineTests {
         #expect(successors.count == 2)
         #expect(successors.allSatisfy { $0.request.allowsCellularAccess })
         #expect(try await rig.reload().files.map(\.uploadAttempt) == [1, 1])
+    }
+
+    @Test("mobile data turned off on cellular cancels each task though the pass may send nothing")
+    func toggleOffOnCellularCancels() async throws {
+        let rig = try await WholeRig.make(onCancel: .leavesListing(after: 1))
+        defer { rig.cleanUp() }
+        await rig.preferences.set(true)
+        await rig.network.move(to: .cellular)
+        await rig.engine.drain()
+        let old = rig.session.createdTasks.map(\.taskIdentifier)
+        #expect(old.count == 2)
+        let postsBefore = rig.attemptedUploadPosts
+
+        await rig.preferences.set(false)
+        await rig.engine.drain()
+
+        // The tasks the old choice let onto cellular are gone, and nothing replaces them until
+        // the phone is on a network the new choice allows.
+        #expect(Set(rig.session.cancelledIdentifiers) == Set(old))
+        #expect(rig.session.createdTasks.count == 2)
+        #expect(rig.attemptedUploadPosts == postsBefore)
+    }
+
+    @Test("a deferred successor goes out under the choice standing when it is sent")
+    func deferredSuccessorTakesCurrentChoice() async throws {
+        let rig = try await WholeRig.make(onCancel: .staysListed)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        await rig.preferences.set(true)
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2)
+        // Changed again while the replacement waits for the old task to end.
+        await rig.preferences.set(false)
+
+        rig.delegate.complete(
+            taskIdentifier: picture.taskIdentifier, taskDescription: picture.description,
+            statusCode: nil, errorDescription: "cancelled"
+        )
+        #expect(try await rig.eventually { rig.session.createdTasks.count == 3 })
+        await rig.engine.untilQuiescent()
+
+        let successor = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(!successor.request.allowsCellularAccess)
+        #expect(!successor.request.allowsExpensiveNetworkAccess)
+    }
+
+    @Test("a task nobody can read ending is itself what sends the files it held back")
+    func unreadableEndReleasesTheBarrier() async throws {
+        let rig = try await WholeRig.make(
+            listing: { _ in
+                [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
+            },
+            onCancel: .staysListed
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.isEmpty, "the premise: the barrier held")
+
+        // It ends and leaves the list. Nobody drains: no network change, no foreground, no tap.
+        rig.session.forget(7)
+        rig.delegate.complete(
+            taskIdentifier: 7, taskDescription: "not|a|whole|task", statusCode: nil,
+            errorDescription: "cancelled"
+        )
+        #expect(try await rig.eventually { rig.session.createdTasks.count == 2 })
+        await rig.engine.untilQuiescent()
+    }
+
+    @Test("mobile data turned off, then the app backgrounded before the drain: the task stops")
+    func toggleOffCancelsUnderAClosedGate() async throws {
+        let rig = try await WholeRig.make(onCancel: .leavesListing(after: 1))
+        defer { rig.cleanUp() }
+        await rig.preferences.set(true)
+        await rig.engine.drain()
+        let old = rig.session.createdTasks.map(\.taskIdentifier)
+        #expect(old.count == 2)
+
+        await rig.preferences.set(false)
+        rig.gate.close()
+        await rig.engine.drain()
+
+        // Cancelling is not new work; the successor is, and it waits for the foreground.
+        #expect(Set(rig.session.cancelledIdentifiers) == Set(old))
+        #expect(rig.session.createdTasks.count == 2)
+    }
+
+    @Test("the chunk session's sign-out cancel reaches a task nobody can read")
+    func chunkCancelEveryTaskReachesUnreadable() async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        // A task never resumed is not listed; one resumed and suspended is, and cannot finish.
+        // Resumed, it may fail before the suspend lands — the host does not resolve — so the
+        // premise is set up again until a task is caught live.
+        var live: URLSessionUploadTask?
+        for _ in 0..<50 {
+            let candidate = session.uploadTask(
+                with: URLRequest(url: URL(string: "https://memos.example.invalid/api/uploads/x")!),
+                from: Data()
+            )
+            candidate.taskDescription = "not|a|chunk"
+            candidate.resume()
+            candidate.suspend()
+            for _ in 0..<20 where candidate.state == .running {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            if candidate.state == .suspended {
+                live = candidate
+                break
+            }
+        }
+        let task = try #require(live, "the premise: a task is still live")
+        let listed = await session.allTasks.map(\.taskIdentifier)
+        try #require(listed.contains(task.taskIdentifier), "the premise: the session lists it")
+        let scheduler = BackgroundChunkScheduler(session: session)
+        #expect(await scheduler.inFlight().isEmpty, "the premise: the lane cannot read it")
+
+        await scheduler.cancelEveryTask()
+
+        #expect(task.state == .canceling || task.state == .completed)
+    }
+
+    @Test("a listed task nobody can read holds back every file until it has left the list")
+    func unreadableTaskIsABarrier() async throws {
+        let rig = try await WholeRig.make(
+            listing: { _ in
+                [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
+            },
+            onCancel: .staysListed
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        // Cancelled, and still listed: it may be carrying either file, so neither goes out.
+        #expect(rig.session.cancelledIdentifiers == [7])
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(rig.attemptedUploadPosts == 0)
+
+        rig.session.forget(7)
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2)
+    }
+
+    @Test("a sign-out cancels every task of both sessions, and their late answers send nothing")
+    func signOutAbandonsEveryTask() async throws {
+        let chunk = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 0)
+        let launch = UUID()
+        let rig = try await WholeRig.make(
+            listing: { job in
+                let file = job.files[0].id
+                let described = { (id: Int, launch: UUID, epoch: Int) in
+                    WholeTaskListing(
+                        taskIdentifier: id,
+                        taskDescription: WholeTaskIdentity(
+                            jobID: job.id, fileID: file, attempt: 0, launch: launch, epoch: epoch
+                        ).taskDescription
+                    )
+                }
+                return [
+                    // Another launch's: nothing says it was not sent for the account whose grant
+                    // just ended.
+                    described(7, UUID(), 9),
+                    WholeTaskListing(taskIdentifier: 8, taskDescription: "not|a|whole|task"),
+                    // This launch's, under a grant newer than the withdrawal: the next account's
+                    // work, which a late sweep must not interrupt.
+                    described(9, launch, 5),
+                    described(10, launch, 2),
+                ]
+            },
+            chunksInFlight: [chunk],
+            launch: launch
+        )
+        defer { rig.cleanUp() }
+        // The session's credential is withdrawn first; the outbox is told after.
+        rig.credentials.set(nil)
+        await rig.engine.abandonAllTasks(withdrawnAt: 3)
+
+        #expect(rig.chunks.everyTaskCancellations == 1)
+        #expect(rig.chunks.cancellations == [chunk])
+        #expect(Set(rig.session.cancelledIdentifiers) == [7, 8, 10])
+
+        // The cancelled task still answers. Nobody is signed in, so nothing is sent again.
+        await rig.engine.handle(
+            WholeAnswer(
+                taskIdentifier: 7,
+                identity: WholeTaskIdentity(
+                    jobID: rig.job.id, fileID: rig.picture.id, attempt: 0, launch: UUID(),
+                    epoch: 0
+                ),
+                statusCode: nil,
+                body: Data()
+            )
+        )
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(rig.attemptedUploadPosts == 0)
+        #expect(rig.completion.idempotencyKeys.isEmpty)
+        #expect(await rig.repository.job(rig.job.id) != nil)
     }
 
     @Test("a deferred replacement's cancelled task answers without a status, and changes nothing")
@@ -1188,6 +1434,174 @@ struct WholeLaneEngineTests {
         await rig.engine.handle(try rig.answer(retried, status: 200, received: 1000))
         #expect(try await rig.reload().files.allSatisfy { $0.isComplete })
         #expect(rig.completion.idempotencyKeys.count == 1)
+    }
+
+    /// A launch's adoption replays what the session buffered, one answer at a time, and the
+    /// first answer's own write advances its row. A file whose task has finished and whose answer
+    /// is still buffered is carried by nothing the row can see; re-planned then, it goes again.
+    @Test("adoption applies every buffered answer of a row before the row is planned again")
+    func adoptionReplaysBeforeReplanning() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        // Both finished while nothing was attached: the session lists neither any more, and
+        // their answers wait for adoption.
+        rig.session.forget(picture.taskIdentifier)
+        rig.session.forget(video.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        rig.delegate.deliver(try rig.answer(video, status: 200, received: 3000))
+
+        await rig.delegate.attach(rig.engine)
+        await rig.engine.untilQuiescent()
+
+        #expect(rig.attempts(of: rig.video.id) == [0])
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.uploadPosts == 2)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+    }
+
+    /// The other half: what the replay passed over is planned once it has landed, with nothing
+    /// else asked to happen — no network change, no foreground, no tap.
+    @Test("a retry an answer asked for during adoption goes once the replay has landed")
+    func adoptionEndPlansWhatItHeld() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        rig.session.forget(picture.taskIdentifier)
+        rig.session.forget(video.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        // The server lost the video's session: it is sent again whole, once.
+        rig.delegate.deliver(try rig.answer(video, status: 409))
+
+        await rig.delegate.attach(rig.engine)
+        #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0, 1] })
+        await rig.engine.untilQuiescent()
+
+        #expect(rig.attempts(of: rig.video.id) == [0, 1])
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.uploadPosts == 3)
+    }
+
+    /// A live answer is in flight between the session's callback and the engine: its task
+    /// already shows as finished, and nothing in the engine owns its file yet.
+    @Test("a finished task whose live answer has not been applied still carries its file")
+    func liveAnswerCarriesItsFile() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        let entry = TestGate()
+        await rig.delegate.attach(DelayedEntry(rig.engine, gate: entry))
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        rig.session.markCompleted(picture.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        await entry.waitUntilParked()
+
+        // Another pass, while the success waits at the engine's door.
+        await rig.engine.drain()
+
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.uploadPosts == 2)
+        #expect(rig.session.createdTasks.count == 2)
+        await entry.open()
+        let applied = try await rig.eventually {
+            try await rig.reload().file(rig.picture.id)?.isComplete == true
+        }
+        #expect(applied, "the original success lands")
+        await rig.engine.untilQuiescent()
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+    }
+
+    /// The account-mismatch hold is a write, and a sibling's answer can move the row under it. The
+    /// row's account is asked again where every whole-file send begins, so a replacement cannot
+    /// carry one account's file to another.
+    @Test("a replacement never opens a session for another account's row, hold or no hold")
+    func replacementKeepsTheRowsAccount() async throws {
+        let gated = WholeBox<AnswerWriteGate?>(nil)
+        let rig = try await WholeRig.make(
+            onCancel: .leavesListing(after: 1),
+            persistence: { repository in
+                let persistence = AnswerWriteGate(repository, gate: TestGate())
+                gated.value = persistence
+                return persistence
+            }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2, "the premise: A's two files are out")
+        let posted = rig.uploadPosts
+
+        // B signs in with a capture of its own queued, and A's tasks still outstanding.
+        let brenda = Fixture.credentials(owner: "brenda", token: "pat-b")
+        rig.credentials.set(brenda)
+        _ = try await rig.repository.enqueue(
+            content: "brenda's", visibility: "PRIVATE",
+            capturedAt: Date(timeIntervalSince1970: 1_750_000_000),
+            binding: Fixture.binding(owner: "brenda"),
+            sources: [
+                StagedSource(
+                    url: try Fixture.file(in: rig.root, named: "b.heic", bytes: 500),
+                    filename: "b.heic", mime: "image/heic"
+                )
+            ]
+        )
+        let pictureID = rig.picture.id
+        let jobID = rig.job.id
+        // A's picture lands between the hold's read and its write, so the hold loses.
+        await gated.value?.interfereBeforeHold { repository in
+            guard let row = await repository.job(jobID) else { return }
+            try? await repository.save(
+                row.updating(pictureID) { $0.bytesConfirmed = $0.byteSize }
+            )
+        }
+        await rig.preferences.set(true)
+
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+
+        let aPosts = rig.http.requests(method: "POST").dropFirst(posted).filter { request in
+            let body = request.httpBody.map { String(decoding: $0, as: UTF8.self) } ?? ""
+            return body.contains("picture.heic") || body.contains("video.mov")
+        }
+        #expect(aPosts.isEmpty, "A's file metadata went to a session under B's credential")
+        let aTasks = rig.session.createdTasks.filter {
+            WholeTaskIdentity(taskDescription: $0.description)?.jobID == jobID
+        }
+        #expect(aTasks.count == 2, "A's bytes went out under B's credential")
+        let row = try await rig.reload()
+        #expect(row.state == .held, "the drain that follows holds A's row")
+    }
+
+    /// A success that says nothing readable asks the server where the upload stands. Asked under
+    /// another account, that server knows nothing of the upload, and its 404 would forget a file
+    /// the row's own server may already hold.
+    @Test("an unreadable success after an account switch asks no server and keeps its upload")
+    func unreadableSuccessKeepsTheRowsAccount() async throws {
+        let rig = try await WholeRig.make(headStatus: 404)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let uploadUID = try #require(try await rig.reload().file(rig.picture.id)?.uploadUID)
+        rig.credentials.set(Fixture.credentials(owner: "brenda", token: "pat-b"))
+
+        await rig.engine.handle(try rig.answer(picture, status: 200))
+        await rig.engine.untilQuiescent()
+
+        #expect(
+            rig.http.requests(method: "HEAD").isEmpty,
+            "A's upload was asked about under B's credential"
+        )
+        let row = try await rig.reload()
+        #expect(row.file(rig.picture.id)?.uploadUID == uploadUID, "A's upload was forgotten")
+        #expect(
+            (row.file(rig.picture.id)?.uploadAttempt ?? 0) == 0,
+            "A's file was put up to be sent again whole"
+        )
+        #expect(row.state == .held, "the drain that follows holds A's row")
+        #expect(row.holdReason == .accountMismatch)
     }
 
     @Test("an ended task is forgotten once the list no longer names it, or its row is gone")

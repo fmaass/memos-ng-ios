@@ -223,10 +223,15 @@ public actor OutboxRepository {
     /// What keeps the app's housekeeping and the share extension's capture out of each other.
     private let lock: OutboxLock
 
+    /// The withdrawal still owed its cancellation, at the root beside the lock file — out of the
+    /// sweep's reach for the same reason (`prepare`).
+    public nonisolated let withdrawals: OutboxWithdrawals
+
     public init(root: URL, stillCurrent: @escaping @Sendable (Int) -> Bool = { _ in true }) throws {
         self.root = root
         self.stillCurrent = stillCurrent
         self.lock = OutboxLock(url: root.appending(path: ".lock"))
+        self.withdrawals = OutboxWithdrawals(url: root.appending(path: "withdrawal.json"))
         try prepare()
     }
 
@@ -242,6 +247,7 @@ public actor OutboxRepository {
         self.root = root
         self.stillCurrent = stillCurrent
         self.lock = OutboxLock(url: root.appending(path: ".lock"), flock: flock)
+        self.withdrawals = OutboxWithdrawals(url: root.appending(path: "withdrawal.json"))
         try prepare()
     }
 
@@ -900,5 +906,72 @@ public enum JobPresence: Sendable, Equatable {
     public var job: UploadJob? {
         if case .present(let job) = self { return job }
         return nil
+    }
+}
+
+/// A grant withdrawn at `epoch` in the process `launch` names, whose tasks may still be sending.
+public struct OutboxWithdrawal: Codable, Equatable, Sendable {
+    public var launch: UUID
+    public var epoch: Int
+
+    public init(launch: UUID, epoch: Int) {
+        self.launch = launch
+        self.epoch = epoch
+    }
+
+    /// Whether a listed whole task may still present the withdrawn grant.
+    ///
+    /// Kept only when it provably belongs to a later grant: minted in the withdrawing process at
+    /// or past the epoch it moved to, or minted by a process started after this was recorded —
+    /// `currentLaunch`, when that is not the withdrawing one. Anything else, a task nobody can
+    /// read included, is covered.
+    public func covers(_ identity: WholeTaskIdentity?, currentLaunch: UUID) -> Bool {
+        guard let identity else { return true }
+        if identity.launch == launch { return identity.epoch < epoch }
+        return identity.launch != currentLaunch
+    }
+}
+
+/// The one withdrawal whose cancellation has not been issued yet, kept on disk.
+///
+/// A background task keeps its bearer header after the process that made it is gone, and a
+/// cancel is issued from a process the system may terminate first. So the withdrawal is written
+/// down at the moment it happens, synchronously, and cleared only once its cancellation has been
+/// issued: a record found at launch is a cancel still owed, signed in or not. One record, not a
+/// list — a later withdrawal covers every task an earlier one does, so it replaces it.
+public final class OutboxWithdrawals: @unchecked Sendable {
+    private let url: URL
+    // Recording is the main actor's and clearing the engine's caller's: the lock makes clearing's
+    // read-compare-remove one step, so a withdrawal recorded between them is never removed.
+    private let lock = NSLock()
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    /// One atomic write. False when it did not land, which leaves only the live cancellation.
+    @discardableResult
+    public func record(_ withdrawal: OutboxWithdrawal) -> Bool {
+        lock.withLock {
+            guard let data = try? JSONEncoder().encode(withdrawal) else { return false }
+            return (try? data.write(to: url, options: .atomic)) != nil
+        }
+    }
+
+    public func pending() -> OutboxWithdrawal? {
+        lock.withLock { read() }
+    }
+
+    /// Removes the record only while it is still the one whose cancellation was issued.
+    public func clear(_ issued: OutboxWithdrawal) {
+        lock.withLock {
+            guard read() == issued else { return }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func read() -> OutboxWithdrawal? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(OutboxWithdrawal.self, from: data)
     }
 }

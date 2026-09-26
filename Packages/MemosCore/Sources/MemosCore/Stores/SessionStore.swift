@@ -206,6 +206,10 @@ public final class SessionStore {
     /// is about to write on has been through somebody else. Standing still across a withdrawal is
     /// the whole of the difference (`SessionReporting.nothingEstablishedSince`).
     private var establishedGeneration = 0
+    /// The credential this process has put in front of the server since the incarnation began, if
+    /// any. Its tasks are the ones a withdrawal has to reach: an earlier launch's belong to the
+    /// stored account, which a launch that has presented nothing has not withdrawn.
+    private var presentedGrant: PresentedCredential?
     /// The same number, in a box anything can read without hopping to this actor.
     ///
     /// It exists for the writers that commit from wherever their work finished. A hop to ask "is
@@ -328,6 +332,12 @@ public final class SessionStore {
     /// layer above: a capture parked while the phone was off the network needs somebody to try
     /// again, and the only event that says trying is worth it is this one.
     private let onVerified: (@MainActor @Sendable () -> Void)?
+    /// What to do the moment an account's grant is withdrawn — a wipe, or another account signing
+    /// in over it — with the authority epoch that withdrawal moved to. The app wires the outbox's
+    /// cancellation of the background uploads still presenting the old credential to it: whatever
+    /// must happen at the epoch move happens in the call, and the cancellation it starts is handed
+    /// back, so a sign-out can wait for it before it says it is done.
+    private let onAccountWithdrawn: (@MainActor @Sendable (Int) -> Task<Void, Never>?)?
     /// Where a diagnostic line goes, injected the same way the sleeper is.
     ///
     /// It exists so the log BOUNDARY can be watched rather than re-derived. A guardrail that
@@ -368,6 +378,7 @@ public final class SessionStore {
         snapshots: TimelineSnapshotStore? = nil,
         routes: (any RouteStatusMonitoring)? = nil,
         onVerified: (@MainActor @Sendable () -> Void)? = nil,
+        onAccountWithdrawn: (@MainActor @Sendable (Int) -> Task<Void, Never>?)? = nil,
         // Optional rather than defaulted to a closure: an `OSLogMessage` interpolation cannot be
         // built in a default argument value (`os` is imported by `MemosLog`, not by this file),
         // and a named default would have to be public to be referenced from one.
@@ -387,6 +398,7 @@ public final class SessionStore {
         self.identity = identity
         self.lastKnownUser = lastKnownUser
         self.onVerified = onVerified
+        self.onAccountWithdrawn = onAccountWithdrawn
         self.diagnostics =
             diagnostics ?? { line in MemosLog.session.error("\(line, privacy: .public)") }
         self.routes = routes
@@ -1388,6 +1400,7 @@ public final class SessionStore {
         defaultVisibility = nil
         avatar = nil
         endIncarnation()
+        presentedGrant = credential
         // AFTER the bump, so it names the incarnation the client above will be handed out under:
         // this is one of the two places a non-nil client is installed, and therefore one of the
         // two that may move it.
@@ -1570,13 +1583,28 @@ public final class SessionStore {
     /// started inside either of those awaits found a live client belonging to a session that was
     /// already over. Bumped first, it finds no client at all, and every answer still on the wire
     /// is fenced out by a number that has already moved.
-    private func endIncarnation() {
+    ///
+    /// It is also the one place the outbox hears that a grant is withdrawn, at the epoch it moved
+    /// to and before the caller's first await: a background task keeps its bearer header until it
+    /// is cancelled. It hears it when the stored account itself is going (`withdrawingAccount`),
+    /// and whenever a credential this process presented stops being the one presented — a failed
+    /// replacement sign-in, a restore over a grant held only in memory — unless the caller puts
+    /// that same credential back (`keeping`).
+    @discardableResult
+    private func endIncarnation(
+        withdrawingAccount: Bool = false, keeping kept: PresentedCredential? = nil
+    ) -> Task<Void, Never>? {
+        let outgoing = presentedGrant
+        presentedGrant = nil
         sessionGeneration += 1
         sessionIncarnation.bump()
         // The authority epoch moves with it, where a reader outside this actor can see it without
         // hopping. It is a DIFFERENT number from the generation because it also moves on a
         // renewal, which replaces the token without ending the session (`SessionEpoch`).
         epoch.bump()
+        let withdrawnHere = outgoing.map { $0 !== kept } ?? false
+        guard withdrawingAccount || withdrawnHere else { return nil }
+        return onAccountWithdrawn?(epoch.current)
     }
 
     /// Everything scoped to the identity that is ending, removed at ONE boundary.
@@ -1696,7 +1724,9 @@ public final class SessionStore {
         // with it: a process that dies inside the write must not leave A's file beside B's token.
         client = nil
         credential = nil
-        endIncarnation()
+        // The account the licence above belonged to — none, on a first sign-in — is withdrawn at
+        // this epoch, exactly as a wipe withdraws it; its uploads still hold its token.
+        endIncarnation(withdrawingAccount: true)
         let installing = sessionGeneration
         await invalidateIdentityScopedState()
         // That call awaits the snapshot removal, and a sign-out or another installation can
@@ -1762,7 +1792,9 @@ public final class SessionStore {
     /// that is an accident of which paths reach here, not a property of this method, and the next
     /// path that reaches it with a live client would silently make it one.
     private func putBack(_ snapshot: SessionSnapshot) {
-        endIncarnation()
+        // Putting back the credential that was standing withdraws nothing; anything else does.
+        endIncarnation(keeping: snapshot.client == nil ? nil : snapshot.credential)
+        if snapshot.client != nil { presentedGrant = snapshot.credential }
         supersedeValidationInFlight()
         state = snapshot.state
         client = snapshot.client
@@ -1832,7 +1864,10 @@ public final class SessionStore {
         // away.
         client = nil
         credential = nil
-        endIncarnation()
+        // The outbox hears it inside, after the epoch moved, so nothing it starts from here
+        // presents this credential, and before any await: a background upload holds its own copy
+        // of the token and goes on sending it until it is cancelled.
+        let cancelling = endIncarnation(withdrawingAccount: true)
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false
@@ -1845,7 +1880,12 @@ public final class SessionStore {
         // The identity-scoped list, LAST of the synchronous withdrawal: its own tail awaits the
         // snapshot removal, and nothing above may be left until after that.
         await invalidateIdentityScopedState()
-        // A sign-in can complete inside that await, and the credential in the keychain is then
+        // Not signed out until the outbox has at least issued the cancel of every upload still
+        // presenting this credential: awaited here, after the synchronous withdrawal above and
+        // before anything reports this sign-out done. A process ended before that point leaves
+        // the outbox's record of the withdrawal for the next launch to finish.
+        await cancelling?.value
+        // A sign-in can complete inside those awaits, and the credential in the keychain is then
         // ITS credential. Deleting it would sign out a session this method never knew about.
         guard owns(issued) else {
             MemosLog.session.info("a sign-out was overtaken before it deleted the credential")

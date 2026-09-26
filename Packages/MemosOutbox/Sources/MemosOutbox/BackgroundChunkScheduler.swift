@@ -217,6 +217,12 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
         task.resume()
     }
 
+    public func cancelEveryTask() async {
+        for task in await session.allTasks {
+            task.cancel()
+        }
+    }
+
     public func cancel(_ identities: [OutboxTaskIdentity]) async {
         let wanted = Set(identities.map(\.taskDescription))
         for task in await session.allTasks

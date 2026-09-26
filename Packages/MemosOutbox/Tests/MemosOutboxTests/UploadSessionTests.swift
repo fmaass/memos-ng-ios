@@ -19,6 +19,8 @@ private actor RecordingWholeHandler: WholeAnswerHandling {
     private(set) var received: [WholeAnswer] = []
 
     func handle(_ answer: WholeAnswer) async { received.append(answer) }
+    func unreadableTaskEnded() async {}
+    func adoptionReplayed() async {}
 }
 
 private enum Upload {
@@ -387,6 +389,36 @@ struct BackgroundUploadSchedulerTests {
         #expect(session.createdTasks.isEmpty)
     }
 
+    @Test("no task is created while a task nobody can read is still listed")
+    func unreadableListedTaskRefusesUploads() async {
+        let session = ScriptedUploadTaskSession(listing: [
+            WholeTaskListing(taskIdentifier: 7, taskDescription: "garbage")
+        ])
+        let delegate = UploadSessionDelegate()
+        let scheduler = Upload.scheduler(on: session, delegate: delegate)
+        let ref = WholeFileRef(jobID: UUID(), fileID: UUID())
+        let file = URL(fileURLWithPath: "/dev/null")
+        #expect(await scheduler.cancelUnreadable() == [7])
+
+        let refused = await scheduler.upload(
+            Upload.request(), fromFile: file, for: ref, attempt: 0, under: .unfenced,
+            issuedUnder: 1
+        )
+        #expect(refused == nil)
+        #expect(session.createdTasks.isEmpty)
+
+        delegate.complete(
+            taskIdentifier: 7, taskDescription: "garbage", statusCode: nil,
+            errorDescription: "cancelled"
+        )
+        let sent = await scheduler.upload(
+            Upload.request(), fromFile: file, for: ref, attempt: 0, under: .unfenced,
+            issuedUnder: 1
+        )
+        #expect(sent != nil)
+        #expect(session.createdTasks.count == 1)
+    }
+
     @Test("a task whose description cannot be read is cancelled, not dropped")
     func unreadableTasksAreCancelled() async {
         let readable = Upload.identity()
@@ -576,10 +608,27 @@ private actor ParkingWholeHandler: WholeAnswerHandling {
     private let gate: TestGate
     private let parkingOn: Int
     private(set) var received: [WholeAnswer] = []
+    /// For each time it was told a task nobody can read ended, the answers handled by then.
+    private(set) var unreadableTold: [[Int]] = []
 
     init(gate: TestGate, parkingOn taskIdentifier: Int) {
         self.gate = gate
         self.parkingOn = taskIdentifier
+    }
+
+    func unreadableTaskEnded() async {
+        unreadableTold.append(received.map(\.taskIdentifier))
+    }
+
+    func adoptionReplayed() async {}
+
+    /// Whether it has been told a task nobody can read ended, within the bound.
+    func toldUnreadable(within seconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while unreadableTold.isEmpty, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return !unreadableTold.isEmpty
     }
 
     func handle(_ answer: WholeAnswer) async {
@@ -621,6 +670,34 @@ struct UploadInterleavingTests {
         await attaching.value
 
         #expect(await handler.received.map(\.taskIdentifier) == [1, 2, 3])
+    }
+
+    /// A drain started while adoption still holds buffered answers finds a file whose task has
+    /// finished and whose answer nobody has applied, and sends it again. So the end of a task
+    /// nobody can read — which asks the engine for a drain — is told after the replay, not in it.
+    @Test("a task nobody can read ending mid-replay is told once, after every buffered answer")
+    func unreadableEndDuringReplayWaitsForTheReplay() async {
+        let delegate = UploadSessionDelegate()
+        let gate = TestGate()
+        let handler = ParkingWholeHandler(gate: gate, parkingOn: 1)
+        let identity = Upload.identity()
+        delegate.deliver(WholeAnswer(taskIdentifier: 1, identity: identity, statusCode: 200))
+        delegate.deliver(WholeAnswer(taskIdentifier: 2, identity: identity, statusCode: 200))
+
+        let attaching = Task { await delegate.attach(handler) }
+        // Answer 1 is being applied; answer 2 is still buffered behind it.
+        await gate.waitUntilParked()
+        delegate.complete(
+            taskIdentifier: 7, taskDescription: "not|a|whole|task", statusCode: nil,
+            errorDescription: "cancelled"
+        )
+
+        let early = await handler.toldUnreadable(within: 0.3)
+        #expect(!early, "the end was told while answers were still buffered")
+        await gate.open()
+        await attaching.value
+
+        #expect(await handler.unreadableTold == [[1, 2]])
     }
 
     /// A listing is evidence only about the tasks that existed when it was taken.
