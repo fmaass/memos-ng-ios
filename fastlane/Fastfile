@@ -7,6 +7,7 @@ require "shellwords"
 require "spaceship"
 require File.expand_path("lib/asc_readback", __dir__)
 require File.expand_path("lib/dsym_store", __dir__)
+require File.expand_path("lib/release_notes", __dir__)
 require File.expand_path("lib/timed_probe", __dir__)
 
 default_platform(:ios)
@@ -22,6 +23,7 @@ ROOT     = File.expand_path("..", __dir__)
 ARCHIVE  = "#{ROOT}/build/MemosNG.xcarchive"
 IPA      = "#{ROOT}/build/MemosNG.ipa"
 GROUP    = "household"
+NOTES    = "#{ROOT}/fastlane/TESTFLIGHT_NOTES.md"
 
 # Off-host first: merkur's build dirs are reaped for disk and its disk is the single point of
 # failure, so the primary store is the NAS. lexosaurus is the local fallback and says so loudly.
@@ -111,6 +113,16 @@ def archive_version(archive)
   build_number = sh("/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' '#{plist}'", log: false).strip
   UI.user_error!("could not read version/build from #{plist}") if version.empty? || build_number.empty?
   [version, build_number]
+end
+
+# MEMNG-571: the build's "What to Test" text, keyed by the numbers the archive carries. Asked for
+# before the dSYM copy and the upload, so a missing or empty section stops the lane while nothing
+# has left the host yet.
+def testflight_changelog(version, build_number)
+  status, text = ReleaseNotes.load(NOTES, version: version, build: build_number)
+  UI.user_error!("release notes REFUSED for #{version} (#{build_number}): #{text}") unless status == :ok
+  UI.message("release notes for #{version} (#{build_number}): #{text.length} characters from #{NOTES}")
+  text
 end
 
 # Listing is what triggers janus's autofs mount, so probe by listing rather than by File.exist?.
@@ -242,10 +254,22 @@ platform :ios do
     end
   end
 
+  # The same derivation `beta` runs, with nothing built or uploaded: a release checks its notes
+  # section before it spends an archive on finding it missing.
+  desc "Print the TestFlight notes a version and build would upload with"
+  lane :testflight_notes do |options|
+    version = options[:version].to_s
+    build_number = options[:build].to_s
+    UI.user_error!("testflight_notes needs version:<marketing> build:<number>") if version.empty? || build_number.empty?
+
+    puts(testflight_changelog(version, build_number))
+  end
+
   desc "Build and upload to TestFlight (headless)"
   lane :beta do
     archive_ipa
     version, build_number = archive_version(ARCHIVE)
+    changelog = testflight_changelog(version, build_number)
     preserve_dsyms(archive: ARCHIVE, version: version, build: build_number)
     # No skip_waiting here: leaving before ASC finishes processing means the groups:
     # assignment silently never runs, and with an internal group that cannot be
@@ -258,7 +282,7 @@ platform :ios do
     # the group assign, leaving 1.0.3 (9) processed and unattached until a manual API attach.
     upload_to_testflight(
       api_key: api_key, ipa: IPA, groups: [GROUP],
-      distribute_external: false, submit_beta_review: false,
+      distribute_external: false, submit_beta_review: false, changelog: changelog,
     )
     verify_attach(version: version, build: build_number)
   end
