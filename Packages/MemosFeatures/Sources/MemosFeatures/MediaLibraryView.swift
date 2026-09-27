@@ -18,6 +18,12 @@ struct MediaLibraryView: View {
     @State private var library: MediaLibraryStore?
     /// The tags the options menu offers, with picture counts for the kind on screen (MEMNG-513).
     @State private var tags: LibraryTagStore?
+    /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
+    @State private var buckets: LibraryBucketStore?
+    /// Which of Years, Months and All is on screen. All is the grid this screen always drew.
+    @State private var scope: LibraryScope = .all
+    /// The year a Years card narrowed the Months view to, or nil for every year.
+    @State private var year: String?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -44,6 +50,7 @@ struct MediaLibraryView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if let library {
+                    ToolbarItem(placement: .topBarLeading) { scopePicker }
                     ToolbarItem(placement: .topBarTrailing) { optionsMenu(library) }
                 }
             }
@@ -78,11 +85,32 @@ struct MediaLibraryView: View {
                     }
                 )
             }
+            if buckets == nil {
+                buckets = LibraryBucketStore(
+                    onUnauthorized: { [session] refusal in
+                        await session.handle(refusal)
+                    }
+                )
+            }
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this grid (`SessionReporting`).
             library?.reports(to: session)
             tags?.reports(to: session)
+            buckets?.reports(to: session)
             await load()
+        }
+        // The buckets are read when Years or Months comes on screen, again whenever the kind or
+        // the tag changes — their counts are counts under both — and again for whoever is signed
+        // in now. All reads none.
+        .task(
+            id: BucketListKey(
+                scope: scope,
+                filter: library?.filter,
+                tag: library?.tag,
+                subject: session.state.user?.subject
+            )
+        ) {
+            await loadBuckets()
         }
         // The tag list is read when the Library appears, again whenever the kind changes — its
         // counts are counts under that kind — and again for whoever is signed in now.
@@ -94,9 +122,13 @@ struct MediaLibraryView: View {
         .onChange(of: session.state.user?.subject) {
             library?.sessionIdentityChanged()
             tags?.sessionIdentityChanged()
+            buckets?.sessionIdentityChanged()
         }
         // The server is answering again, and this grid was read while it was not.
-        .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
+        .reloadsOnRecovery(session.reachabilityRecoveries) {
+            await load()
+            await loadBuckets()
+        }
     }
 
     /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a
@@ -118,6 +150,103 @@ struct MediaLibraryView: View {
 
     @ViewBuilder
     private func content(_ library: MediaLibraryStore) -> some View {
+        switch scope {
+        case .all:
+            grid(library)
+        case .years, .months:
+            if let buckets {
+                bucketContent(library, buckets)
+            } else {
+                ProgressView()
+            }
+        }
+    }
+
+    /// Years and Months: the buckets under the same filter bar, the view on screen drawn only from
+    /// a list read for it (`bucketsShown`).
+    @ViewBuilder
+    private func bucketContent(
+        _ library: MediaLibraryStore,
+        _ store: LibraryBucketStore
+    ) -> some View {
+        // Nil while the store's list answers some other selection — a read still on its way, or
+        // one that failed and left the previous kind's list standing.
+        let answered = bucketsShown(
+            for: scope,
+            filter: library.filter,
+            tag: library.tag,
+            timeZoneIdentifier: store.timeZoneIdentifier,
+            buckets: store.buckets,
+            answering: store.loadedRequest
+        )
+        let shown = answered ?? []
+        Group {
+            if scope == .years {
+                LibraryYearsGrid(
+                    years: shown,
+                    errorText: store.lastError,
+                    chooseYear: { chooseYear($0) }
+                )
+            } else {
+                LibraryMonthsMosaic(
+                    months: mosaicMonths(year.map { dayBuckets(shown, inYear: $0) } ?? shown),
+                    year: year,
+                    errorText: store.lastError,
+                    clearYear: { year = nil },
+                    showDay: { showDay($0) }
+                )
+            }
+        }
+        .safeAreaInset(edge: .top) { filterBar(library) }
+        .overlay {
+            if shown.isEmpty {
+                if store.isLoading {
+                    ProgressView()
+                } else if answered != nil, store.lastError == nil {
+                    ContentUnavailableView(
+                        "Nothing Here",
+                        systemImage: "photo.on.rectangle",
+                        description: Text("No pictures fall on any date under this filter.")
+                    )
+                }
+            }
+        }
+        .refreshable { await loadBuckets() }
+    }
+
+    /// The segment that picks Years, Months or All. Choosing one by hand widens Months back to
+    /// every year: the narrowing belongs to the Years card that asked for it.
+    private var scopePicker: some View {
+        let selection = Binding(
+            get: { scope },
+            set: { chosen in
+                year = nil
+                scope = chosen
+            }
+        )
+        return Picker("Library view", selection: selection) {
+            ForEach(LibraryScope.allCases) { option in
+                Text(option.label).tag(option)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+    }
+
+    /// A Years card opens that year's days in the Months view, narrowed on the device from the one
+    /// list of day buckets, the way the web does.
+    private func chooseYear(_ key: String) {
+        year = key
+        scope = .months
+    }
+
+    /// A day tile's tap. MEMNG-587 makes this the jump into the All grid at that day; until then
+    /// a day is looked at, not opened.
+    private func showDay(_ day: LibraryBucket) {}
+
+    @ViewBuilder
+    private func grid(_ library: MediaLibraryStore) -> some View {
         LibraryGrid(
             items: library.items,
             // The device's zone, which is the one the month buckets are asked for in, so a header
@@ -267,6 +396,21 @@ struct MediaLibraryView: View {
         if library.dropTagIfAbsent(from: tags) { await load() }
     }
 
+    /// Reads the buckets the view on screen is drawn from, under the kind and tag the grid is
+    /// narrowed to. All is drawn from the list and reads none.
+    private func loadBuckets() async {
+        guard let library, let buckets, let size = scope.bucketSize,
+            let handle = session.activeHandle, let baseURL = session.serverBaseURL
+        else { return }
+        await buckets.load(
+            size: size,
+            filter: library.filter,
+            tag: library.tag,
+            using: handle,
+            baseURL: baseURL
+        )
+    }
+
     private func loadMore() async {
         guard let library, let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
@@ -285,6 +429,15 @@ struct MediaLibraryView: View {
 /// What the tag list is read again on: the kind on screen and the account it is read as.
 private struct TagListKey: Equatable {
     let filter: MediaLibraryFilter?
+    let subject: String?
+}
+
+/// What the bucket list is read again on: the view on screen, the kind and tag its counts are
+/// counted under, and the account it is read as.
+private struct BucketListKey: Equatable {
+    let scope: LibraryScope
+    let filter: MediaLibraryFilter?
+    let tag: String?
     let subject: String?
 }
 

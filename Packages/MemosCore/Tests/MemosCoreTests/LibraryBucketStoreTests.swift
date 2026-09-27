@@ -69,6 +69,29 @@ struct LibraryBucketStoreTests {
         }
     }
 
+    /// A card never assumes a cover exists (MEMNG-586): a cover URL that does not resolve is no
+    /// URL at all, rather than the server's base address standing in for a picture.
+    @Test("a cover URL that does not resolve is nil, and the bucket is still listed")
+    func anUnresolvableCoverIsNil() async {
+        let client = Stub.client { _, _, _ in
+            Stub.json(
+                #"[{"key":"2026","count":3,"coverUid":"u","coverThumbnailUrl":""},"#
+                    + #"{"key":"2025","count":1,"coverUid":"v","coverThumbnailUrl":"/t"}]"#
+            )
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        await store.load(
+            size: .year, filter: .all, tag: nil, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.buckets.map(\.key) == ["2026", "2025"])
+        #expect(store.buckets.first?.coverThumbnailURL == nil)
+        #expect(store.buckets.first?.count == 3)
+        // The control: a cover that does resolve is resolved against the server.
+        #expect(
+            store.buckets.last?.coverThumbnailURL
+                == URL(string: "https://memos.example.invalid/t")
+        )
+    }
+
     @Test("All with no tag sends neither, and the zone defaults to the device's")
     func allAndNoTagAreAbsent() async {
         let paths = LockedValue<[String]>([])
