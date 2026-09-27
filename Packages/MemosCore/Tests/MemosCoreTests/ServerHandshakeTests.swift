@@ -229,4 +229,67 @@ struct ServerHandshakeTests {
         #expect(asked.count == 2)
         #expect(!session.showsOlderServerNotice)
     }
+
+    /// The reset at a sign-in's start has to invalidate the handshake still on the wire, not only
+    /// take the notice down. A new sign-in moves the session generation only once its credential
+    /// is stored, so until then A's handshake still owns the generation: released inside that
+    /// window, its "older" would put the notice back, and B — whose own server answers the app's
+    /// major and so writes nothing — would inherit A's notice about a different server.
+    @Test("an older-major answer held across the start of the next sign-in cannot reach it")
+    func anEarlierHandshakeCannotReachTheNextSignIn() async throws {
+        let healthEntered = Gate()
+        let healthRelease = Gate()
+        let whoamiEntered = Gate()
+        let whoamiRelease = Gate()
+        let healths = Counter()
+        let whoamis = Counter()
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token, healthFromHandler: true) { _, _, operation in
+                    switch operation {
+                    case healthOperation:
+                        healths.increment()
+                        guard healths.count == 1 else {
+                            return Self.health(major: VendoredRelease.apiMajor, version: "2.0.0")
+                        }
+                        // A's handshake: held until B's sign-in is under way.
+                        healthEntered.open()
+                        await healthRelease.wait()
+                        return Self.health(major: VendoredRelease.apiMajor - 1, version: "1.11.0")
+                    default:
+                        whoamis.increment()
+                        if whoamis.count == 2 {
+                            // B's whoami: held, so B has reset the notice but owns nothing yet.
+                            whoamiEntered.open()
+                            await whoamiRelease.wait()
+                        }
+                        return Stub.json(Stub.user)
+                    }
+                }
+            }
+        )
+        await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_a")
+        let checkA = try #require(session.serverMajorCheck, "sign-in A launched no handshake")
+        await healthEntered.wait()
+
+        let signInB = Task {
+            await session.signIn(serverAddress: "memos.example.invalid", token: "token_for_b")
+        }
+        await whoamiEntered.wait()
+        #expect(!session.showsOlderServerNotice)
+
+        healthRelease.open()
+        await checkA.value
+        // A's answer has been judged, and B is still waiting on its whoami.
+        #expect(!session.showsOlderServerNotice)
+
+        whoamiRelease.open()
+        await signInB.value
+        try await handshakeFinished(session)
+
+        #expect(healths.count == 2)
+        #expect(session.state.user?.subject == "fabian")
+        #expect(!session.showsOlderServerNotice)
+    }
 }

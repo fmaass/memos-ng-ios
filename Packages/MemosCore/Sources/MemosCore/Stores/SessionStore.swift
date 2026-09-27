@@ -114,6 +114,14 @@ public final class SessionStore {
     /// The handshake the last sign-in launched, kept so a test can await its end: releasing the
     /// transport does not by itself prove the continuation that writes the notice has run.
     private(set) var serverMajorCheck: Task<Void, Never>?
+    /// Moved by every withdrawal of the older-server notice (`withdrawOlderServerNotice`), and read
+    /// by a handshake beside the session generation before it writes.
+    ///
+    /// The generation alone cannot fence the handshake: a sign-in only moves it once its credential
+    /// is stored, so between an accepted sign-in's start and that point the PREVIOUS session's
+    /// handshake still owns the generation, and its late answer would put back the notice the new
+    /// sign-in has just taken down — for a server the new sign-in may not even be talking to.
+    private var handshakeEpoch = 0
     /// How many times the screens have been asked to read again because the server came back.
     ///
     /// A number rather than a flag, because what a screen does with it is notice that it CHANGED:
@@ -536,7 +544,7 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         lastFailure = nil
-        showsOlderServerNotice = false
+        withdrawOlderServerNotice()
         // Taken before the browser leg, which is the longest await in the app: a sign-out or
         // another installation completing inside it owns the session by the time the code comes
         // back. See the pasted leg for why `persist`'s own generation cannot answer this.
@@ -705,7 +713,7 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         lastFailure = nil
-        showsOlderServerNotice = false
+        withdrawOlderServerNotice()
         let credential = PresentedCredential(trimmed)
         let client = makeClient(configuration, credential)
         // Taken BEFORE the first await. `persist` mints a generation of its own, so checking only
@@ -1891,7 +1899,7 @@ public final class SessionStore {
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false
-        showsOlderServerNotice = false
+        withdrawOlderServerNotice()
         retryInFlight?.cancel()
         retryInFlight = nil
         // Everything above this line is synchronous and belongs to the incarnation this method
@@ -2698,10 +2706,12 @@ public final class SessionStore {
     /// establishment each move it, so the sign-in's own `issued` would never match — and the
     /// answer is written only while that session still owns the store (`owns`, not
     /// `nothingEstablishedSince`, which tolerates a withdrawal and would let a notice about a
-    /// server this device has signed out of reach the screen). Nothing is awaited between the
-    /// decision and the write.
+    /// server this device has signed out of reach the screen) and while no sign-in or wipe has
+    /// withdrawn the notice since it was launched (`handshakeEpoch`). Nothing is awaited between
+    /// the decision and the write.
     private func checkServerMajor(client: any APIProtocol, issuedUnder generation: Int) {
-        serverMajorCheck = Task { [generation] in
+        let epoch = handshakeEpoch
+        serverMajorCheck = Task { [generation, epoch] in
             let answer: Result<Operations.HealthHealthGet.Output, any Error>
             do {
                 answer = .success(try await client.healthHealthGet(.init()))
@@ -2709,12 +2719,25 @@ public final class SessionStore {
                 answer = .failure(error)
             }
             let older = Self.serverIsOlder(answer, than: VendoredRelease.apiMajor)
-            guard owns(generation) else { return }
+            // Both fences, on this actor, with nothing awaited between them and the write: the
+            // session is still the one the handshake was launched for, AND nothing has withdrawn
+            // the notice since — a sign-in accepted after the launch has, even before it owns the
+            // generation.
+            guard owns(generation), epoch == handshakeEpoch else { return }
             if older {
                 MemosLog.session.info("GET /health -> an API major older than this build's")
                 showsOlderServerNotice = true
             }
         }
+    }
+
+    /// Takes the older-server notice down and invalidates every handshake launched before now.
+    ///
+    /// One function so the two can never be separated: a reset that left an earlier handshake able
+    /// to write would be undone by that handshake's late answer.
+    private func withdrawOlderServerNotice() {
+        showsOlderServerNotice = false
+        handshakeEpoch += 1
     }
 
     /// The handshake's ONE decision: whether what `/health` answered says the server speaks an
