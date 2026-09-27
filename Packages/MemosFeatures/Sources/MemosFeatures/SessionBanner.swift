@@ -15,6 +15,9 @@ public enum SessionNotice: Equatable, Sendable {
     case unreachable(String)
     /// The credential is unconfirmed and that is all the app has to say about it yet.
     case unverified(String)
+    /// The server speaks an older API major than this build expects. Information only: no retry,
+    /// because nothing the person can do from here changes the server's version.
+    case olderServer(String)
 }
 
 public enum SessionBanner {
@@ -35,12 +38,23 @@ public enum SessionBanner {
     /// end up stacking two cards saying the same thing.
     public static func notice(
         showingUnreachable: Bool,
-        verification: SessionVerification
+        verification: SessionVerification,
+        showingOlderServer: Bool = false
     ) -> SessionNotice? {
         // One sentence, one source: the session's own. The flag decides WHICH notice carries it —
         // and with it whether the person is offered a retry — never what it says, because a banner
         // with a sentence of its own would be saying something the session does not.
-        guard let text = text(for: verification) else { return nil }
-        return showingUnreachable ? .unreachable(text) : .unverified(text)
+        if let text = text(for: verification) {
+            return showingUnreachable ? .unreachable(text) : .unverified(text)
+        }
+        // Ranked below both: a server that cannot be reached, or a credential not yet confirmed, is
+        // the more urgent thing to say, and the older-server line is still true once they clear.
+        // It is the one card a CONFIRMED session can carry, because it is about the server's
+        // contract rather than about the credential.
+        return showingOlderServer ? .olderServer(olderServerText) : nil
     }
+
+    /// The older-server line. Fixed, because the handshake knows only that the server is older —
+    /// not by how much, nor what that will cost.
+    public static let olderServerText = "This server is older than the app expects."
 }

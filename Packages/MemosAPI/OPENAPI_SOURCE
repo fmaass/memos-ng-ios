@@ -2,6 +2,7 @@
 # Written by scripts/sync-openapi.sh — do not edit by hand.
 repo=memos-ng
 commit=5045bb7844f8fa7ed2217111804d294deb965e35
+tag=v2.0.0
 subject=Release 2.0.0: the shared API major and the Photos-style library (#217)
 committed=2026-09-26T20:21:45+02:00
 files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md Sources/MemosAPI/Fixtures/auto-memo-date.json Sources/MemosAPI/Fixtures/auto-memo-date/heic-offset.heic Sources/MemosAPI/Fixtures/auto-memo-date/jpeg-no-offset.jpg Sources/MemosAPI/Fixtures/auto-memo-date/jpeg-offset.jpg Sources/MemosAPI/Fixtures/auto-memo-date/mov-creationdate.mov Sources/MemosAPI/Fixtures/auto-memo-date/mp4-header-only.mp4 Sources/MemosAPI/Fixtures/auto-memo-date/mp4-zero-header.mp4 Sources/MemosAPI/Fixtures/auto-memo-date/png-exif-after-idat.png Sources/MemosAPI/Fixtures/auto-memo-date/png-exif.png Sources/MemosAPI/Fixtures/auto-memo-date/png-none.png

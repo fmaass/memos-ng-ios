@@ -239,11 +239,15 @@ test, and a test must fail when the behaviour breaks.
 ## The generated client
 
 `Packages/MemosAPI` generates its client from a vendored `openapi.json` at build time. Both it and
-the parity fixture are synced from ONE memos-ng commit:
+the parity fixture are synced from ONE memos-ng commit, and that commit must carry exactly one
+`v<major>.*` release tag of the app's own major (`MARKETING_VERSION` in `project.yml`) — the script
+refuses an untagged commit and a tag of another major:
 
-    MEMOS_NG_REPO=/path/to/memos-ng scripts/sync-openapi.sh <40-char-sha>
+    MEMOS_NG_REPO=/path/to/memos-ng scripts/sync-openapi.sh <40-char-sha-of-a-v<major>.*-tag>
 
-The commit, its subject and the files it wrote are recorded in `Packages/MemosAPI/OPENAPI_SOURCE`.
+The commit, its tag, its subject and the files it wrote are recorded in
+`Packages/MemosAPI/OPENAPI_SOURCE`, and the tag and its major in the generated
+`VendoredRelease.swift`, which the sign-in handshake compares with the server's `/health`.
 Never hand-write a client method: if something will not generate, fix the contract.
 
 The sync vendors `openapi.json` VERBATIM: the committed file is byte-for-byte

@@ -66,7 +66,8 @@ struct MainTabView: View {
     private var notice: some View {
         switch SessionBanner.notice(
             showingUnreachable: session.showsUnreachableNotice,
-            verification: session.verification
+            verification: session.verification,
+            showingOlderServer: session.showsOlderServerNotice
         ) {
         case .unreachable(let text):
             UnreachableBanner(text: text, retry: { await session.retryNow() })
@@ -74,6 +75,14 @@ struct MainTabView: View {
                 .padding(.top, DesignTokens.Space.regular)
         case .unverified(let text):
             NoticeCard(text: text, tone: .warning)
+                .padding(.horizontal, DesignTokens.Space.regular)
+                .padding(.top, DesignTokens.Space.regular)
+        case .olderServer(let text):
+            // A plain line, not a card: it informs, asks nothing of the person and offers no retry.
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, DesignTokens.Space.regular)
                 .padding(.top, DesignTokens.Space.regular)
         case nil:

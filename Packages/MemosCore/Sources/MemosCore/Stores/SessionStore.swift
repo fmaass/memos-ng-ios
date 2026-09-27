@@ -103,6 +103,25 @@ public final class SessionStore {
     /// `UnreachableNotice.shows(…)` taken at a moment the store can name — the instant a
     /// verification was written, or the instant a wake armed for this outage came due.
     public private(set) var showsUnreachableNotice = false
+    /// Whether the server this session signed in to speaks an OLDER API major than the contract
+    /// this build was generated from (`VendoredRelease.apiMajor`), as the sign-in handshake found.
+    ///
+    /// Raised only by `checkServerMajor`, and taken down by a sign-out's wipe and at the start of
+    /// each sign-in — never by a revalidation, which confirms the credential and says nothing about
+    /// the server's contract. It informs and never blocks: the session works as far as the older
+    /// server lets it.
+    public private(set) var showsOlderServerNotice = false
+    /// The handshake the last sign-in launched, kept so a test can await its end: releasing the
+    /// transport does not by itself prove the continuation that writes the notice has run.
+    private(set) var serverMajorCheck: Task<Void, Never>?
+    /// Moved by every withdrawal of the older-server notice (`withdrawOlderServerNotice`), and read
+    /// by a handshake beside the session generation before it writes.
+    ///
+    /// The generation alone cannot fence the handshake: a sign-in only moves it once its credential
+    /// is stored, so between an accepted sign-in's start and that point the PREVIOUS session's
+    /// handshake still owns the generation, and its late answer would put back the notice the new
+    /// sign-in has just taken down — for a server the new sign-in may not even be talking to.
+    private var handshakeEpoch = 0
     /// How many times the screens have been asked to read again because the server came back.
     ///
     /// A number rather than a flag, because what a screen does with it is notice that it CHANGED:
@@ -525,6 +544,7 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         lastFailure = nil
+        withdrawOlderServerNotice()
         // Taken before the browser leg, which is the longest await in the app: a sign-out or
         // another installation completing inside it owns the session by the time the code comes
         // back. See the pasted leg for why `persist`'s own generation cannot answer this.
@@ -560,12 +580,15 @@ public final class SessionStore {
                 return false
             }
             let credential = PresentedCredential(token)
+            let established = makeClient(configuration, credential)
             establish(
-                client: makeClient(configuration, credential),
+                client: established,
                 configuration: configuration,
                 user: exchanged.user,
                 credential: credential
             )
+            // AFTER `establish`, which moved the generation: see `checkServerMajor`.
+            checkServerMajor(client: established, issuedUnder: sessionGeneration)
             enterVerified()
             if persistence.outcome == .storedNowhere {
                 lastError = Self.storageWarning
@@ -690,6 +713,7 @@ public final class SessionStore {
         state = .signingIn
         lastError = nil
         lastFailure = nil
+        withdrawOlderServerNotice()
         let credential = PresentedCredential(trimmed)
         let client = makeClient(configuration, credential)
         // Taken BEFORE the first await. `persist` mints a generation of its own, so checking only
@@ -724,6 +748,8 @@ public final class SessionStore {
                     user: user,
                     credential: credential
                 )
+                // AFTER `establish`, which moved the generation: see `checkServerMajor`.
+                checkServerMajor(client: client, issuedUnder: sessionGeneration)
                 enterVerified()
                 persistenceProven = true
                 record(user, of: configuration, boundTo: trimmed)
@@ -734,6 +760,8 @@ public final class SessionStore {
                     user: user,
                     credential: credential
                 )
+                // AFTER `establish`, which moved the generation: see `checkServerMajor`.
+                checkServerMajor(client: client, issuedUnder: sessionGeneration)
                 enterVerified()
                 lastError = Self.storageWarning
                 persistenceProven = false
@@ -1871,6 +1899,7 @@ public final class SessionStore {
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false
+        withdrawOlderServerNotice()
         retryInFlight?.cancel()
         retryInFlight = nil
         // Everything above this line is synchronous and belongs to the incarnation this method
@@ -2666,6 +2695,79 @@ public final class SessionStore {
     private func probe(issuedUnder generation: Int) async {
         guard generation == sessionGeneration else { return }
         await revalidate(attempt: ladderAttempt, expecting: generation)
+    }
+
+    /// The sign-in handshake: asks the server which API major it speaks, and raises
+    /// `showsOlderServerNotice` when that is older than the contract this build was generated from.
+    ///
+    /// Unstructured, so the sign-in returns without waiting for `/health`: a structured child would
+    /// hold the sign-in open until the server answered, and the handshake informs rather than
+    /// gates. `generation` is read by the caller AFTER `establish` returned — `persist` and
+    /// establishment each move it, so the sign-in's own `issued` would never match — and the
+    /// answer is written only while that session still owns the store (`owns`, not
+    /// `nothingEstablishedSince`, which tolerates a withdrawal and would let a notice about a
+    /// server this device has signed out of reach the screen) and while no sign-in or wipe has
+    /// withdrawn the notice since it was launched (`handshakeEpoch`). Nothing is awaited between
+    /// the decision and the write.
+    private func checkServerMajor(client: any APIProtocol, issuedUnder generation: Int) {
+        let epoch = handshakeEpoch
+        serverMajorCheck = Task { [generation, epoch] in
+            let answer: Result<Operations.HealthHealthGet.Output, any Error>
+            do {
+                answer = .success(try await client.healthHealthGet(.init()))
+            } catch {
+                answer = .failure(error)
+            }
+            let older = Self.serverIsOlder(answer, than: VendoredRelease.apiMajor)
+            // Both fences, on this actor, with nothing awaited between them and the write: the
+            // session is still the one the handshake was launched for, AND nothing has withdrawn
+            // the notice since — a sign-in accepted after the launch has, even before it owns the
+            // generation.
+            guard owns(generation), epoch == handshakeEpoch else { return }
+            if older {
+                MemosLog.session.info("GET /health -> an API major older than this build's")
+                showsOlderServerNotice = true
+            }
+        }
+    }
+
+    /// Takes the older-server notice down and invalidates every handshake launched before now.
+    ///
+    /// One function so the two can never be separated: a reset that left an earlier handshake able
+    /// to write would be undone by that handshake's late answer.
+    private func withdrawOlderServerNotice() {
+        showsOlderServerNotice = false
+        handshakeEpoch += 1
+    }
+
+    /// The handshake's ONE decision: whether what `/health` answered says the server speaks an
+    /// older API major than `appMajor`.
+    ///
+    /// A decoded 200 is compared. A 200 whose body does not decode as `HealthResponse` is a server
+    /// from before `apiMajor` existed — v2.0.0 made the field required — and that is older too. It
+    /// cannot be decided at `try ok.body.json`: the generated client decodes the body INSIDE
+    /// `healthHealthGet` before it hands back `.ok`, so a missing field throws from the call as a
+    /// `ClientError` that still carries the 200. A body the network cut off arrives in that same
+    /// shape, which is why the underlying error has to be a `DecodingError` — the body arrived and
+    /// did not fit — and not merely any error after a 200. A transport failure (no response at
+    /// all) and any other status say nothing, because reachability belongs to the outbox probe and
+    /// the verification ladder. A NEWER major says nothing either, as the owner's standing default.
+    private static func serverIsOlder(
+        _ answer: Result<Operations.HealthHealthGet.Output, any Error>,
+        than appMajor: Int
+    ) -> Bool {
+        switch answer {
+        case .success(.ok(let ok)):
+            guard let health = try? ok.body.json else { return false }
+            return health.apiMajor < appMajor
+        case .success(.undocumented):
+            return false
+        case .failure(let error):
+            guard let clientError = error as? ClientError,
+                clientError.receivedStatusCode == 200
+            else { return false }
+            return clientError.underlyingError is DecodingError
+        }
     }
 
     static func whoami(_ client: any APIProtocol) async throws -> User {

@@ -204,7 +204,9 @@ no AI attribution, leak nothing internal, and make only claims that are literall
 ## Starting a new iOS project from this reference
 
 1. Clone; rename the bundle id and the scheme.
-2. Point `scripts/sync-openapi.sh` at the new backend and re-run it; re-record the source commit.
+2. Point `scripts/sync-openapi.sh` at the new backend and re-run it against a commit carrying a
+   `v<major>.*` release tag of the app's own major (it refuses anything else); it re-records the
+   source commit and its tag.
 3. Delete `MemosFeatures` — the screens are the app-specific part.
 4. Keep the `MemosCore` / `MemosAPI` shape: bearer middleware, `ServerConfiguration`,
    `APIClientFactory`, the Keychain wrapper, the `@Observable` store pattern, the typed `APIError`
