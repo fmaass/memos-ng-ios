@@ -501,6 +501,22 @@ struct WithdrawalRecordTests {
         )
     }
 
+    /// Where the repository keeps its record, taken by a directory: the real store's atomic write
+    /// has nowhere to land, and it says so.
+    private func refuseRecords(_ harness: Harness) throws {
+        try FileManager.default.createDirectory(
+            at: harness.root.appending(path: "outbox/withdrawal.json"),
+            withIntermediateDirectories: false
+        )
+    }
+
+    private func setPermissions(_ harness: Harness, root: Int, record: Int) throws {
+        let outbox = harness.root.appending(path: "outbox")
+        let file = outbox.appending(path: "withdrawal.json")
+        try FileManager.default.setAttributes([.posixPermissions: record], ofItemAtPath: file.path)
+        try FileManager.default.setAttributes([.posixPermissions: root], ofItemAtPath: outbox.path)
+    }
+
     @Test("a cancel the dying process never issued is issued by the next launch, signed out")
     func aSignedOutLaunchFinishesTheWithdrawal() async throws {
         let harness = try await Harness.make(
@@ -567,5 +583,101 @@ struct WithdrawalRecordTests {
         )
         await facade.finishWithdrawal()
         #expect(harness.repository.withdrawals.pending() == nil)
+    }
+
+    @Test("a record the disk refused still has its cancel issued, over both sessions, once")
+    func aRefusedRecordIsStillCancelled() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: Wake.server())
+        defer { harness.cleanUp() }
+        try refuseRecords(harness)
+        let launch = UUID()
+        let session = ScriptedUploadTaskSession(listing: [
+            listing(7, harness.job, launch: launch, epoch: 2),
+            // Minted at the epoch the sign-out moved to: the next account's.
+            listing(8, harness.job, launch: launch, epoch: 3),
+        ])
+        let facade = outbox(harness, session: session, launch: launch)
+        facade.recordWithdrawal(at: 3)
+        try #require(
+            harness.repository.withdrawals.pending() == nil, "the premise: the record never landed"
+        )
+
+        await facade.finishWithdrawal()
+
+        #expect(session.cancelledIdentifiers == [7], "the withdrawn account's upload still sends")
+        #expect(harness.scheduler.everyTaskCancellations == 1, "the chunk lane's too")
+        await facade.finishWithdrawal()
+        #expect(harness.scheduler.everyTaskCancellations == 1, "a cancel issued is not owed")
+    }
+
+    @Test("an older launch's record and a refused one are both cancelled, and the old one goes")
+    func anOlderRecordAndARefusedOneAreBothCancelled() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: Wake.server())
+        defer { harness.cleanUp() }
+        let dead = UUID()
+        let launch = UUID()
+        // A process that withdrew at its own epoch 3 ended before the cancel.
+        try #require(
+            harness.repository.withdrawals.record(OutboxWithdrawal(launch: dead, epoch: 3))
+        )
+        let session = ScriptedUploadTaskSession(listing: [
+            listing(7, harness.job, launch: dead, epoch: 2),
+            // This launch's, minted before its own withdrawal: the older record cannot reach it,
+            // because epochs start again in every launch.
+            listing(8, harness.job, launch: launch, epoch: 4),
+            // Minted at the epoch this launch's sign-out moved to: the next account's.
+            listing(9, harness.job, launch: launch, epoch: 5),
+        ])
+        let facade = outbox(harness, session: session, launch: launch)
+        // A root the write can neither land in nor replace the old record through.
+        try setPermissions(harness, root: 0o555, record: 0o444)
+        defer { try? setPermissions(harness, root: 0o755, record: 0o644) }
+        facade.recordWithdrawal(at: 5)
+        try setPermissions(harness, root: 0o755, record: 0o644)
+        try #require(
+            harness.repository.withdrawals.pending() == OutboxWithdrawal(launch: dead, epoch: 3),
+            "the premise: the new record never replaced the old one"
+        )
+
+        await facade.finishWithdrawal()
+
+        #expect(Set(session.cancelledIdentifiers) == [7, 8])
+        #expect(harness.scheduler.everyTaskCancellations == 2, "the chunk lane's, for each")
+        #expect(
+            harness.repository.withdrawals.pending() == nil,
+            "the older record would cancel this launch's valid uploads at the next launch"
+        )
+    }
+
+    @Test("a refused record made while an earlier cancel is in flight outlives that cancel")
+    func aRefusedRecordOutlivesAnEarlierCancel() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: Wake.server())
+        defer { harness.cleanUp() }
+        try refuseRecords(harness)
+        let launch = UUID()
+        let session = ScriptedUploadTaskSession(listing: [
+            listing(7, harness.job, launch: launch, epoch: 2),
+            listing(8, harness.job, launch: launch, epoch: 4),
+        ])
+        let facade = outbox(harness, session: session, launch: launch)
+        facade.recordWithdrawal(at: 3)
+        let listed = TestGate()
+        session.holdNextListing(on: listed)
+
+        let finishing = Task { @MainActor in await facade.finishWithdrawal() }
+        // Bounded, so a withdrawal that never lists turns this red instead of parking the bundle.
+        let parked = try await Wake.eventually { session.listingCount > 0 }
+        if !parked { await listed.open() }
+        try #require(parked, "the withdrawal never asked the session what it carries")
+        facade.recordWithdrawal(at: 5)
+        await listed.open()
+        await finishing.value
+        #expect(session.cancelledIdentifiers == [7])
+
+        await facade.finishWithdrawal()
+        #expect(
+            Set(session.cancelledIdentifiers) == [7, 8],
+            "the earlier cancel dropped a later withdrawal"
+        )
     }
 }

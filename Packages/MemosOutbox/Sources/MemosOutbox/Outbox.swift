@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 /// Lets the engine tell the facade something changed.
 ///
@@ -90,6 +91,11 @@ public final class Outbox {
     /// engine's own `isDraining` cannot exclude them from each other, and the interleaving loses a
     /// cursor. Held for the life of the process, because adoption happens once.
     private var adoption: Task<Void, Never>?
+    /// A withdrawal the disk refused to record, whose cancellation only this process can issue.
+    private var unrecordedWithdrawal: OutboxWithdrawal?
+
+    /// The app's subsystem, spelled out: this package depends on nothing, `MemosLog` included.
+    private static let log = Logger(subsystem: "live.discomarder.memosng", category: "outbox")
 
     public init(
         repository: OutboxRepository,
@@ -429,16 +435,28 @@ public final class Outbox {
     /// is issued by the next launch's adoption.
     public func recordWithdrawal(at epoch: Int) {
         let launch = uploads?.launch ?? OutboxUploadSession.processLaunch
-        repository.withdrawals.record(OutboxWithdrawal(launch: launch, epoch: epoch))
+        let withdrawal = OutboxWithdrawal(launch: launch, epoch: epoch)
+        guard !repository.withdrawals.record(withdrawal) else { return }
+        // The disk refused it, so no later launch will issue this cancel: this process still can,
+        // and `finishWithdrawal` must have something to issue it from.
+        unrecordedWithdrawal = withdrawal
+        Self.log.error("A withdrawal at epoch \(epoch) could not be recorded; cancelling live only")
     }
 
-    /// Cancels every task of both sessions the recorded withdrawal covers, and only once that
-    /// cancellation has been issued clears the record — unless a later withdrawal replaced it
-    /// meanwhile, which is left for its own.
+    /// Cancels every task of both sessions the recorded withdrawal covers, and the one the disk
+    /// refused, and only once that cancellation has been issued clears each — unless a later
+    /// withdrawal replaced it meanwhile, which is left for its own.
+    ///
+    /// Both, never the newer of the two: epochs start again in every launch, so an older launch's
+    /// record and this one's cannot be ordered, and each covers tasks the other does not. The
+    /// older record is cleared too, or the next launch would issue it over this launch's uploads.
     public func finishWithdrawal() async {
-        guard let withdrawal = repository.withdrawals.pending() else { return }
-        await engine.abandonAllTasks(covering: withdrawal)
-        repository.withdrawals.clear(withdrawal)
+        let recorded = repository.withdrawals.pending()
+        let unrecorded = unrecordedWithdrawal
+        if let recorded { await engine.abandonAllTasks(covering: recorded) }
+        if let unrecorded { await engine.abandonAllTasks(covering: unrecorded) }
+        if let recorded { repository.withdrawals.clear(recorded) }
+        if let unrecorded, unrecordedWithdrawal == unrecorded { unrecordedWithdrawal = nil }
     }
 
     /// Sends a restored draft again, on the SAME manifest.
