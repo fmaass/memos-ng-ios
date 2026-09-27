@@ -19,6 +19,11 @@ struct StubTransport: ClientTransport {
         )
 
     let handler: Handler
+    /// Whether `/health` is answered here, as a server of the app's own major, instead of reaching
+    /// the handler. Every sign-in launches the handshake as an unstructured task, so its request
+    /// races whatever a test is counting; a handler written before the handshake existed counts it
+    /// as one of its own. Only the handshake's own suite hands `/health` to its handler.
+    var answersHealthItself = true
 
     func send(
         _ request: HTTPRequest,
@@ -26,7 +31,10 @@ struct StubTransport: ClientTransport {
         baseURL: URL,
         operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
-        try await handler(request, body, operationID)
+        if answersHealthItself, operationID == Stub.healthOperation {
+            return Stub.json(Stub.healthOfThisMajor)
+        }
+        return try await handler(request, body, operationID)
     }
 }
 
@@ -130,14 +138,22 @@ enum Stub {
     /// fence, which a token closure has no way to carry.
     static func client(
         token: PresentedCredential,
+        healthFromHandler: Bool = false,
         handler: @escaping StubTransport.Handler
     ) -> any APIProtocol {
         APIClientFactory.make(
             configuration: ServerConfiguration(baseURL: baseURL),
             credential: token,
-            transport: StubTransport(handler: handler)
+            transport: StubTransport(handler: handler, answersHealthItself: !healthFromHandler)
         )
     }
+
+    /// The contract's operationId for `/health`, which the sign-in handshake asks.
+    static let healthOperation = "health_health_get"
+
+    /// A server of exactly the major this build was generated from: the handshake says nothing.
+    static let healthOfThisMajor =
+        #"{"status":"ok","version":"test","apiMajor":\#(VendoredRelease.apiMajor)}"#
 
     /// The management screen's client: a real generated client whose ONLY middleware is the grant
     /// one, which is what the app builds. A test that reached for `client(token:)` here would be
