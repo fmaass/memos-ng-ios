@@ -133,7 +133,7 @@ final class ComposedRoutes: RouteStatusMonitoring, @unchecked Sendable {
 /// own client and publishes the media signal. Nothing here is a double except the transport under
 /// the client and the path monitor above the store.
 @MainActor
-@Suite(.serialized)
+@Suite(.serialized, .mediaGlobals)
 struct ComposedRecoveryTests {
     private let transport = ScriptedWireTransport()
     private let routes = ComposedRoutes()

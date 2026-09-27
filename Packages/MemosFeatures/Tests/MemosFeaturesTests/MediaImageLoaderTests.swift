@@ -366,7 +366,7 @@ struct TilePairHost: View {
 }
 
 @MainActor
-@Suite("MediaImageLoader", .serialized)
+@Suite("MediaImageLoader", .serialized, .mediaGlobals)
 struct MediaImageLoaderTests {
     /// One component in each direction, so it decodes to exactly one colour — `#3E7C4F` — in
     /// every pixel. The same vector `ThumbnailTests` uses, and it is what makes the expected
