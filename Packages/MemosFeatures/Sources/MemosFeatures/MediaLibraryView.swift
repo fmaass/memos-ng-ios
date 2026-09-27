@@ -16,6 +16,8 @@ import SwiftUI
 struct MediaLibraryView: View {
     @Environment(SessionStore.self) private var session
     @State private var library: MediaLibraryStore?
+    /// The tags the options menu offers, with picture counts for the kind on screen (MEMNG-513).
+    @State private var tags: LibraryTagStore?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -38,10 +40,11 @@ struct MediaLibraryView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Library")
+            .navigationSubtitle(MediaLibraryPresentation.subtitle(for: library?.tag))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if let library {
-                    ToolbarItem(placement: .topBarTrailing) { sortMenu(library) }
+                    ToolbarItem(placement: .topBarTrailing) { optionsMenu(library) }
                 }
             }
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
@@ -68,15 +71,29 @@ struct MediaLibraryView: View {
                     }
                 )
             }
+            if tags == nil {
+                tags = LibraryTagStore(
+                    onUnauthorized: { [session] refusal in
+                        await session.handle(refusal)
+                    }
+                )
+            }
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this grid (`SessionReporting`).
             library?.reports(to: session)
+            tags?.reports(to: session)
             await load()
+        }
+        // The tag list is read when the Library appears, again whenever the kind changes — its
+        // counts are counts under that kind — and again for whoever is signed in now.
+        .task(id: TagListKey(filter: library?.filter, subject: session.state.user?.subject)) {
+            await loadTags()
         }
         // The rows on this grid belong to the account they were read as. If the session becomes
         // somebody else's — or nobody's — while the tab is up, they go, the way the timeline's do.
         .onChange(of: session.state.user?.subject) {
             library?.sessionIdentityChanged()
+            tags?.sessionIdentityChanged()
         }
         // The server is answering again, and this grid was read while it was not.
         .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
@@ -115,8 +132,13 @@ struct MediaLibraryView: View {
         // grid IS, and one that scrolls away is one you have to scroll back up to reach.
         .safeAreaInset(edge: .top) { filterBar(library) }
         .overlay {
-            if library.items.isEmpty && !library.isLoading && library.lastError == nil {
-                let empty = MediaLibraryPresentation.emptyState(for: library.filter)
+            if let empty = MediaLibraryPresentation.emptyOverlay(
+                itemsEmpty: library.items.isEmpty,
+                isLoading: library.isLoading,
+                lastError: library.lastError,
+                filter: library.filter,
+                tag: library.tag
+            ) {
                 ContentUnavailableView(
                     empty.title,
                     systemImage: empty.symbol,
@@ -155,7 +177,10 @@ struct MediaLibraryView: View {
     /// Photos gives a single sort key on an album. A segmented control beside the filter would put
     /// two different questions on one bar and spend the width of the screen on the one that is
     /// answered once a year (MEMNG-190).
-    private func sortMenu(_ library: MediaLibraryStore) -> some View {
+    /// The Library's options: the sort, and the tag the grid is narrowed to. Each section is an
+    /// inline Picker, which is what draws the checkmark on the chosen row — one selection each, so
+    /// choosing a row un-chooses the other.
+    private func optionsMenu(_ library: MediaLibraryStore) -> some View {
         Menu {
             Picker("Sort", selection: sortBinding(library)) {
                 ForEach(MediaLibraryOrder.allCases) { order in
@@ -163,10 +188,31 @@ struct MediaLibraryView: View {
                 }
             }
             .pickerStyle(.inline)
+            Picker("Tags", selection: tagBinding(library)) {
+                ForEach(tagRows(library)) { row in
+                    Text(row.label).tag(row.selection)
+                }
+            }
+            .pickerStyle(.inline)
         } label: {
-            Image(systemName: "arrow.up.arrow.down")
+            Image(systemName: "line.3.horizontal.decrease.circle")
         }
-        .accessibilityLabel("Sort")
+        .accessibilityLabel("Options")
+    }
+
+    private func tagRows(_ library: MediaLibraryStore) -> [LibraryTagRow] {
+        MediaLibraryPresentation.tagRows(tags?.tags ?? [], selected: library.tag)
+    }
+
+    private func tagBinding(_ library: MediaLibraryStore) -> Binding<String?> {
+        Binding(
+            get: { library.tag },
+            set: { chosen in
+                guard chosen != library.tag else { return }
+                library.setTag(chosen)
+                Task { await load() }
+            }
+        )
     }
 
     /// Choosing a direction persists it and reloads the grid from the other end — the store treats
@@ -207,6 +253,14 @@ struct MediaLibraryView: View {
         await library.refresh(using: handle, baseURL: baseURL)
     }
 
+    /// Reads the tags under the kind on screen, and widens the grid back to every tag when the
+    /// chosen one is not among them (`MediaLibraryStore.dropTagIfAbsent`).
+    private func loadTags() async {
+        guard let library, let tags, let handle = session.activeHandle else { return }
+        await tags.load(for: library.filter, using: handle)
+        if library.dropTagIfAbsent(from: tags) { await load() }
+    }
+
     private func loadMore() async {
         guard let library, let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
@@ -222,6 +276,12 @@ struct MediaLibraryView: View {
 /// is where MEMNG-206 lived: nothing asserted that a store full of files ever became PLACED
 /// tiles, so the width round-trip could break with every unit around it green. Everything the
 /// grid draws arrives as a value; the session, the store and the fetching stay in the screen.
+/// What the tag list is read again on: the kind on screen and the account it is read as.
+private struct TagListKey: Equatable {
+    let filter: MediaLibraryFilter?
+    let subject: String?
+}
+
 struct LibraryGrid: View {
     let items: [MemoAttachment]
     /// What the store last failed with, shown at the top of the scroll.

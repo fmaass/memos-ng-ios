@@ -23,6 +23,23 @@ public struct LibraryEmptyState: Equatable, Sendable {
     public let message: String
 }
 
+/// One row of the Tags section in the Library's options menu.
+public struct LibraryTagRow: Identifiable, Equatable, Sendable {
+    /// What choosing the row selects: nil for "All tags", otherwise the tag's name.
+    public let selection: String?
+    public let title: String
+    /// The picture count, or nil for "All tags" and for a chosen tag the list does not name.
+    public let count: Int?
+    public let isSelected: Bool
+    public var id: String? { selection }
+
+    /// What the row reads as, count included.
+    public var label: String {
+        guard let count else { return title }
+        return "\(title) (\(count))"
+    }
+}
+
 /// One file placed in the library, with the box the row solver gave it.
 public struct LibraryTile: Identifiable, Equatable, Sendable {
     public let attachment: MemoAttachment
@@ -161,6 +178,70 @@ public enum MediaLibraryPresentation {
                 message: "Videos posted to your memos appear here."
             )
         }
+    }
+
+    /// What the grid says when a tag is chosen and nothing under the open tab carries it
+    /// (MEMNG-513). A tag the server does not know answers with an empty list rather than an
+    /// error, so this — not an error card — is what an unknown tag looks like.
+    public static func emptyState(for filter: MediaLibraryFilter, tag: String) -> LibraryEmptyState
+    {
+        let noun =
+            switch filter {
+            case .all: "photos or videos"
+            case .images: "photos"
+            case .videos: "videos"
+            }
+        return LibraryEmptyState(
+            title: "No pictures with this tag",
+            symbol: "tag",
+            message: "No \(noun) are tagged “\(tag)”."
+        )
+    }
+
+    /// Which empty state, if any, sits over the grid: none while it loads, none over an error
+    /// (the error card says what went wrong), the tag's own when a tag is chosen, and the tab's
+    /// otherwise.
+    public static func emptyOverlay(
+        itemsEmpty: Bool,
+        isLoading: Bool,
+        lastError: String?,
+        filter: MediaLibraryFilter,
+        tag: String?
+    ) -> LibraryEmptyState? {
+        guard itemsEmpty, !isLoading, lastError == nil else { return nil }
+        if let tag { return emptyState(for: filter, tag: tag) }
+        return emptyState(for: filter)
+    }
+
+    /// The Tags section of the options menu: "All tags" first — the nil selection — then every tag
+    /// with its picture count, in the server's order, exactly one of them selected.
+    ///
+    /// Selection is by VALUE, nil against a name, never by label: a tag the server calls
+    /// "All tags" is a row of its own and choosing it is not choosing every tag. A chosen tag the
+    /// list does not name (not read yet, or read a moment before the reset) still gets a row, so
+    /// the menu never shows a selection with nothing ticked.
+    public static func tagRows(_ tags: [LibraryTag], selected: String?) -> [LibraryTagRow] {
+        let everyTag = LibraryTagRow(
+            selection: nil, title: "All tags", count: nil, isSelected: selected == nil
+        )
+        var rows = [everyTag]
+        rows += tags.map {
+            LibraryTagRow(
+                selection: $0.name, title: $0.name, count: $0.count,
+                isSelected: $0.name == selected
+            )
+        }
+        if let selected, !tags.contains(where: { $0.name == selected }) {
+            rows.append(
+                LibraryTagRow(selection: selected, title: selected, count: nil, isSelected: true)
+            )
+        }
+        return rows
+    }
+
+    /// The line under the Library's title: the chosen tag, or nothing.
+    public static func subtitle(for tag: String?) -> String {
+        tag.map { "#\($0)" } ?? ""
     }
 
     /// How wide the picture a long press lifts off the grid is drawn.

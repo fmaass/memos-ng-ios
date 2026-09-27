@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import ImageIO
+import os
 
 /// Reading one file's capture date out of the file itself.
 ///
@@ -15,14 +16,18 @@ import ImageIO
 /// ever being read. It touches exactly the tags the rules name — `DateTimeOriginal`,
 /// `OffsetTimeOriginal`, `OffsetTime`, `com.apple.quicktime.creationdate`, the movie header — so no
 /// GPS tag is read, and nothing that is read is ever logged. And it never throws: a file that says
-/// nothing, a corrupt file and a file this process could not open all read as `.empty`, because a
-/// capture date the app cannot prove is worth less than none.
+/// nothing reads as `.empty`, because a capture date the app cannot prove is worth less than none.
+/// What it does not do is answer `.empty` for a file it did not hear out — a deadline, a
+/// cancellation, a decoder that refused the file (an AVFoundation load that threw, an image ImageIO
+/// would open no source or no properties for) — since that would state "no date" about a file
+/// nobody finished reading; those carry their `failure` instead, and date nothing all the same. An
+/// image ImageIO DID open, whose properties simply hold no EXIF, is a file that says nothing.
 ///
 /// `nonisolated` and `async` together are what keep it off the main actor: a nonisolated async
 /// function does not inherit its caller's actor, so a composer on the main actor that awaits this
 /// is not the thread that decodes anything.
 public enum CaptureReader {
-    /// How long one file may take before it is treated as having said nothing. The server's own
+    /// How long one file may take before its read settles as `.deadline`. The server's own
     /// extraction deadline is five seconds; a read that has not finished by then is not coming.
     public static let deadline: Duration = .seconds(5)
 
@@ -47,7 +52,8 @@ public enum CaptureReader {
     /// memo by a thumbnail or an auxiliary picture — and the vendored `heic-offset.heic` fixture is
     /// exactly that shape, so the mistake fails a test rather than shipping.
     static func imageReading(at url: URL) -> CaptureReading {
-        if let tags = imageIOTags(at: url) {
+        var refusal: String?
+        if let tags = imageIOTags(at: url, refusal: &refusal) {
             let reading = CaptureTags.imageReading(
                 dateTimeOriginal: tags.dateTime, offset: tags.offset)
             if reading.source != nil { return reading }
@@ -58,19 +64,36 @@ public enum CaptureReader {
         if let tags = PNGExif.dateTags(inFileAt: url) {
             return CaptureTags.imageReading(dateTimeOriginal: tags.dateTime, offset: tags.offset)
         }
+        if let refusal { return CaptureReading(failure: .undecodable, detail: refusal) }
         return .empty
     }
 
     /// The two date tags as ImageIO reports them for the PRIMARY image, or nil when it reports no
     /// EXIF dictionary at all.
-    static func imageIOTags(at url: URL) -> (dateTime: String?, offset: String?)? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    ///
+    /// Nil is two different answers, and `refusal` is what tells them apart: an image whose
+    /// properties hold no EXIF is left without one, while no source or no properties at all is
+    /// ImageIO declining the file, described with the status it reported at that moment — read
+    /// here, from the source that failed, because asking again later is a different decode.
+    static func imageIOTags(
+        at url: URL, refusal: inout String?
+    ) -> (dateTime: String?, offset: String?)? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            refusal = "ImageIO created no source"
+            return nil
+        }
         let index = CGImageSourceGetPrimaryImageIndex(source)
         guard
             let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil)
-                as? [CFString: Any],
-            let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        else { return nil }
+                as? [CFString: Any]
+        else {
+            let status = CGImageSourceGetStatus(source).rawValue
+            refusal = "ImageIO status \(status), no properties for image \(index)"
+            return nil
+        }
+        guard let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any] else {
+            return nil
+        }
         return (
             exif[kCGImagePropertyExifDateTimeOriginal] as? String,
             exif[kCGImagePropertyExifOffsetTimeOriginal] as? String
@@ -96,12 +119,20 @@ public enum CaptureReader {
         // optionals themselves, and `try?` over an optional-returning call is the one place a
         // double optional reads as a single one.
         let metadata: [AVMetadataItem]
-        do { metadata = try await asset.load(.metadata) } catch { return .empty }
+        do { metadata = try await asset.load(.metadata) } catch { return refused(error) }
         let keyed = AVMetadataItem.metadataItems(
             from: metadata, filteredByIdentifier: .quickTimeMetadataCreationDate)
+        // A key that could not be loaded is not a key that was absent: if nothing after it answers,
+        // the movie was not heard out, and the header's silence must not stand in for the key's.
+        var unheard: CaptureReading?
         for item in keyed {
             var text: String?
-            do { text = try await item.load(.stringValue) } catch { continue }
+            do {
+                text = try await item.load(.stringValue)
+            } catch {
+                unheard = refused(error)
+                continue
+            }
             guard let text, let instant = CaptureTags.quickTimeCreationDate(text) else { continue }
             return CaptureReading(instant: instant, civil: nil, source: .quicktime)
         }
@@ -110,11 +141,20 @@ public enum CaptureReader {
             if let creation = try await asset.load(.creationDate) {
                 header = try await creation.load(.dateValue)
             }
-        } catch { return .empty }
+        } catch { return refused(error) }
         guard let header, let accepted = CaptureTags.acceptedHeaderInstant(header, now: now) else {
-            return .empty
+            return unheard ?? .empty
         }
         return CaptureReading(instant: accepted, civil: nil, source: .quicktime)
+    }
+
+    /// What a throwing AVFoundation load means. It throws for a cancelled load too, and a read the
+    /// caller abandoned is not a file the decoder refused.
+    private static func refused(_ error: any Error) -> CaptureReading {
+        if Task.isCancelled { return CaptureReading(failure: .cancelled) }
+        let refusal = error as NSError
+        return CaptureReading(
+            failure: .undecodable, detail: "\(refusal.domain) \(refusal.code)")
     }
 
     /// The read, or nothing at all if it takes longer than a read of a file's header ever should.
@@ -127,8 +167,9 @@ public enum CaptureReader {
     /// whichever of the read and the timer speaks first is the answer this returns; a work task
     /// still running afterwards is cancelled and abandoned rather than waited for.
     ///
-    /// Settling as "no date" is what keeps the sheet usable, and it is the same answer the SPA
-    /// reaches when its own poll runs out.
+    /// Settling with no date is what keeps the sheet usable, and it is the same answer the SPA
+    /// reaches when its own poll runs out — but it settles as `.deadline` or `.cancelled`, never as
+    /// `.empty`, because a timer cannot know what the file says.
     static func withDeadline(
         _ duration: Duration = CaptureReader.deadline,
         _ work: @escaping @Sendable () async -> CaptureReading
@@ -136,22 +177,27 @@ public enum CaptureReader {
         let answer = FirstAnswer()
         let worker = Task.detached(priority: .utility) {
             let reading = await work()
-            await answer.deliver(reading)
+            answer.deliver(reading)
         }
         let timer = Task {
-            try? await Task.sleep(for: duration)
-            await answer.deliver(.empty)
+            // Only a sleep that ran its whole length is a deadline. A timer cancelled early was
+            // cancelled because an answer came first or because the caller went away, and the
+            // latter has its own delivery below — letting this one speak too would race it and
+            // could call a cancellation a timeout.
+            do { try await Task.sleep(for: duration) } catch { return }
+            answer.deliver(CaptureReading(failure: .deadline))
         }
         // The caller's cancellation has to reach BOTH: the unstructured children, which are not in
         // its task tree, and the continuation this is parked on, which nothing else would ever
-        // resume. Delivering "nothing" is what wakes it, and the one-shot claim inside
-        // `FirstAnswer` is what makes a cancellation racing an answer still exactly one delivery.
+        // resume. It claims the answer FIRST, synchronously, and only then cancels the children:
+        // a work woken by its cancellation answers at once, and cancelling it before the claim
+        // would hand the answer to whichever of the two got there first.
         let reading = await withTaskCancellationHandler {
             await answer.value
         } onCancel: {
+            answer.deliver(CaptureReading(failure: .cancelled))
             worker.cancel()
             timer.cancel()
-            Task { await answer.deliver(.empty) }
         }
         worker.cancel()
         timer.cancel()
@@ -161,32 +207,40 @@ public enum CaptureReader {
 
 /// The one answer a bounded read produces, whoever gets there first.
 ///
-/// A one-shot claim, made inside the actor: the read and the timer both try to deliver, exactly one
-/// delivery wins, and the loser's answer is dropped rather than resuming a continuation twice —
-/// which is a crash, not a race to be lived with.
-private actor FirstAnswer {
-    private var answered: CaptureReading?
-    private var waiting: CheckedContinuation<CaptureReading, Never>?
+/// The claim is taken under a lock, synchronously, at each place that answers — the work, the
+/// timer and the caller's cancellation — so the order in which they happen IS the order in which
+/// they claim, with no actor hop between an answer being known and it being claimed. The loser's
+/// answer is dropped rather than resuming a continuation twice, which is a crash, not a race to be
+/// lived with.
+private final class FirstAnswer: Sendable {
+    private struct State: Sendable {
+        var answered: CaptureReading?
+        var waiting: CheckedContinuation<CaptureReading, Never>?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var value: CaptureReading {
         get async {
-            if let answered { return answered }
-            return await withCheckedContinuation { continuation in
-                if let answered {
-                    continuation.resume(returning: answered)
-                } else {
-                    waiting = continuation
+            await withCheckedContinuation { continuation in
+                let answered = state.withLock { state -> CaptureReading? in
+                    if let answered = state.answered { return answered }
+                    state.waiting = continuation
+                    return nil
                 }
+                if let answered { continuation.resume(returning: answered) }
             }
         }
     }
 
     func deliver(_ reading: CaptureReading) {
-        guard answered == nil else { return }
-        answered = reading
-        if let waiting {
-            self.waiting = nil
-            waiting.resume(returning: reading)
+        let waiting = state.withLock { state -> CheckedContinuation<CaptureReading, Never>? in
+            guard state.answered == nil else { return nil }
+            state.answered = reading
+            let waiting = state.waiting
+            state.waiting = nil
+            return waiting
         }
+        waiting?.resume(returning: reading)
     }
 }
