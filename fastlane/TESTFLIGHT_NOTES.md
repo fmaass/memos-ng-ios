@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.1.0 (26)
+
+- The Library now sorts pictures by the day they were taken, newest first, with a header for each month. Months follow your phone's time zone.
+- A new Years | Months | All control sits at the top of the Library. Years shows one card per year with a cover picture and a count. Tap a year to see its months. Months shows each month with a tile per day: its cover, the day number and how many pictures were taken that day. All is the grid you know. The Images, Videos and tag filters still apply everywhere.
+- Tapping a day does nothing yet. Jumping from a day into the grid comes in a later build, and so does selecting pictures to share or delete.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.0.0 (25)
 
 - This version needs memos-ng 2.0.0. At sign-in, the app now reads the server's version and tells you when the server is older than the app.
