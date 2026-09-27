@@ -138,7 +138,7 @@ struct LibraryTagStoreTests {
         let entered = TagListSignal()
         let release = TagListSignal()
         // Only the first request is held: a second one, if the store sends it, answers at once,
-        // so the join failing is a red expectation rather than a test waiting forever.
+        // so the refusal failing is a red expectation rather than a test waiting forever.
         let client = Stub.client { _, _, _ in
             calls.set(calls.get() + 1)
             if calls.get() == 1 {
