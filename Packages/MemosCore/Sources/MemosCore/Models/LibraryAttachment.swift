@@ -129,3 +129,39 @@ extension MemoAttachment {
         )
     }
 }
+
+/// A row of the library list: the file, and the three things the list knows about it that a memo's
+/// attachment list does not.
+///
+/// It WRAPS `MemoAttachment` rather than widening it. The tile, the image loader, its cache key and
+/// the viewer keep their one model, and `MemoAttachment` is part of the timeline snapshot on disk,
+/// whose shape is versioned — these fields belong to the list, not to the file.
+///
+/// `takenAt` is not `MemoAttachment.captureInstant`: that is camera metadata and nil for an undated
+/// file, while the list answers `takenAt` for every row. It is optional here although the wire
+/// field is required, so that a row can also stand for a date that could not be read rather than
+/// inventing one.
+public struct LibraryRow: Sendable, Equatable, Identifiable {
+    public var attachment: MemoAttachment
+    public var takenAt: Date?
+    public var mine: Bool
+    public var filename: String
+
+    public var id: String { attachment.uid }
+
+    public init(attachment: MemoAttachment, takenAt: Date?, mine: Bool, filename: String) {
+        self.attachment = attachment
+        self.takenAt = takenAt
+        self.mine = mine
+        self.filename = filename
+    }
+
+    public init(_ generated: Components.Schemas.AttachmentListItem, baseURL: URL) {
+        self.init(
+            attachment: MemoAttachment(generated, baseURL: baseURL),
+            takenAt: generated.takenAt,
+            mine: generated.mine,
+            filename: generated.filename
+        )
+    }
+}

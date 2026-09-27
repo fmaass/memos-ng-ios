@@ -27,14 +27,17 @@ struct MediaLibraryStoreTests {
         uid: String,
         mime: String = "image/jpeg",
         status: String = "ready",
-        memoUid: String? = nil
+        memoUid: String? = nil,
+        mine: Bool = true,
+        takenAt: String = "2026-09-26T10:00:00Z",
+        filename: String? = nil
     ) -> String {
         let owner = memoUid.map { "\"\($0)\"" } ?? "null"
         return """
             {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
-            "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+            "width":1000,"height":800,"mine":\(mine),"hasPrint":false,"hasLegacyPrint":false,\
             "renditions":[],"orphan":\(memoUid == nil),"memoUid":\(owner),\
-            "takenAt":"2026-09-26T10:00:00Z","filename":"\(uid).jpg",\
+            "takenAt":"\(takenAt)","filename":"\(filename ?? "\(uid).jpg")",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
             "previewUrl":"/api/attachments/\(uid)/mobile",\
             "webUrl":"/api/attachments/\(uid)/web",\
@@ -72,7 +75,7 @@ struct MediaLibraryStoreTests {
         let store = MediaLibraryStore(pageSize: 2)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(store.items.map(\.uid) == ["a", "b"])
+        #expect(store.items.map(\.attachment.uid) == ["a", "b"])
         let path = paths.get().first ?? ""
         #expect(!path.contains("cursor="), "a first page must not carry a cursor")
         // `?type=` on the All tab would be a filter matching nothing, not the absence of one.
@@ -114,7 +117,7 @@ struct MediaLibraryStoreTests {
         #expect(store.hasMore, "a page with X-Next-Cursor is not the last one")
 
         await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.items.map(\.uid) == ["a", "b", "c"], "the page did not append")
+        #expect(store.items.map(\.attachment.uid) == ["a", "b", "c"], "the page did not append")
         #expect(
             paths.get().contains { $0.contains("cursor=page-2") },
             "the header's token was not sent back"
@@ -136,7 +139,7 @@ struct MediaLibraryStoreTests {
 
         await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
         #expect(requests.count == 1, "a next page was fetched past the end of the list")
-        #expect(store.items.map(\.uid) == ["a"])
+        #expect(store.items.map(\.attachment.uid) == ["a"])
     }
 
     @Test("a file already loaded is never shown twice")
@@ -154,7 +157,10 @@ struct MediaLibraryStoreTests {
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(store.items.map(\.uid) == ["a", "b", "c"], "the overlapping row was merged twice")
+        #expect(
+            store.items.map(\.attachment.uid) == ["a", "b", "c"],
+            "the overlapping row was merged twice"
+        )
     }
 
     @Test("a video is not shown under Images, an image is not shown under Videos")
@@ -167,7 +173,7 @@ struct MediaLibraryStoreTests {
         }
         let images = MediaLibraryStore(pageSize: 10, filter: .images)
         await images.refresh(using: imagesClient.handle, baseURL: Stub.baseURL)
-        #expect(images.items.map(\.uid) == ["photo"], "a video was shown under Images")
+        #expect(images.items.map(\.attachment.uid) == ["photo"], "a video was shown under Images")
 
         let videosClient = Stub.client { _, _, _ in
             Self.page([
@@ -177,7 +183,7 @@ struct MediaLibraryStoreTests {
         }
         let videos = MediaLibraryStore(pageSize: 10, filter: .videos)
         await videos.refresh(using: videosClient.handle, baseURL: Stub.baseURL)
-        #expect(videos.items.map(\.uid) == ["clip"], "an image was shown under Videos")
+        #expect(videos.items.map(\.attachment.uid) == ["clip"], "an image was shown under Videos")
     }
 
     @Test("All shows what is neither a photo nor a video")
@@ -192,8 +198,8 @@ struct MediaLibraryStoreTests {
         let store = MediaLibraryStore(pageSize: 10)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(store.items.map(\.uid) == ["photo", "clip", "paper"])
-        #expect(store.items.map(\.mediaKind) == [.image, .video, .other])
+        #expect(store.items.map(\.attachment.uid) == ["photo", "clip", "paper"])
+        #expect(store.items.map(\.attachment.mediaKind) == [.image, .video, .other])
     }
 
     @Test("changing tab empties the grid and forgets the cursor")
@@ -205,7 +211,7 @@ struct MediaLibraryStoreTests {
         }
         let store = MediaLibraryStore(pageSize: 1)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.items.map(\.uid) == ["a"])
+        #expect(store.items.map(\.attachment.uid) == ["a"])
 
         store.setFilter(.videos)
         #expect(store.items.isEmpty, "the old tab's files stayed on screen under the new one")
@@ -251,7 +257,10 @@ struct MediaLibraryStoreTests {
         release.signal()
         await inFlight.value
 
-        #expect(store.items.map(\.uid) == ["clip"], "the superseded page was merged anyway")
+        #expect(
+            store.items.map(\.attachment.uid) == ["clip"],
+            "the superseded page was merged anyway"
+        )
         // The cursor is the damage that outlives the merge: had `page-3` been adopted, the store
         // would believe the Videos tab continues where the All tab left off.
         #expect(!store.hasMore, "the dropped page's cursor was adopted")
@@ -309,7 +318,7 @@ struct MediaLibraryStoreTests {
         let store = MediaLibraryStore(pageSize: 2)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        let row = try #require(store.items.first)
+        let row = try #require(store.items.first?.attachment)
         let poster = "https://memos.example.invalid/api/attachments/a/poster"
         #expect(row.posterURL?.absoluteString == poster)
         #expect(row.isVideo)
@@ -331,7 +340,76 @@ struct MediaLibraryStoreTests {
         let store = MediaLibraryStore(pageSize: 10)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(store.items.map(\.memoUID) == ["memo-7", nil])
+        #expect(store.items.map(\.attachment.memoUID) == ["memo-7", nil])
+    }
+
+    // MARK: - MEMNG-585: what a list row knows that the file model does not
+
+    /// The filenames are deliberately NOT derived from the uid, and one is not a plain word: a row
+    /// that rebuilt its name from anything but the wire field, or escaped it on the way, would
+    /// otherwise still pass.
+    @Test("a row keeps when it was taken, whose it is and what it is called, around the same file")
+    func rowsKeepTheListFields() async throws {
+        let wire = [
+            Self.item(uid: "a", filename: "IMG_0001.HEIC"),
+            Self.item(
+                uid: "b",
+                mime: "video/mp4",
+                memoUid: "memo-7",
+                mine: false,
+                takenAt: "2025-01-02T03:04:05Z",
+                filename: "Strand & Meer 2025.mov"
+            ),
+        ]
+        let client = Stub.client { _, _, _ in Self.page(wire) }
+        let store = MediaLibraryStore(pageSize: 10)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.items.map(\.id) == ["a", "b"])
+        #expect(store.items.map(\.mine) == [true, false], "someone else's file read as mine")
+        #expect(store.items.map(\.filename) == ["IMG_0001.HEIC", "Strand & Meer 2025.mov"])
+        #expect(
+            store.items.map(\.takenAt) == [
+                Date(timeIntervalSince1970: 1_790_416_800),
+                Date(timeIntervalSince1970: 1_735_787_045),
+            ]
+        )
+        // The file itself is exactly what the list conversion made of the row before it had
+        // anything around it: the tile, the loader and the viewer read this and nothing else.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let expected = try wire.map {
+            MemoAttachment(
+                try decoder.decode(Components.Schemas.AttachmentListItem.self, from: Data($0.utf8)),
+                baseURL: Stub.baseURL
+            )
+        }
+        #expect(store.items.map(\.attachment) == expected)
+    }
+
+    /// Rows are merged by the FILE, not by the whole row: a file that comes back on the next page
+    /// with other fields is still the one file, and the row already on screen stays as it is.
+    @Test("an overlapping row is kept once, as the page that brought it first had it")
+    func overlappingRowKeepsItsFirstFields() async {
+        let client = Stub.client { request, _, _ in
+            if (request.path ?? "").contains("cursor=") {
+                return Self.page([
+                    Self.item(uid: "b", mine: false, filename: "renamed.jpg"),
+                    Self.item(uid: "c"),
+                ])
+            }
+            return Self.page(
+                [Self.item(uid: "a"), Self.item(uid: "b", filename: "first.jpg")],
+                nextCursor: "page-2"
+            )
+        }
+        let store = MediaLibraryStore(pageSize: 2)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.items.map(\.id) == ["a", "b", "c"], "the overlapping row was merged twice")
+        #expect(store.items.map(\.filename) == ["a.jpg", "first.jpg", "c.jpg"])
+        #expect(store.items.map(\.mine) == [true, true, true])
     }
 
     // MARK: - MEMNG-190: which end of the library the grid starts at
@@ -368,7 +446,7 @@ struct MediaLibraryStoreTests {
         }
         let store = MediaLibraryStore(pageSize: 1)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.items.map(\.uid) == ["a"])
+        #expect(store.items.map(\.attachment.uid) == ["a"])
 
         store.setOrder(.oldestFirst)
         #expect(store.items.isEmpty, "the old direction's rows stayed on screen under the new one")
@@ -396,7 +474,10 @@ struct MediaLibraryStoreTests {
         }
         let store = MediaLibraryStore(pageSize: 1, order: .oldestFirst)
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.items.map(\.uid) == ["a"], "the premise: the outgoing account had rows")
+        #expect(
+            store.items.map(\.attachment.uid) == ["a"],
+            "the premise: the outgoing account had rows"
+        )
 
         let asked = paths.get().count
         store.sessionIdentityChanged()
@@ -444,7 +525,10 @@ struct MediaLibraryStoreTests {
         release.signal()
         await inFlight.value
 
-        #expect(store.items.map(\.uid) == ["oldest"], "the superseded page was merged anyway")
+        #expect(
+            store.items.map(\.attachment.uid) == ["oldest"],
+            "the superseded page was merged anyway"
+        )
         #expect(!store.hasMore, "the dropped page's cursor was adopted")
         #expect(
             paths.get().contains { $0.contains("cursor=") },
@@ -482,7 +566,7 @@ struct MediaLibraryStoreTests {
 
         release.signal()
         await inFlight.value
-        #expect(store.items.map(\.uid) == ["a", "b", "c", "d"])
+        #expect(store.items.map(\.attachment.uid) == ["a", "b", "c", "d"])
     }
 
     /// The banner owns what an unreachable server says, and a sentence the server's own answer left

@@ -152,7 +152,7 @@ struct SessionNoiseTests {
         await library.refresh(using: live, baseURL: Stub.baseURL)
 
         #expect(library.lastError == nil, "the page was refused before any fence was asked")
-        #expect(library.items.map(\.uid) == ["x"])
+        #expect(library.items.map(\.attachment.uid) == ["x"])
     }
 
     /// B3, per store: an answer issued under one incarnation and applied under the next changes

@@ -53,7 +53,7 @@ public struct LibraryTile: Identifiable, Equatable, Sendable {
 }
 
 /// One justified row of the library.
-public struct LibraryRow: Identifiable, Equatable, Sendable {
+public struct LibraryGalleryRow: Identifiable, Equatable, Sendable {
     public let tiles: [LibraryTile]
     public let height: Double
 
@@ -93,7 +93,7 @@ public enum MediaLibraryPresentation {
         width: Double,
         targetHeight: Double = targetRowHeight,
         gap: Double
-    ) -> [LibraryRow] {
+    ) -> [LibraryGalleryRow] {
         JustifiedGallery.rows(
             ratios: JustifiedGallery.ratios(of: items),
             containerWidth: width,
@@ -101,7 +101,7 @@ public enum MediaLibraryPresentation {
             gap: gap
         )
         .map { row in
-            LibraryRow(
+            LibraryGalleryRow(
                 tiles: row.tiles.compactMap { tile in
                     guard items.indices.contains(tile.index) else { return nil }
                     return LibraryTile(

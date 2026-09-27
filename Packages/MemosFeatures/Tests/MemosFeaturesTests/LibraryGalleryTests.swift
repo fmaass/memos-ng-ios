@@ -27,7 +27,7 @@ struct LibraryGalleryTests {
     private let gap = 4.0
     private let width = 390.0
 
-    private func rows(_ items: [MemoAttachment], width: Double? = nil) -> [LibraryRow] {
+    private func rows(_ items: [MemoAttachment], width: Double? = nil) -> [LibraryGalleryRow] {
         MediaLibraryPresentation.rows(for: items, width: width ?? self.width, gap: gap)
     }
 

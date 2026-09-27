@@ -122,7 +122,10 @@ struct MediaLibraryTagFilterTests {
         release.signal()
         await inFlight.value
 
-        #expect(store.items.map(\.uid) == ["fresh"], "the first tag's page landed on the second's")
+        #expect(
+            store.items.map(\.attachment.uid) == ["fresh"],
+            "the first tag's page landed on the second's"
+        )
         #expect(!store.hasMore, "the dropped page's cursor was adopted")
     }
 }

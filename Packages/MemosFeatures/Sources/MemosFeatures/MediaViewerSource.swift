@@ -26,7 +26,8 @@ enum MediaViewerSource {
     var pages: [MediaPage] {
         switch self {
         case .fixed(let pages): pages
-        case .library(let pager, _): MediaViewerPresentation.pages(for: pager.items)
+        case .library(let pager, _):
+            MediaViewerPresentation.pages(for: pager.items.map(\.attachment))
         }
     }
 
@@ -67,7 +68,9 @@ enum MediaViewerSource {
     /// is already out, and whether there is a cursor to send.
     func wantsMore(atPageWithID id: String) -> Bool {
         guard case .library(let pager, _) = self else { return false }
-        guard let raw = pager.items.firstIndex(where: { $0.uid == id }) else { return false }
+        guard let raw = pager.items.firstIndex(where: { $0.attachment.uid == id }) else {
+            return false
+        }
         return pager.shouldLoadMore(
             after: raw,
             lookahead: Self.lookahead(pageSize: pager.pageSize)

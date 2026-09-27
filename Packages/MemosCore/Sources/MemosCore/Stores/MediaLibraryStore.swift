@@ -10,7 +10,7 @@ import MemosAPI
 /// in front of it without a server.
 @MainActor
 public protocol MediaLibraryPaging: AnyObject {
-    var items: [MemoAttachment] { get }
+    var items: [LibraryRow] { get }
     /// How many rows one request brings back — the size the near-end lookahead is measured in.
     var pageSize: Int { get }
     /// Whether the server has said there is more to read. The viewer needs it for the case a page
@@ -37,7 +37,7 @@ public protocol MediaLibraryPaging: AnyObject {
 @MainActor
 @Observable
 public final class MediaLibraryStore: MediaLibraryPaging {
-    public private(set) var items: [MemoAttachment] = []
+    public private(set) var items: [LibraryRow] = []
     public private(set) var isLoading = false
     public private(set) var isLoadingMore = false
     public private(set) var lastError: String?
@@ -323,15 +323,15 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Pure and static so both merges — the refresh's and the next page's — are provably the same
     /// merge, and so the two rules it enforces can be asserted without a network.
     static func merged(
-        _ loaded: [MemoAttachment],
-        with page: [MemoAttachment],
+        _ loaded: [LibraryRow],
+        with page: [LibraryRow],
         filter: MediaLibraryFilter
-    ) -> [MemoAttachment] {
-        var known = Set(loaded.map(\.uid))
+    ) -> [LibraryRow] {
+        var known = Set(loaded.map(\.id))
         var out = loaded
         for item in page {
-            guard filter.includes(item.mediaKind) else { continue }
-            guard known.insert(item.uid).inserted else { continue }
+            guard filter.includes(item.attachment.mediaKind) else { continue }
+            guard known.insert(item.id).inserted else { continue }
             out.append(item)
         }
         return out
@@ -402,7 +402,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         cursor: String?,
         limit: Int,
         baseURL: URL
-    ) async throws -> (items: [MemoAttachment], nextCursor: String?) {
+    ) async throws -> (items: [LibraryRow], nextCursor: String?) {
         let response = try await client.listAttachmentsApiAttachmentsGet(
             .init(
                 query: .init(
@@ -425,7 +425,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             MemosLog.api.info(
                 "GET /api/attachments -> 200, \(rows.count, privacy: .public) items, more: \(more)"
             )
-            return (rows.map { MemoAttachment($0, baseURL: baseURL) }, next)
+            return (rows.map { LibraryRow($0, baseURL: baseURL) }, next)
         case .unprocessableContent:
             throw APIError.server(status: 422)
         case .undocumented(let statusCode, _):

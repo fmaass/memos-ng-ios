@@ -15,7 +15,7 @@ import Testing
 /// it is the only way to say "the reader is now twelve rows from the end" without a server.
 @MainActor
 private final class PagerProbe: MediaLibraryPaging {
-    var items: [MemoAttachment]
+    var items: [LibraryRow]
     let pageSize: Int
     var hasMore = true
     /// What the real store's own guard answers. Set false to stand for "a page is already in
@@ -26,8 +26,14 @@ private final class PagerProbe: MediaLibraryPaging {
     private(set) var loads = 0
 
     init(items: [MemoAttachment], pageSize: Int = 60) {
-        self.items = items
+        self.items = Self.rows(items)
         self.pageSize = pageSize
+    }
+
+    /// The files as the store would hold them. Nothing the viewer does reads past `.attachment`, so
+    /// the list-only fields are left at whatever they happen to be.
+    static func rows(_ files: [MemoAttachment]) -> [LibraryRow] {
+        files.map { .init(attachment: $0, takenAt: nil, mine: true, filename: $0.uid) }
     }
 
     func shouldLoadMore(after index: Int, lookahead: Int) -> Bool {
@@ -47,7 +53,7 @@ private final class PagerProbe: MediaLibraryPaging {
             hasMore = false
             return
         }
-        items += script.removeFirst()
+        items += Self.rows(script.removeFirst())
         hasMore = !script.isEmpty
     }
 }
@@ -388,10 +394,10 @@ struct MediaViewerPagingTests {
     func nearTheEndUsesRawRows() async {
         let pager = PagerProbe(items: mixedRows(60))
         let source = MediaViewerSource.library(pager) { await pager.more() }
-        let deep = pager.items[31].uid
-        let shallow = pager.items[29].uid
+        let deep = pager.items[31].attachment.uid
+        let shallow = pager.items[29].attachment.uid
         // The projection really does renumber: this is what makes the two indices different.
-        let projected = MediaViewerPresentation.pages(for: pager.items).map(\.id)
+        let projected = MediaViewerPresentation.pages(for: pager.items.map(\.attachment)).map(\.id)
         #expect(projected.count < pager.items.count, "control: documents were dropped")
         #expect(projected.firstIndex(of: deep) != 31, "control: page offset differs from row index")
 
@@ -420,7 +426,7 @@ struct MediaViewerPagingTests {
         let source = MediaViewerSource.library(pager) { await pager.more() }
         let before = source.pages.count
 
-        await source.loadMore(nearingPageWithID: pager.items[59].uid)
+        await source.loadMore(nearingPageWithID: pager.items[59].attachment.uid)
 
         #expect(pager.loads == 3, "the blank pages were not read through")
         #expect(source.pages.count == before + 1, "the picture past the documents never arrived")
@@ -438,7 +444,7 @@ struct MediaViewerPagingTests {
         pager.script = (0..<50).map { documents(2, from: 1000 + $0 * 2) }
         let source = MediaViewerSource.library(pager) { await pager.more() }
 
-        await source.loadMore(nearingPageWithID: pager.items[59].uid)
+        await source.loadMore(nearingPageWithID: pager.items[59].attachment.uid)
 
         #expect(pager.loads == MediaViewerSource.maximumBlankContinuations)
         #expect(pager.hasMore, "control: the list had not ended, so the bound is what stopped it")
@@ -465,7 +471,7 @@ struct MediaViewerPagingTests {
         let pager = PagerProbe(items: photos(60))
         let source = MediaViewerSource.library(pager) { await pager.more() }
 
-        let last = pager.items[59].uid
+        let last = pager.items[59].attachment.uid
         pager.answers = false
         await source.loadMore(nearingPageWithID: last)
         #expect(pager.loads == 0, "a second page was asked for while one was in flight")
@@ -482,7 +488,7 @@ struct MediaViewerPagingTests {
         let source = MediaViewerSource.library(pager) { await pager.more() }
         #expect(source.pages.map(\.id) == ["p0", "p1", "p2"])
 
-        pager.items = photos(5)
+        pager.items = PagerProbe.rows(photos(5))
         #expect(source.pages.map(\.id) == ["p0", "p1", "p2", "p3", "p4"])
     }
 }

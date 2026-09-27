@@ -119,7 +119,7 @@ struct MediaLibraryView: View {
     @ViewBuilder
     private func content(_ library: MediaLibraryStore) -> some View {
         LibraryGrid(
-            items: library.items,
+            items: library.items.map(\.attachment),
             errorText: library.lastError,
             loadingMore: library.isLoadingMore,
             zoom: mediaZoom,
@@ -234,7 +234,10 @@ struct MediaLibraryView: View {
     /// were loaded at the moment of the tap.
     private func open(_ attachment: MemoAttachment) {
         guard let library else { return }
-        viewing = MediaViewerPresentation.viewer(for: library.items, startingAt: attachment.uid)
+        viewing = MediaViewerPresentation.viewer(
+            for: library.items.map(\.attachment),
+            startingAt: attachment.uid
+        )
     }
 
     /// Fetches the named file of a tile's attachment and offers it to the share sheet. The
@@ -369,7 +372,7 @@ struct LibraryGrid: View {
         .padding(.horizontal, DesignTokens.Space.tight)
     }
 
-    private var rows: [LibraryRow] {
+    private var rows: [LibraryGalleryRow] {
         MediaLibraryPresentation.rows(
             for: items,
             width: Double(contentWidth),
