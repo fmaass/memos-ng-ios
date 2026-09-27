@@ -82,8 +82,9 @@ new_tree() { # $1 name, $2 marketing version; prints the tree
   local work="$tmp/$1"
   mkdir -p "$work" || return 1
   g init -q "$work" || return 1
+  # The commented-out line is a literal a loose read would count: a second, different value.
   cat > "$work/project.yml" <<YML
-# MARKETING_VERSION: "9.9.9" is a comment, never a declaration
+# MARKETING_VERSION: "9.9.9"
 targets:
   MemosNG:
     settings:
