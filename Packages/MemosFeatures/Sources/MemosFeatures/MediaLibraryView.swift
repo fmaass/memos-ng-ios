@@ -119,7 +119,10 @@ struct MediaLibraryView: View {
     @ViewBuilder
     private func content(_ library: MediaLibraryStore) -> some View {
         LibraryGrid(
-            items: library.items.map(\.attachment),
+            items: library.items,
+            // The device's zone, which is the one the month buckets are asked for in, so a header
+            // and the bucket it stands for name the same month.
+            timeZone: TimeZone.current.identifier,
             errorText: library.lastError,
             loadingMore: library.isLoadingMore,
             zoom: mediaZoom,
@@ -286,7 +289,9 @@ private struct TagListKey: Equatable {
 }
 
 struct LibraryGrid: View {
-    let items: [MemoAttachment]
+    let items: [LibraryRow]
+    /// The zone the month sections are calendar months of.
+    let timeZone: String
     /// What the store last failed with, shown at the top of the scroll.
     let errorText: String?
     /// Whether the next page is on its way — the spinner at the bottom of the scroll.
@@ -351,32 +356,39 @@ struct LibraryGrid: View {
     /// places all of its subviews, and this grid is a thousand files long. Solved into rows first,
     /// the stack stays lazy — only the rows near the screen are ever built — while each row is a
     /// plain `HStack` of boxes the solver has already sized.
+    ///
+    /// Each month is headed by its name and solved on its own (MEMNG-585), the headers and rows
+    /// siblings in the one lazy stack so it stays lazy across months as well as within them.
     private var gallery: some View {
         LazyVStack(spacing: DesignTokens.Space.tight) {
-            ForEach(rows) { row in
-                HStack(spacing: DesignTokens.Space.tight) {
-                    ForEach(row.tiles) { placed in
-                        tile(placed.attachment)
-                            .frame(width: placed.width, height: placed.height)
-                            .onAppear {
-                                guard wantsMore(placed.index) else { return }
-                                Task { await loadMore() }
-                            }
+            ForEach(sections) { section in
+                LibraryMonthHeader(label: section.label)
+                ForEach(section.rows) { row in
+                    HStack(spacing: DesignTokens.Space.tight) {
+                        ForEach(row.tiles) { placed in
+                            tile(placed.attachment)
+                                .frame(width: placed.width, height: placed.height)
+                                .onAppear {
+                                    guard wantsMore(placed.index) else { return }
+                                    Task { await loadMore() }
+                                }
+                        }
+                        // Rows are packed from the left; the trailing one is short by design and
+                        // must not be stretched across the width (`JustifiedGallery`).
+                        Spacer(minLength: 0)
                     }
-                    // Rows are packed from the left; the trailing one is short by design and must
-                    // not be stretched across the width (`JustifiedGallery`).
-                    Spacer(minLength: 0)
                 }
             }
         }
         .padding(.horizontal, DesignTokens.Space.tight)
     }
 
-    private var rows: [LibraryGalleryRow] {
-        MediaLibraryPresentation.rows(
+    private var sections: [LibraryGallerySection] {
+        MediaLibraryPresentation.sections(
             for: items,
             width: Double(contentWidth),
-            gap: Double(DesignTokens.Space.tight)
+            gap: Double(DesignTokens.Space.tight),
+            timeZone: timeZone
         )
     }
 
@@ -462,6 +474,18 @@ struct LibraryGrid: View {
 /// tile has no tap and no viewer, so a context menu would be the only way to reach the memo it
 /// hangs on or the file itself, and a gesture nobody is told about is not a way to reach anything.
 /// So the actions are on the tile, visibly, and the long press keeps offering them as well.
+/// The month a section of the library is, above its rows.
+struct LibraryMonthHeader: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(.headline)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, DesignTokens.Space.snug)
+    }
+}
+
 struct DocumentTile: View {
     let mime: String
     /// What can be done with this file. Empty in a preview or a fitting test, and then no button

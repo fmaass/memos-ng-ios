@@ -56,6 +56,11 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     public private(set) var tag: String?
 
     private var nextCursor: String?
+    /// The page size `nextCursor` was minted under. A continuation is resent "with the same
+    /// `type`, `tag`, `limit` and `order`" (the contract's `X-Next-Cursor`), so the size is fixed
+    /// when a list's first page is read and travels with its cursor, rather than being whatever
+    /// the store would start a list with at the moment the next page is asked for.
+    private var nextCursorLimit: Int
     /// Which loaded list this is. Bumped wherever the list stops being the one an unanswered page
     /// was a continuation of: a refresh replacing it, and a filter change discarding it.
     private var generation = 0
@@ -76,6 +81,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             { _ in .superseded }
     ) {
         self.pageSize = pageSize
+        self.nextCursorLimit = pageSize
         self.filter = filter
         self.order = order
         self.onUnauthorized = onUnauthorized
@@ -195,6 +201,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         // next one's number, with the first one's client still in hand.
         let client = handle.client
         let lineage = self.lineage
+        let limit = pageSize
         guard loadingLineage != lineage else { return }
         loadingLineage = lineage
         isLoading = true
@@ -213,7 +220,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 order: lineage.order,
                 tag: lineage.tag,
                 cursor: nil,
-                limit: pageSize,
+                limit: limit,
                 baseURL: baseURL
             )
             guard lineage == self.lineage else {
@@ -226,6 +233,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             }
             items = Self.merged([], with: page.items, filter: lineage.filter)
             nextCursor = page.nextCursor
+            nextCursorLimit = limit
             hasMore = page.nextCursor != nil
             lastError = nil
             // A page that arrived is the session's to act on, as a question and not an answer —
@@ -266,6 +274,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         // next is the CURRENT list's next page, not the one this call set out to fetch.
         while !isLoading, hasMore, let cursor = nextCursor {
             let lineage = self.lineage
+            let limit = nextCursorLimit
             do {
                 let page = try await Self.page(
                     client,
@@ -273,7 +282,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     order: lineage.order,
                     tag: lineage.tag,
                     cursor: cursor,
-                    limit: pageSize,
+                    limit: limit,
                     baseURL: baseURL
                 )
                 guard lineage == self.lineage else {
@@ -412,7 +421,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     // Written as a member of the generated enum rather than through a name this
                     // file spells out: what the generator calls that type is the generator's to
                     // decide, and this call is the only place the app has to agree with it.
-                    order: order == .oldestFirst ? .asc : .desc,
+                    order: order == .oldestFirst ? .takenAsc : .takenDesc,
                     tag: tag
                 )
             )

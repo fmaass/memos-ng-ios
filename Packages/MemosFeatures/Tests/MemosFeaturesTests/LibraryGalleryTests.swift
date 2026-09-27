@@ -104,6 +104,25 @@ struct LibraryGalleryTests {
         #expect((second.tiles.first?.index ?? 0) > 0)
     }
 
+    /// A list whose months interleave — a merged page can bring an older file back above a newer
+    /// one — puts a month's files at scattered places in the whole list. Each tile must still
+    /// report its own place there, not its place in its month, or the paging trigger fires from
+    /// the wrong tile.
+    @Test("a tile's index in a month section is its place in the whole library")
+    func sectionIndicesAreGlobal() {
+        let september = Date(timeIntervalSince1970: 1_789_387_200)  // 2026-09-14 12:00Z
+        let august = Date(timeIntervalSince1970: 1_786_708_800)  // 2026-08-14 12:00Z
+        let items = [("s0", september), ("a1", august), ("s2", september), ("a3", august)].map {
+            LibraryRow(attachment: file($0.0), takenAt: $0.1, mine: true, filename: $0.0)
+        }
+        let sections = MediaLibraryPresentation.sections(
+            for: items, width: width, gap: gap, timeZone: "Europe/Zurich")
+
+        #expect(sections.map(\.label) == ["September 2026", "August 2026"])
+        let placed = sections.map { $0.rows.flatMap(\.tiles).map { "\($0.id)@\($0.index)" } }
+        #expect(placed == [["s0@0", "s2@2"], ["a1@1", "a3@3"]])
+    }
+
     @Test("no width means no rows, which is what the first frame is")
     func noWidthNoRows() {
         #expect(rows((0..<3).map { file("p\($0)") }, width: 0).isEmpty)

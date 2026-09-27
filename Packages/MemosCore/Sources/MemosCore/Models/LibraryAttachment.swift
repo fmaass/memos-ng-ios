@@ -69,9 +69,11 @@ public enum MediaLibraryFilter: String, Sendable, Equatable, CaseIterable, Ident
 
 /// Which end of the library the grid starts at.
 ///
-/// One key, two directions — which is the whole of what the server offers (`?order=desc|asc` on
-/// `GET /api/attachments`) and the whole of what a photo library needs. Photos calls the same pair
-/// "Newest First" and "Oldest First" on an album, and this is that control.
+/// One key, two directions — the whole of what a photo library needs. The key is when the picture
+/// was TAKEN (`?order=taken_desc|taken_asc` on `GET /api/attachments`), not when it was uploaded
+/// (`desc|asc`, which the server also offers): the grid is sectioned into the months pictures were
+/// taken in, and an upload order would scatter one month across the library (MEMNG-585). Photos
+/// calls the same pair "Newest First" and "Oldest First" on an album, and this is that control.
 public enum MediaLibraryOrder: String, Sendable, Equatable, CaseIterable, Identifiable {
     case newestFirst
     case oldestFirst
@@ -83,8 +85,8 @@ public enum MediaLibraryOrder: String, Sendable, Equatable, CaseIterable, Identi
     /// request names the sort the database does.
     public var apiOrder: String {
         switch self {
-        case .newestFirst: "desc"
-        case .oldestFirst: "asc"
+        case .newestFirst: "taken_desc"
+        case .oldestFirst: "taken_asc"
         }
     }
 

@@ -711,7 +711,7 @@ struct LibraryPreferencesTests {
     @Test("both directions are offered, under Photos' own words")
     func menuRows() {
         #expect(MediaLibraryOrder.allCases.map(\.label) == ["Newest First", "Oldest First"])
-        #expect(MediaLibraryOrder.newestFirst.apiOrder == "desc")
-        #expect(MediaLibraryOrder.oldestFirst.apiOrder == "asc")
+        #expect(MediaLibraryOrder.newestFirst.apiOrder == "taken_desc")
+        #expect(MediaLibraryOrder.oldestFirst.apiOrder == "taken_asc")
     }
 }

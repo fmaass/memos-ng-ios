@@ -63,6 +63,16 @@ public struct LibraryGalleryRow: Identifiable, Equatable, Sendable {
     public var id: String { tiles.first?.id ?? "empty" }
 }
 
+/// One month of the library as the grid draws it: its header, then its justified rows.
+public struct LibraryGallerySection: Identifiable, Equatable, Sendable {
+    /// `YYYY-MM`, or `undatedSectionKey` (`groupByMonth`).
+    public let key: String
+    public let label: String
+    public let rows: [LibraryGalleryRow]
+
+    public var id: String { key }
+}
+
 /// Decisions the library screen needs, kept out of the view — the same split `MemoPresentation`
 /// makes, and for the same reason: a SwiftUI body is the worst place to unit-test anything.
 public enum MediaLibraryPresentation {
@@ -113,6 +123,50 @@ public enum MediaLibraryPresentation {
                 },
                 height: row.height
             )
+        }
+    }
+
+    /// The library as month sections, each packed into justified rows of its own (MEMNG-585).
+    ///
+    /// A month is a calendar month in `timeZone` (`groupByMonth`), and each month is solved on its
+    /// own, so a row never straddles two headers. Every tile keeps its index in the WHOLE list —
+    /// the number the paging trigger is measured in — rather than its place in its month: a month
+    /// that reported indices from zero would put the trigger for the end of the library at the top
+    /// of every section.
+    public static func sections(
+        for items: [LibraryRow],
+        width: Double,
+        targetHeight: Double = targetRowHeight,
+        gap: Double,
+        timeZone: String
+    ) -> [LibraryGallerySection] {
+        // Rows are unique by file (`MediaLibraryStore.merged`), so a uid names one place.
+        let position = Dictionary(
+            items.enumerated().map { ($0.element.id, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return groupByMonth(items, timeZone: timeZone).map { month in
+            let packed = Self.rows(
+                for: month.items.map(\.attachment),
+                width: width,
+                targetHeight: targetHeight,
+                gap: gap
+            )
+            .map { row in
+                LibraryGalleryRow(
+                    tiles: row.tiles.compactMap { tile in
+                        guard let index = position[tile.id] else { return nil }
+                        return LibraryTile(
+                            attachment: tile.attachment,
+                            index: index,
+                            width: tile.width,
+                            height: tile.height
+                        )
+                    },
+                    height: row.height
+                )
+            }
+            return LibraryGallerySection(key: month.key, label: month.label, rows: packed)
         }
     }
 

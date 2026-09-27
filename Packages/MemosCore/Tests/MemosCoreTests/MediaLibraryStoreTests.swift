@@ -414,7 +414,11 @@ struct MediaLibraryStoreTests {
 
     // MARK: - MEMNG-190: which end of the library the grid starts at
 
-    @Test("the direction chosen is the direction asked for")
+    /// Both directions are sorted by when the picture was TAKEN (MEMNG-585): the month sections
+    /// the grid draws are calendar months of `takenAt`, and a list sorted by upload would scatter
+    /// one month's photographs across the library. The plain `desc`/`asc` the server also accepts
+    /// sort by upload, so each is asserted absent beside the one that must be there.
+    @Test("the direction chosen is the direction asked for, by when the picture was taken")
     func orderRidesOnTheRequest() async {
         let paths = LockedValue<[String]>([])
         let client = Stub.client { request, _, _ in
@@ -423,18 +427,53 @@ struct MediaLibraryStoreTests {
         }
         let newest = MediaLibraryStore(pageSize: 2)
         await newest.refresh(using: client.handle, baseURL: Stub.baseURL)
-        #expect(paths.get().last?.contains("order=desc") == true, "newest-first did not say so")
+        let newestPath = paths.get().last ?? ""
+        #expect(newestPath.contains("order=taken_desc"), "newest-first did not ask for taken_desc")
+        #expect(!newestPath.contains("order=desc"), "newest-first asked for upload order")
 
         let oldest = MediaLibraryStore(pageSize: 2, order: .oldestFirst)
         await oldest.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let oldestPath = paths.get().last ?? ""
+        #expect(oldestPath.contains("order=taken_asc"), "Oldest First did not ask for taken_asc")
+        #expect(!oldestPath.contains("order=asc"), "Oldest First asked for upload order")
         #expect(
-            paths.get().last?.contains("order=asc") == true,
-            "Oldest First did not reach the server"
-        )
-        #expect(
-            paths.get().last?.contains("order=desc") == false,
+            !oldestPath.contains("order=taken_desc"),
             "the newest-first direction was sent for a store reading the other way"
         )
+    }
+
+    /// The contract: a cursor is resent "with the same `type`, `tag`, `limit` and `order`". The
+    /// token is opaque, so it goes back byte for byte — the one here carries characters a query
+    /// encoder would escape, and the decoded value is what the server has to see again.
+    @Test("a continuation repeats its lineage's limit, direction and cursor unchanged")
+    func continuationRepeatsTheLineage() async throws {
+        let paths = LockedValue<[String]>([])
+        let token = "t0k/en+=="
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            if path.contains("cursor=") {
+                return Self.page(Self.uids(["d"]))
+            }
+            return Self.page(Self.uids(["a", "b", "c"]), nextCursor: token)
+        }
+        let store = MediaLibraryStore(pageSize: 3, order: .oldestFirst)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.items.map(\.id) == ["a", "b", "c", "d"], "control: the continuation landed")
+        let sent = paths.get()
+        try #require(sent.count == 2)
+        let first = try #require(URLComponents(string: sent[0])?.queryItems)
+        let next = try #require(URLComponents(string: sent[1])?.queryItems)
+        func value(_ name: String, in items: [URLQueryItem]) -> String? {
+            items.first { $0.name == name }?.value
+        }
+        #expect(value("limit", in: first) == "3")
+        #expect(value("limit", in: next) == "3", "the continuation changed the page size")
+        #expect(value("order", in: next) == "taken_asc", "the continuation changed the direction")
+        #expect(value("cursor", in: next) == token, "the header's token did not go back unchanged")
+        #expect(value("cursor", in: first) == nil, "control: a first page carries no cursor")
     }
 
     @Test("turning the library round empties the grid and forgets the cursor")
@@ -454,7 +493,7 @@ struct MediaLibraryStoreTests {
 
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let last = paths.get().last ?? ""
-        #expect(last.contains("order=asc"))
+        #expect(last.contains("order=taken_asc"))
         // The cursor is a position inside ONE ordering; carried across a reversal it pages the
         // wrong way through the middle of the library.
         #expect(
@@ -510,7 +549,7 @@ struct MediaLibraryStoreTests {
                 await release.wait()
                 return Self.page(Self.uids(["stale"]), nextCursor: "page-3")
             }
-            if path.contains("order=asc") {
+            if path.contains("order=taken_asc") {
                 return Self.page(Self.uids(["oldest"]))
             }
             return Self.page(Self.uids(["a"]), nextCursor: "page-2")
