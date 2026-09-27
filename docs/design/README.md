@@ -7,3 +7,9 @@ page 3929 (decisions 5, 8, 9, 10, 11, 12) they are the binding source for the na
 (WP-11, story MEMNG-583): every brief and gate prompt for that work names them, and an acceptance
 criterion reads "matches decision N". Open the HTML in a browser to drive the mock; the text is
 what a session without a browser reads.
+
+`all-by-day-mockup.html` (2026-09-27, artifact 8TZR6qt29D1wuyT6XzDLo9, this account) and its text
+export `all-by-day-mockup.md` add decision 13 on top: inside All every day is a collected mosaic
+group with a heading, a tags line and a scroll date pill top centre. It changes nothing in
+`photos-library-mockup.*` except what a day tile in Months lands on (the day's heading). Read both
+`.md` files before the first brief.

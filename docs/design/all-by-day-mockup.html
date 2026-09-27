@@ -1,0 +1,229 @@
+<title>Days in the Library</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f4f3ef;--surface:#ffffff;--ink:#1d1c19;--muted:#6c6963;--line:#dcd9d1;
+  --accent:#2c66c9;--accent-ink:#ffffff;--soft:#e9eef8;
+  --ok:#2e7d4f;--ok-soft:#e4f2ea;--warn:#b4541a;--warn-soft:#fbeee4;
+  --phone-bg:#000000;--phone-surface:#1c1d21;--phone-ink:#f2f2f0;--phone-muted:#9a9b9e;
+  --phone-line:#2c2d32;--phone-accent:#5b9cff;--phone-bar:rgba(28,29,33,.82);
+  --serif:"Newsreader",Georgia,"Times New Roman",serif;
+  --sans:"Source Sans 3",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){color-scheme:dark;
+    --bg:#17181b;--surface:#1f2024;--ink:#ebeae6;--muted:#9d9c97;--line:#31333a;
+    --accent:#7aa8ff;--accent-ink:#0e1524;--soft:#232a3a;
+    --ok:#6cc08e;--ok-soft:#1b2d22;--warn:#e6905a;--warn-soft:#332419}
+}
+:root[data-theme="dark"]{color-scheme:dark;
+  --bg:#17181b;--surface:#1f2024;--ink:#ebeae6;--muted:#9d9c97;--line:#31333a;
+  --accent:#7aa8ff;--accent-ink:#0e1524;--soft:#232a3a;
+  --ok:#6cc08e;--ok-soft:#1b2d22;--warn:#e6905a;--warn-soft:#332419}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.5;margin:0}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:32px 64px}
+h1{font-family:var(--serif);font-weight:500;font-size:clamp(30px,4.5vw,42px);line-height:1.1;margin:0 0 8px;text-wrap:balance}
+h2{font-family:var(--serif);font-weight:500;font-size:26px;line-height:1.2;margin:0 0 6px;text-wrap:balance}
+h3{font-size:16px;font-weight:700;margin:0 0 4px}
+p{margin:0 0 12px;max-width:62ch}
+.lede{font-size:18px;color:var(--muted);max-width:62ch}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
+.note{font-size:14px;color:var(--muted)}
+section{margin-top:44px}
+.option{display:grid;grid-template-columns:minmax(0,360px) minmax(0,1fr);gap:28px;align-items:start}
+@media (max-width:760px){.option{grid-template-columns:1fr}}
+.copy ul{padding-left:18px;margin:0 0 12px}
+.copy li{margin:0 0 6px;max-width:60ch}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--mono);font-size:12px;margin:0 0 14px}
+.flow span{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:3px 8px}
+.flow em{font-style:normal;color:var(--muted)}
+.flow .new{background:var(--soft);border-color:var(--accent);color:var(--accent);font-weight:500}
+.hint{font-size:13px;color:var(--muted);margin:8px 0 0;font-family:var(--mono)}
+table{border-collapse:collapse;width:100%;font-size:15px;margin:8px 0 16px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:700;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+td:first-child{font-weight:600;white-space:nowrap}
+.tscroll{overflow-x:auto}
+.verdict{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:16px 20px;max-width:70ch}
+.verdict p:last-child{margin:0}
+.chg{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px 18px;font-size:15px}
+.chg dt{font-weight:700;margin-top:8px}.chg dt:first-child{margin-top:0}
+.chg dd{margin:0 0 4px;color:var(--muted)}
+code{font-family:var(--mono);font-size:.9em;background:var(--soft);padding:1px 5px;border-radius:4px}
+
+/* phone */
+.phone{width:min(100%,360px);aspect-ratio:9/19;max-width:100%;background:var(--phone-bg);color:var(--phone-ink);border-radius:36px;border:6px solid #2a2b30;box-shadow:0 20px 50px rgba(0,0,0,.28);position:relative;overflow:hidden;font-family:var(--sans);user-select:none;-webkit-user-select:none}
+.status{position:absolute;top:0;left:0;right:0;height:38px;display:flex;justify-content:space-between;align-items:center;padding:6px 26px 0;font-size:13px;font-weight:600;z-index:6;pointer-events:none}
+.screen{position:absolute;inset:0;display:flex;flex-direction:column;transition:transform .32s cubic-bezier(.2,.7,.2,1);background:var(--phone-bg)}
+@media (prefers-reduced-motion:reduce){.screen{transition:none}}
+.screen.off{transform:translateX(100%)}
+.hdr{padding:46px 16px 8px;position:relative;z-index:5;background:linear-gradient(var(--phone-bg) 70%,transparent)}
+.hdr .back{background:none;border:0;color:var(--phone-accent);font:inherit;font-size:15px;padding:0;margin:0 0 4px;cursor:pointer;display:inline-flex;align-items:center;gap:2px}
+.hdr .title{font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1.1}
+.hdr .sub{font-size:14px;color:var(--phone-muted);margin-top:2px}
+.hdr .btns{position:absolute;right:16px;top:50px;display:flex;gap:8px}
+.glass{background:var(--phone-bar);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.18);color:var(--phone-ink)}
+.rbtn{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:16px}
+.cap{height:34px;border-radius:17px;padding:0 14px;display:grid;place-items:center;font-size:15px;font-weight:600}
+.scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 0 96px;scrollbar-width:none;position:relative}
+.scroll::-webkit-scrollbar{display:none}
+.dock{position:absolute;left:0;right:0;bottom:0;padding:0 16px 22px;display:flex;justify-content:center;align-items:center;gap:8px;z-index:6;pointer-events:none}
+.dock>*{pointer-events:auto}
+.seg{height:44px;border-radius:22px;display:flex;align-items:center;padding:4px;gap:2px;font-size:14px;font-weight:600}
+.seg span{padding:0 14px;height:36px;display:grid;place-items:center;border-radius:18px;color:var(--phone-muted)}
+.seg span.on{background:rgba(255,255,255,.16);color:var(--phone-ink)}
+.libicon{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;font-size:18px;color:var(--phone-accent)}
+
+.tile{position:relative;background:linear-gradient(135deg,var(--c1),var(--c2));overflow:hidden;border:0;padding:0;aspect-ratio:1;display:block;width:100%}
+.tile .v{position:absolute;bottom:6px;right:8px;font-size:11px;font-weight:600;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.6)}
+
+/* all view (option B) */
+.mhead{position:sticky;top:0;z-index:4;padding:8px 16px 6px;font-size:22px;font-weight:700;background:linear-gradient(var(--phone-bg) 75%,transparent);display:flex;justify-content:space-between;align-items:baseline}
+.mhead small{font-size:13px;color:var(--phone-muted);font-weight:600}
+.day{margin:0 12px 22px}
+.dhead{display:flex;justify-content:space-between;align-items:baseline;padding:0 2px 6px;font-size:17px;font-weight:700}
+.dhead small{font-size:13px;color:var(--phone-muted);font-weight:600;font-variant-numeric:tabular-nums}
+.dhead .wd{margin-right:6px}
+.dtags{padding:0 2px 8px;font-size:13px;color:var(--phone-muted);margin-top:-4px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;border-radius:12px;overflow:hidden}
+.grid .tile{cursor:default}
+.mosaic-mode .grid .tile:first-child{grid-column:span 2;grid-row:span 2}
+.mosaic-mode .grid.small .tile{grid-column:span 3;grid-row:auto;aspect-ratio:16/9}
+.mosaic-mode .grid.small .tile:first-child{grid-column:span 3;grid-row:auto}
+.sw,.pp{font:inherit;font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:4px 10px;color:var(--ink);cursor:pointer}
+.sw.on,.pp.on{background:var(--soft);border-color:var(--accent);color:var(--accent);font-weight:500}
+.sw:focus-visible,.pp:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pill{position:absolute;top:96px;right:14px;z-index:7;height:30px;border-radius:15px;padding:0 12px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;opacity:0;transform:translateY(-6px);transition:opacity .2s,transform .2s;cursor:pointer;font-variant-numeric:tabular-nums}
+.pill.show{opacity:1;transform:none}
+.pill-centre .pill{right:auto;left:50%;top:104px;transform:translate(-50%,-6px)}
+.pill-centre .pill.show{transform:translate(-50%,0)}
+.pill-dock .pill{top:auto;right:auto;left:50%;bottom:84px;transform:translate(-50%,6px)}
+.pill-dock .pill.show{transform:translate(-50%,0)}
+.pill-left .pill{right:auto;left:14px;top:96px}
+.pill-inline .pill{top:auto;right:auto;left:16px;bottom:auto;position:static;height:auto;padding:0;background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;font-size:14px;color:var(--phone-muted);opacity:1;transform:none;display:none}
+.pill-inline .hdr .sub{display:none}
+.pill-inline .hdr .live{display:block;font-size:14px;color:var(--phone-muted);margin-top:2px;font-variant-numeric:tabular-nums}
+.hdr .live{display:none}
+.pill i{font-style:normal;color:var(--phone-muted);font-weight:600}
+.toast{position:absolute;left:50%;bottom:92px;transform:translateX(-50%);background:var(--phone-surface);border:1px solid var(--phone-line);color:var(--phone-ink);padding:8px 14px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;white-space:nowrap;z-index:8}
+.toast.show{opacity:1}
+.mhead{padding-bottom:10px}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">memos-ng-ios · Library · Months → ? → picture</p>
+  <h1>Days in the Library</h1>
+  <p class="lede">No separate day screen. All stays the one place every picture lives, but inside it each day is collected into its own group: a heading, its tags, and its pictures held together as one block. The date stays on screen while you scroll.</p>
+  <div class="flow">
+    <span>Years</span><em>›</em><span>Months</span><em>›</em><span class="new">All, collected by day</span><em>›</em><span>picture</span>
+  </div>
+  <p class="note">Every tile is a placeholder colour, not a real picture; the day numbers, counts and tags are made up for Sep 2026. Scroll inside the phone; the two buttons above it switch how a day lays its pictures out.</p>
+
+  <section>
+    <p class="eyebrow">The All view</p>
+    <h2>Every day is a group</h2>
+    <div class="flow" role="group" aria-label="Day layout"><em>day layout</em><button class="sw" data-mode="grid" id="swGrid">Even grid</button><button class="sw on" data-mode="mosaic" id="swMosaic">Mosaic per day</button></div>
+    <div class="flow" role="group" aria-label="Date pill placement"><em>date while scrolling</em><button class="pp on" data-pos="centre" id="ppCentre">Top centre</button><button class="pp" data-pos="dock" id="ppDock">Above the dock</button><button class="pp" data-pos="left" id="ppLeft">Top left</button><button class="pp" data-pos="inline" id="ppInline">In the header line</button></div>
+    <div class="option">
+      <div class="phone" id="phoneB">
+        <div class="status"><span>09:41</span><span>●●● ⌁ ▮</span></div>
+        <div class="screen">
+          <div class="hdr">
+            <div class="title">Library</div>
+            <div class="sub">1 795 items · newest first</div>
+            <div class="live" id="bLive">Sat 27 Sep 2026</div>
+            <div class="btns"><div class="glass rbtn">•••</div><div class="glass cap">Select</div></div>
+          </div>
+          <div class="glass pill" id="bPill"><i>Sat</i>27 Sep 2026</div>
+          <div class="scroll" id="bScroll"></div>
+          <div class="toast" id="bToast">Opens Months at Sep 2026</div>
+          <div class="dock"><div class="glass libicon">▦</div><div class="glass seg"><span>Years</span><span>Months</span><span class="on">All</span></div></div>
+        </div>
+      </div>
+      <div class="copy">
+        <p><b>The day group.</b> Each day gets a heading row: the weekday in bold, the date, the count on the right, and the day's tags in a second line when it has any. Its pictures sit under it as one block, inset from the edges with rounded corners, so a day reads as a thing you can hold, not as rows that happen to follow each other. Between two days there is real air.</p>
+        <ul>
+          <li><b>Even grid</b> keeps three tiles per row inside the block. Densest, every picture the same size.</li>
+          <li><b>Mosaic per day</b> gives the first picture of a day a hero tile and the rest squares, the same rhythm Months uses. A day with one or two pictures gets one wide tile. Calmer, longer to scroll.</li>
+          <li><b>The date while scrolling.</b> A glass pill names the day whose group is at the top of the screen and updates as groups pass; it fades a second after the scrolling stops. Tap it and you are back in Months at that month. The buttons above the phone move it: top centre under the header, above the dock, top left, or no pill at all and the header's second line turns into the live date instead.</li>
+          <li>The month heading stays sticky above the groups, with its count, as today.</li>
+          <li>A day tile in Months opens All with that day's group under the month heading, which is the jump MEMNG-587 builds. "and N more days" behaves as decided.</li>
+        </ul>
+        <p><b>Cost.</b> No new screen and no new route. The grid the app already draws gets a group per day, a heading row, and one overlay driven by the scroll position it already tracks.</p>
+        <p class="hint">try: wheel or drag inside the phone · tap the date pill · switch Even grid / Mosaic</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Decisions</p>
+    <h2>Where this landed</h2>
+    <div class="tscroll"><table>
+      <tr><th>Question</th><th>Suggestion</th></tr>
+      <tr><td>Grid or mosaic inside a day</td><td>Decided 2026-09-27: mosaic. The first picture of a day is the hero, the rest are squares; a day with one or two pictures gets one wide tile.</td></tr>
+      <tr><td>Tags on the day heading</td><td>Kept as drawn: one line, the tags of that day's memos, at most three and "+N". They are what tells two hiking Saturdays apart. The Timeline stays the only place a day has words beyond that.</td></tr>
+      <tr><td>Where the date sits while scrolling</td><td>Top centre under the header, as the mock opens. The other three placements stay on the switch for comparison.</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">On the record</p>
+    <h2>What has to change on the record</h2>
+    <dl class="chg">
+      <dt>Plan page 3929, §4 The All view</dt><dd>Add the day groups (heading, tags, inset block) and the date pill; the month heading line stays.</dd>
+      <dt>Decision 9 (Months)</dt><dd>Unchanged. A day tile still opens All at that day; the target now has a header to land under.</dd>
+      <dt>Conformance package (handover 4121)</dt><dd>One more member: day groups and the scroll date pill in All, with a witness that the pill names the day at the top after a programmatic scroll.</dd>
+      <dt>MEMNG-587 day jump</dt><dd>Lands the day's heading under the month heading rather than the day's first tile.</dd>
+      <dt>Web client</dt><dd>Same two additions to the All page so both clients keep one design.</dd>
+    </dl>
+  </section>
+</div>
+
+<script>
+(function(){
+  // deterministic placeholder colours
+  function hue(seed){var x=Math.sin(seed*9301+49297)*233280;return x-Math.floor(x);}
+  var pals=[[28,42],[200,215],[350,20],[95,140],[210,190],[35,10],[260,300],[170,190]];
+  function tileStyle(seed){var p=pals[Math.floor(hue(seed)*pals.length)];var l1=38+hue(seed+1)*22,l2=22+hue(seed+2)*20;
+    return '--c1:hsl('+p[0]+' 45% '+l1+'%);--c2:hsl('+p[1]+' 40% '+l2+'%)';}
+  var wd=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var wdl=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  // Sep 2026: 1 Sep 2026 is a Tuesday
+  function dow(d){return (2+d-1)%7;}
+  // days with pictures in Sep 2026: [day, count, videos, tags]
+  var sep=[[29,6,0,['#garden']],[27,20,2,['#hike','#lakes']],[26,11,0,['#lakes']],[25,4,1,[]],[21,9,0,['#kids']],[19,14,1,['#kids','#zoo']],[13,17,0,['#city']],[12,3,0,[]],[8,7,0,['#garden']],[5,10,2,['#kids']],[2,5,0,[]]];
+  var byDay={};sep.forEach(function(r){byDay[r[0]]=r;});
+
+  // ---------- Option B: All with day sections + date pill ----------
+  var bS=document.getElementById('bScroll'),pill=document.getElementById('bPill'),toast=document.getElementById('bToast');
+  function dayBlock(d,mon,year,w,r){var label=wd[w]+'|'+d+' '+mon+' '+year;
+    var b='<div class="day"><div class="dhead" data-label="'+label+'"><span><span class="wd">'+wd[w]+'</span>'+d+' '+mon+'</span><small>'+r[1]+'</small></div>';
+    if(r[3]&&r[3].length)b+='<div class="dtags">'+r[3].join(' ')+'</div>';
+    b+='<div class="grid'+(r[1]<3?' small':'')+'">';
+    for(var i=0;i<r[1];i++){b+='<div class="tile" style="'+tileStyle(d*100+i+(mon==='Aug'?7:0))+'">'+(r[2]&&i===0?'<span class="v">▶ 0:14</span>':'')+'</div>';}
+    return b+'</div></div>';}
+  var g='<div class="mhead">Sep 2026 <small>106 items</small></div>';
+  sep.forEach(function(r){g+=dayBlock(r[0],'Sep','2026',dow(r[0]),r);});
+  g+='<div class="mhead">Aug 2026 <small>63 items</small></div>';
+  [[30,12,0,['#beach']],[28,5,0,[]],[24,9,1,['#kids']],[16,2,0,[]]].forEach(function(r){g+=dayBlock(r[0],'Aug','2026',(6+r[0]-1)%7,r);}); // 1 Aug 2026 is a Saturday
+  bS.innerHTML=g;
+  var heads=Array.prototype.slice.call(bS.querySelectorAll('.dhead'));
+  var hideT=null;
+  function updatePill(){var top=bS.scrollTop+44;var cur=heads[0];
+    for(var i=0;i<heads.length;i++){if(heads[i].offsetTop<=top)cur=heads[i];else break;}
+    var l=cur.dataset.label.split('|');pill.innerHTML='<i>'+l[0]+'</i>'+l[1];document.getElementById('bLive').textContent=l[0]+' '+l[1];
+    pill.classList.add('show');clearTimeout(hideT);hideT=setTimeout(function(){pill.classList.remove('show');},1100);}
+  bS.addEventListener('scroll',updatePill,{passive:true});
+  pill.addEventListener('click',function(){toast.textContent='Opens Months at '+pill.textContent.slice(3).trim().slice(-8);toast.classList.add('show');setTimeout(function(){toast.classList.remove('show');},1400);});
+  // start B a little way in so the pill's purpose is visible at rest
+  bS.scrollTop=140;updatePill();clearTimeout(hideT);
+  var phoneB=document.getElementById('phoneB');phoneB.classList.add('pill-centre');phoneB.classList.add('mosaic-mode');
+  document.querySelectorAll('.pp').forEach(function(b){b.addEventListener('click',function(){
+    document.querySelectorAll('.pp').forEach(function(x){x.classList.toggle('on',x===b);});
+    phoneB.className='phone pill-'+b.dataset.pos+(phoneB.classList.contains('mosaic-mode')?' mosaic-mode':'');updatePill();});});
+  document.querySelectorAll('.sw').forEach(function(b){b.addEventListener('click',function(){
+    document.querySelectorAll('.sw').forEach(function(x){x.classList.toggle('on',x===b);});
+    phoneB.classList.toggle('mosaic-mode',b.dataset.mode==='mosaic');updatePill();});});
+})();
+</script>
