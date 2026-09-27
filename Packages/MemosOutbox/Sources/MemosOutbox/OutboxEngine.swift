@@ -724,13 +724,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
         if response.statusCode == 404 {
             // The session expired or was reaped. The ORIGINAL is untouched — it starts again.
-            return .resynced(job.clearingLostUpload(fileID: fileID))
+            return .resynced(job.clearingLostUpload(fileID: fileID), confirmed: nil)
         }
         guard response.isSuccess,
             let raw = response.header(OutboxRequests.offsetHeader),
             let offset = Int64(raw)
         else { return .unanswered }
-        return .resynced(job.advancing(fileID: fileID, bytesConfirmed: offset))
+        let advanced = job.advancing(fileID: fileID, bytesConfirmed: offset)
+        return .resynced(advanced, confirmed: advanced.file(fileID)?.bytesConfirmed)
     }
 
     /// The originals this create sent, named by the attachments the answer came back with.
@@ -822,7 +823,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             var current = creating.applying(recovery)
             for fileID in recovery.resync {
                 switch await resync(current, fileID: fileID, credentials: credentials) {
-                case .resynced(let next):
+                case .resynced(let next, _):
                     current = next
                 case .unanswered:
                     break
@@ -1058,11 +1059,16 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         // Set when the answer was a refusal, so the write below can choose between holding it and
         // queueing it for the successor under the isolation that performs the write.
         var refused: OutboxRefusal?
+        // Set only when the server said how much it holds, in this answer or in the HEAD asked
+        // about it, so a write refused because a pass parked the capture meanwhile can still bank
+        // the count onto the park — see `bank`.
+        var accepted: Int64?
 
         switch result.statusCode {
         case .some(let code) where (200..<300).contains(code):
             if let session = OutboxWire.decodeSession(result.body) {
                 next = job.advancing(fileID: fileID, bytesConfirmed: session.bytesReceived)
+                accepted = next.file(fileID)?.bytesConfirmed
             } else {
                 askTheServer = "The server's answer was unreadable."
             }
@@ -1114,8 +1120,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 asked = await resync(job, fileID: fileID, credentials: credentials)
             }
             switch asked {
-            case .resynced(let resynced):
+            case .resynced(let resynced, let confirmed):
                 next = resynced
+                accepted = confirmed
             case .withheld:
                 await onChange()
                 return
@@ -1151,6 +1158,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // this answer is about the row `job` describes. A pass that released, held, advanced
             // or finished the capture while the credential was being acquired owns it now.
             written = await save(next, matching: job)
+        }
+        if written == nil, let accepted {
+            await bank(accepted, of: fileID, refusedAbout: job)
         }
         await onChange()
         guard let written else { return }
@@ -1675,7 +1685,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             let byteSize = job.file(fileID)?.byteSize
         else { return nil }
         switch await resync(job, fileID: fileID, credentials: credentials) {
-        case .resynced(let resynced):
+        case .resynced(let resynced, _):
             guard let file = resynced.file(fileID), file.uploadUID != nil else {
                 return .retryWhole
             }
@@ -1706,7 +1716,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// What asking the server where an upload stands came to.
     enum Resync {
-        case resynced(UploadJob)
+        /// `confirmed` is the offset the server's HEAD answered with, as the row now holds it; nil
+        /// when the session was gone and the file starts again, which confirms nothing.
+        case resynced(UploadJob, confirmed: Int64?)
         /// No usable answer, or no request could be made: the caller backs off.
         case unanswered
         /// Not asked: the gate closed before the request left, or the row belongs to an account
@@ -1775,7 +1787,33 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     @discardableResult
     private func hold(_ job: UploadJob, reason: HoldReason) async -> Bool {
         guard job.state != .held || job.holdReason != reason else { return true }
-        return await save(job.held(reason, error: Self.message(for: reason)), matching: job) != nil
+        return await save(Self.holding(job, for: reason), matching: job) != nil
+    }
+
+    /// The row `hold` writes, built in one place so `bank` can recognise it as a whole value.
+    private static func holding(_ job: UploadJob, for reason: HoldReason) -> UploadJob {
+        job.held(reason, error: message(for: reason))
+    }
+
+    /// An accepted count whose write was refused because a pass parked the capture for the
+    /// network, or held it for another account, while the answer's handler was suspended. Both are
+    /// right: nothing may be sent, and the server holds those bytes. So the count is copied onto
+    /// the parked row and nothing else of the answer is — its state, retry and error stay the
+    /// park's — or the next pass re-sends bytes the server already holds.
+    ///
+    /// Only when that park is the ONLY thing that moved the row: the row on disk must differ from
+    /// the handler's snapshot and be, as a whole value, exactly what the park or the account hold
+    /// writes from it. A release, a cancel, another hold, a newer attempt, another answer or a
+    /// deleted row owns the capture now, and the answer stays dropped. The write is fenced on the
+    /// row just read, so a pass that moves it again in between wins too.
+    private func bank(
+        _ bytesConfirmed: Int64, of fileID: UUID, refusedAbout snapshot: UploadJob
+    ) async {
+        guard let onDisk = await repository.job(snapshot.id), onDisk != snapshot else { return }
+        let parked = onDisk == snapshot.waitingForNetwork()
+        let heldForAccount = onDisk == Self.holding(snapshot, for: .accountMismatch)
+        guard parked || heldForAccount else { return }
+        await save(onDisk.updating(fileID) { $0.bytesConfirmed = bytesConfirmed }, matching: onDisk)
     }
 
     /// An ORDINARY write: no server has said anything about a credential, so there is no epoch to

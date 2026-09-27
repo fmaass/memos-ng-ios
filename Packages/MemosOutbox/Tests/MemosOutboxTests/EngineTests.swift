@@ -1512,3 +1512,310 @@ struct ChunkAccountTests {
         #expect(row.holdReason == .accountMismatch)
     }
 }
+
+/// MEMNG-536: an answer the server accepted, meeting a pass that parked or held its capture while
+/// the answer's handler was suspended.
+///
+/// Both writes are fenced on the same whole-value snapshot, so whichever lands second is refused.
+/// When the park lands first, the handler's accepted count used to go with its refused write: the
+/// row stayed parked at a cursor the server had already moved past. The handler is held at its
+/// credential acquisition — before its hand-off is counted, so the drain reconciles rather than
+/// defers — and the drain runs on the same engine inside that hold.
+@Suite("An accepted answer that meets a park")
+struct ParkedAnswerTests {
+    private static let accepted400 = #"{"upload_uid":"u1","chunk_size":400,"bytes_received":400}"#
+
+    /// The capture as a first chunk leaves it: a session, and a chunk out at `offset`.
+    private func started(_ harness: Harness, at offset: Int64 = 0) async throws -> UploadJob {
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].chunkSize = 400
+        job.files[0].bytesConfirmed = offset
+        job.state = .uploading
+        try await harness.repository.save(job)
+        // Read back, so the snapshot is exactly the value on disk the handler will read.
+        return try #require(await harness.reload())
+    }
+
+    private func rig(
+        _ harness: Harness,
+        _ provider: InterferingCredentials,
+        on path: NetworkPath,
+        _ preferences: UploadPreferences
+    ) -> OutboxEngine {
+        OutboxEngine(
+            repository: harness.repository,
+            credentials: provider,
+            http: harness.http,
+            scheduler: harness.scheduler,
+            completion: harness.completion,
+            network: StubNetworkPath(path),
+            preferences: preferences,
+            clock: { harness.clock.now }
+        )
+    }
+
+    private func answer(
+        _ job: UploadJob, at offset: Int64 = 0, status: Int = 200, body: String = accepted400
+    ) -> ChunkResult {
+        ChunkResult(
+            identity: OutboxTaskIdentity(jobID: job.id, fileID: job.files[0].id, offset: offset),
+            statusCode: status,
+            body: Data(body.utf8)
+        )
+    }
+
+    /// Runs `answer` through a handler held at its credential, drains the same engine inside the
+    /// hold, and returns the row as the drain left it and as the handler left it.
+    private func interleave(
+        _ harness: Harness,
+        _ answer: ChunkResult,
+        on path: NetworkPath
+    ) async throws -> (afterDrain: UploadJob, afterAnswer: UploadJob) {
+        let gate = TestGate()
+        let provider = InterferingCredentials(Fixture.credentials()) { await gate.pass() }
+        let preferences = Fixture.preferences()
+        defer { Fixture.forgetting(preferences.name) }
+        let engine = rig(harness, provider, on: path, preferences.store)
+
+        let answering = Task { await engine.handle(answer) }
+        await gate.waitUntilParked()
+        await engine.drain()
+        let afterDrain = try #require(await harness.reload())
+        await gate.open()
+        await answering.value
+        await engine.untilQuiescent()
+        let afterAnswer = try #require(await harness.reload())
+        return (afterDrain, afterAnswer)
+    }
+
+    @Test("a network park that lands inside the handler's hop keeps the accepted cursor")
+    func aParkInsideTheHopKeepsTheAcceptedCursor() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness)
+
+        let rows = try await interleave(harness, answer(snapshot), on: .cellular)
+
+        #expect(
+            rows.afterDrain == snapshot.waitingForNetwork(),
+            "the premise: the drain parked the very row the handler holds, at the old cursor"
+        )
+        var expected = rows.afterDrain
+        expected.files[0].bytesConfirmed = 400
+        #expect(
+            rows.afterAnswer == expected,
+            "the park, with ONLY the accepted cursor moved: the answer dropped or the park undone"
+        )
+        #expect(harness.scheduler.uploads.isEmpty, "a parked capture sent a chunk")
+    }
+
+    @Test("an account-mismatch hold that lands inside the handler's hop keeps the accepted cursor")
+    func anAccountHoldInsideTheHopKeepsTheAcceptedCursor() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            binding: Fixture.binding(owner: "someone-else")
+        )
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness)
+
+        let rows = try await interleave(harness, answer(snapshot), on: .wifi)
+
+        #expect(rows.afterDrain.state == .held, "the premise: the drain held the row")
+        #expect(rows.afterDrain.holdReason == .accountMismatch)
+        #expect(rows.afterDrain.files[0].bytesConfirmed == 0)
+        var expected = rows.afterDrain
+        expected.files[0].bytesConfirmed = 400
+        #expect(
+            rows.afterAnswer == expected,
+            "the hold, with ONLY the accepted cursor moved: the answer dropped or the hold undone"
+        )
+        #expect(harness.scheduler.uploads.isEmpty, "a held capture sent a chunk")
+    }
+
+    @Test("a count past the file's end is clamped when it is banked onto a park")
+    func anOverReportedCountIsClampedOntoThePark() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness)
+        let over = #"{"upload_uid":"u1","chunk_size":400,"bytes_received":5000}"#
+
+        let rows = try await interleave(harness, answer(snapshot, body: over), on: .cellular)
+
+        #expect(rows.afterDrain == snapshot.waitingForNetwork(), "the premise: the park landed")
+        var expected = rows.afterDrain
+        expected.files[0].bytesConfirmed = 1000
+        #expect(rows.afterAnswer == expected, "the banked cursor is the planner's, clamped")
+    }
+
+    /// Only an accepted count is carried onto a park. A 404 forgets the upload, a refusal holds and
+    /// a server error backs off: each of those is today's refused write, and stays dropped.
+    @Test(
+        "an answer that accepted no count is still dropped when a park landed",
+        arguments: [404, 401, 503]
+    )
+    func anAnswerWithoutACountStaysDropped(status: Int) async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness, at: 400)
+
+        let rows = try await interleave(
+            harness, answer(snapshot, at: 400, status: status, body: "{}"), on: .cellular
+        )
+
+        #expect(rows.afterDrain == snapshot.waitingForNetwork(), "the premise: the park landed")
+        #expect(rows.afterAnswer == rows.afterDrain, "a \(status) rewrote the parked row")
+    }
+
+    /// The server as a HEAD finds it, with every HEAD held at `gate` until the test opens it.
+    private struct HeldHead: OutboxHTTPPerforming {
+        let inner: ScriptedHTTP
+        let gate: TestGate
+
+        func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+            -> OutboxHTTPResponse
+        {
+            if request.httpMethod == "HEAD" { await gate.pass() }
+            return try await inner.perform(request, under: authority)
+        }
+    }
+
+    /// Runs an answer whose body is unreadable, so the handler asks the server with a HEAD, and
+    /// drains the same engine while that HEAD is held. The handler reads the network once, on
+    /// its way to the HEAD; the drain inside the HEAD finds the phone on mobile data.
+    private func interleaveHead(
+        _ harness: Harness,
+        _ answer: ChunkResult,
+        head: ScriptedHTTP
+    ) async throws -> (afterDrain: UploadJob, afterAnswer: UploadJob) {
+        let gate = TestGate()
+        let preferences = Fixture.preferences()
+        defer { Fixture.forgetting(preferences.name) }
+        let engine = OutboxEngine(
+            repository: harness.repository,
+            credentials: StaticCredentials(credentials: Fixture.credentials()),
+            http: HeldHead(inner: head, gate: gate),
+            scheduler: harness.scheduler,
+            completion: harness.completion,
+            network: StubNetworkPath(.wifi, thenAfterOneRead: .cellular),
+            preferences: preferences.store,
+            clock: { harness.clock.now }
+        )
+
+        let answering = Task { await engine.handle(answer) }
+        await gate.waitUntilParked()
+        await engine.drain()
+        let afterDrain = try #require(await harness.reload())
+        await gate.open()
+        await answering.value
+        await engine.untilQuiescent()
+        let afterAnswer = try #require(await harness.reload())
+        return (afterDrain, afterAnswer)
+    }
+
+    @Test("a park that lands while the handler's HEAD is out keeps the offset the HEAD confirmed")
+    func aParkInsideTheHeadKeepsTheConfirmedOffset() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness)
+
+        let rows = try await interleaveHead(
+            harness,
+            answer(snapshot, body: "unreadable"),
+            head: .standard(chunkSize: 400, headOffset: 400)
+        )
+
+        #expect(
+            rows.afterDrain == snapshot.waitingForNetwork(),
+            "the premise: the drain parked the very row the handler holds, at the old cursor"
+        )
+        var expected = rows.afterDrain
+        expected.files[0].bytesConfirmed = 400
+        #expect(
+            rows.afterAnswer == expected,
+            "the park, with ONLY the confirmed offset moved: the HEAD's count was dropped"
+        )
+        #expect(harness.scheduler.uploads.isEmpty, "a parked capture sent a chunk")
+    }
+
+    /// A HEAD that found the session gone (404) resets the file, and one that could not be read
+    /// backs off: neither confirms an offset, so neither is carried onto a park.
+    @Test(
+        "a HEAD that confirmed no offset is still dropped when a park landed",
+        arguments: [404, 500]
+    )
+    func aHeadWithoutAnOffsetStaysDropped(status: Int) async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness, at: 400)
+
+        let rows = try await interleaveHead(
+            harness,
+            answer(snapshot, at: 400, body: "unreadable"),
+            head: ScriptedHTTP { _ in OutboxHTTPResponse(statusCode: status) }
+        )
+
+        #expect(rows.afterDrain == snapshot.waitingForNetwork(), "the premise: the park landed")
+        #expect(rows.afterAnswer == rows.afterDrain, "a HEAD \(status) rewrote the parked row")
+    }
+
+    /// What else can move the row inside the hop. None of these is a park or the account hold of
+    /// the handler's own snapshot, so the answer is not about the row on disk any more.
+    enum Move: String, CaseIterable, Sendable {
+        case heldForAnotherReason
+        case parkedAtANewerAttempt
+        case parkedAfterACancel
+        case parkedAfterAnotherAnswerAdvancedIt
+        case deleted
+
+        func applied(to snapshot: UploadJob) -> UploadJob? {
+            var parked = snapshot.waitingForNetwork()
+            switch self {
+            case .heldForAnotherReason:
+                return snapshot.held(.serverRefused, error: "The server refused this memo.")
+            case .parkedAtANewerAttempt:
+                parked.files[0].uploadAttempt = (snapshot.files[0].uploadAttempt ?? 0) + 1
+            case .parkedAfterACancel:
+                parked.cancelledAt = Date(timeIntervalSince1970: 1_750_000_100)
+            case .parkedAfterAnotherAnswerAdvancedIt:
+                parked.files[0].bytesConfirmed = 800
+            case .deleted:
+                return nil
+            }
+            return parked
+        }
+    }
+
+    @Test(
+        "a row something else moved inside the hop keeps what that move wrote",
+        arguments: Move.allCases
+    )
+    func aRowMovedBySomethingElseStaysAsItWasLeft(move: Move) async throws {
+        let harness = try await Harness.make(bytes: 1000, http: .standard(chunkSize: 400))
+        defer { harness.cleanUp() }
+        let snapshot = try await started(harness)
+        let moved = move.applied(to: snapshot)
+        let repository = harness.repository
+        let landed = LockedFlag()
+        let provider = InterferingCredentials(Fixture.credentials()) {
+            if let moved {
+                try? await repository.save(moved)
+            } else {
+                await repository.delete(snapshot)
+            }
+            landed.set()
+        }
+        let preferences = Fixture.preferences()
+        defer { Fixture.forgetting(preferences.name) }
+        let engine = rig(harness, provider, on: .cellular, preferences.store)
+
+        await engine.handle(answer(snapshot))
+        await engine.untilQuiescent()
+
+        #expect(landed.get(), "the premise: the move landed inside the acquisition")
+        let row = await harness.reload()
+        #expect(row == moved, "an answer that outlived \(move.rawValue) was written over it")
+        #expect(harness.scheduler.uploads.isEmpty)
+    }
+}
