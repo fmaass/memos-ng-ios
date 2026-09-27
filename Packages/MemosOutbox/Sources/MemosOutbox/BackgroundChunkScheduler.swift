@@ -192,19 +192,10 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
         await delegate.attach(handler)
     }
 
-    /// What the session holds, plus every answer the delegate has not finished handing over: a
-    /// finished task has left `allTasks` while its answer is still on its way to the row, and a
-    /// chunk listed nowhere in that window is rescheduled under the same identity.
-    ///
-    /// The session is read first, so a task it lists is counted whatever happens next. Read the
-    /// other way round, a task still running at the delegate read and delivered before the session
-    /// read would be missing from both.
     public func inFlight() async -> [OutboxTaskIdentity] {
-        let listed = await session.allTasks.compactMap {
+        await session.allTasks.compactMap {
             OutboxTaskIdentity(taskDescription: $0.taskDescription)
         }
-        var seen = Set(listed)
-        return listed + delegate.undeliveredIdentities().filter { seen.insert($0).inserted }
     }
 
     public func upload(
@@ -265,12 +256,6 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// Which credential generation each in-flight chunk went out under, keyed the way the task is.
     /// Empty for anything this process did not schedule — a task adopted across a relaunch.
     private var epochs: [String: Int] = [:]
-    /// Answers delivered whose handling has not returned, per identity.
-    ///
-    /// A count, not a set: two tasks can carry one identity — a 404 clears the upload without
-    /// moving the attempt, and that answer's handler schedules the next chunk at the same offset
-    /// and attempt — so the first answer to finish must not erase the second one's entry.
-    private var undelivered: [OutboxTaskIdentity: Int] = [:]
     /// What is still being written to disk. The system's completion handler waits on this.
     private let pending = PendingHandlerWork()
     /// Where "finished" is reported; nil is the process-wide box the app delegate stores into.
@@ -283,17 +268,6 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
 
     func record(epoch: Int, for identity: OutboxTaskIdentity) {
         lock.withLock { epochs[identity.taskDescription] = epoch }
-    }
-
-    func undeliveredIdentities() -> [OutboxTaskIdentity] {
-        lock.withLock { Array(undelivered.keys) }
-    }
-
-    private func settle(_ identity: OutboxTaskIdentity) {
-        lock.withLock {
-            let left = (undelivered[identity] ?? 0) - 1
-            undelivered[identity] = left > 0 ? left : nil
-        }
     }
 
     /// AWAITS the replay. Adoption is what calls this, and a drain may only start after adoption
@@ -315,7 +289,6 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         }
         for result in replay {
             await handler.handle(result)
-            settle(result.identity)
             pending.leave()
         }
     }
@@ -359,10 +332,7 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         // events" in the very next callback, and the app must not answer that until this has
         // reached the disk — which, for a result that is still waiting for adoption, it has not.
         pending.enter()
-        // In flight from here until its handling returns, on both branches: the task has already
-        // left the session's listing, and the row does not know yet.
         let handler: (any OutboxChunkHandling)? = lock.withLock {
-            undelivered[result.identity, default: 0] += 1
             guard let attached = self.handler else {
                 waiting.append(result)
                 return nil
@@ -372,7 +342,6 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         guard let handler else { return }
         Task {
             await handler.handle(result)
-            settle(result.identity)
             pending.leave()
         }
     }
