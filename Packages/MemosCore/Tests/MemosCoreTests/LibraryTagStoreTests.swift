@@ -108,8 +108,12 @@ struct LibraryTagStoreTests {
     func aStaleKindIsDropped() async {
         let entered = TagListSignal()
         let release = TagListSignal()
-        let client = Stub.client { request, _, _ in
-            if request.path?.contains("type=video") == true {
+        let calls = LockedValue<Int>(0)
+        // Held by ORDER rather than by path, so a store that stopped sending the kind fails here
+        // instead of leaving the test waiting for a request it will never recognise.
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
                 entered.signal()
                 await release.wait()
                 return Stub.json(#"[{"name":"stale","count":9}]"#)
@@ -133,10 +137,14 @@ struct LibraryTagStoreTests {
         let calls = LockedValue<Int>(0)
         let entered = TagListSignal()
         let release = TagListSignal()
+        // Only the first request is held: a second one, if the store sends it, answers at once,
+        // so the join failing is a red expectation rather than a test waiting forever.
         let client = Stub.client { _, _, _ in
             calls.set(calls.get() + 1)
-            entered.signal()
-            await release.wait()
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
             return Stub.json(#"[{"name":"travel","count":3}]"#)
         }
         let store = LibraryTagStore()

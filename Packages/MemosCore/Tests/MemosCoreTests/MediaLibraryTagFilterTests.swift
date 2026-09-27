@@ -101,9 +101,12 @@ struct MediaLibraryTagFilterTests {
     func aSupersededTagPageIsDropped() async {
         let entered = TagSignal()
         let release = TagSignal()
-        let client = Stub.client { request, _, _ in
-            let path = request.path ?? ""
-            if path.contains("tag=first") {
+        let calls = LockedValue<Int>(0)
+        // Held by ORDER rather than by path, so a store that stopped sending the tag fails here
+        // instead of leaving the test waiting for a request it will never recognise.
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
                 entered.signal()
                 await release.wait()
                 return Self.page(["stale"], nextCursor: "stale-2")
