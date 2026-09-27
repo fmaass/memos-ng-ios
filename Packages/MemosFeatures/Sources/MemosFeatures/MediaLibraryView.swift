@@ -220,6 +220,8 @@ struct MediaLibraryView: View {
         let selection = Binding(
             get: { scope },
             set: { chosen in
+                // A jump still reading was on its way to the view being left; it lands nowhere.
+                if chosen != scope { library?.abandonJump() }
                 year = nil
                 scope = chosen
             }
@@ -241,9 +243,15 @@ struct MediaLibraryView: View {
         scope = .months
     }
 
-    /// A day tile's tap. MEMNG-587 makes this the jump into the All grid at that day; until then
-    /// a day is looked at, not opened.
-    private func showDay(_ day: LibraryBucket) {}
+    /// A day tile's tap: the All grid, landed on that day (MEMNG-587). The segment moves at once;
+    /// the store reads until it holds the day and names the row the grid scrolls to
+    /// (`MediaLibraryStore.landing`). The day is looked for in the zone the bucket was counted in.
+    private func showDay(_ day: LibraryBucket) {
+        guard let library, let buckets else { return }
+        let zone = buckets.timeZoneIdentifier
+        scope = .all
+        Task { await jump(library, toDay: day.key, in: zone) }
+    }
 
     @ViewBuilder
     private func grid(_ library: MediaLibraryStore) -> some View {
@@ -258,13 +266,17 @@ struct MediaLibraryView: View {
             wantsMore: { library.shouldLoadMore(after: $0) },
             open: { open($0) },
             fetch: { file, rendition in await fetch(file, rendition) },
-            loadMore: { await loadMore() }
+            loadMore: { await loadMore() },
+            landing: library.landing,
+            landed: { library.consumeLanding($0) }
         )
         // Pinned above the scroll rather than inside it: the filter is how you change what the
         // grid IS, and one that scrolls away is one you have to scroll back up to reach.
         .safeAreaInset(edge: .top) { filterBar(library) }
         .overlay {
-            if let empty = MediaLibraryPresentation.emptyOverlay(
+            if library.isJumping {
+                ProgressView()
+            } else if let empty = MediaLibraryPresentation.emptyOverlay(
                 itemsEmpty: library.items.isEmpty,
                 isLoading: library.isLoading,
                 lastError: library.lastError,
@@ -417,6 +429,11 @@ struct MediaLibraryView: View {
         else { return }
         await library.loadMore(using: handle, baseURL: baseURL)
     }
+
+    private func jump(_ library: MediaLibraryStore, toDay day: String, in zone: String) async {
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
+        await library.jump(toDay: day, in: zone, using: handle, baseURL: baseURL)
+    }
 }
 
 /// The scrolling grid itself, split from the screen so a test can host it.
@@ -441,6 +458,20 @@ private struct BucketListKey: Equatable {
     let subject: String?
 }
 
+/// What the grid asks again on for a landing: the landing, the width its rows are solved to, and
+/// each layout and each row built while the landing's row is not yet among them.
+private struct LandingReadiness: Equatable {
+    let landing: LibraryLanding?
+    let width: CGFloat
+    let laidOut: CGFloat
+    let built: Int
+}
+
+/// The rows a grid's lazy stack has built now, kept out of SwiftUI's observation (`LibraryGrid`).
+private final class RowsOnScreen {
+    var rows: Set<String> = []
+}
+
 struct LibraryGrid: View {
     let items: [LibraryRow]
     /// The zone the month sections are calendar months of.
@@ -460,6 +491,11 @@ struct LibraryGrid: View {
     /// closure, because they differ only in which file they ask for.
     let fetch: (MemoAttachment, AttachmentRendition) async -> Void
     let loadMore: () async -> Void
+    /// The row a jump to a day landed on, which the scroll is brought to each time a jump lands.
+    /// The store takes it down with the list it belongs to, so an abandoned jump never lands here.
+    var landing: LibraryLanding?
+    /// Told once the scroll has been brought to `landing`'s built row, so it is scrolled to once.
+    var landed: (LibraryLanding) -> Void = { _ in }
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
@@ -467,11 +503,75 @@ struct LibraryGrid: View {
     /// rather than assumed, so a rotation or a split view re-packs the library rather than
     /// running it off the edge.
     @State private var contentWidth: CGFloat = 0
+    /// The landing this grid has brought its scroll to: a width measured again afterwards must not
+    /// bring the reader back to it.
+    @State private var scrolledTo: LibraryLanding?
+    /// The rows the lazy stack has built now, the ones on or beside the screen. A reference rather
+    /// than observed state on purpose: it changes with every row scrolled past, and observing it
+    /// would re-solve the whole library each time.
+    @State private var onScreen = RowsOnScreen()
+    /// The height the rows were last laid out to, kept only while a landing waits to be reached,
+    /// so the library is not re-solved for every layout after that.
+    @State private var laidOut: CGFloat = 0
+    /// How many rows the lazy stack has built while a landing waits to be reached.
+    @State private var built = 0
 
     var body: some View {
         // Hoisted because the measuring closure below is `Sendable` and may run off the main
         // actor, where the design tokens are not reachable.
         let inset = 2 * DesignTokens.Space.tight
+        ScrollViewReader { proxy in
+            scroll(inset: inset)
+                // Asked when the grid appears — the Months tap builds a new grid, and the landing
+                // may already be there — and again whenever the landing or the measured width
+                // moves, because before the width is known no row exists to scroll to.
+                .onChange(of: readiness, initial: true) { bring(proxy) }
+                // And again each time the rows are laid out anew: a scroll to a row the lazy stack
+                // has not built goes where its estimate puts it, which moves as rows are measured.
+                // No delay stands in for this: the layout, and the rows built, say when to ask.
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentSize.height
+                } action: { _, laid in
+                    guard landing != nil, landing != scrolledTo else { return }
+                    laidOut = laid
+                }
+        }
+    }
+
+    private var readiness: LandingReadiness {
+        LandingReadiness(
+            landing: landing, width: contentWidth, laidOut: laidOut, built: built)
+    }
+
+    /// Scrolls to the landing's row, again as often as asked until the lazy stack has built that
+    /// row: each ask lands nearer, and only a built row's place is exact rather than estimated.
+    private func bring(_ proxy: ScrollViewProxy) {
+        guard let landing, landing != scrolledTo, let row = rowID(holding: landing.rowID) else {
+            return
+        }
+        proxy.scrollTo(row, anchor: .top)
+        // Built, the row's place is known rather than estimated, so this scroll is the last one.
+        if onScreen.rows.contains(row) { settle(landing) }
+    }
+
+    /// The landing's row is built and scrolled to: the landing is done with, here and in the store.
+    private func settle(_ landing: LibraryLanding) {
+        scrolledTo = landing
+        landed(landing)
+    }
+
+    /// The justified row a file sits in — what the scroll is brought to, because a row is what the
+    /// lazy stack places.
+    private func rowID(holding fileID: String) -> String? {
+        for section in sections {
+            if let row = section.rows.first(where: { $0.tiles.contains { $0.id == fileID } }) {
+                return row.id
+            }
+        }
+        return nil
+    }
+
+    private func scroll(inset: CGFloat) -> some View {
         ScrollView {
             LazyVStack(spacing: DesignTokens.Space.tight) {
                 if let error = errorText {
@@ -530,6 +630,15 @@ struct LibraryGrid: View {
                         // must not be stretched across the width (`JustifiedGallery`).
                         Spacer(minLength: 0)
                     }
+                    .id(row.id)
+                    // The lazy stack builds only the rows on or beside the screen, so a row that
+                    // appears is one the scroll has reached.
+                    .onAppear {
+                        onScreen.rows.insert(row.id)
+                        guard landing != nil, landing != scrolledTo else { return }
+                        built += 1
+                    }
+                    .onDisappear { onScreen.rows.remove(row.id) }
                 }
             }
         }

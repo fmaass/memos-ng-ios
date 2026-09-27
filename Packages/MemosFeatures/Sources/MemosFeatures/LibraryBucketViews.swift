@@ -62,8 +62,7 @@ struct LibraryMonthsMosaic: View {
     let errorText: String?
     /// Widens the days back to every year.
     let clearYear: () -> Void
-    /// A day was tapped. The screen hands in a no-op until MEMNG-587 makes it the jump into the
-    /// All grid at that day; the tile already reports which day it is.
+    /// A day was tapped: the screen jumps to the All grid at that day (MEMNG-587).
     let showDay: (LibraryBucket) -> Void
 
     var body: some View {

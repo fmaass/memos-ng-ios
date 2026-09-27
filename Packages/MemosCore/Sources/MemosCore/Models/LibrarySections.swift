@@ -62,6 +62,16 @@ public func dayKey(_ takenAt: Date?, timeZone: String = libraryTimeZone) -> Stri
     return "\(year)-\(twoDigits(month))-\(twoDigits(day))"
 }
 
+/// Where the first row taken on one calendar day sits in a list, or nil when none of them was.
+///
+/// `day` is a day bucket's key (`YYYY-MM-DD`), which the server counted in `timeZone`; a row is on
+/// that day when its instant, read in the SAME zone, names the same key. Read in any other zone, a
+/// photograph taken late in the evening would be looked for on the day after the one whose tile
+/// was tapped. A row with no readable instant is on no day.
+public func firstRowIndex(onDay day: String, in rows: [LibraryRow], timeZone: String) -> Int? {
+    rows.firstIndex { dayKey($0.takenAt, timeZone: timeZone) == day }
+}
+
 /// A Gregorian calendar in the named zone, speaking English.
 ///
 /// The SPA's `Intl` throws on a zone it does not know, and one unknown identifier must not take the

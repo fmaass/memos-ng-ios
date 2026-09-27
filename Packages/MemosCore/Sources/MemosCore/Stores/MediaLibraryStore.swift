@@ -175,6 +175,144 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         generation += 1
     }
 
+    // MARK: - Jumping to a day (MEMNG-587)
+
+    /// How many rows each page of a jump asks for, its first and every continuation after it.
+    ///
+    /// The server has no cursor that starts at a date, so a day is reached by reading from the
+    /// top. Pages of the grid's own size would make that one round trip per sixty pictures; this
+    /// makes it one per five hundred, and the list the jump leaves keeps the size its cursor was
+    /// minted under (`nextCursorLimit`) until a reload starts a list of the ordinary size.
+    public static let jumpPageSize = 500
+
+    /// Where the last jump landed: the row the grid scrolls to. Nil unless the list on screen is
+    /// still the one that jump loaded — any change of lineage takes it down with the list, so a
+    /// target can never be read out against rows it does not describe, nor applied late.
+    public var landing: LibraryLanding? {
+        guard let landed, landed.lineage == lineage else { return nil }
+        return landed.landing
+    }
+
+    /// Whether a jump is reading pages for the list on screen.
+    public var isJumping: Bool {
+        guard let jumping else { return false }
+        return jumping.lineage == lineage
+    }
+
+    private var landed: (lineage: Lineage, landing: LibraryLanding)?
+
+    /// The jump reading pages now: the lineage it owns and the day it is looking for.
+    private struct Jump: Equatable {
+        var lineage: Lineage
+        var day: String
+        var timeZone: String
+    }
+
+    private var jumping: Jump?
+
+    /// Reads the library from its first page, in the grid's own direction, until a page brings a
+    /// row taken on `day` in `timeZone` — the zone the day bucket was counted in — and then shows
+    /// that list with the row as `landing`.
+    ///
+    /// Nothing reaches the grid before the day is found: the pages are gathered here and applied
+    /// together, so a list that runs out without the day leaves the grid exactly as it was, and a
+    /// jump that is abandoned leaves nothing behind.
+    ///
+    /// A jump is a list of its own from its first request, so it moves the generation BEFORE it
+    /// asks: whatever else is in flight — an earlier jump, a refresh, a continuation — then answers
+    /// a list that has moved on, and so does this jump the moment a later tap, a tab, a direction,
+    /// a tag, `abandonJump` or a subject change moves it in turn. The same day asked for again
+    /// while it is being read is refused, not reissued: the answer on its way is the one that
+    /// lands.
+    ///
+    /// The direction is the grid's own. Both directions the grid offers are orders of when a
+    /// picture was taken, so the jump pages in taken order without turning the library round.
+    public func jump(
+        toDay day: String,
+        in timeZone: String,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        let client = handle.client
+        guard jumping != Jump(lineage: self.lineage, day: day, timeZone: timeZone) else { return }
+        generation += 1
+        let lineage = self.lineage
+        let jump = Jump(lineage: lineage, day: day, timeZone: timeZone)
+        jumping = jump
+        defer {
+            if jumping == jump { jumping = nil }
+        }
+        let limit = Self.jumpPageSize
+        var rows: [LibraryRow] = []
+        var cursor: String?
+        while true {
+            do {
+                let page = try await Self.page(
+                    client,
+                    filter: lineage.filter,
+                    order: lineage.order,
+                    tag: lineage.tag,
+                    cursor: cursor,
+                    limit: limit,
+                    baseURL: baseURL
+                )
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("a jump's page answered for a list that has moved on")
+                    return
+                }
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("a jump's page for a session that has ended is not applied")
+                    return
+                }
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                rows = Self.merged(rows, with: page.items, filter: lineage.filter)
+                if let index = firstRowIndex(onDay: day, in: rows, timeZone: timeZone) {
+                    items = rows
+                    nextCursor = page.nextCursor
+                    nextCursorLimit = limit
+                    hasMore = page.nextCursor != nil
+                    lastError = nil
+                    // A new lineage again, for the reason `refresh` takes one: a continuation that
+                    // set out before this list was applied must not be merged into it.
+                    generation += 1
+                    landed = (
+                        self.lineage,
+                        LibraryLanding(day: day, rowID: rows[index].id, serial: generation)
+                    )
+                    return
+                }
+                guard let next = page.nextCursor else {
+                    MemosLog.api.info("a jump read the whole list without finding its day")
+                    return
+                }
+                cursor = next
+            } catch {
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("a jump's page failed for a list that has moved on")
+                    return
+                }
+                await report(error, issuedUnder: handle)
+                return
+            }
+        }
+    }
+
+    /// Marks `landing` as scrolled to, so a grid built again later, or measured again, does not
+    /// bring the reader back to it. Only the landing the caller scrolled to is cleared: a newer one
+    /// that arrived meanwhile still stands.
+    public func consumeLanding(_ landing: LibraryLanding) {
+        guard landed?.landing == landing else { return }
+        landed = nil
+    }
+
+    /// Drops the jump that is reading, if one is, because the view it was going to land in is no
+    /// longer the one on screen. It moves the lineage — the one way this store drops a page in
+    /// flight — and does nothing when no jump is reading.
+    public func abandonJump() {
+        guard isJumping else { return }
+        generation += 1
+    }
+
     /// Which list a page in flight belongs to — the generation, the filter, the direction AND the
     /// tag, because any of them moving makes the answer a continuation of something nobody is
     /// reading any more.
@@ -200,6 +338,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         // re-sampling is what let a request rejected as one session's reissue itself under the
         // next one's number, with the first one's client still in hand.
         let client = handle.client
+        // A reload is newer than a jump still reading, so the jump must not land over it: moved
+        // here, the jump's pages answer a list that has moved on, whichever answers first.
+        if isJumping { generation += 1 }
         let lineage = self.lineage
         let limit = pageSize
         guard loadingLineage != lineage else { return }
@@ -440,5 +581,22 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
+    }
+}
+
+/// Where a jump to a day landed: the day, and the first row loaded on it.
+public struct LibraryLanding: Sendable, Equatable {
+    /// The day bucket's key that was jumped to.
+    public let day: String
+    /// The row the grid scrolls to.
+    public let rowID: String
+    /// Which list this landing belongs to, so the same day jumped to twice is two landings and the
+    /// grid scrolls twice.
+    public let serial: Int
+
+    public init(day: String, rowID: String, serial: Int) {
+        self.day = day
+        self.rowID = rowID
+        self.serial = serial
     }
 }

@@ -15,6 +15,8 @@ struct MediaLibraryRenderTests {
     /// The grid under a namespace, which only a view can declare.
     private struct Harness: View {
         let items: [LibraryRow]
+        var landing: LibraryLanding?
+        var landed: (LibraryLanding) -> Void = { _ in }
         @Namespace private var zoom
 
         var body: some View {
@@ -27,7 +29,9 @@ struct MediaLibraryRenderTests {
                 wantsMore: { _ in false },
                 open: { _ in },
                 fetch: { _, _ in },
-                loadMore: {}
+                loadMore: {},
+                landing: landing,
+                landed: landed
             )
         }
     }
@@ -55,6 +59,55 @@ struct MediaLibraryRenderTests {
     private static func row(_ attachment: MemoAttachment, takenAt: Date) -> LibraryRow {
         LibraryRow(
             attachment: attachment, takenAt: takenAt, mine: true, filename: attachment.uid)
+    }
+
+    /// MEMNG-587: the Months tap builds a NEW grid, and the jump may have landed before it exists
+    /// or before it has measured its width. Either way the landing is already set when the grid
+    /// could first scroll, so a grid that only answers a CHANGE of landing never scrolls at all.
+    @Test("a grid built with a landing already set scrolls to it, once")
+    func gridScrollsToALandingItWasBuiltWith() async throws {
+        let filler = (0..<40).map {
+            Self.row(
+                MediaViewerPageTests.image("fill-\($0)", width: 1000, height: 1000),
+                takenAt: Self.september)
+        }
+        let target = Self.row(
+            MediaViewerPageTests.image("target", width: 1000, height: 1000), takenAt: Self.august)
+        let landing = LibraryLanding(day: "2026-08-14", rowID: "target", serial: 1)
+        let consumed = LockedLandings()
+        // On the test host's own scene (as `StackChromeTests` does): a window belonging to no scene
+        // took the first scroll the grid asked for and none after it.
+        let frame = CGRect(origin: .zero, size: CGSize(width: 390, height: 844))
+        let window: UIWindow
+        if let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene })
+            as? UIWindowScene
+        {
+            window = UIWindow(windowScene: scene)
+            window.frame = frame
+        } else {
+            window = UIWindow(frame: frame)
+        }
+        window.rootViewController = UIHostingController(
+            rootView: Harness(
+                items: filler + [target], landing: landing, landed: { consumed.append($0) }))
+        window.makeKeyAndVisible()
+
+        // The row coming into view is told after the scroll lands, so both are waited for; then a
+        // few more passes, in which a second report of the same landing would arrive.
+        // The landing's row is the grid's last, so a scroll brought to it rests at the bottom.
+        var offset: CGFloat = 0
+        var bottom: CGFloat = .infinity
+        var settledPasses = 0
+        for _ in 0..<80 where settledPasses < 5 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            (offset, bottom) = Self.scrollOffset(in: window)
+            if offset >= bottom - 1, !consumed.all.isEmpty { settledPasses += 1 }
+        }
+        window.isHidden = true
+        #expect(offset > 0, "the grid never scrolled to the landing it was built with")
+        #expect(offset >= bottom - 1, "the scroll stopped short of the landing's row")
+        #expect(consumed.all == [landing], "the landing was not reported scrolled to exactly once")
     }
 
     @Test("a grid holding files places them once it has a real frame")
@@ -143,6 +196,21 @@ struct MediaLibraryRenderTests {
         }
     }
 
+    /// How far the grid's scroll has been brought down, and the furthest it can be.
+    private static func scrollOffset(in root: UIView) -> (offset: CGFloat, bottom: CGFloat) {
+        var stack: [UIView] = [root]
+        while let view = stack.popLast() {
+            if let scroll = view as? UIScrollView {
+                let bottom =
+                    scroll.contentSize.height + scroll.adjustedContentInset.bottom
+                    - scroll.bounds.height
+                return (scroll.contentOffset.y, bottom)
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return (0, .infinity)
+    }
+
     /// The tallest scrollable content in the hierarchy — SwiftUI's `ScrollView` bridges to a
     /// `UIScrollView`, whose `contentSize` is what the grid actually laid out.
     private static func scrollContentHeight(in root: UIView) -> CGFloat {
@@ -156,4 +224,11 @@ struct MediaLibraryRenderTests {
         }
         return best
     }
+}
+
+/// The landings a hosted grid reported scrolled to, in order.
+@MainActor
+private final class LockedLandings {
+    private(set) var all: [LibraryLanding] = []
+    func append(_ landing: LibraryLanding) { all.append(landing) }
 }

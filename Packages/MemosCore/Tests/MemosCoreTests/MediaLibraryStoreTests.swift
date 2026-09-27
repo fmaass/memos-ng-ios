@@ -310,6 +310,27 @@ struct MediaLibraryStoreTests {
         #expect(store.lastError != nil, "the failure was swallowed")
     }
 
+    /// A jump to a day (MEMNG-587) reads the same endpoint with the same credential, so its refusal
+    /// takes the same one way to the session rather than a way of its own.
+    @Test("a rejected token on a jump reaches the session the way a refresh's does")
+    func unauthorizedJumpIsHandled() async {
+        let handled = LockedValue<Bool>(false)
+        let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
+        let store = MediaLibraryStore(
+            onUnauthorized: { _ in
+                handled.set(true)
+                return .endedSession
+            }
+        )
+        await store.jump(
+            toDay: "2026-09-26", in: "Europe/Zurich", using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(handled.get(), "a 401 on a jump did not reach the session")
+        #expect(store.items.isEmpty)
+        #expect(store.landing == nil)
+        #expect(store.lastError != nil, "the failure was swallowed")
+    }
+
     @Test("a tier URL is resolved against the server, and a list row has no duration to show")
     func rowsMapOntoTheSharedAttachmentModel() async throws {
         let client = Stub.client { _, _, _ in
