@@ -72,8 +72,7 @@ private struct VanishingDownloads: MediaDownloadTransport {
 
 /// A download held open until the test lets it go, so the account can be changed underneath it.
 ///
-/// The wait polls rather than blocks, which is how every other held request in this bundle is
-/// written (`HeatmapStoreTests.hold`): a semaphore inside an async function parks a cooperative
+/// The wait polls rather than blocks: a semaphore inside an async function parks a cooperative
 /// thread, and the test that has to run in the meantime is on the same executor.
 private final class GatedDownloads: MediaDownloadTransport, @unchecked Sendable {
     let entered = LockedValue<Bool>(false)

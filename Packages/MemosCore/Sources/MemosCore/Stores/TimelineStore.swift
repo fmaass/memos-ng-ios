@@ -58,9 +58,8 @@ public final class TimelineStore {
     ///
     /// It is not an error message and it is deliberately not one: the sentence about an
     /// unreachable server belongs to the session, once, on its banner. What this carries is the
-    /// FACT, for the one reader that has to tell "the server said nothing matched" from "nobody
-    /// asked the server" — a search, whose empty list would otherwise read as an answer
-    /// (`MemoSearchOutcome.unavailable`).
+    /// FACT, for a reader that has to tell "the server said nothing matched" from "nobody asked
+    /// the server" — an empty list that would otherwise read as an answer.
     public private(set) var serverUnreachable = false
     public private(set) var hasMore = true
     /// Whether anything is believed to sit ABOVE the loaded rows.
@@ -102,20 +101,20 @@ public final class TimelineStore {
     /// Where a failure that never reached the server goes instead of `lastError`, and the seam
     /// this store reads the session's incarnation from (`SessionReporting`).
     ///
-    /// Named by the owner rather than taken at construction, because the search screen builds one
-    /// of these inside `MemoSearch` and the timeline builds its own from a `.task`.
+    /// Named by the owner rather than taken at construction, because the timeline builds its own
+    /// from a `.task` and names the session to it there.
     private var session: (any SessionReporting)?
     /// Where the last-seen list is kept between launches, or nil for a store that keeps none —
-    /// which is every list that is not THE timeline: a search result set is an answer to a
-    /// question nobody asked again on the next launch.
+    /// which is every list that is not THE timeline: any other list is an answer to a question
+    /// nobody asked again on the next launch.
     private let snapshots: TimelineSnapshotWriter?
     /// Whose timeline this is. Nil is the same "keep none" as above, and it is what a store built
     /// before anybody is signed in has.
     private let snapshotIdentity: TimelineSnapshotIdentity?
     /// Whether this store's list is one a next launch should open on.
     ///
-    /// False for every list that is not THE timeline. The search results are a `TimelineStore` too
-    /// (`MemoSearch`), and they are an answer to a question nobody will ask again tomorrow.
+    /// False for every list that is not THE timeline: any other `TimelineStore` holds an answer to
+    /// a question nobody will ask again tomorrow.
     private let persists: Bool
     /// How many times the published list has changed in this run.
     ///
@@ -816,7 +815,7 @@ public final class TimelineStore {
         if let failure = StoreFailure.transportFailure(error) {
             serverUnreachable = true
             // The sentence a PREVIOUS answer left behind is not about this attempt, and a reader
-            // that sees both reads the older one (`MemoSearch.answer`).
+            // that sees both reads the older one.
             lastError = nil
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
@@ -866,8 +865,8 @@ public final class TimelineStore {
     ///
     /// A store with no session named to it answers yes: a preview and a suite that is about paging
     /// have no incarnation to be wrong about.
-    /// The same question, asked by the owner that holds this store's handle across its own awaits
-    /// (`MemoSearch`, whose debounce is long enough for a session to end inside it).
+    /// The same question, asked by an owner that holds this store's handle across its own awaits,
+    /// long enough for a session to end inside them.
     public func sessionIsCurrent(_ handle: SessionHandle) -> Bool { sessionStillCurrent(handle) }
 
     /// The same fence, as a value the SENDING executor can ask.
@@ -1317,7 +1316,7 @@ public final class TimelineStore {
     /// Waits for every read this store issued to pay a debt.
     ///
     /// Two samples of a request count cannot show that no further payment is still to come, so the
-    /// store offers the instant at which there is none, in the idiom of `MemoSearch.settled()`. A
+    /// store offers the instant at which there is none. A
     /// payment that leaves a debt of its own is waited for too. No mutation awaits this: a save is
     /// finished when the save is finished, and must not wait on a read it did not need.
     func owedReadsSettled() async {

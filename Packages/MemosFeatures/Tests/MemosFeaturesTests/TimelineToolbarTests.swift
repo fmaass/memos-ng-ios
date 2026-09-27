@@ -9,8 +9,9 @@ import UIKit
 /// `UINavigationBar` rather than asserted against a list this file also wrote.
 ///
 /// The arrangement is an IA decision (see `TimelineToolbar`): the way into Settings LEADING, New
-/// memo TRAILING and rightmost, and the slot between them held empty for the date-jump / search
-/// loupe. That is exactly the kind of decision a refactor undoes in silence — both controls were
+/// memo TRAILING and rightmost. A search loupe sat immediately left of New memo from MEMNG-120
+/// until MEMNG-513 retired the Timeline's text search. That is exactly the kind of decision a
+/// refactor undoes in silence — both controls were
 /// on the right until 2026-08-26, and nothing short of a screenshot would have said so.
 ///
 /// MEMNG-185 changed WHAT sits in the leading corner — a gear rather than the account's face, and
@@ -60,7 +61,7 @@ struct TimelineToolbarTests {
     }
 
     private func toolbar() -> TimelineToolbar {
-        TimelineToolbar(composed: 0, openSettings: {}, search: {}, newMemo: {})
+        TimelineToolbar(composed: 0, openSettings: {}, newMemo: {})
     }
 
     /// Hosted in a real key window and laid out around a run-loop spin, for the reason
@@ -161,9 +162,8 @@ struct TimelineToolbarTests {
         #expect(account.frame.minX < newMemo.frame.minX, "the gear is not left of New memo")
     }
 
-    /// The other half of the same decision, and the reservation that goes with it: New memo is in
-    /// the trailing half and nothing sits to its right, because the slot the loupe (MEMNG-120)
-    /// will take is to its LEFT. A loupe added on the far side would fail here.
+    /// The other half of the same decision: New memo is in the trailing half and nothing sits to
+    /// its right. A control added on the far side would fail here.
     @Test("New memo is the trailing control, and the rightmost thing in the bar")
     func newMemoIsTheRightmostControl() throws {
         let bar = try hostedBar()
@@ -182,49 +182,23 @@ struct TimelineToolbarTests {
     /// Changing a control is a chance to lose the words VoiceOver reads, because the label is on
     /// the button rather than on the glyph inside it — an `Image(systemName:)` reads as nothing
     /// worth hearing on its own.
-    @Test("both controls keep the words VoiceOver reads")
+    ///
+    /// The set of labels is asserted WHOLE: the bar holds these two controls and nothing else, so
+    /// a returning loupe (retired with the Timeline's text search, MEMNG-513), or a second copy of
+    /// either control, fails here rather than in a screenshot nobody takes.
+    @Test("both controls keep the words VoiceOver reads, and they are the only two")
     func voiceOverLabelsSurvive() throws {
         let bar = try hostedBar()
-        let labels = Set(bar.controls.map(\.label))
+        let drawn = bar.controls.map(\.label)
+        let labels = Set(drawn)
 
         #expect(labels.contains("Settings"), "\(bar.description)")
         #expect(labels.contains("New memo"), "\(bar.description)")
+        #expect(labels == ["Settings", "New memo"], "\(bar.description)")
+        #expect(drawn.count == 2, "a control is drawn twice: \(bar.description)")
         // Positive control: the walk above reaches labelled views at all, so a label it does not
         // find is an absence rather than a walk that visited nothing.
         #expect(!labels.isEmpty)
-    }
-
-    /// The loupe MEMNG-120 reserved the slot for, arriving where the reservation said it would:
-    /// in the trailing corner, immediately LEFT of New memo, which stays the rightmost thing in
-    /// the bar. The leading corner is untouched.
-    ///
-    /// "The only new bar item" is the half a placement test usually misses. A search surface is
-    /// easy to ship as two controls — a loupe and a cancel, or a loupe and a filter — and a bar
-    /// with four things in it is a different screen from the one this arrangement was decided
-    /// for. So the set of labels is asserted WHOLE rather than by looking for the new one.
-    @Test("the corner button is the only new bar item and it is labelled for VoiceOver")
-    func theLoupeIsTheOnlyNewBarItem() throws {
-        let bar = try hostedBar()
-        print("MEMOSNG_TOOLBAR_BEGIN\n\(bar.description)\nMEMOSNG_TOOLBAR_END")
-        let labels = bar.controls.map(\.label)
-
-        // Three, and exactly these three. A fourth control, or a second copy of one of them,
-        // fails here rather than in a screenshot nobody takes.
-        #expect(Set(labels) == ["Settings", "Search", "New memo"], "\(bar.description)")
-        #expect(labels.count == 3, "a control is drawn twice: \(bar.description)")
-
-        let account = try #require(bar.control("Settings"), "\(bar.description)")
-        let search = try #require(bar.control("Search"), "\(bar.description)")
-        let newMemo = try #require(bar.control("New memo"), "\(bar.description)")
-
-        // Trailing corner, between the face and New memo — the reserved slot, in that order.
-        #expect(search.frame.midX > bar.middle, "the loupe is not in the trailing half")
-        #expect(account.frame.midX < search.frame.midX, "the loupe is not right of the gear")
-        #expect(search.frame.midX < newMemo.frame.midX, "the loupe is not left of New memo")
-        #expect(
-            bar.controls.allSatisfy({ $0.frame.maxX <= newMemo.frame.maxX }),
-            "the loupe displaced New memo from the right-hand end: \(bar.description)"
-        )
     }
 
     /// The half a placement test cannot reach: the gear is not a PICTURE of a way into Settings,

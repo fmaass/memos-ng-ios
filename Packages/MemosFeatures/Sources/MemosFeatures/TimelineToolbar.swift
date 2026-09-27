@@ -16,14 +16,10 @@ import SwiftUI
 ///   that exists to offer one destination is a tap nobody asked for, so the destination is now
 ///   the button: one press, straight to the screen. Who is signed in is still said, in the place
 ///   it was always said properly — the top of Settings, with the avatar beside it.
-/// - TRAILING: the search loupe and then New memo — the screen's primary action, still the
-///   RIGHTMOST thing in the bar. The loupe took the slot reserved for it immediately to New
-///   memo's left (MEMNG-120): it arrived BESIDE New memo rather than displacing it, and the bar
-///   holds three controls now. Nothing else is to be put there.
-///
-/// The loupe is a TARGET, not a control. Everything a search is made of — typing, clearing,
-/// dismissing — happens in the sheet it raises, where a thumb can reach it; the corner costs one
-/// tap and nothing else (`SearchSheet`).
+/// - TRAILING: New memo — the screen's primary action, the RIGHTMOST thing in the bar. A search
+///   loupe sat immediately to its left from MEMNG-120 until MEMNG-513 retired the Timeline's text
+///   search (pictures are found by tag in the Library now), so the bar holds two controls.
+///   Nothing else is to be put there.
 ///
 /// There is no menu here at all any more, and that is the end of a specific hazard rather than a
 /// simplification: a menu opens with its first row directly under the anchor that opened it, and
@@ -38,22 +34,11 @@ struct TimelineToolbar: ToolbarContent {
     /// the rest of the trigger.
     let composed: Int
     let openSettings: () -> Void
-    let search: () -> Void
     let newMemo: () -> Void
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
             SettingsToolbarButton(openSettings: openSettings)
-        }
-        // Declared BEFORE New memo, which is what puts it to New memo's left: items with one
-        // placement are laid out in the order they are written, leading to trailing. The
-        // arrangement is measured out of a real bar rather than trusted to that
-        // (`TimelineToolbarTests`).
-        ToolbarItem(placement: .topBarTrailing) {
-            Button(action: search) {
-                Image(systemName: "magnifyingglass")
-            }
-            .accessibilityLabel("Search")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button(action: newMemo) {
