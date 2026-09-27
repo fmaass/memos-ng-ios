@@ -88,9 +88,10 @@ code{font-family:var(--mono);font-size:.9em;background:var(--soft);padding:1px 5
 .dtags{padding:0 2px 8px;font-size:13px;color:var(--phone-muted);margin-top:-4px}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;border-radius:12px;overflow:hidden}
 .grid .tile{cursor:default}
-.mosaic-mode .grid .tile:first-child{grid-column:span 2;grid-row:span 2}
-.mosaic-mode .grid.small .tile{grid-column:span 3;grid-row:auto;aspect-ratio:16/9}
-.mosaic-mode .grid.small .tile:first-child{grid-column:span 3;grid-row:auto}
+.mosaic-mode .grid{grid-auto-flow:dense}
+.mosaic-mode .tile.hl{grid-column:span 2;grid-row:span 2}
+.mosaic-mode .tile.hr{grid-column:2/span 2;grid-row:span 2}
+.mosaic-mode .tile.wd{grid-column:span 3;aspect-ratio:16/9}
 .sw,.pp{font:inherit;font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:4px 10px;color:var(--ink);cursor:pointer}
 .sw.on,.pp.on{background:var(--soft);border-color:var(--accent);color:var(--accent);font-weight:500}
 .sw:focus-visible,.pp:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -145,7 +146,7 @@ code{font-family:var(--mono);font-size:.9em;background:var(--soft);padding:1px 5
         <p><b>The day group.</b> Each day gets a heading row: the weekday in bold, the date, the count on the right, and the day's tags in a second line when it has any. Its pictures sit under it as one block, inset from the edges with rounded corners, so a day reads as a thing you can hold, not as rows that happen to follow each other. Between two days there is real air.</p>
         <ul>
           <li><b>Even grid</b> keeps three tiles per row inside the block. Densest, every picture the same size.</li>
-          <li><b>Mosaic per day</b> gives the first picture of a day a hero tile and the rest squares, the same rhythm Months uses. A day with one or two pictures gets one wide tile. Calmer, longer to scroll.</li>
+          <li><b>Mosaic per day</b> lays a day out in the same four frame patterns Months cycles through: hero left with two squares stacked right, a row of three, hero right with two squares left, a full-width 16:9 frame. Each day starts the cycle one step later than the day before, so two neighbouring days never open the same way. A day with one or two pictures gets wide frames only.</li>
           <li><b>The date while scrolling.</b> A glass pill names the day whose group is at the top of the screen and updates as groups pass; it fades a second after the scrolling stops. Tap it and you are back in Months at that month. The buttons above the phone move it: top centre under the header, above the dock, top left, or no pill at all and the header's second line turns into the live date instead.</li>
           <li>The month heading stays sticky above the groups, with its count, as today.</li>
           <li>A day tile in Months opens All with that day's group under the month heading, which is the jump MEMNG-587 builds. "and N more days" behaves as decided.</li>
@@ -161,7 +162,7 @@ code{font-family:var(--mono);font-size:.9em;background:var(--soft);padding:1px 5
     <h2>Where this landed</h2>
     <div class="tscroll"><table>
       <tr><th>Question</th><th>Suggestion</th></tr>
-      <tr><td>Grid or mosaic inside a day</td><td>Decided 2026-09-27: mosaic. The first picture of a day is the hero, the rest are squares; a day with one or two pictures gets one wide tile.</td></tr>
+      <tr><td>Grid or mosaic inside a day</td><td>Decided 2026-09-27: mosaic, with the frame patterns mixed. The day cycles through Months' four patterns (hero left, three squares, hero right, wide 16:9), starting one step later than the previous day; a day with one or two pictures gets wide frames only.</td></tr>
       <tr><td>Tags on the day heading</td><td>Kept as drawn: one line, the tags of that day's memos, at most three and "+N". They are what tells two hiking Saturdays apart. The Timeline stays the only place a day has words beyond that.</td></tr>
       <tr><td>Where the date sits while scrolling</td><td>Top centre under the header, as the mock opens. The other three placements stay on the switch for comparison.</td></tr>
     </table></div>
@@ -197,11 +198,22 @@ code{font-family:var(--mono);font-size:.9em;background:var(--soft);padding:1px 5
 
   // ---------- Option B: All with day sections + date pill ----------
   var bS=document.getElementById('bScroll'),pill=document.getElementById('bPill'),toast=document.getElementById('bToast');
-  function dayBlock(d,mon,year,w,r){var label=wd[w]+'|'+d+' '+mon+' '+year;
+  // Frame patterns, as Months uses them (decision 9): A hero left + two squares stacked right,
+  // B a row of three squares, C hero right + two squares stacked left, D a full-width 16:9 frame.
+  // A day starts the cycle at its own index so two neighbouring days never open the same way.
+  var PAT=[['hl','',''],['','',''],['hr','',''],['','',''],['wd']];
+  function slots(n,k){var out=[];if(n<=2){for(var i=0;i<n;i++)out.push('wd');return out;}
+    var i=0,step=k;while(out.length<n){var pat=PAT[step%PAT.length];step++;
+      var left=n-out.length;
+      if(left<pat.length){for(var j=0;j<left;j++)out.push(left===1?'wd':'');break;}
+      for(var j=0;j<pat.length;j++)out.push(pat[j]);}
+    return out;}
+  var dayIndex=0;
+  function dayBlock(d,mon,year,w,r){var label=wd[w]+'|'+d+' '+mon+' '+year;var sl=slots(r[1],dayIndex++);
     var b='<div class="day"><div class="dhead" data-label="'+label+'"><span><span class="wd">'+wd[w]+'</span>'+d+' '+mon+'</span><small>'+r[1]+'</small></div>';
     if(r[3]&&r[3].length)b+='<div class="dtags">'+r[3].join(' ')+'</div>';
-    b+='<div class="grid'+(r[1]<3?' small':'')+'">';
-    for(var i=0;i<r[1];i++){b+='<div class="tile" style="'+tileStyle(d*100+i+(mon==='Aug'?7:0))+'">'+(r[2]&&i===0?'<span class="v">▶ 0:14</span>':'')+'</div>';}
+    b+='<div class="grid">';
+    for(var i=0;i<r[1];i++){b+='<div class="tile '+sl[i]+'" style="'+tileStyle(d*100+i+(mon==='Aug'?7:0))+'">'+(r[2]&&i===0?'<span class="v">▶ 0:14</span>':'')+'</div>';}
     return b+'</div></div>';}
   var g='<div class="mhead">Sep 2026 <small>106 items</small></div>';
   sep.forEach(function(r){g+=dayBlock(r[0],'Sep','2026',dow(r[0]),r);});

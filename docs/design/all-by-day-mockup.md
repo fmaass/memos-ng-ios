@@ -1,7 +1,7 @@
 # All collected by day — text export of the mockup (2026-09-27)
 
 Interactive source: `all-by-day-mockup.html` beside this file (Claude artifact
-https://claude.ai/artifact/8TZR6qt29D1wuyT6XzDLo9, versions 1–4 on 2026-09-27). Owner's decision
+https://claude.ai/artifact/8TZR6qt29D1wuyT6XzDLo9, versions 1–5 on 2026-09-27). Owner's decision
 on 2026-09-27, 20:40 CEST, after two rejected drafts: a separate Day screen between Months and All
 ("I don't like that there is a dedicated day view where you swap to the next day"), and a Days
 level of any kind. The All view stays the one place every picture lives.
@@ -20,9 +20,13 @@ sticky month heading ("Sep 2026 · 106 items") that exists today.
   at most three and "+N". They are what tells two hiking Saturdays apart. The Timeline stays the
   only place a day has words beyond that.
 - **Mosaic block.** The day's pictures as one block, inset 12 pt from the edges with 12 pt rounded
-  corners, 2 pt gaps: the first picture of the day is a 2×2 hero, the rest are squares in a
-  3-column grid; a day with one or two pictures gets a full-width 16:9 tile per picture. A video
-  tile carries its "▶ 0:14" mark bottom-right as today.
+  corners, 2 pt gaps, in a 3-column grid that cycles the SAME four frame patterns Months uses
+  (decision 9): A hero left (2×2) with two squares stacked right, B a row of three squares, C hero
+  right (2×2) with two squares stacked left, D a full-width 16:9 frame. The cycle runs A B C B D and
+  a day starts it one step later than the day before it, so two neighbouring days never open the
+  same way (owner, 21:20 CEST: "only one hero frame? we should mix it up a bit"). A day with one or
+  two pictures gets full-width 16:9 frames only; a remainder that does not fill a pattern is squares,
+  a single leftover a wide frame. A video tile carries its "▶ 0:14" mark bottom-right as today.
 - **Air between days.** 22 pt between one day's block and the next heading.
 - **Not chosen:** the even 3-column grid inside a day (kept on the mock's switch for comparison).
 
