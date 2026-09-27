@@ -1,0 +1,616 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Photos-style Library</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f4f3ef; --surface:#ffffff; --ink:#1d1c19; --muted:#6c6963; --line:#dcd9d1;
+  --accent:#2c66c9; --accent-ink:#ffffff; --soft:#e9eef8; --warn:#b4541a; --warn-soft:#fbeee4;
+  --ok:#2e7d4f; --ok-soft:#e4f2ea;
+  --phone-bg:#000000; --phone-surface:#1c1d21; --phone-ink:#f2f2f0; --phone-muted:#9a9b9e;
+  --phone-line:#2c2d32; --phone-accent:#5b9cff; --phone-bar:rgba(28,29,33,.82);
+  --sans:"Source Sans 3",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --serif:"Newsreader",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#17181b; --surface:#1f2024; --ink:#ebeae6; --muted:#9d9c97; --line:#31333a;
+    --accent:#7aa8ff; --accent-ink:#0e1524; --soft:#232a3a; --warn:#e6905a; --warn-soft:#332419;
+    --ok:#6cc08e; --ok-soft:#1b2d22;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#17181b; --surface:#1f2024; --ink:#ebeae6; --muted:#9d9c97; --line:#31333a;
+  --accent:#7aa8ff; --accent-ink:#0e1524; --soft:#232a3a; --warn:#e6905a; --warn-soft:#332419;
+  --ok:#6cc08e; --ok-soft:#1b2d22;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.5;padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:1180px;margin:0 auto}
+h1,h2,h3{font-family:var(--serif);font-weight:500;letter-spacing:-.01em;text-wrap:balance;margin:0}
+h1{font-size:2.4rem;line-height:1.1}
+h2{font-size:1.55rem;line-height:1.2}
+h3{font-size:1.15rem;font-family:var(--sans);font-weight:600}
+p{margin:0}
+.eyebrow{font-size:.75rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600}
+code{font-family:var(--mono);font-size:.84em;background:var(--soft);padding:.05em .35em;border-radius:4px}
+a{color:var(--accent)}
+header.top{padding-block:40px 28px;display:grid;gap:12px;max-width:68ch}
+header.top p{color:var(--muted);font-size:1.05rem}
+.meta{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:.85rem;color:var(--muted)}
+.meta b{color:var(--ink);font-weight:600}
+.layout{display:grid;grid-template-columns:minmax(0,1fr);gap:40px;align-items:start}
+@media (min-width:900px){.layout{grid-template-columns:400px minmax(0,1fr);gap:56px}.sticky{position:sticky;top:16px}}
+.sections{display:grid;gap:44px;max-width:66ch}
+section{display:grid;gap:12px}
+section ul{margin:0;padding-left:1.2em;display:grid;gap:6px}
+section li b{font-weight:600}
+.note{border-left:3px solid var(--accent);padding:8px 14px;background:var(--soft);border-radius:0 6px 6px 0;font-size:.95rem}
+.note.warn{border-color:var(--warn);background:var(--warn-soft)}
+/* checks for the owner */
+.checks{display:grid;gap:10px}
+.check{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.check .n{font-family:var(--mono);font-size:.8rem;color:var(--muted);padding-top:3px}
+.check b{display:block;font-weight:600}
+.check span{color:var(--muted);font-size:.93rem}
+/* phases */
+.phases{display:grid;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.phase{display:grid;grid-template-columns:34px 1fr auto;gap:12px;padding:12px 14px;border-top:1px solid var(--line);align-items:start}
+.phase:first-child{border-top:0}
+.phase .k{font-family:var(--mono);font-size:.8rem;color:var(--accent);padding-top:3px}
+.phase b{display:block;font-weight:600}
+.phase span{color:var(--muted);font-size:.9rem}
+.phase .side{font-family:var(--mono);font-size:.74rem;color:var(--muted);text-align:right;padding-top:4px;white-space:nowrap}
+.tag{display:inline-block;font-size:.72rem;font-weight:600;padding:1px 7px;border-radius:99px;background:var(--soft);color:var(--accent);margin-left:4px;vertical-align:1px}
+.tag.be{background:var(--ok-soft);color:var(--ok)}
+/* date rule */
+.chain{display:grid;gap:8px;font-family:var(--mono);font-size:.82rem}
+.chain div{display:grid;grid-template-columns:22px 1fr;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+.chain div i{font-style:normal;color:var(--accent)}
+.chain .no{border-style:dashed;color:var(--muted)}
+.chain .no i{color:var(--warn)}
+table{border-collapse:collapse;font-size:.9rem;width:100%}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:.75rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.tblwrap{overflow-x:auto}
+/* ---------- phone mock ---------- */
+.mockwrap{display:grid;gap:12px;justify-items:center}
+.mockhint{font-size:.85rem;color:var(--muted);text-align:center;max-width:36ch}
+.phone{width:min(100%,360px);aspect-ratio:9/19;max-width:100%;background:var(--phone-bg);color:var(--phone-ink);border-radius:36px;border:6px solid #2a2b30;box-shadow:0 20px 50px rgba(0,0,0,.28);position:relative;overflow:hidden;font-family:var(--sans)}
+.phone *{box-sizing:border-box}
+.statusbar{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;font-size:.78rem;font-weight:600;color:var(--phone-ink)}
+/* liquid-glass surfaces: translucent, blurred, hairline border and a top highlight */
+.glass{background:rgba(40,41,46,.62);backdrop-filter:blur(14px) saturate(1.4);-webkit-backdrop-filter:blur(14px) saturate(1.4);border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 4px 14px rgba(0,0,0,.35)}
+.apphdr{display:flex;align-items:flex-start;justify-content:space-between;padding:8px 14px 8px;position:relative;z-index:3;height:64px}
+.apphdr .ttl{font-weight:700;font-size:1.7rem;line-height:1.05;letter-spacing:-.01em}
+.apphdr .ttl small{display:block;font-weight:400;font-size:.74rem;color:var(--phone-muted);margin-top:3px;letter-spacing:0}
+.hbtns{display:flex;gap:8px;align-items:center;padding-top:2px}
+.capsule{height:38px;padding:0 16px;border-radius:99px;color:var(--phone-ink);font:inherit;font-weight:600;font-size:.92rem;cursor:pointer}
+.capsule:focus-visible,.rbtn.sm:focus-visible{outline:2px solid var(--phone-accent)}
+.rbtn.sm{width:38px;height:38px;font-size:1rem}
+.screen{position:absolute;inset:0;top:calc(34px + 64px);overflow-y:auto;overscroll-behavior:contain;padding:0 4px 120px;scrollbar-width:none}
+.screen::-webkit-scrollbar{display:none}
+.mhdr{position:sticky;top:0;z-index:2;background:var(--phone-bar);backdrop-filter:blur(8px);padding:10px 8px 6px;font-weight:600;font-size:1rem;display:flex;justify-content:space-between;align-items:baseline}
+.mhdr small{font-weight:400;color:var(--phone-muted);font-size:.75rem;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:56px;gap:3px;margin-bottom:4px}
+.tile{position:relative;border-radius:2px;background:linear-gradient(135deg,var(--c1),var(--c2));overflow:hidden;cursor:pointer;border:0;padding:0}
+.tile.w2{grid-column:span 2}.tile.w3{grid-column:span 3}.tile.h2{grid-row:span 2}
+.tile .vid{position:absolute;left:5px;bottom:4px;font-size:.62rem;font-weight:600;background:rgba(0,0,0,.55);padding:1px 5px;border-radius:3px;pointer-events:none}
+.tile .chk{position:absolute;right:5px;bottom:5px;width:20px;height:20px;border-radius:50%;border:1.5px solid rgba(255,255,255,.75);background:rgba(0,0,0,.2);display:none;pointer-events:none}
+.tile .chk::after{content:"";position:absolute;left:6px;top:3px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);opacity:0}
+.phone.selecting .tile.mine .chk{display:block}
+.phone.selecting .tile.mine.on .chk{background:#1f7cf5;border-color:#1f7cf5}
+.phone.selecting .tile.mine.on .chk::after{opacity:1}
+.phone.selecting .tile:not(.mine){opacity:.45;cursor:not-allowed}
+.tile:focus-visible{outline:2px solid var(--phone-accent);outline-offset:-2px}
+/* years: one card per year */
+.cards{display:grid;grid-template-columns:1fr;gap:10px;padding:10px 6px}
+.card{border:0;padding:0;background:none;color:inherit;text-align:left;cursor:pointer;font:inherit}
+.card .cov{aspect-ratio:16/9;border-radius:10px;background:linear-gradient(135deg,var(--c1),var(--c2));position:relative;overflow:hidden}
+.card .cov b{position:absolute;left:12px;bottom:10px;font-size:1.3rem;font-weight:700;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+.card .cov small{position:absolute;right:10px;top:8px;font-size:.7rem;background:rgba(0,0,0,.5);padding:2px 7px;border-radius:99px;font-variant-numeric:tabular-nums}
+.card:focus-visible .cov{outline:2px solid var(--phone-accent)}
+/* months: title, then one key photo per day in a mosaic (edge to edge, hero frames) */
+.mtitle{font-weight:700;font-size:1.35rem;padding:18px 10px 8px}
+.more{display:block;width:100%;border:0;background:none;color:var(--accent);font:inherit;font-size:.9rem;text-align:left;padding:6px 12px 10px;cursor:pointer}
+.mosaic{display:grid;grid-template-columns:repeat(3,1fr);grid-auto-flow:dense;gap:2px;padding:0 2px;margin-bottom:2px}
+.day{position:relative;border:0;padding:0;border-radius:6px;background:linear-gradient(135deg,var(--c1),var(--c2));aspect-ratio:1/1;cursor:pointer;overflow:hidden;color:#fff}
+.day.hero-l{grid-column:1/3;grid-row:span 2}
+.day.hero-r{grid-column:2/4;grid-row:span 2}
+.day.hero-w{grid-column:1/4;aspect-ratio:16/9}
+.day b{position:absolute;left:8px;top:6px;font-size:1.05rem;font-weight:700;text-shadow:0 1px 4px rgba(0,0,0,.7)}
+.day.hero-l b,.day.hero-r b,.day.hero-w b{font-size:1.35rem}
+.day:focus-visible{outline:2px solid var(--phone-accent);outline-offset:-2px}
+/* floating dock, always ONE row (Photos app, iOS 26): at rest the app tab pill + search;
+   scrolled inside the Library the active tab shrinks to its icon and Years|Months|All takes the row */
+.dock{position:absolute;left:12px;right:12px;bottom:14px;z-index:5;display:grid;grid-template-columns:1fr;grid-template-areas:"tabs";gap:8px;align-items:center}
+.dock .seg{grid-area:seg;justify-self:center;display:none}
+.dock .tabs{grid-area:tabs;justify-self:start}
+.dock.compact{grid-template-columns:44px 1fr 44px;grid-template-areas:"tabs seg spacer"}
+.dock.compact .seg{display:flex}
+.dock.compact .tabs button:not(.active){display:none}
+.dock.compact .tabs button.active .lbl{display:none}
+.dock.compact .tabs button.active{padding:0;width:38px;justify-content:center}
+.tabs{display:flex;background:var(--phone-bar);backdrop-filter:blur(10px);border:1px solid var(--phone-line);border-radius:99px;padding:3px}
+.tabs button{display:flex;align-items:center;gap:6px;border:0;background:none;color:var(--phone-muted);font:inherit;font-weight:600;font-size:.84rem;padding:8px 13px;border-radius:99px;cursor:pointer;height:38px}
+.tabs button.active{background:var(--phone-ink);color:var(--phone-bg)}
+.tabs button:focus-visible{outline:2px solid var(--phone-accent)}
+.tabs .ico{font-size:1rem;line-height:1}
+.bar{position:absolute;left:14px;right:14px;bottom:18px;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.placeholder{padding:14px 10px;display:grid;gap:10px}
+.placeholder .memo{border:1px solid var(--phone-line);border-radius:12px;padding:12px;background:var(--phone-surface)}
+.placeholder .memo b{display:block;font-size:.85rem;margin-bottom:4px}
+.placeholder .memo p{font-size:.8rem;color:var(--phone-muted)}
+.placeholder .map{height:420px;border-radius:12px;background:radial-gradient(circle at 30% 40%,#2c4a2f 0,#1d2b22 25%,#151c19 60%),#151c19;position:relative}
+.placeholder .map i{position:absolute;width:26px;height:26px;border-radius:50%;background:var(--phone-accent);color:#fff;font:600 .7rem var(--sans);display:grid;place-items:center;font-style:normal}
+.rbtn{width:44px;height:44px;border-radius:50%;border:1px solid var(--phone-line);background:var(--phone-bar);backdrop-filter:blur(10px);color:var(--phone-ink);display:grid;place-items:center;cursor:pointer;padding:0;font-size:1.1rem}
+.rbtn:focus-visible{outline:2px solid var(--phone-accent)}
+.pill{display:flex;background:var(--phone-bar);backdrop-filter:blur(10px);border:1px solid var(--phone-line);border-radius:99px;padding:3px}
+.pill button{border:0;background:none;color:var(--phone-muted);font:inherit;font-weight:600;font-size:.86rem;padding:8px 14px;border-radius:99px;cursor:pointer}
+.pill button[aria-pressed="true"]{background:var(--phone-ink);color:var(--phone-bg)}
+.pill button:focus-visible{outline:2px solid var(--phone-accent)}
+.bar.select-bar{left:12px;right:12px;bottom:14px}
+.bar.select-bar .cnt{font-weight:600;font-size:.95rem;font-variant-numeric:tabular-nums;text-shadow:0 1px 4px rgba(0,0,0,.7)}
+.bar.select-bar .del{color:#ff5a4e}
+.bar.select-bar .del:disabled{opacity:.4;cursor:not-allowed}
+/* menu */
+.menu{position:absolute;right:12px;top:calc(34px + 58px);z-index:6;border-radius:16px;width:62%;padding:6px}
+.menu button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--phone-ink);font:inherit;font-size:.9rem;padding:9px 10px;border-radius:9px;cursor:pointer;text-align:left}
+.menu button .ico{width:18px;text-align:center;color:var(--phone-muted)}
+.menu button .lbl{flex:1}
+.menu button::before{content:"";width:12px;display:inline-block}
+.menu button[aria-checked="true"]::before{content:"✓";color:var(--phone-ink);font-weight:700}
+.menu button:focus-visible{outline:2px solid var(--phone-accent)}
+.menu hr{border:0;border-top:1px solid var(--phone-line);margin:6px 0}
+/* callouts on the mock */
+.feed{display:grid;gap:10px;padding:2px 8px 0}
+.capture{border-radius:12px;padding:10px 12px;color:var(--phone-muted);font-size:.9rem;display:flex;justify-content:space-between;align-items:center}
+.capture i{font-style:normal;color:var(--phone-ink);opacity:.8}
+.dayhdr{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--phone-muted);font-weight:600;padding-top:6px}
+.card{border:1px solid var(--phone-line);border-radius:12px;padding:10px 12px;display:grid;gap:8px;background:var(--phone-bg)}
+.card .top{display:flex;align-items:center;gap:8px;font-size:.78rem;color:var(--phone-muted)}
+.card .top .av{width:22px;height:22px;border-radius:50%;background:#2f4a3a;color:#9fd6b4;display:grid;place-items:center;font-size:.7rem;font-weight:700}
+.card .top .who{color:var(--phone-ink);font-weight:600}
+.card .top .more{margin-left:auto;color:var(--phone-muted)}
+.card .txt{font-size:.92rem;line-height:1.35}
+.card .media{display:grid;gap:3px}
+.card .media.three{grid-template-columns:repeat(3,1fr)}
+.card .media.pair{grid-template-columns:repeat(2,1fr)}
+.card .media.single{grid-template-columns:1fr}
+.card .media i{display:block;aspect-ratio:1;border-radius:6px;background:linear-gradient(135deg,var(--c1),var(--c2))}
+.card .media.single i{aspect-ratio:4/3}
+.card .media.pair i{aspect-ratio:4/3}
+.card .chips{display:flex;gap:6px;flex-wrap:wrap}
+.card .chips span{font-size:.7rem;padding:2px 8px;border-radius:99px;background:rgba(95,210,140,.14);color:#9fd6b4}
+.toast{position:absolute;left:50%;transform:translateX(-50%);bottom:84px;z-index:7;background:var(--phone-surface);border:1px solid var(--phone-line);color:var(--phone-ink);font-size:.82rem;padding:8px 14px;border-radius:99px;white-space:nowrap}
+.controls{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.controls button{font:inherit;font-size:.85rem;font-weight:600;padding:6px 12px;border-radius:99px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}
+.controls button:focus-visible{outline:2px solid var(--accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:.8rem;color:var(--muted);justify-content:center}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-1px;margin-right:5px}
+@media (prefers-reduced-motion: reduce){.bar{transition:none}}
+/* glass wins over the component defaults above */
+.glass{background:rgba(40,41,46,.62);backdrop-filter:blur(14px) saturate(1.4);-webkit-backdrop-filter:blur(14px) saturate(1.4);border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 4px 14px rgba(0,0,0,.35)}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">memos-ng · WP-9 · plan page 3929 · Epic MEMNG-505</div>
+  <h1>The picture library, rebuilt after the iOS Photos app</h1>
+  <p>A walkthrough of what the approved plan will build on <code>/resources</code>, so the understanding can be checked before any code exists. The phone on the left is a working mock: switch the tabs and the pill, open the filter menu, press Select, scroll the grid. Revised 2026-09-23 twice: the Months day mosaic (from your screenshots) and the app tab pill.</p>
+  <div class="meta"><span>Owner decision <b>2026-09-22</b></span><span>Codex plan gate <b>APPROVE, round 3</b></span><span>Milestone <b>328</b>, target 2026-10-31</span><span>Tickets <b>MEMNG-501…511</b></span></div>
+</header>
+
+<div class="layout">
+<div class="sticky mockwrap">
+  <div class="phone" id="phone">
+    <div class="statusbar"><span>09:41</span><span>memos.discomarder.live</span></div>
+    <div class="apphdr">
+      <button class="rbtn sm glass" id="settingsBtn" type="button" hidden aria-label="Settings">⚙</button>
+      <div class="ttl" id="ttl">Library<small id="subtitle">All · newest first</small></div>
+      <div class="hbtns">
+        <button class="rbtn sm glass" id="composeBtn" type="button" hidden aria-label="New memo">✎</button>
+        <button class="rbtn sm glass" id="optBtn" type="button" aria-label="Sort and filter" aria-haspopup="menu">•••</button>
+        <button class="capsule glass" id="selectBtn" type="button">Select</button>
+        <button class="rbtn sm glass" id="selAllBtn" type="button" hidden aria-label="Select all of yours" title="Select all of your pictures in view">☰</button>
+        <button class="rbtn sm glass" id="exitSelBtn" type="button" hidden aria-label="Done">✕</button>
+      </div>
+    </div>
+    <div class="screen" id="screen" tabindex="0" aria-label="Library content"></div>
+    <div class="menu glass" id="menu" hidden role="menu">
+      <button type="button" role="menuitemradio" data-order="newest" aria-checked="true"><span class="lbl">Sort by Newest First</span></button>
+      <button type="button" role="menuitemradio" data-order="oldest" aria-checked="false"><span class="lbl">Sort by Oldest First</span></button>
+      <hr>
+      <button type="button" role="menuitemradio" data-type="" aria-checked="true"><span class="ico">⊞</span><span class="lbl">All Items</span></button>
+      <button type="button" role="menuitemradio" data-type="image" aria-checked="false"><span class="ico">▣</span><span class="lbl">Photos</span></button>
+      <button type="button" role="menuitemradio" data-type="video" aria-checked="false"><span class="ico">▶</span><span class="lbl">Videos</span></button>
+      <hr>
+      <button type="button" role="menuitemradio" data-tag="" aria-checked="true"><span class="ico">#</span><span class="lbl">All tags</span></button>
+      <button type="button" role="menuitemradio" data-tag="curated" aria-checked="false"><span class="ico">#</span><span class="lbl">curated <small>43</small></span></button>
+      <button type="button" role="menuitemradio" data-tag="recap" aria-checked="false"><span class="ico">#</span><span class="lbl">recap <small>4</small></span></button>
+      <button type="button" role="menuitemradio" data-tag="laax" aria-checked="false"><span class="ico">#</span><span class="lbl">laax <small>12</small></span></button>
+    </div>
+    <div class="dock" id="bar">
+      <div class="pill seg glass" role="group" aria-label="View">
+        <button type="button" data-view="years" aria-pressed="false">Years</button>
+        <button type="button" data-view="months" aria-pressed="false">Months</button>
+        <button type="button" data-view="all" aria-pressed="true">All</button>
+      </div>
+      <div class="tabs glass" role="tablist" aria-label="App sections">
+        <button type="button" role="tab" data-tab="library"><span class="ico">▦</span><span class="lbl">Library</span></button>
+        <button type="button" role="tab" data-tab="timeline" class="active"><span class="ico">▤</span><span class="lbl">Timeline</span></button>
+        <button type="button" role="tab" data-tab="places"><span class="ico">◎</span><span class="lbl">Places</span></button>
+      </div>
+    </div>
+    <div class="bar select-bar" id="selbar" hidden>
+      <button class="rbtn glass" id="shareBtn" type="button" disabled aria-label="Share selected">⬆</button>
+      <span class="cnt" id="selcount">0 Items Selected</span>
+      <button class="rbtn glass del" id="delBtn" type="button" disabled aria-label="Delete selected">🗑</button>
+    </div>
+    <div class="toast" id="toast" hidden></div>
+  </div>
+  <div class="controls">
+    <button type="button" id="ctlAll">Show All view</button>
+    <button type="button" id="ctlMonths">Show Months</button>
+    <button type="button" id="ctlYears">Show Years</button>
+    <button type="button" id="ctlSelect">Toggle Select</button>
+    <button type="button" id="ctlCompact">Toggle scrolled state</button>
+  </div>
+  <div class="legend"><span><i style="background:linear-gradient(135deg,#4d7ec9,#7fb0e6)"></i>owned by you</span><span><i style="background:linear-gradient(135deg,#8a8d93,#5e6167)"></i>someone else's public picture</span><span>▶ video</span></div>
+  <p class="mockhint">Tile colours stand in for thumbnails. The month counts are examples, not the live figures.</p>
+</div>
+
+<div class="sections">
+
+<section id="bar-section">
+  <div class="eyebrow">1 · The floating dock</div>
+  <h2>One row, always: the tab pill, or the Library icon plus Years | Months | All</h2>
+  <p>Rebuilt on 2026-09-23 after your note that the two-row dock, with the Years | Months | All pill appearing and vanishing, was confusing. The dock now works exactly like the iOS 26 Photos app: a single liquid-glass row. At rest it is the app tab pill, Library | Timeline | Places, and nothing else. Timeline in the middle is the default destination when the app opens. Sort and filter are not in the dock; they live in the header (section 2).</p>
+  <ul>
+    <li><b>Once you scroll inside the Library</b> the tab pill collapses to the Library icon on the left and Years | Months | All takes its place, with All as the default. That is the state in your latest screenshot. It stays that way while you read; it only expands back to the three tabs when you return to the top or tap the Library icon. Tapping the Library tab while it is active toggles between the two states, so Years and Months are reachable even when the library is too short to scroll.</li>
+    <li><b>Tab pill</b> replaces the drawer for the three main destinations: the Library, the memo feed (today's home route) and the Places map. Explore, Archived and Settings stay in the header menu. On Timeline and Places the dock never shows the Years | Months | All segment. The native iOS app already has exactly these three tabs (Timeline, Library, Places), so the web dock brings the two clients into line.</li>
+    <li><b>Timeline in the mock</b> is now the real feed: day headers, one card per memo with author, time, visibility, text, the picture grid (a row of three, then pairs, as the justified layout packs them) and tag chips. Its header is the one you prefer from the iOS app: settings top-left, new-memo top-right, always visible while scrolling; the inline "Any thoughts…" field at the top of the web feed goes, the new-memo button opens the editor instead. Your reminder screenshots are the iOS app's timeline; the web card carries the same elements.</li>
+    <li><b>Years | Months | All pill</b> switches between the three Library views. The chosen view is also in the URL.</li>
+  </ul>
+  <div class="note warn">Not in the approved plan yet: the plan has a Library-only bar that hides completely on a downward scroll (decision 8). The tab pill is an app-shell change on every route, so it would become its own phase or a separate small plan. Say yes to the dock as shown here, or tell me which destinations belong in the pill, and I fold it in.</div>
+  <div class="note">Try it on the mock: wheel or drag inside the phone and watch the tab pill collapse to the Library icon with Years | Months | All beside it; scroll back to the top, or tap the icon, and the three tabs return. "Toggle scrolled state" does the same. Tap Timeline or Places to see the dock on the other routes. Tap the round options button top right for the sort and filter menu.</div>
+</section>
+
+<section id="header-section">
+  <div class="eyebrow">2 · The header</div>
+  <h2>Options and Select, in liquid glass, top right</h2>
+  <p>Your correction of 2026-09-23 from the second set of screenshots. The Library header has a large bold title with a small line under it, and two glass buttons on the right: a round options button and, to its right, the "Select" capsule. Both are translucent and blurred with a hairline edge and a top highlight, like every control on this screen.</p>
+  <ul>
+    <li><b>Options button</b> opens a glass dropdown under the buttons with three groups: sort ("Sort by Newest First" checked by default, "Sort by Oldest First"), kind ("All Items" checked by default, "Photos", "Videos") and tags ("All tags" checked by default, then every tag with its picture count). Each row carries a checkmark on the active choice; sort, kind and tag land in the URL. The Photos app's extra filters (Favorites, Edited, Screenshots, Shared) and view options are not part of this round.</li>
+    <li><b>Select</b> enters select mode (section 6). The capsule is replaced by round glass buttons while selecting.</li>
+    <li><b>On Timeline</b> the header is settings top-left and new-memo top-right, fixed while scrolling, as in the iOS app (your preference, 2026-09-23). Places keeps its own header.</li>
+  </ul>
+</section>
+
+<section id="search-section">
+  <div class="eyebrow">3 · Finding a picture</div>
+  <h2>By tag, from the options menu. No text search.</h2>
+  <p>Settled on 2026-09-23 after your point that the memos are used for pictures, with very little text: a text search finds almost nothing, so it goes. What people actually have in hand when they look for a picture is a tag, a month or a place, and the app already carries the last two (Months and Years here, the Places map). The tag is the missing one.</p>
+  <ul>
+    <li><b>Tags in the options menu.</b> The third group of the menu lists every tag with its picture count; picking one filters the whole Library, All, Months and Years alike, and the header subtitle shows the tag. The counts in Months and Years follow the tag, so they never disagree with the grid.</li>
+    <li><b>Behind it</b> the picture list and the counts endpoint learn a tag parameter (a picture carries its memo's tags). That is the one piece of backend work this adds: about a day.</li>
+    <li><b>Gone:</b> the search button (header and dock), the Photos-style search screen, the text field. The existing memo text search route stays where it is, reachable from the menu, untouched.</li>
+    <li><b>Later, if wanted:</b> people or objects inside pictures, which the Photos app does on the phone. Nothing in this round prevents it.</li>
+  </ul>
+  <div class="note">Try it on the mock: open the options menu top right on the Library and pick a tag; the subtitle follows.</div>
+</section>
+
+<section id="all-section">
+  <div class="eyebrow">4 · The All view</div>
+  <h2>Every picture, newest first, under a header per month</h2>
+  <p>Today the page stops at the newest 200 of 1795 attachments and shows them in upload order. After the plan it pages through the whole library as you scroll and orders it by the date the picture was taken. A sticky header names each month, with its count, and the grid keeps the current justified row layout.</p>
+  <ul>
+    <li><b>Same tile everywhere.</b> The library reuses the memo card's tile, which fixes the video-tap, retry and error-state defects at once.</li>
+    <li><b>Videos</b> open in the lightbox on a single tap, like photos.</li>
+    <li><b>A failed request</b> shows an error with a retry button, never an empty "no pictures" state.</li>
+  </ul>
+</section>
+
+<section id="date-section">
+  <div class="eyebrow">5 · Which date counts</div>
+  <h2>The EXIF capture date, else the memo's date</h2>
+  <p>This is the owner decision from 2026-09-22. Every picture gets one <code>takenAt</code> value, and both the ordering and the month and year grouping use it:</p>
+  <div class="chain">
+    <div><i>1</i><span>capture_instant — the EXIF capture time, when the photo carries one</span></div>
+    <div><i>2</i><span>memo.created_at — the date of the memo the picture belongs to</span></div>
+    <div><i>3</i><span>attachment.created_at — only for an orphan that belongs to no memo</span></div>
+    <div class="no"><i>✕</i><span>captured_at — never used: it can be the browser's file time or the upload time, and the two cannot be told apart</span></div>
+  </div>
+  <p>Why this matters with the live data:</p>
+  <div class="tblwrap"><table>
+    <tr><th>Live figure (2026-09-22)</th><th>Value</th><th>Consequence</th></tr>
+    <tr><td>Attachments in the library</td><td class="num">1 795</td><td>All become reachable (today: 200).</td></tr>
+    <tr><td>Without any capture date</td><td class="num">624</td><td>All from the June 2026 migration. With the upload date they would form one fake "June 2026" bucket. With the memo date they spread over their real months, back to May 2026.</td></tr>
+    <tr><td>Videos</td><td class="num">169</td><td>The Videos filter and the count badges use the same date.</td></tr>
+    <tr><td>Years with dated pictures</td><td class="num">1</td><td>The Years view shows one card today. Backdated memos can add earlier years.</td></tr>
+  </table></div>
+  <div class="note">The Places map already computes a taken date and falls back to the upload time. The plan switches it to this same chain, so migrated pins move from the migration day to their memo date. That is a deliberate change, covered by a test.</div>
+</section>
+
+<section id="months-section">
+  <div class="eyebrow">6 · Months and Years</div>
+  <h2>Months: the six busiest days of each month, laid out as a mosaic</h2>
+  <p>Corrected on 2026-09-23 after your reference screenshots. Months is not a list of month cards. Each month gets a bold title ("Sep 2026"), then one tile per shown day, edge to edge with hairline gaps. Not every day: the six days with the most pictures, in date order, and a small "and N more days" line under the month when it had more (settled 2026-09-23 after counting: every month since May has 20 to 31 days with pictures, so all of them would be about 130 tiles for five months, a second All view rather than an overview). Some days get a large hero frame, the rest are squares, and the pattern cycles as the Photos app does: hero left with two stacked right, a row of three, hero right, a full-width hero. The day number sits top-left on its tile, bold white, no chip and no count badge. Years keeps one wide card per year.</p>
+  <ul>
+    <li><b>Tap a day tile</b> and the All view opens scrolled to that day. The page loads as many pages as needed to get there.</li>
+    <li><b>Tap "and N more days"</b> and the All view opens at that month's first shown day, where every day is there.</li>
+    <li><b>Tap a year card</b> and Months opens filtered to that year.</li>
+    <li><b>The key photo of a day</b> is the newest picture of that day. No multi-photo collage inside one day tile.</li>
+    <li><b>Day and month boundaries</b> are computed in Europe/Zurich on the server and in the browser, so a photo taken at 23:30 on 31 August lands on 31 August, not on 1 September.</li>
+    <li><b>Which days are shown</b> is by picture count, ties to the later day. <b>Which of them get a hero</b> follows the fixed cycling pattern above, not the picture's importance. The Photos app picks both by content; that is out of scope.</li>
+  </ul>
+  <div class="note warn">This changes the approved plan: the counting endpoint gains a day size, phase 4 builds the day mosaic instead of month cards, and the "no per-day grouping" cut is lifted for the Months view. The change is folded into plan page 3929 and Stories MEMNG-507 and MEMNG-509 and goes through a Codex delta round.</div>
+</section>
+
+<section id="select-section">
+  <div class="eyebrow">7 · Select</div>
+  <h2>Select mode: glass buttons above, a toolbar below</h2>
+  <p>Rebuilt on 2026-09-23 from your screenshots of the Photos app's select mode. Tapping "Select" swaps the header buttons for round glass buttons: one that selects all of your pictures in view (tap again to clear) and a close button that ends select mode. The dock is replaced by a flat toolbar, as in the Photos app: a round glass share button on the left, "N Items Selected" in the centre and a round glass delete button on the right.</p>
+  <ul>
+    <li><b>Tiles:</b> a tap toggles a small blue checkmark in the tile's bottom-right corner instead of opening the picture. Unselected pictures keep their brightness, as in the Photos app. Only your own pictures can be selected; other members' pictures are dimmed and inert, which the Photos app has no equivalent for.</li>
+    <li><b>Share</b> opens the phone's share sheet with the selected original files (Web Share API with files; iOS Safari and the installed PWA support it, Chrome on Android too). On a browser that cannot share files the button is hidden rather than dead. Files are fetched one by one before the sheet opens; a spinner on the button covers the wait.</li>
+    <li><b>Delete</b> asks for confirmation first, then deletes sequentially through the existing single-picture endpoint. On the first failure the run stops and a toast reports how many succeeded and how many failed. Counts in Months and Years refresh afterwards.</li>
+    <li><b>Keyboard:</b> Space and Enter toggle a tile in select mode.</li>
+    <li><b>Not this round:</b> download, add-to-memo, print, and the Photos app's "more" menu in select mode.</li>
+  </ul>
+</section>
+
+<section id="phases-section">
+  <div class="eyebrow">8 · The order of work</div>
+  <h2>Six phases, each merged and deployed on its own</h2>
+  <div class="phases">
+    <div class="phase"><span class="k">1</span><div><b>Page the whole library and fix the four defects<span class="tag">frontend</span></b><span>Infinite paging over the existing cursor header, the shared tile, blurhash cached per picture. Closes MEMNG-501, 502, 503, 504.</span></div><span class="side">MEMNG-506</span></div>
+    <div class="phase"><span class="k">2</span><div><b>The taken-date contract<span class="tag be">backend</span></b><span>Additive <code>takenAt</code> field, taken-date ordering with a composite cursor, the counting endpoint (day, month and year sizes, each with a key photo). The native iOS client keeps working unchanged.</span></div><span class="side">MEMNG-507</span></div>
+    <div class="phase"><span class="k">3</span><div><b>The All view and the floating bar<span class="tag">frontend</span></b><span>Taken order, month sections, filter menu, pill (All only), search button, scroll behaviour. The app tab pill (decision 09) would join here or become a phase of its own once confirmed.</span></div><span class="side">MEMNG-508</span></div>
+    <div class="phase"><span class="k">4</span><div><b>Years and Months<span class="tag">frontend</span></b><span>The day mosaic under each month title, capped to the six busiest days, one wide card per year, and the jump from a day tile into All.</span></div><span class="side">MEMNG-509</span></div>
+    <div class="phase"><span class="k">5</span><div><b>Select mode with delete<span class="tag">frontend</span></b><span>Owner-only selection, sequential delete, keyboard and screen-reader review.</span></div><span class="side">MEMNG-510</span></div>
+    <div class="phase"><span class="k">6</span><div><b>On-device acceptance and closeout</b><span>Owner's iPhone PWA and Safari, desktop Chrome; timings recorded; records closed.</span></div><span class="side">MEMNG-511</span></div>
+  </div>
+  <p>Every phase ends with its tests written red first, the local gate run bare, a Codex review of the diff, and a deploy with a live check on the real page. The 1.8.0 release train is separate and runs in its own session.</p>
+</section>
+
+<section id="decisions-section">
+  <div class="eyebrow">9 · Points worth a second look</div>
+  <h2>The choices that are cheap to change now</h2>
+  <div class="checks">
+    <div class="check"><span class="n">01</span><div><b>Years ships now, even with a single card.</b><span>Alternative: hide Years until a second year exists. Free to change later.</span></div></div>
+    <div class="check"><span class="n">02</span><div><b>No search button and no text search; pictures are found by tag from the options menu.</b><span>Set by you on 2026-09-23: the memos are pictures, not text. Adds a tag parameter to the picture list and the counts endpoint (about a day). The memo text search route stays untouched.</span></div></div>
+    <div class="check"><span class="n">03</span><div><b>The dock appears on desktop too.</b><span>Alternative: a top toolbar on wide screens. One breakpoint to change.</span></div></div>
+    <div class="check"><span class="n">09</span><div><b>Proposed by you 2026-09-23: the app tab pill (Library | Timeline | Places) in the dock; inside the Library, scrolling collapses it to the Library icon plus Years | Months | All.</b><span>Replaces the plan's hide-on-scroll rule for the Library bar (decision 8) with the Photos-app single-row swap. An app-shell change on every route, so it becomes its own phase. Folded into the plan as decision 11 on the strength of your message; say so if you meant it only as a question.</span></div></div>
+    <div class="check"><span class="n">04</span><div><b>Select does share and delete.</b><span>Share (toolbar left) hands the selected originals to the phone's share sheet through the Web Share API; where the browser cannot share files (desktop Firefox), the button is hidden. Delete on the right. Other people's pictures cannot be selected at all. Share added at your request 2026-09-23.</span></div></div>
+    <div class="check"><span class="n">05</span><div><b>Sort and filter live in the header options menu.</b><span>The inline All / Images / Videos switch disappears; the glass options button left of Select holds sort and filter, and the choice survives a reload. Set by you on 2026-09-23.</span></div></div>
+    <div class="check"><span class="n">06</span><div><b>Jumping to an old month loads pages until it arrives.</b><span>Fine at 1.8 k pictures. If the jump to the oldest month takes more than 3 s on the iPhone, a smarter cursor becomes a follow-up ticket.</span></div></div>
+    <div class="check"><span class="n">07</span><div><b>No virtualization.</b><span>All loaded tiles stay in the page. Revisited only if the phone struggles in phase 6.</span></div></div>
+    <div class="check"><span class="n">08</span><div><b>Out of scope this round.</b><span>Favourites, "edited" and screenshot filters, multi-photo collages inside a day tile, content-driven hero selection, add-to-memo from Select, a bulk-delete endpoint, database migrations, any change to the iOS app.</span></div></div>
+  </div>
+</section>
+
+</div>
+</div>
+</div>
+
+<script>
+(function(){
+  var phone=document.getElementById('phone'), screen=document.getElementById('screen');
+  var bar=document.getElementById('bar'), selbar=document.getElementById('selbar');
+  var menu=document.getElementById('menu'), toast=document.getElementById('toast');
+  var subtitle=document.getElementById('subtitle');
+  var state={tab:'timeline',view:'all',type:'',order:'newest',selecting:false,selected:{},tag:''};
+  function renderOther(){
+    if(state.tab==='timeline'){
+      var pal=[['#4d7ec9','#7fb0e6'],['#c9884d','#e6b47f'],['#6b4dc9','#a17fe6'],['#3f9a6e','#8fd6b0'],['#c94d6e','#e68fa8'],['#8a8d93','#5e6167'],['#b8a24d','#e6d68f']];
+      function pics(n,seed){var out='';for(var k=0;k<n;k++){var c=pal[(seed+k)%pal.length];out+='<i style="--c1:'+c[0]+';--c2:'+c[1]+'"></i>';}return out;}
+      function media(n,seed){
+        if(!n)return '';
+        if(n===1)return '<div class="media single">'+pics(1,seed)+'</div>';
+        if(n===2)return '<div class="media pair">'+pics(2,seed)+'</div>';
+        var rows='<div class="media three">'+pics(3,seed)+'</div>';n-=3;var k=3;
+        while(n>0){var take=n>=3&&n!==4?3:2;rows+='<div class="media '+(take===3?'three':'pair')+'">'+pics(take,seed+k)+'</div>';n-=take;k+=take;}
+        return rows;
+      }
+      var feed=[
+        {day:'Today',items:[{who:'fabian',av:'F',t:'8:12 AM',vis:'🔒',txt:'Sunday walk along the lake, first cold morning.',n:3,tags:['walk']}]},
+        {day:'Yesterday',items:[{who:'laura',av:'L',t:'5:36 PM',vis:'🌐',txt:'',n:7,tags:[]},{who:'fabian',av:'F',t:'10:04 PM',vis:'🌐',txt:'',n:2,tags:[]}]},
+        {day:'Sunday, 20 September',items:[{who:'laura',av:'L',t:'9:51 PM',vis:'🌐',txt:'Home moments',n:5,tags:['recap']},{who:'fabian',av:'F',t:'7:20 AM',vis:'🔒',txt:'Receipt for the bike service, 180 CHF. Chain and cassette replaced.',n:1,tags:['bike','receipt']},{who:'laura',av:'L',t:'6:02 AM',vis:'🌐',txt:'With the kids at the playground before it rained.',n:4,tags:[]}]},
+        {day:'Friday, 18 September',items:[{who:'fabian',av:'F',t:'9:40 PM',vis:'🔒',txt:'Ideas for the balcony: herbs on the rail, a second chair, string lights.',n:0,tags:['home']}]}
+      ];
+      var seed=0;
+      screen.innerHTML='<div class="feed">'+feed.map(function(g){
+        return '<div class="dayhdr">'+g.day+'</div>'+g.items.map(function(m){
+          seed+=m.n||1;
+          return '<article class="card"><div class="top"><span class="av">'+m.av+'</span><span class="who">'+m.who+'</span><span>'+m.t+'</span><span>'+m.vis+'</span><span class="more">•••</span></div>'
+            +(m.txt?'<div class="txt">'+m.txt+'</div>':'')+media(m.n,seed)
+            +(m.tags.length?'<div class="chips">'+m.tags.map(function(t){return '<span>#'+t+'</span>';}).join('')+'</div>':'')+'</article>';
+        }).join('');
+      }).join('')+'<p class="mockhint" style="color:var(--phone-muted);padding:8px 0 4px">The memo feed, route /. Texts and pictures are examples.</p></div>';
+    }else{
+      screen.innerHTML='<div class="placeholder"><div class="map"><i style="left:28%;top:36%">12</i><i style="left:58%;top:52%">4</i><i style="left:40%;top:70%">27</i></div><p class="mockhint" style="color:var(--phone-muted)">The Places map with its clusters (today\'s /places route). Placeholder only.</p></div>';
+    }
+  }
+
+  // Example months: real months of the live library (Sep 2026 back to May 2026); counts are illustrative.
+  var months=[
+    {key:'2026-09',label:'September 2026',short:'Sep 2026',n:31,dn:20,days:[4,8,11,12,15,17]},
+    {key:'2026-08',label:'August 2026',short:'Aug 2026',n:47,dn:31,days:[2,9,12,18,29,31]},
+    {key:'2026-07',label:'July 2026',short:'Jul 2026',n:38,dn:31,days:[4,5,11,18,25,28]},
+    {key:'2026-06',label:'June 2026',short:'Jun 2026',n:29,dn:4,days:[7,11,20,27]},
+    {key:'2026-05',label:'May 2026',short:'May 2026',n:24,dn:5,days:[12,14,19,23,30]}
+  ];
+  var palettes=[['#4d7ec9','#7fb0e6'],['#3f9c8a','#7fd1b9'],['#c97a3f','#e9b07a'],['#7e5fc4','#b49ce6'],['#c94d6a','#e68aa0'],['#3f6fa8','#5fa3d6']];
+  var other=['#8a8d93','#5e6167'];
+  function seeded(i){return ((i*9301+49297)%233280)/233280;}
+  function tiles(mk,count){
+    var out=[];var mi=months.findIndex(function(m){return m.key===mk;});
+    for(var i=0;i<count;i++){
+      var r=seeded(mi*100+i);
+      var isVid=r>0.86, mine=r<0.78||isVid;
+      if(state.type==='video'&&!isVid)continue;
+      if(state.type==='image'&&isVid)continue;
+      var pal=mine?palettes[(mi+i)%palettes.length]:other;
+      var span=r<0.15?'w2':(r>0.7&&r<0.76?'w3':'');
+      var tall=r>0.4&&r<0.48?'h2':'';
+      out.push({id:mk+'-'+i,pal:pal,vid:isVid,mine:mine,span:span,tall:tall});
+    }
+    return out;
+  }
+  function renderAll(){
+    var list=state.order==='newest'?months:months.slice().reverse();
+    var h='';
+    list.forEach(function(m){
+      var ts=tiles(m.key,Math.min(m.n,18));
+      if(!ts.length)return;
+      h+='<div class="mhdr" id="mh-'+m.key+'"><span>'+m.label+'</span><small>'+ts.length+' shown of '+m.n+'</small></div><div class="grid">';
+      ts.forEach(function(t){
+        h+='<button type="button" class="tile '+t.span+' '+t.tall+(t.mine?' mine':'')+(state.selected[t.id]?' on':'')+'" data-id="'+t.id+'" style="--c1:'+t.pal[0]+';--c2:'+t.pal[1]+'" aria-label="'+(t.vid?'video':'photo')+(t.mine?'':' from another member')+'">'+(t.vid?'<span class="vid">▶ 0:12</span>':'')+'<span class="chk"></span></button>';
+      });
+      h+='</div>';
+    });
+    screen.innerHTML=h;
+  }
+  function renderYears(){
+    var total=months.reduce(function(a,m){return a+m.n;},0);
+    screen.innerHTML='<div class="cards"><button type="button" class="card" data-year="2026"><div class="cov" style="--c1:#4d7ec9;--c2:#c97a3f"><small>'+total+'</small><b>2026</b></div></button></div>';
+  }
+  // Mosaic patterns cycle over the month's days, as the Photos app does:
+  // A = hero left 2x2 + two stacked right; B = a row of three; C = hero right 2x2 + two stacked left; D = full-width hero.
+  var patterns=[['hero-l','',''],['','',''],['','hero-r',''],['hero-w']];
+  function renderMonths(){
+    var list=state.order==='newest'?months:months.slice().reverse();
+    var h='';
+    list.forEach(function(m,mi){
+      h+='<div class="mtitle" id="mt-'+m.key+'">'+m.short+'</div><div class="mosaic">';
+      var di=0,pi=mi%patterns.length;
+      while(di<m.days.length){
+        var pat=patterns[pi%patterns.length];
+        for(var k=0;k<pat.length&&di<m.days.length;k++,di++){
+          var d=m.days[di], p=palettes[(mi*7+d)%palettes.length];
+          h+='<button type="button" class="day '+pat[k]+'" data-month="'+m.key+'" data-day="'+d+'" style="--c1:'+p[0]+';--c2:'+p[1]+'" aria-label="'+d+' '+m.short+'"><b>'+d+'</b></button>';
+        }
+        pi++;
+      }
+      h+='</div>';
+      if(m.dn>m.days.length)h+='<button type="button" class="more" data-month="'+m.key+'" data-day="'+m.days[0]+'">and '+(m.dn-m.days.length)+' more days</button>';
+    });
+    screen.innerHTML=h;
+  }
+  function render(){
+    var ttl=document.querySelector('.apphdr .ttl');
+    if(state.tab!=='library'){
+      renderOther();
+      ttl.firstChild.textContent=state.tab==='timeline'?'':'Places';
+      subtitle.textContent=state.tab==='timeline'?'Tuesday, 23 September':'map';
+    }else{
+      if(state.view==='all')renderAll();else if(state.view==='months')renderMonths();else renderYears();
+      ttl.firstChild.textContent='Library';
+      var t=state.type==='image'?'Photos':state.type==='video'?'Videos':'All';
+      subtitle.textContent=(state.view==='all'?t:state.view==='months'?'Months':'Years')+(state.tag?' · #'+state.tag:'')+' · '+(state.order==='newest'?'newest first':'oldest first');
+    }
+    var lib=state.tab==='library', tl=state.tab==='timeline';
+    ttl.hidden=tl;
+    document.getElementById('settingsBtn').hidden=!tl;
+    document.getElementById('composeBtn').hidden=!tl;
+    document.getElementById('optBtn').hidden=!lib||state.selecting;
+    document.getElementById('selectBtn').hidden=!lib||state.selecting;
+    document.getElementById('selAllBtn').hidden=!(lib&&state.selecting);
+    document.getElementById('exitSelBtn').hidden=!(lib&&state.selecting);
+    phone.querySelectorAll('.pill button').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.view===state.view));});
+    phone.querySelectorAll('.tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===state.tab);b.setAttribute('aria-selected',String(b.dataset.tab===state.tab));});
+    phone.classList.toggle('selecting',state.selecting);
+    bar.hidden=state.selecting; selbar.hidden=!state.selecting;
+    updateCount();
+  }
+  function updateCount(){
+    var n=Object.keys(state.selected).length;
+    document.getElementById('selcount').textContent=n+(n===1?' Item Selected':' Items Selected');
+    document.getElementById('delBtn').disabled=n===0;
+    document.getElementById('shareBtn').disabled=n===0;
+  }
+  function say(msg){toast.textContent=msg;toast.hidden=false;clearTimeout(say.t);say.t=setTimeout(function(){toast.hidden=true;},2200);}
+  function setView(v){state.tab='library';state.view=v;if(v!=='all'){state.selecting=false;state.selected={};}render();screen.scrollTop=0;bar.classList.add('compact');}
+  function setTab(t){state.tab=t;state.selecting=false;state.selected={};menu.hidden=true;render();screen.scrollTop=0;bar.classList.remove('compact');say(t==='library'?'Route /resources':t==='timeline'?'Route / (memo feed)':'Route /places');}
+
+  phone.querySelectorAll('.pill button').forEach(function(b){b.addEventListener('click',function(){setView(b.dataset.view);});});
+  phone.querySelectorAll('.tabs button').forEach(function(b){b.addEventListener('click',function(){
+    if(b.dataset.tab===state.tab&&state.tab==='library'){bar.classList.toggle('compact');return;}
+    setTab(b.dataset.tab);
+  });});
+  document.getElementById('ctlAll').addEventListener('click',function(){setView('all');});
+  document.getElementById('ctlMonths').addEventListener('click',function(){setView('months');});
+  document.getElementById('ctlYears').addEventListener('click',function(){setView('years');});
+  function toggleSelect(){
+    if(state.tab!=='library'||state.view!=='all'){setView('all');}
+    state.selecting=!state.selecting; state.selected={}; menu.hidden=true; render();
+  }
+  document.getElementById('selectBtn').addEventListener('click',toggleSelect);
+  document.getElementById('ctlSelect').addEventListener('click',toggleSelect);
+  document.getElementById('ctlCompact').addEventListener('click',function(){if(state.selecting)toggleSelect();if(state.tab!=='library')setTab('library');bar.classList.toggle('compact');});
+  document.getElementById('optBtn').addEventListener('click',function(){menu.hidden=!menu.hidden;});
+  document.getElementById('exitSelBtn').addEventListener('click',toggleSelect);
+  document.getElementById('selAllBtn').addEventListener('click',function(){
+    var all=screen.querySelectorAll('.tile.mine'), n=Object.keys(state.selected).length;
+    var selectAll=n<all.length;
+    all.forEach(function(t){if(selectAll)state.selected[t.dataset.id]=true;else delete state.selected[t.dataset.id];t.classList.toggle('on',selectAll);});
+    updateCount(); say(selectAll?'Selected all of your pictures in view':'Deselected all');
+  });
+  menu.querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click',function(){
+      if(b.dataset.type!==undefined){state.type=b.dataset.type;menu.querySelectorAll('[data-type]').forEach(function(x){x.setAttribute('aria-checked',String(x===b));});}
+      if(b.dataset.order){state.order=b.dataset.order;menu.querySelectorAll('[data-order]').forEach(function(x){x.setAttribute('aria-checked',String(x===b));});}
+      if(b.dataset.tag!==undefined){state.tag=b.dataset.tag;menu.querySelectorAll('[data-tag]').forEach(function(x){x.setAttribute('aria-checked',String(x===b));});}
+      menu.hidden=true;render();
+      say('URL: /resources?type='+(state.type||'all')+'&order='+state.order);
+    });
+  });
+  screen.addEventListener('click',function(e){
+    var tile=e.target.closest('.tile'); var card=e.target.closest('.card'); var day=e.target.closest('.day')||e.target.closest('.more');
+    if(day){
+      var mk=day.dataset.month, dn=day.dataset.day; setView('all');
+      var mh=document.getElementById('mh-'+mk); if(mh){screen.scrollTop=mh.offsetTop;}
+      say('Loaded pages until '+dn+' '+mk+' arrived, then jumped to that day');
+      return;
+    }
+    if(tile){
+      if(state.selecting){
+        if(!tile.classList.contains('mine')){say('Not yours: cannot be selected');return;}
+        var id=tile.dataset.id; if(state.selected[id])delete state.selected[id];else state.selected[id]=true;
+        tile.classList.toggle('on',!!state.selected[id]);updateCount();
+      }else{say(tile.getAttribute('aria-label').indexOf('video')===0?'Opens the video in the lightbox':'Opens in the lightbox');}
+      return;
+    }
+    if(card){
+      if(card.dataset.year){setView('months');say('Months, filtered to 2026');}
+    }
+  });
+  screen.addEventListener('keydown',function(e){
+    if(!state.selecting)return; var tile=e.target.closest&&e.target.closest('.tile');
+    if(tile&&(e.key===' '||e.key==='Enter')){e.preventDefault();tile.click();}
+  });
+  document.getElementById('shareBtn').addEventListener('click',function(){
+    var n=Object.keys(state.selected).length;
+    say('Share sheet → '+n+' original file'+(n===1?'':'s')+' via the Web Share API');
+  });
+  document.getElementById('delBtn').addEventListener('click',function(){
+    var n=Object.keys(state.selected).length;
+    say('Confirm dialog → deletes '+n+' one by one, then refreshes counts');
+    state.selected={};state.selecting=false;render();
+  });
+  // Dock behaviour (Photos app): the moment you scroll inside the Library the tab pill collapses to the
+  // Library icon and Years|Months|All takes the row; it stays that way until you reach the top again or
+  // tap the icon. No idle timer, no direction test: nothing flips while you read.
+  screen.addEventListener('scroll',function(){
+    if(state.tab!=='library'||state.selecting)return;
+    if(screen.scrollTop>20)bar.classList.add('compact');else bar.classList.remove('compact');
+  },{passive:true});
+  render();
+})();
+</script>
+
+</body></html>
