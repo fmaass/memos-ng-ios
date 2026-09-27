@@ -20,4 +20,43 @@ struct SessionBannerTests {
     func saysNothingWhenVerified() {
         #expect(SessionBanner.text(for: .verified) == nil)
     }
+
+    /// The older-server line is the one card a confirmed session can carry: it is about the
+    /// server's contract, not the credential, and it says exactly the sentence the app promises.
+    @Test("a confirmed session on an older server says so, in exactly one sentence")
+    func aConfirmedSessionCarriesTheOlderServerLine() {
+        let notice = SessionBanner.notice(
+            showingUnreachable: false,
+            verification: .verified,
+            showingOlderServer: true
+        )
+        #expect(notice == .olderServer("This server is older than the app expects."))
+    }
+
+    /// One card, and the more urgent one: an unreachable server outranks the older-server line,
+    /// and so does a credential not yet confirmed.
+    @Test("the older-server line yields to the unreachable notice and to the unconfirmed line")
+    func theOlderServerLineYields() {
+        let unreachable = SessionBanner.notice(
+            showingUnreachable: true,
+            verification: .unverified("Can't reach home."),
+            showingOlderServer: true
+        )
+        #expect(unreachable == .unreachable("Can't reach home."))
+        let unverified = SessionBanner.notice(
+            showingUnreachable: false,
+            verification: .unverified("Can't reach home."),
+            showingOlderServer: true
+        )
+        #expect(unverified == .unverified("Can't reach home."))
+    }
+
+    @Test("without the flag a confirmed session still says nothing")
+    func noFlagNoLine() {
+        #expect(
+            SessionBanner.notice(
+                showingUnreachable: false, verification: .verified, showingOlderServer: false
+            ) == nil
+        )
+    }
 }
