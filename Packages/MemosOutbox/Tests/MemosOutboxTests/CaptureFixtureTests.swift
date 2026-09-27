@@ -16,6 +16,16 @@ import Testing
 struct CaptureFixtureTests {
     static let binaries = AutoMemoDateArtefact.binaries
 
+    /// The bound every fixture read here runs under, instead of the product's five seconds.
+    ///
+    /// These cases ask what the reader READS, and a fixture is a few hundred bytes; what the
+    /// product's bound does to a slow read is asserted by the deadline cases below, with a read
+    /// that never answers. Under the product's bound, a build host carrying two lanes handed back
+    /// readings with nothing at all in them for exactly the fixtures that go through a system
+    /// decoder — the shape a timed-out read leaves — and they read as the reader being wrong
+    /// (MEMNG-392).
+    static let patient: Duration = .seconds(60)
+
     @Test(
         "every fixture the artefact names is vendored, whole",
         arguments: CaptureFixtureTests.binaries)
@@ -43,11 +53,16 @@ struct CaptureFixtureTests {
         // A fixed "now" so the header's future check is not a race with the clock.
         let now = try #require(AutoMemoDateArtefact.instant("2026-09-06T00:00:00Z"))
         let reading = await CaptureReader.read(
-            fileAt: named.url, mime: named.binary.mime, now: now)
+            fileAt: named.url, mime: named.binary.mime, now: now, deadline: Self.patient)
+        // A read that was not heard out is told apart from a wrong answer before any value is
+        // compared: "not read" is a fact about the decoder, a wrong value is a fact about the
+        // reader, and a red run has to say which one it saw.
+        let why = Self.diagnosis(named, reading)
+        #expect(reading.failure == nil, "\(why)")
         let expected = named.binary.expect.captureInstant.flatMap(AutoMemoDateArtefact.instant(_:))
-        #expect(reading.instant == expected, "\(named.name)")
-        #expect(reading.civil == named.binary.expect.captureCivil, "\(named.name)")
-        #expect(reading.source?.rawValue == named.binary.expect.captureSource, "\(named.name)")
+        #expect(reading.instant == expected, "\(why)")
+        #expect(reading.civil == named.binary.expect.captureCivil, "\(why)")
+        #expect(reading.source?.rawValue == named.binary.expect.captureSource, "\(why)")
     }
 
     /// The case that made the reader grow a PNG chunk walk.
@@ -62,20 +77,30 @@ struct CaptureFixtureTests {
         let expected = try #require(AutoMemoDateArtefact.instant("2026-01-01T07:15:00Z"))
         for name in ["png-exif.png", "png-exif-after-idat.png"] {
             let named = try #require(Self.binaries.first { $0.name == name })
-            let reading = await CaptureReader.read(fileAt: named.url, mime: named.binary.mime)
-            #expect(reading.instant == expected, "\(name)")
+            let reading = await CaptureReader.read(
+                fileAt: named.url, mime: named.binary.mime, deadline: Self.patient)
+            #expect(reading.instant == expected, "\(Self.diagnosis(named, reading))")
             #expect(reading.source == .exif, "\(name)")
         }
         // WHICH reader finds which is the divergence the walk exists for, asserted rather than
         // assumed: ImageIO answers for the chunk before the image data and not for the one after.
+        // And that ImageIO's nil for the one after is an answer — properties with no EXIF in
+        // them — rather than a refusal, which would read as a file that could not be decoded.
         let after = try #require(Self.binaries.first { $0.name == "png-exif-after-idat.png" })
-        #expect(CaptureReader.imageIOTags(at: after.url) == nil)
+        var refusal: String?
+        #expect(CaptureReader.imageIOTags(at: after.url, refusal: &refusal) == nil)
+        #expect(refusal == nil)
         let before = try #require(Self.binaries.first { $0.name == "png-exif.png" })
-        #expect(CaptureReader.imageIOTags(at: before.url)?.dateTime == "2026:01:01 13:00:00")
+        let tags = CaptureReader.imageIOTags(at: before.url, refusal: &refusal)
+        #expect(tags?.dateTime == "2026:01:01 13:00:00")
         // And on a PNG with no EXIF at all the walk finds nothing and invents nothing.
         let none = try #require(Self.binaries.first { $0.name == "png-none.png" })
         #expect(PNGExif.dateTags(inFileAt: none.url) == nil)
-        #expect(await CaptureReader.read(fileAt: none.url, mime: none.binary.mime) == .empty)
+        // `.empty` exactly, so with no failure beside it: a file that says nothing was HEARD, and
+        // it must not be reported as a read that was not.
+        let silent = await CaptureReader.read(
+            fileAt: none.url, mime: none.binary.mime, deadline: Self.patient)
+        #expect(silent == .empty, "\(Self.diagnosis(none, silent))")
     }
 
     @Test("the chunk walk reads the date tags and nothing else")
@@ -105,7 +130,9 @@ struct CaptureFixtureTests {
         }
         let elapsed = Date().timeIntervalSince(started)
 
-        #expect(reading == .empty, "a read that never answered was allowed to answer")
+        #expect(
+            reading == CaptureReading(failure: .deadline),
+            "a read that never answered was allowed to answer, or not called a deadline")
         #expect(elapsed < 5, "the deadline did not bound the caller (\(elapsed)s)")
         // Let the abandoned work finish, so the test process is not left with a task in it.
         await gate.release()
@@ -115,38 +142,105 @@ struct CaptureFixtureTests {
     /// the detached work nor the continuation this is parked on by itself — nothing else would ever
     /// resume it — so a composer that goes away while a big video is being read would otherwise
     /// wait out the whole deadline for an answer nobody wants.
-    @Test("a cancelled read returns at once, with nothing, and cancels the work")
+    @Test(
+        "a cancelled read returns at once, with nothing, and cancels the work",
+        .timeLimit(.minutes(1)))
     func cancellingTheReadReturnsAtOnce() async throws {
         let gate = NeverReturns()
+        // Opened by the work itself once it is running, so the cancellation below lands on a read
+        // in flight. A sleep here was a guess that a loaded host outlasted (MEMNG-414).
+        let running = NeverReturns()
         let sawCancellation = CancellationWitness()
-        let started = Date()
         let task = Task {
             await CaptureReader.withDeadline(.seconds(30)) {
+                await running.release()
                 await gate.wait()
                 await sawCancellation.record(Task.isCancelled)
                 return CaptureReading(instant: Date(), civil: nil, source: .exif)
             }
         }
-        // Give the work a turn to start, then take it away.
-        try await Task.sleep(for: .milliseconds(50))
+        await running.wait()
+        let cancelled = Date()
         task.cancel()
         let reading = await task.value
-        let elapsed = Date().timeIntervalSince(started)
+        let elapsed = Date().timeIntervalSince(cancelled)
 
-        #expect(reading == .empty, "a cancelled read answered with a date anyway")
+        #expect(
+            reading == CaptureReading(failure: .cancelled),
+            "a cancelled read answered with a date, or not as a cancellation")
         #expect(elapsed < 5, "the cancellation waited for the deadline (\(elapsed)s)")
         // And the work itself was cancelled rather than left running to the end of the process.
+        // Its answer is awaited, not slept for: read before the work records it, the witness says
+        // nothing either way. The time limit is what bounds a work that never records at all.
         await gate.release()
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(await sawCancellation.value == true, "the detached read was not cancelled")
+        #expect(await sawCancellation.observed() == true, "the detached read was not cancelled")
+    }
+
+    /// AVFoundation answers a movie it cannot open by throwing, and that throw used to be read as
+    /// a movie with no date — indistinguishable from `mp4-zero-header.mp4`, which WAS read.
+    @Test("a movie AVFoundation refuses is reported as refused, not as a movie with no date")
+    func aRefusedMovieIsNotAnEmptyOne() async throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("capture-\(UUID().uuidString).mov")
+        let reading = await CaptureReader.read(
+            fileAt: missing, mime: "video/quicktime", deadline: Self.patient)
+        #expect(reading.failure == .undecodable)
+        #expect(reading.instant == nil && reading.civil == nil && reading.source == nil)
+        #expect(reading.detail != nil, "the refusal did not say what AVFoundation reported")
+    }
+
+    /// The image half of the same rule. Bytes ImageIO will not open as an image are a refusal,
+    /// described with the status ImageIO reported at the failing call — not an image with no date,
+    /// which is what `png-none.png` is.
+    @Test("an image ImageIO refuses is reported as refused, with what ImageIO said")
+    func aRefusedImageIsNotAnEmptyOne() async throws {
+        let garbage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("capture-\(UUID().uuidString).jpg")
+        try Data("this is not an image".utf8).write(to: garbage)
+        defer { try? FileManager.default.removeItem(at: garbage) }
+        let reading = await CaptureReader.read(
+            fileAt: garbage, mime: "image/jpeg", deadline: Self.patient)
+        #expect(reading.failure == .undecodable)
+        #expect(reading.instant == nil && reading.civil == nil && reading.source == nil)
+        #expect(
+            reading.detail?.hasPrefix("ImageIO ") == true,
+            "the refusal did not carry ImageIO's own answer: \(reading.detail ?? "none")")
+    }
+
+    /// A cancellation that is itself what wakes the work.
+    ///
+    /// The work here answers the instant its sleep is cancelled, so it is ready with a DATE the
+    /// moment the caller's cancellation reaches it. The cancellation must already have claimed the
+    /// answer by then; if it cancelled the work first and claimed after, the work could win. One
+    /// pass proves little about an ordering, so it is asked many times.
+    @Test(
+        "a cancellation that wakes the work still answers as a cancellation",
+        .timeLimit(.minutes(1)))
+    func aCancellationThatWakesTheWorkStillWins() async throws {
+        var wrong = 0
+        for _ in 0..<200 {
+            let running = NeverReturns()
+            let task = Task {
+                await CaptureReader.withDeadline(.seconds(30)) {
+                    await running.release()
+                    try? await Task.sleep(for: .seconds(30))
+                    return CaptureReading(instant: Date(), civil: nil, source: .exif)
+                }
+            }
+            await running.wait()
+            task.cancel()
+            if await task.value != CaptureReading(failure: .cancelled) { wrong += 1 }
+        }
+        #expect(wrong == 0, "\(wrong) of 200 cancellations were answered by the work instead")
     }
 
     @Test("the HEIC's date comes from its PRIMARY image, not from item 0")
     func heicPrimaryImage() async throws {
         let named = try #require(Self.binaries.first { $0.name == "heic-offset.heic" })
-        let reading = await CaptureReader.read(fileAt: named.url, mime: named.binary.mime)
+        let reading = await CaptureReader.read(
+            fileAt: named.url, mime: named.binary.mime, deadline: Self.patient)
         let expected = named.binary.expect.captureInstant.flatMap(AutoMemoDateArtefact.instant(_:))
-        #expect(reading.instant == expected)
+        #expect(reading.instant == expected, "\(Self.diagnosis(named, reading))")
         // The decoy the fixture carries at item 0 is a 2019 date. Reading the wrong index does not
         // fail with an error — it answers confidently with somebody else's year, which is why this
         // is asserted rather than assumed.
@@ -157,12 +251,35 @@ struct CaptureFixtureTests {
     static func hex(_ digest: SHA256Digest) -> String {
         digest.map { String(format: "%02x", $0) }.joined()
     }
+
+    /// What a red fixture read says about itself: its failure, and what the refusing decoder
+    /// reported at the failing call — carried in the reading from where it happened, so a red run
+    /// reports what THAT read saw rather than what a second decode sees afterwards (MEMNG-295).
+    static func diagnosis(
+        _ named: AutoMemoDateArtefact.NamedBinary, _ reading: CaptureReading
+    ) -> String {
+        let failure = reading.failure.map(\.rawValue) ?? "none"
+        return "\(named.name), failure: \(failure), detail: \(reading.detail ?? "none")"
+    }
 }
 
-/// Whether the abandoned work saw the cancellation it was sent.
+/// Whether the abandoned work saw the cancellation it was sent, and a way to wait until it has
+/// said so.
 actor CancellationWitness {
-    private(set) var value: Bool?
-    func record(_ cancelled: Bool) { value = cancelled }
+    private var value: Bool?
+    private var waiting: [CheckedContinuation<Bool, Never>] = []
+
+    func record(_ cancelled: Bool) {
+        value = cancelled
+        let waiters = waiting
+        waiting = []
+        for waiter in waiters { waiter.resume(returning: cancelled) }
+    }
+
+    func observed() async -> Bool {
+        if let value { return value }
+        return await withCheckedContinuation { waiting.append($0) }
+    }
 }
 
 /// A read that answers only when the test lets it — which, for the deadline case, is after the
