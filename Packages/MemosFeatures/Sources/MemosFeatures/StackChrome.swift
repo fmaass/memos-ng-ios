@@ -2,28 +2,24 @@ import SwiftUI
 
 /// What a pushed screen keeps of the app that pushed it.
 ///
-/// The tab bar belongs to the `TabView`, not to the navigation stack inside a tab, so it stays
-/// under everything the timeline pushes unless the pushed screen says otherwise. Nearly nothing
-/// should say otherwise: a memo is a thing inside the Timeline tab, and the bar under it is how
-/// you leave. Settings is the exception — it is the whole app's screen, reached from a tab it
-/// does not belong to, so the Timeline and Library icons under it were the previous screen's
-/// controls left sitting on somebody else's (MEMNG-220).
+/// The dock belongs to the tabs, not to the navigation stack inside a tab, so it stays under
+/// everything the timeline pushes unless the pushed screen says otherwise. Nearly nothing should
+/// say otherwise: a memo is a thing inside the Timeline tab, and the dock under it is how you
+/// leave. Settings is the exception — it is the whole app's screen, reached from a tab it does not
+/// belong to, so the Timeline and Library icons under it were the previous screen's controls left
+/// sitting on somebody else's (MEMNG-220).
 enum ScreenChrome: Equatable, Sendable {
-    /// A screen inside its tab. The tab bar stays exactly as it was on the tab's root.
+    /// A screen inside its tab. The dock stays exactly as it was on the tab's root.
     case withinTab
-    /// A screen that stands for the whole app. The tab bar goes while it is up, and comes back
-    /// when it is popped.
+    /// A screen that stands for the whole app. The dock goes while it is up, and comes back when
+    /// it is popped.
     case takesOverTab
 
-    /// The tab bar's visibility while such a screen is on top.
-    ///
-    /// `.automatic` rather than `.visible` for a screen inside its tab: automatic IS what the bar
-    /// resolves to with nothing said at all, so a screen declaring itself ordinary changes nothing
-    /// about what was already there.
-    var tabBar: Visibility {
+    /// Whether the dock is under such a screen while it is on top.
+    var showsDock: Bool {
         switch self {
-        case .withinTab: .automatic
-        case .takesOverTab: .hidden
+        case .withinTab: true
+        case .takesOverTab: false
         }
     }
 }
@@ -56,17 +52,18 @@ extension View {
     /// A destination in one of the app's navigation stacks, drawn with the chrome its route asks
     /// for.
     /// The route's answer is read HERE rather than inside the closure, and the closure carries
-    /// only the `Visibility` away with it. What it decides is the same either way; what changes is
-    /// that the destination closure then touches nothing actor-isolated, so it is the same
-    /// construct `navigationDestination` is handed today rather than a new one that has to be
-    /// argued about.
+    /// only a `Bool` away with it, so what the destination does to the dock cannot disagree with
+    /// the route it was pushed for. The system tab bar is hidden on every destination as on every
+    /// tab root: the dock replaces it, and a pushed screen must not bring it back.
     func stackDestination<Route: StackRoute, Destination: View>(
         for route: Route.Type,
         @ViewBuilder destination: @escaping (Route) -> Destination
     ) -> some View {
-        let tabBar = Route.chrome.tabBar
+        let takesOver = !Route.chrome.showsDock
         return navigationDestination(for: route) { value in
-            destination(value).toolbarVisibility(tabBar, for: .tabBar)
+            destination(value)
+                .toolbarVisibility(.hidden, for: .tabBar)
+                .modifier(DockTakeover(takesOver: takesOver))
         }
     }
 }

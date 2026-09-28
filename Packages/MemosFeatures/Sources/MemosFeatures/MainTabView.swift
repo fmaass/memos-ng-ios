@@ -1,39 +1,6 @@
 import MemosCore
 import SwiftUI
 
-/// The signed-in app's surfaces, as a value rather than as literals inside a `TabView`.
-///
-/// It exists so what the app's main navigation OFFERS is assertable: a tab whose title or glyph is
-/// written inline in a view body is a thing no test can read back, and this is the one list that
-/// says how many ways into the app there are.
-public enum MainTab: String, CaseIterable, Identifiable, Sendable {
-    // Declaration order IS the bar's order, left to right: Library, Timeline in the middle, Places —
-    // the same pill the web dock draws (plan page 3929 decision 11), so the two clients read alike.
-    // Which tab the app opens on is not this order's business; `MainTabView.selection` says it.
-    case library
-    case timeline
-    case places
-
-    public var id: String { rawValue }
-
-    public var title: String {
-        switch self {
-        case .timeline: "Timeline"
-        case .library: "Library"
-        case .places: "Places"
-        }
-    }
-
-    /// SF Symbols, so the bar looks like every other tab bar on the phone.
-    public var symbol: String {
-        switch self {
-        case .timeline: "list.bullet"
-        case .library: "photo.on.rectangle.angled"
-        case .places: "map"
-        }
-    }
-}
-
 /// What the app shows while somebody is signed in.
 ///
 /// A tab bar rather than a screen with a button to somewhere else: the library is a place people
@@ -42,7 +9,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Sendable {
 /// and forth between them cost nothing.
 struct MainTabView: View {
     @Environment(SessionStore.self) private var session
-    @State private var selection: MainTab = .timeline
+    @State private var selection: MainTab
     /// A memo asked for from a tab that cannot open one.
     ///
     /// It lives HERE because the move it describes is a move between tabs: the Library says which
@@ -50,6 +17,12 @@ struct MainTabView: View {
     /// tab bar is the only thing that can put the app on the other one. Both ends read it out of
     /// the environment (MEMNG-191).
     @State private var jump = MemoJump()
+
+    /// Opens on the Timeline, the middle tab (plan page 3929 decision 11). A test that is about
+    /// another tab's screen under the real dock opens there instead.
+    init(opening tab: MainTab = .timeline) {
+        _selection = State(initialValue: tab)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -96,13 +69,9 @@ struct MainTabView: View {
     private var tabs: some View {
         // The bar IS `MainTab.allCases`: its content and its order are the enum's, so a case added
         // without a screen is a compile error rather than a tab nobody can reach, and a test that
-        // reads the enum reads what a person touches.
-        TabView(selection: $selection) {
-            ForEach(MainTab.allCases) { tab in
-                Tab(tab.title, systemImage: tab.symbol, value: tab) {
-                    screen(for: tab)
-                }
-            }
+        // reads the enum reads what a person touches. The dock that draws it is `DockedTabs`.
+        DockedTabs(selection: $selection) { tab in
+            screen(for: tab)
         }
         .environment(jump)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the

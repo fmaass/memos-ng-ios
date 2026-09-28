@@ -136,8 +136,8 @@ private final class SegmentCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// The Years | Months | All segment (MEMNG-586), on the Library screen itself, hosted over a real
-/// `SessionStore` and the real generated client.
+/// The Years | Months | All segment (MEMNG-586), in the dock over the Library (MEMNG-594), hosted
+/// in the real `MainTabView` over a real `SessionStore` and the real generated client.
 ///
 /// In this suite for the reason `MediaLibrarySubjectChangeTests` is: it installs the loader's
 /// transport and publishes its retry signal, both process-wide, and the suite is serialized.
@@ -171,6 +171,9 @@ extension MediaImageLoaderTests {
         labelled label: String, in node: Any, into found: inout [NSObject]
     ) {
         guard let object = node as? NSObject else { return }
+        // The system tab bar is hidden under the dock but keeps its items' labels; it must not
+        // answer for the dock.
+        if object is UITabBar { return }
         if object.accessibilityLabel == label { found.append(object) }
         for child in object.accessibilityElements ?? [] {
             elements(labelled: label, in: child, into: &found)
@@ -196,50 +199,100 @@ extension MediaImageLoaderTests {
     /// SwiftUI's accessibility elements are not views, and have no superview to walk up.
     private static func isInNavigationBar(_ element: NSObject, bar: CGRect?) -> Bool {
         guard let bar else { return false }
-        let frame = element.accessibilityFrame
+        let frame = frame(of: element)
         return !frame.isEmpty && bar.contains(CGPoint(x: frame.midX, y: frame.midY))
     }
 
-    /// Picks the toolbar's "Years" segment the way a tap does: the segmented control that draws
-    /// the "Years" label in the navigation bar takes that segment as its value and announces it to
-    /// its target. Returns what it found, for the message of a case that then sees no change.
-    ///
-    /// Reached through the accessibility tree, because that is where the walk meets the bar's
-    /// control: a walk of `subviews` alone from the window never did.
-    private static func chooseYears(in window: UIWindow) -> String {
-        let bar = navigationBarFrame(in: window)
-        var found: [NSObject] = []
-        elements(labelled: "Years", in: window, into: &found)
-        // Every control that draws it: the bar may hold a second copy it measures with, and which
-        // of the two is live is the bar's business.
-        var chosen: [UISegmentedControl] = []
-        var report: [String] = []
-        for case let label as UIView in found where isInNavigationBar(label, bar: bar) {
-            var node = label.superview
-            while let current = node, !(current is UISegmentedControl) { node = current.superview }
-            guard let control = node as? UISegmentedControl,
-                !chosen.contains(where: { $0 === control })
-            else { continue }
-            guard
-                let index = (0..<control.numberOfSegments).first(where: {
-                    control.titleForSegment(at: $0) == "Years"
-                })
-            else { continue }
-            control.selectedSegmentIndex = index
-            control.sendActions(for: .valueChanged)
-            if let action = control.actionForSegment(at: index) { control.sendAction(action) }
-            chosen.append(control)
-            let titles = (0..<control.numberOfSegments).map { control.titleForSegment(at: $0) }
-            report.append("segment \(index) of \(titles), window \(control.window != nil)")
+    /// Where an element is drawn, in the window's coordinates. A UIKit view is asked directly:
+    /// in a window attached to no scene its accessibility frame is not converted to the screen
+    /// (measured: a segment label of the dock's control read y=7), while SwiftUI's elements are.
+    private static func frame(of element: NSObject) -> CGRect {
+        if let view = element as? UIView, let window = view.window {
+            return view.convert(view.bounds, to: window)
         }
-        if !report.isEmpty { return "chose \(report)" }
-        let kinds = found.map { "\(type(of: $0))" }
-        return "no segmented control draws Years in the navigation bar: \(kinds)"
+        return element.accessibilityFrame
+    }
+
+    /// Whether an element is drawn in the dock: the bottom fifth of the window, where it sits.
+    private static func isInDock(_ element: NSObject, window: UIWindow) -> Bool {
+        let frame = frame(of: element)
+        return !frame.isEmpty && frame.midY > window.bounds.height * 0.8
+            && frame.intersects(window.bounds)
+    }
+
+    /// The labels among `titles` the dock reads out right now.
+    private static func dockLabels(_ titles: [String], in window: UIWindow) -> Set<String> {
+        var shown: Set<String> = []
+        for title in titles {
+            var found: [NSObject] = []
+            elements(labelled: title, in: window, into: &found)
+            if found.contains(where: { isInDock($0, window: window) }) { shown.insert(title) }
+        }
+        return shown
+    }
+
+    /// Every segmented control in the navigation bar. The Library's toolbar used to carry the
+    /// Years | Months | All picker; the dock carries it now, and the bar must carry none.
+    private static func navigationBarSegmentedControls(in window: UIWindow) -> Int {
+        var count = 0
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let bar = view as? UINavigationBar, !bar.isHidden {
+                var inner: [UIView] = [bar]
+                while let node = inner.popLast() {
+                    if node is UISegmentedControl { count += 1 }
+                    inner.append(contentsOf: node.subviews)
+                }
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return count
+    }
+
+    /// Scrolls every tall scroll view on screen `distance` points below the top of its content,
+    /// the way a drag leaves it: the offset moves and the scroll view tells its delegate.
+    private static func scroll(_ window: UIWindow, by distance: CGFloat) -> Int {
+        var moved = 0
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let scroller = view as? UIScrollView, scroller.window != nil,
+                scroller.bounds.height > window.bounds.height / 2,
+                !(scroller is UITextView)
+            {
+                let top = -scroller.adjustedContentInset.top
+                scroller.setContentOffset(CGPoint(x: 0, y: top + distance), animated: false)
+                moved += 1
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return moved
+    }
+
+    /// The dock's element that reads out `label`, if the dock draws one.
+    private static func dockElement(_ label: String, in window: UIWindow) -> NSObject? {
+        var found: [NSObject] = []
+        elements(labelled: label, in: window, into: &found)
+        return found.first { isInDock($0, window: window) }
+    }
+
+    /// Picks the dock's "Years" segment the way VoiceOver presses it. Returns what it found, for
+    /// the message of a case that then sees no change.
+    private static func chooseYears(in window: UIWindow) -> String {
+        guard let years = dockElement("Years", in: window) else {
+            var found: [NSObject] = []
+            elements(labelled: "Years", in: window, into: &found)
+            let kinds = found.map { "\(type(of: $0))@\(Int(frame(of: $0).midY))" }
+            return "the dock draws no Years: \(kinds)"
+        }
+        return years.accessibilityActivate() ? "pressed Years" : "Years took no press"
     }
 
     /// Every label the hosted hierarchy reads out.
     private static func labels(in node: Any, into found: inout [String]) {
         guard let object = node as? NSObject else { return }
+        // The system tab bar is hidden under the dock but keeps its items' labels; it must not
+        // answer for the dock.
+        if object is UITabBar { return }
         if let label = object.accessibilityLabel, !label.isEmpty { found.append(label) }
         for child in object.accessibilityElements ?? [] { labels(in: child, into: &found) }
         if let view = object as? UIView {
@@ -253,7 +306,8 @@ extension MediaImageLoaderTests {
         return found
     }
 
-    /// Signs in, hosts the Library and switches it to Years through the toolbar's segment.
+    /// Signs in, hosts the app on the Library under the real dock, scrolls it past the dock's
+    /// threshold and switches it to Years through the segment the dock turns into.
     private func hostYears(_ wire: SegmentTransport) async -> (SessionStore, UIWindow) {
         let session = segmentSession(wire)
         await session.enteredForeground()
@@ -262,26 +316,47 @@ extension MediaImageLoaderTests {
 
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
         window.rootViewController = UIHostingController(
-            rootView: MediaLibraryView().environment(session))
+            rootView: MainTabView(opening: .library).environment(session))
         window.makeKeyAndVisible()
 
-        var labels: [String] = []
-        for _ in 0..<200 where !labels.contains("Years") {
+        let tabs = MainTab.allCases.map(\.title)
+        let segment = LibraryScope.allCases.map(\.label)
+        var inDock: Set<String> = []
+        for _ in 0..<200 where inDock != Set(tabs) {
             await segmentSettle(window, turns: 1)
-            labels = Self.labels(in: window)
+            inDock = Self.dockLabels(tabs + segment, in: window)
         }
+        // At rest the dock is the three tabs and nothing else (plan page 3929 decision 8).
+        #expect(inDock == Set(tabs), "the Library at rest: the dock reads \(inDock)")
+        // The navigation bar carries no segmented control: the picker left it for the dock.
+        #expect(Self.navigationBarSegmentedControls(in: window) == 0)
+        var years: [NSObject] = []
+        Self.elements(labelled: "Years", in: window, into: &years)
         let bar = Self.navigationBarFrame(in: window)
-        var inBar: [NSObject] = []
-        for title in ["Years", "Months", "All"] {
-            var found: [NSObject] = []
-            Self.elements(labelled: title, in: window, into: &found)
-            inBar += found.filter { Self.isInNavigationBar($0, bar: bar) }.prefix(1)
-        }
-        #expect(inBar.count == 3, "the toolbar does not offer Years, Months and All: \(labels)")
+        #expect(!years.contains { Self.isInNavigationBar($0, bar: bar) }, "Years in the bar")
         // The control: All is what the Library opens on, and All reads no buckets.
         await segmentSettle(window)
         #expect(wire.sizesAsked.isEmpty, "All read buckets: \(wire.sizesAsked)")
         #expect(!Self.labels(in: window).contains("12 items"), "a year card drawn under All")
+
+        // Past the threshold the dock collapses to the Library icon beside Years | Months | All.
+        var moved = 0
+        for _ in 0..<100 where !inDock.isSuperset(of: segment) {
+            moved = Self.scroll(window, by: DockMode.segmentThreshold * 8)
+            await segmentSettle(window, turns: 1)
+            inDock = Self.dockLabels(tabs + segment, in: window)
+        }
+        #expect(moved > 0, "no scroll view to scroll")
+        #expect(
+            inDock == Set(segment + [MainTab.library.title]),
+            "the Library scrolled: the dock reads \(inDock)"
+        )
+        #expect(Self.navigationBarSegmentedControls(in: window) == 0)
+        // All is the segment's default, as it is the Library's.
+        #expect(
+            Self.dockElement("All", in: window)?.accessibilityTraits.contains(.selected) == true,
+            "All is not the chosen segment"
+        )
 
         let chosen = Self.chooseYears(in: window)
         await segmentSettle(window)
@@ -289,7 +364,7 @@ extension MediaImageLoaderTests {
         return (session, window)
     }
 
-    @Test("the toolbar's segment switches the Library to Years, which draws a card per year")
+    @Test("the dock's segment switches the Library to Years, which draws a card per year")
     func segmentSwitchesToYears() async {
         let wire = SegmentTransport()
         let probe = CoverProbe()

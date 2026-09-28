@@ -20,10 +20,13 @@ struct MediaLibraryView: View {
     @State private var tags: LibraryTagStore?
     /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
     @State private var buckets: LibraryBucketStore?
-    /// Which of Years, Months and All is on screen. All is the grid this screen always drew.
-    @State private var scope: LibraryScope = .all
-    /// The year a Years card narrowed the Months view to, or nil for every year.
-    @State private var year: String?
+    /// Which of Years, Months and All is on screen, and the year a Years card narrowed Months to.
+    /// Shared with the dock, whose segment picks it (plan page 3929 decision 11); a Library hosted
+    /// with no dock above it keeps its own, at All.
+    @Environment(LibraryScopeChoice.self) private var sharedChoice: LibraryScopeChoice?
+    @State private var ownChoice = LibraryScopeChoice()
+    /// The dock this Library's scrolling collapses to its segment, when there is one above it.
+    @Environment(AppDock.self) private var dock: AppDock?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -50,7 +53,6 @@ struct MediaLibraryView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if let library {
-                    ToolbarItem(placement: .topBarLeading) { scopePicker }
                     ToolbarItem(placement: .topBarTrailing) { optionsMenu(library) }
                 }
             }
@@ -92,6 +94,11 @@ struct MediaLibraryView: View {
                     }
                 )
             }
+            // A choice made in the dock's segment abandons a jump still reading, synchronously, on
+            // the store it is reading on.
+            if let library {
+                choice.whenChosenByHand { [weak library] in library?.abandonJump() }
+            }
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this grid (`SessionReporting`).
             library?.reports(to: session)
@@ -104,7 +111,7 @@ struct MediaLibraryView: View {
         // in now. All reads none.
         .task(
             id: BucketListKey(
-                scope: scope,
+                scope: choice.scope,
                 filter: library?.filter,
                 tag: library?.tag,
                 subject: session.state.user?.subject
@@ -148,9 +155,11 @@ struct MediaLibraryView: View {
         return .library(library, more: more)
     }
 
+    private var choice: LibraryScopeChoice { sharedChoice ?? ownChoice }
+
     @ViewBuilder
     private func content(_ library: MediaLibraryStore) -> some View {
-        switch scope {
+        switch choice.scope {
         case .all:
             grid(library)
         case .years, .months:
@@ -171,6 +180,8 @@ struct MediaLibraryView: View {
     ) -> some View {
         // Nil while the store's list answers some other selection — a read still on its way, or
         // one that failed and left the previous kind's list standing.
+        let scope = choice.scope
+        let year = choice.year
         let answered = bucketsShown(
             for: scope,
             filter: library.filter,
@@ -187,14 +198,16 @@ struct MediaLibraryView: View {
                     errorText: store.lastError,
                     chooseYear: { chooseYear($0) }
                 )
+                .feedsDock(dock, on: .library)
             } else {
                 LibraryMonthsMosaic(
                     months: mosaicMonths(year.map { dayBuckets(shown, inYear: $0) } ?? shown),
                     year: year,
                     errorText: store.lastError,
-                    clearYear: { year = nil },
+                    clearYear: { choice.clearYear() },
                     showDay: { showDay($0) }
                 )
+                .feedsDock(dock, on: .library)
             }
         }
         .safeAreaInset(edge: .top) { filterBar(library) }
@@ -214,33 +227,10 @@ struct MediaLibraryView: View {
         .refreshable { await loadBuckets() }
     }
 
-    /// The segment that picks Years, Months or All. Choosing one by hand widens Months back to
-    /// every year: the narrowing belongs to the Years card that asked for it.
-    private var scopePicker: some View {
-        let selection = Binding(
-            get: { scope },
-            set: { chosen in
-                // A jump still reading was on its way to the view being left; it lands nowhere.
-                if chosen != scope { library?.abandonJump() }
-                year = nil
-                scope = chosen
-            }
-        )
-        return Picker("Library view", selection: selection) {
-            ForEach(LibraryScope.allCases) { option in
-                Text(option.label).tag(option)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
-    }
-
     /// A Years card opens that year's days in the Months view, narrowed on the device from the one
     /// list of day buckets, the way the web does.
     private func chooseYear(_ key: String) {
-        year = key
-        scope = .months
+        choice.showMonths(of: key)
     }
 
     /// A day tile's tap: the All grid, landed on that day (MEMNG-587). The segment moves at once;
@@ -249,7 +239,7 @@ struct MediaLibraryView: View {
     private func showDay(_ day: LibraryBucket) {
         guard let library, let buckets else { return }
         let zone = buckets.timeZoneIdentifier
-        scope = .all
+        choice.showAll()
         Task { await jump(library, toDay: day.key, in: zone) }
     }
 
@@ -270,6 +260,7 @@ struct MediaLibraryView: View {
             landing: library.landing,
             landed: { library.consumeLanding($0) }
         )
+        .feedsDock(dock, on: .library)
         // Pinned above the scroll rather than inside it: the filter is how you change what the
         // grid IS, and one that scrolls away is one you have to scroll back up to reach.
         .safeAreaInset(edge: .top) { filterBar(library) }
@@ -411,7 +402,7 @@ struct MediaLibraryView: View {
     /// Reads the buckets the view on screen is drawn from, under the kind and tag the grid is
     /// narrowed to. All is drawn from the list and reads none.
     private func loadBuckets() async {
-        guard let library, let buckets, let size = scope.bucketSize,
+        guard let library, let buckets, let size = choice.scope.bucketSize,
             let handle = session.activeHandle, let baseURL = session.serverBaseURL
         else { return }
         await buckets.load(

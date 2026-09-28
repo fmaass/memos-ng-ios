@@ -58,7 +58,7 @@ private final class TabOrderCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// The signed-in app's tab bar as a person meets it at launch: Library, Timeline, Places from left
+/// The signed-in app's dock as a person meets it at launch: Library, Timeline, Places from left
 /// to right, with the Timeline chosen (page 3929 decision 11).
 ///
 /// The real `MainTabView` over a real `SessionStore` and the real generated client, rather than a
@@ -66,9 +66,9 @@ private final class TabOrderCredentials: CredentialStore, @unchecked Sendable {
 /// view — the order by `MainTab.allCases`, the default by its own `selection` — so a stand-in would
 /// be asserting its own construction.
 @MainActor
-@Suite("The tab bar at launch")
+@Suite("The dock at launch")
 struct MainTabOrderRenderTests {
-    @Test("the bar reads Library, Timeline, Places from left to right, with the Timeline chosen")
+    @Test("the dock reads Library, Timeline, Places from left to right, with the Timeline chosen")
     func barOrderAndDefault() async {
         let session = SessionStore(
             credentials: TabOrderCredentials(),
@@ -97,28 +97,88 @@ struct MainTabOrderRenderTests {
             window.rootViewController = nil
         }
 
-        var bar: UITabBar?
+        let expected = ["Library", "Timeline", "Places"]
+        var drawn: [String] = []
         for _ in 0..<120 {
             await Self.settle(window)
-            bar = Self.tabBar(in: window)
-            if let bar, bar.items?.count == MainTab.allCases.count, bar.selectedItem != nil {
+            drawn = Self.dockTitlesLeftToRight(in: window, of: expected)
+            if drawn.count == expected.count, Self.chosenTitle(in: window, of: expected) != nil {
                 break
             }
         }
-        guard let bar else {
-            Issue.record("no UITabBar in the hosted hierarchy")
-            return
+
+        // Where they are DRAWN: the order a person reads, taken from the dock's band at the foot
+        // of the window so a title printed by the screen underneath cannot answer for it.
+        #expect(drawn == expected, "the dock reads \(drawn)")
+        // The default. The chosen tab is the one the dock marks selected, not the enum's middle
+        // case: the Timeline in the middle is only right if it is also the one the app opens on.
+        #expect(Self.chosenTitle(in: window, of: expected) == "Timeline")
+        // The system bar the dock replaces is not drawn under it.
+        #expect(!Self.systemTabBarShows(in: window), "the system tab bar is on screen")
+    }
+
+    /// Taps the dock's element labelled `title` the way VoiceOver does. Returns whether anything
+    /// took the activation.
+    private static func activate(_ title: String, in window: UIWindow) -> Bool {
+        dockElements(in: window, of: [title]).contains { $0.accessibilityActivate() }
+    }
+
+    /// The Library's segment is the Library's alone (plan page 3929 decision 8: "On Timeline and
+    /// Places the dock never shows the Years | Months | All segment"). The Library case is the
+    /// control: the same tap on the chosen tab DOES bring the segment there, so
+    /// the other two cases' silence is about the tab, not about a probe that cannot see it.
+    @Test(
+        "a tap on the chosen tab brings the segment on the Library and nowhere else",
+        arguments: [MainTab.library, MainTab.timeline, MainTab.places]
+    )
+    func segmentIsTheLibrarysAlone(tab: MainTab) async {
+        let session = SessionStore(
+            credentials: TabOrderCredentials(),
+            makeClient: { configuration, credential in
+                APIClientFactory.make(
+                    configuration: configuration,
+                    credential: credential,
+                    transport: TabOrderTransport()
+                )
+            },
+            sleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
+            noticeSleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
+            identity: MediaIdentity()
+        )
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_taborder")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+
+        let window = Self.window()
+        window.rootViewController = UIHostingController(
+            rootView: MainTabView(opening: tab).environment(session))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
         }
 
-        let expected = ["Library", "Timeline", "Places"]
-        // The bar's own items, in the order the bar holds them.
-        #expect(bar.items?.map { $0.title ?? "" } == expected)
-        // And where they are DRAWN: the order a person reads, taken from the bar's own subtree so a
-        // title printed by the screen underneath cannot answer for it.
-        #expect(Self.titlesLeftToRight(in: bar, of: expected) == expected)
-        // The default. Selection is the bar's, not the enum's: the Timeline in the middle is only
-        // right if it is also the one the app opens on.
-        #expect(bar.selectedItem?.title == "Timeline")
+        let tabs = MainTab.allCases.map(\.title)
+        let segment = LibraryScope.allCases.map(\.label)
+        for _ in 0..<120 where Self.chosenTitle(in: window, of: tabs) != tab.title {
+            await Self.settle(window)
+        }
+        #expect(Self.chosenTitle(in: window, of: tabs) == tab.title, "precondition: on \(tab)")
+
+        // A tap on the chosen tab: on the Library it toggles to the segment.
+        let took = Self.activate(tab.title, in: window)
+        var shown: [String] = []
+        for _ in 0..<40 {
+            await Self.settle(window)
+            shown = Self.dockTitlesLeftToRight(in: window, of: tabs + segment)
+            if tab == .library, shown.contains("Years") { break }
+        }
+        #expect(took, "the dock's \(tab.title) took no activation")
+        if tab == .library {
+            #expect(Set(shown) == Set(segment + [MainTab.library.title]), "dock: \(shown)")
+        } else {
+            #expect(shown == tabs, "a tap on the chosen \(tab.title) changed the dock: \(shown)")
+        }
     }
 
     /// Built on the test host's own window scene, for the reason `StackChromeTests` gives: a
@@ -138,35 +198,69 @@ struct MainTabOrderRenderTests {
         try? await Task.sleep(for: .milliseconds(25))
     }
 
-    private static func tabBar(in view: UIView) -> UITabBar? {
-        if let bar = view as? UITabBar { return bar }
-        for subview in view.subviews {
-            if let bar = tabBar(in: subview) { return bar }
+    /// Whether a system tab bar is on screen: in the hierarchy, unhidden up its superview chain,
+    /// and inside the window.
+    private static func systemTabBarShows(in window: UIWindow) -> Bool {
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let bar = view as? UITabBar {
+                var node: UIView? = bar
+                var hidden = false
+                while let current = node {
+                    if current.isHidden || current.alpha < 0.01 { hidden = true }
+                    node = current.superview
+                }
+                let frame = bar.convert(bar.bounds, to: window)
+                if !hidden, !frame.isEmpty, frame.intersects(window.bounds) { return true }
+            }
+            stack.append(contentsOf: view.subviews)
         }
-        return nil
+        return false
     }
 
-    /// The titles as the bar lays them out, left to right, by the on-screen frame of the
-    /// accessibility element that reads each one out. By containment, because a tab's label
-    /// carries its position in the bar along with its name; leftmost copy wins, because the bar
-    /// may keep a second one it measures with.
-    private static func titlesLeftToRight(in bar: UITabBar, of titles: [String]) -> [String] {
+    /// The dock's elements: labelled exactly with one of `titles`, drawn in the bottom fifth of
+    /// the window, where the dock sits.
+    private static func dockElements(in window: UIWindow, of titles: [String]) -> [NSObject] {
         var elements: [NSObject] = []
-        collect(bar, into: &elements)
-        var leftmost: [String: CGFloat] = [:]
-        for element in elements {
-            guard let label = element.accessibilityLabel else { continue }
-            let frame = element.accessibilityFrame
-            guard !frame.isEmpty else { continue }
-            for title in titles where label.contains(title) {
-                leftmost[title] = min(leftmost[title] ?? .infinity, frame.midX)
+        collect(window, into: &elements)
+        let band = window.bounds.height * 0.8
+        return elements.filter { element in
+            guard let label = element.accessibilityLabel, titles.contains(label) else {
+                return false
             }
+            let frame = element.accessibilityFrame
+            return !frame.isEmpty && frame.midY > band && frame.intersects(window.bounds)
+        }
+    }
+
+    /// The titles as the dock lays them out, left to right, by the on-screen frame of the
+    /// accessibility element that reads each one out; leftmost copy wins.
+    private static func dockTitlesLeftToRight(
+        in window: UIWindow, of titles: [String]
+    ) -> [String] {
+        var leftmost: [String: CGFloat] = [:]
+        for element in dockElements(in: window, of: titles) {
+            guard let label = element.accessibilityLabel else { continue }
+            leftmost[label] = min(leftmost[label] ?? .infinity, element.accessibilityFrame.midX)
         }
         return leftmost.sorted { $0.value < $1.value }.map(\.key)
     }
 
+    /// The one tab the dock marks selected, or nil when it marks none or more than one.
+    private static func chosenTitle(in window: UIWindow, of titles: [String]) -> String? {
+        let chosen = Set(
+            dockElements(in: window, of: titles)
+                .filter { $0.accessibilityTraits.contains(.selected) }
+                .compactMap(\.accessibilityLabel)
+        )
+        return chosen.count == 1 ? chosen.first : nil
+    }
+
     private static func collect(_ node: Any, into found: inout [NSObject]) {
         guard let object = node as? NSObject else { return }
+        // The system tab bar is hidden under the dock but keeps its items' labels; it must not
+        // answer for the dock.
+        if object is UITabBar { return }
         found.append(object)
         for child in object.accessibilityElements ?? [] { collect(child, into: &found) }
         if let view = object as? UIView {

@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import SwiftUI
 import Testing
 import UIKit
@@ -16,25 +17,22 @@ private final class TestPath {
     var path = NavigationPath()
 }
 
-/// The signed-in app's shape in miniature: two tabs, a stack inside the first, and the app's own
-/// way of declaring what that stack pushes.
+/// The signed-in app's shape in miniature: the real tabs under the real dock, a stack inside the
+/// Timeline, and the app's own way of declaring what that stack pushes.
 ///
-/// What is INSIDE each destination is deliberately a stand-in, and only that. Everything that
-/// decides the question is production code — the real `SettingsRoute` and `MemoRoute`, the real
-/// `stackDestination`, and the chrome each route declares.
+/// What is INSIDE each tab and destination is deliberately a stand-in, and only that. Everything
+/// that decides the question is production code — `DockedTabs`, the dock it draws, the real
+/// `SettingsRoute` and `MemoRoute`, the real `stackDestination`, and the chrome each route
+/// declares.
 private struct ChromeHarness: View {
     @Bindable var nav: TestPath
 
     var body: some View {
-        // The same `Tab(_:systemImage:value:)` shape `MainTabView` builds its bar out of. The
-        // selection is constant because nothing here switches tabs — the question is what the bar
-        // does while the FIRST tab pushes.
-        TabView(selection: .constant(MainTab.timeline)) {
-            Tab(
-                MainTab.timeline.title,
-                systemImage: MainTab.timeline.symbol,
-                value: MainTab.timeline
-            ) {
+        // The selection is constant because nothing here switches tabs — the question is what the
+        // dock does while the Timeline pushes.
+        DockedTabs(selection: .constant(MainTab.timeline)) { tab in
+            switch tab {
+            case .timeline:
                 NavigationStack(path: $nav.path) {
                     Text("the timeline")
                         .stackDestination(for: SettingsRoute.self) { _ in
@@ -44,13 +42,10 @@ private struct ChromeHarness: View {
                             Text(route.uid)
                         }
                 }
-            }
-            Tab(
-                MainTab.library.title,
-                systemImage: MainTab.library.symbol,
-                value: MainTab.library
-            ) {
+            case .library:
                 Text("the library")
+            case .places:
+                Text("the places")
             }
         }
     }
@@ -132,12 +127,34 @@ private final class HostedTabs {
         } while Date() < deadline
     }
 
-    /// Whether the tab bar is under what is on screen right now.
+    /// Whether the dock is under what is on screen right now: the tab named `title` is offered
+    /// by an element that reads it out, sits in the bottom band of the window where the dock is
+    /// drawn, and is on screen at all.
+    ///
+    /// Read from the accessibility tree, because the dock is SwiftUI all the way down and has no
+    /// view of its own to find. By equality, so the stand-in screens' lower-case "the timeline"
+    /// cannot answer for the tab.
+    func showsTab(_ title: String) -> Bool {
+        var found: [NSObject] = []
+        Self.collect(labelled: title, in: window, into: &found)
+        let band = window.bounds.height * 0.8
+        return found.contains { element in
+            let frame = element.accessibilityFrame
+            return !frame.isEmpty && frame.midY > band && frame.intersects(window.bounds)
+        }
+    }
+
+    /// Whether the dock is drawn: both of the harness's tabs the ticket names are offered in it.
+    var dockShows: Bool {
+        showsTab(MainTab.timeline.title) && showsTab(MainTab.library.title)
+    }
+
+    /// Whether the SYSTEM tab bar is on screen. The dock replaces it, so it never should be.
     ///
     /// Not `UITabBar` merely existing: SwiftUI keeps the bar in the hierarchy and takes it off the
     /// screen, so the question is geometric as well as a matter of flags — is any part of it still
     /// inside the window, with nothing in its chain of superviews hiding it.
-    var tabBarShows: Bool {
+    var systemTabBarShows: Bool {
         guard let bar = Self.tabBar(in: window) else { return false }
         var node: UIView? = bar
         while let current = node {
@@ -148,29 +165,14 @@ private final class HostedTabs {
         return !frame.isNull && !frame.isEmpty && frame.intersects(window.bounds)
     }
 
-    /// Whether this tab is one the reader is being offered right now — the Timeline and Library
-    /// the ticket names.
-    ///
-    /// Both halves are load-bearing, and the visibility half is not decoration: a bar SwiftUI has
-    /// taken off the screen goes on carrying its items' accessibility labels, so asking only what
-    /// the bar offers answers "Timeline" just as readily on the Settings screen as on the timeline
-    /// (measured — it did, which is what sent this probe back for a second draft). The labels are
-    /// read from the BAR's own subtree, so the word printed by the screen underneath cannot answer
-    /// for it, and by containment rather than equality, because a tab's accessibility label
-    /// carries its position in the bar along with its name.
-    func showsTab(_ title: String) -> Bool {
-        guard tabBarShows, let bar = Self.tabBar(in: window) else { return false }
-        var found: [String] = []
-        Self.collectLabels(bar, into: &found)
-        return found.contains { $0.contains(title) }
-    }
-
-    /// What the bar actually looks like, for when an assertion above fails and the message alone
-    /// cannot say whether the bar is missing, hidden, transparent or merely parked off the screen.
-    var barState: String {
-        guard let bar = Self.tabBar(in: window) else { return "no UITabBar in the hierarchy" }
-        let frame = bar.convert(bar.bounds, to: window)
-        return "hidden=\(bar.isHidden) alpha=\(bar.alpha) frame=\(frame) window=\(window.bounds)"
+    /// Every label the hierarchy reads out, for when an assertion fails and the message alone
+    /// cannot say what was on screen instead.
+    var labels: String {
+        var found: [NSObject] = []
+        Self.collect(labelled: nil, in: window, into: &found)
+        return found.compactMap { element in
+            element.accessibilityLabel.map { "\($0)@\(Int(element.accessibilityFrame.midY))" }
+        }.joined(separator: ", ")
     }
 
     func tearDown() {
@@ -186,81 +188,94 @@ private final class HostedTabs {
         return nil
     }
 
-    private static func collectLabels(_ node: Any, into found: inout [String]) {
-        if let element = node as? NSObject {
-            if let label = element.accessibilityLabel, !label.isEmpty { found.append(label) }
-            for child in element.accessibilityElements ?? [] { collectLabels(child, into: &found) }
+    /// Every element that reads out `label` — or, with nil, every element that reads anything.
+    private static func collect(
+        labelled label: String?, in node: Any, into found: inout [NSObject]
+    ) {
+        guard let object = node as? NSObject else { return }
+        // The system tab bar is hidden under the dock but keeps its items' labels; it must not
+        // answer for the dock.
+        if object is UITabBar { return }
+        if let text = object.accessibilityLabel, !text.isEmpty, label == nil || text == label {
+            found.append(object)
         }
-        if let view = node as? UIView {
-            for subview in view.subviews { collectLabels(subview, into: &found) }
+        for child in object.accessibilityElements ?? [] {
+            collect(labelled: label, in: child, into: &found)
+        }
+        if let view = object as? UIView {
+            for subview in view.subviews { collect(labelled: label, in: subview, into: &found) }
         }
     }
 }
 
-/// Whether the app's tab bar is under a pushed screen, asked of a real hosted `TabView` rather
+/// Whether the app's dock is under a pushed screen, asked of the real hosted `DockedTabs` rather
 /// than of the value that decides it.
 ///
 /// `SettingsView` itself cannot be hosted from this bundle — it reads `SessionStore` out of the
 /// environment, and constructing one inlines the API layer that Features reaches only through
 /// Core; `SettingsRenderTests` says the same at more length. So the screen under the push is a
 /// stand-in. The decision under test is not: put `SettingsRoute.chrome` back to `.withinTab` and
-/// the first test here goes red on the assertion, exactly as it did before this was fixed.
+/// the first test here goes red on the assertion.
 @MainActor
-@Suite("The tab bar under a pushed screen")
+@Suite("The dock under a pushed screen")
 struct StackChromeTests {
-    @Test("Settings takes the tab bar over, and going back brings it straight back")
+    @Test("Settings takes the dock over, and going back brings it straight back")
     func settingsTakesTheBarOverAndGivesItBack() {
         let nav = TestPath()
         let screen = HostedTabs(nav)
         defer { screen.tearDown() }
-        screen.settle(waitingFor: { screen.tabBarShows })
+        screen.settle(waitingFor: { screen.dockShows })
 
-        // The control. Without it, "the bar is gone" below would be equally true of a harness that
-        // never managed to draw one — and it is what says the bar being tracked is THE bar, the
-        // one offering the two tabs the ticket names.
-        #expect(screen.tabBarShows)
+        // The control. Without it, "the dock is gone" below would be equally true of a harness
+        // that never managed to draw one — and it is what says the dock being tracked is THE dock,
+        // the one offering the two tabs the ticket names.
+        #expect(screen.dockShows, "on the timeline — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
         #expect(screen.showsTab(MainTab.library.title))
+        // The system bar the dock replaced is not drawn beside it.
+        #expect(!screen.systemTabBarShows)
 
         withoutAnimation { nav.path.append(SettingsRoute()) }
-        screen.settle(waitingFor: { !screen.tabBarShows })
+        screen.settle(waitingFor: { !screen.showsTab(MainTab.library.title) })
 
-        #expect(!screen.tabBarShows, "on Settings — \(screen.barState)")
-        #expect(!screen.showsTab(MainTab.timeline.title))
-        #expect(!screen.showsTab(MainTab.library.title))
+        #expect(!screen.showsTab(MainTab.timeline.title), "on Settings — \(screen.labels)")
+        #expect(!screen.showsTab(MainTab.library.title), "on Settings — \(screen.labels)")
+        #expect(!screen.systemTabBarShows, "Settings brought the system tab bar back")
 
         withoutAnimation { nav.path.removeLast() }
-        screen.settle(waitingFor: { screen.tabBarShows })
+        screen.settle(waitingFor: { screen.dockShows })
 
-        #expect(screen.tabBarShows, "back on the timeline — \(screen.barState)")
+        #expect(screen.dockShows, "back on the timeline — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
         #expect(screen.showsTab(MainTab.library.title))
+        #expect(!screen.systemTabBarShows)
     }
 
-    @Test("a memo pushed from the timeline keeps the tab bar under it")
+    @Test("a memo pushed from the timeline keeps the dock under it")
     func memoKeepsTheBar() {
         let nav = TestPath()
         let screen = HostedTabs(nav)
         defer { screen.tearDown() }
-        screen.settle(waitingFor: { screen.tabBarShows })
+        screen.settle(waitingFor: { screen.dockShows })
 
-        #expect(screen.tabBarShows)
+        #expect(screen.dockShows, "on the timeline — \(screen.labels)")
 
         withoutAnimation { nav.path.append(MemoRoute(uid: "m1")) }
         // The plain settle, not the waiting one: this push is supposed to change nothing, so
-        // there is no arrival to give up on early — a wait that returned the instant the bar was
-        // still there would pass before the bar had any chance to go.
+        // there is no arrival to give up on early — a wait that returned the instant the dock was
+        // still there would pass before it had any chance to go.
         screen.settle()
 
-        #expect(screen.tabBarShows)
+        #expect(screen.dockShows, "on the memo — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
+        #expect(!screen.systemTabBarShows, "the memo brought the system tab bar back")
     }
 
-    @Test("which screens take the tab bar over is said once, on the route")
+    @Test("which screens take the dock over is said once, on the route")
     func routesDeclareTheirChrome() {
         #expect(SettingsRoute.chrome == .takesOverTab)
         #expect(MemoRoute.chrome == .withinTab)
-        #expect(ScreenChrome.takesOverTab.tabBar == .hidden)
-        #expect(ScreenChrome.withinTab.tabBar == .automatic)
+        #expect(!ScreenChrome.takesOverTab.showsDock)
+        #expect(ScreenChrome.withinTab.showsDock)
     }
 }
