@@ -60,6 +60,10 @@ struct AttachmentThumbnail: View {
     /// shape immediately, from the server's own measurements, so the layout does not jump when
     /// the image lands — and the blurhash underneath gets that identical frame.
     var slot: AttachmentSlot
+    /// The corner the tile is cut to. The grid's radius everywhere but the Months mosaic, whose
+    /// tiles sit two points apart and take a smaller one (plan decision 9) — which only this clip
+    /// can give them, because a wider inner cut is not undone by a narrower one outside it.
+    var cornerRadius: CGFloat = DesignTokens.Radius.tile
 
     /// This tile's own load: what it captured, what it gave up on, and the request it has out.
     @State private var picture = PictureLoad()
@@ -157,7 +161,7 @@ struct AttachmentThumbnail: View {
             .onChange(of: MediaRetrySignal.shared.publications) { _, _ in
                 picture.askAgain(showing: image != nil)
             }
-            .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+            .clipShape(.rect(cornerRadius: cornerRadius))
     }
 
     private func load() async {

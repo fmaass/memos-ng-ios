@@ -75,50 +75,75 @@ public func dayBuckets(
     return days.filter { $0.key.hasPrefix(prefix) }
 }
 
-/// One day of the Months mosaic: its bucket and the day of the month it prints.
+/// One day of the Months mosaic: its bucket, the day of the month it prints and the frame it sits
+/// in. It carries its day's count, which the tile does not draw (plan decision 9).
 public struct LibraryMosaicTile: Sendable, Equatable, Identifiable {
     public let bucket: LibraryBucket
     /// "14" for `2026-09-14`, "3" for `2026-09-03`; the whole key for one that is not a day.
     public let dayLabel: String
+    public let slot: MosaicSlot
 
     public var id: String { bucket.key }
 }
 
-/// One month of the Months view: its header and its days, in the order the server listed them.
+/// One month of the Months view: its title, the days it shows and how many it left out.
 public struct LibraryMosaicMonth: Sendable, Equatable, Identifiable {
     /// `YYYY-MM`, or `undatedSectionKey` for a key that names no day.
     public let key: String
-    /// "September 2026", in English as `groupByMonth` labels the All view's months.
+    /// "Sep 2026" (plan decision 9). The All view's month headers keep the full name
+    /// (`groupByMonth`); this label is the Months view's own.
     public let label: String
+    /// The days `pickDays` kept, in date order.
     public let tiles: [LibraryMosaicTile]
+    /// How many of the month's days are not drawn.
+    public let dropped: Int
 
     public var id: String { key }
+
+    /// "and 3 more days", "and 1 more day", or nil for a month that shows every day it has.
+    public var moreDaysLabel: String? {
+        guard dropped > 0 else { return nil }
+        return dropped == 1 ? "and 1 more day" : "and \(dropped) more days"
+    }
+
+    /// Where the "more days" line opens All: the first day the month SHOWS, not its first day.
+    public var firstShownDay: LibraryBucket? { tiles.first?.bucket }
 }
 
-/// Day buckets filed under their months.
+/// Day buckets filed under their months, each month reduced to its `cap` busiest days.
 ///
-/// Months follow the order their first day arrives in and days keep the list's order within them,
-/// so newest-first from the server stays newest-first on screen. A bucket without a cover is laid
-/// out like any other — whether a cover can be drawn is the tile's question, not the layout's. A
-/// key that is not `YYYY-MM-DD` is filed under "Undated" rather than dropped, as `groupByMonth`
-/// files a row with no instant.
-public func mosaicMonths(_ days: [LibraryBucket]) -> [LibraryMosaicMonth] {
+/// Months follow the order their first day arrives in, so newest-first from the server stays
+/// newest-first on screen; within a month, `pickDays` keeps the busiest and lays them out in date
+/// order, and each month's frames start one pattern later than the month above it
+/// (`mosaicSlots(_:offset:)` with the month's index). A bucket without a cover is laid out like any
+/// other — whether a cover can be drawn is the tile's question, not the layout's. A key that is not
+/// `YYYY-MM-DD` is filed under "Undated" rather than dropped, as `groupByMonth` files a row with no
+/// instant, and is picked like any month's days.
+public func mosaicMonths(_ days: [LibraryBucket], cap: Int = 6) -> [LibraryMosaicMonth] {
     var order: [String] = []
     var labels: [String: String] = [:]
-    var tiles: [String: [LibraryMosaicTile]] = [:]
+    var members: [String: [LibraryBucket]] = [:]
     for bucket in days {
         let day = LibraryDayKey(bucket.key)
         let key = day?.monthKey ?? undatedSectionKey
-        if tiles[key] == nil {
+        if members[key] == nil {
             order.append(key)
             labels[key] = day?.monthLabel ?? "Undated"
         }
-        tiles[key, default: []].append(
-            LibraryMosaicTile(bucket: bucket, dayLabel: day.map { "\($0.day)" } ?? bucket.key)
-        )
+        members[key, default: []].append(bucket)
     }
-    return order.map { key in
-        LibraryMosaicMonth(key: key, label: labels[key] ?? key, tiles: tiles[key] ?? [])
+    return order.enumerated().map { index, key in
+        let picked = pickDays(members[key] ?? [], cap: cap)
+        let slots = mosaicSlots(picked.shown.count, offset: index)
+        let tiles = zip(picked.shown, slots).map { bucket, slot in
+            LibraryMosaicTile(
+                bucket: bucket,
+                dayLabel: LibraryDayKey(bucket.key).map { "\($0.day)" } ?? bucket.key,
+                slot: slot
+            )
+        }
+        return LibraryMosaicMonth(
+            key: key, label: labels[key] ?? key, tiles: tiles, dropped: picked.dropped)
     }
 }
 
@@ -148,9 +173,14 @@ private struct LibraryDayKey {
 
     var monthKey: String { "\(year)-\(month < 10 ? "0" : "")\(month)" }
 
+    /// "Sep 2026", as the web's `Intl.DateTimeFormat('en', { month: 'short' })` writes it. Spelled
+    /// out rather than read from a locale, because a locale's short names are data that can move
+    /// between releases, and this title must not.
     var monthLabel: String {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.locale = Locale(identifier: "en")
-        return "\(calendar.standaloneMonthSymbols[month - 1]) \(year)"
+        "\(Self.shortMonths[month - 1]) \(year)"
     }
+
+    private static let shortMonths = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
 }

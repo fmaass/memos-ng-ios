@@ -146,7 +146,7 @@ struct LibraryBucketLayoutTests {
 
     // MARK: - mosaic
 
-    @Test("days file under their months, each month once, in the order its first day arrived")
+    @Test("days file under their months, each month once in arrival order, days in date order")
     func daysFileUnderMonths() {
         let days = [
             Self.bucket("2026-09-14", 3),
@@ -160,17 +160,17 @@ struct LibraryBucketLayoutTests {
         #expect(months.map(\.key) == ["2026-09", "2026-08", "2025-12", "2025-11"])
         #expect(
             months.map(\.label)
-                == ["September 2026", "August 2026", "December 2025", "November 2025"]
+                == ["Sep 2026", "Aug 2026", "Dec 2025", "Nov 2025"]
         )
         #expect(months.map(\.tiles.count) == [2, 1, 2, 1])
         #expect(
             months.map { $0.tiles.map(\.bucket.key) } == [
-                ["2026-09-14", "2026-09-03"], ["2026-08-31"], ["2025-12-25", "2025-12-01"],
+                ["2026-09-03", "2026-09-14"], ["2026-08-31"], ["2025-12-01", "2025-12-25"],
                 ["2025-11-30"],
             ]
         )
-        #expect(months[0].tiles.map(\.dayLabel) == ["14", "3"])
-        #expect(months[0].tiles.map(\.bucket.count) == [3, 1], "a tile carries its day's count")
+        #expect(months[0].tiles.map(\.dayLabel) == ["3", "14"])
+        #expect(months[0].tiles.map(\.bucket.count) == [1, 3], "a tile carries its day's count")
     }
 
     @Test("a day that arrives out of order still joins its month rather than opening another")
@@ -182,7 +182,7 @@ struct LibraryBucketLayoutTests {
         ]
         let months = mosaicMonths(days)
         #expect(months.map(\.key) == ["2026-09", "2026-08"])
-        #expect(months[0].tiles.map(\.bucket.key) == ["2026-09-14", "2026-09-01"])
+        #expect(months[0].tiles.map(\.bucket.key) == ["2026-09-01", "2026-09-14"])
     }
 
     @Test("a day without a cover is laid out like any other")
@@ -194,7 +194,7 @@ struct LibraryBucketLayoutTests {
         ]
         let months = mosaicMonths(days)
         #expect(months.count == 1)
-        #expect(months[0].tiles.map(\.bucket.key) == ["2026-09-14", "2026-09-13", "2026-09-12"])
+        #expect(months[0].tiles.map(\.bucket.key) == ["2026-09-12", "2026-09-13", "2026-09-14"])
         #expect(months[0].tiles[1].bucket.coverThumbnailURL == nil)
         #expect(months[0].tiles[1].dayLabel == "13")
     }
@@ -209,9 +209,10 @@ struct LibraryBucketLayoutTests {
         ]
         let months = mosaicMonths(days)
         #expect(months.map(\.key) == ["2026-09", undatedSectionKey])
-        #expect(months.map(\.label) == ["September 2026", "Undated"])
-        #expect(months[1].tiles.map(\.bucket.key) == ["2026", "2026-13-01", "+026-09-01"])
-        #expect(months[1].tiles.map(\.dayLabel) == ["2026", "2026-13-01", "+026-09-01"])
+        #expect(months.map(\.label) == ["Sep 2026", "Undated"])
+        // Picked and ordered like any month's days: by key, which for these is string order.
+        #expect(months[1].tiles.map(\.bucket.key) == ["+026-09-01", "2026", "2026-13-01"])
+        #expect(months[1].tiles.map(\.dayLabel) == ["+026-09-01", "2026", "2026-13-01"])
     }
 
     @Test("no days is no months")

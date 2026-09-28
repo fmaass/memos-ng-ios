@@ -41,6 +41,8 @@ public enum DesignTokens {
     public enum Radius {
         public static let card: CGFloat = 20
         public static let tile: CGFloat = 8
+        /// A Months mosaic tile (plan decision 9): the tiles sit two points apart, edge to edge.
+        public static let mosaic: CGFloat = 6
     }
 
     /// Dimensions that must grow with the type size. Every one of these is read through

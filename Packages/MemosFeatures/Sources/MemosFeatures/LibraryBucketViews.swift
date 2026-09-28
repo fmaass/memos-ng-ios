@@ -53,8 +53,9 @@ struct LibraryYearCard: View {
     }
 }
 
-/// The Library's Months view: each month's header over a mosaic of its days, a tile per day with
-/// that day's cover and count.
+/// The Library's Months view (plan decision 9): each month's bold title over a mosaic of the days
+/// it shows, edge to edge with hairline gaps, and an "and N more days" line under a month that has
+/// more. Which days, in which frames, is decided by `mosaicMonths`; this draws it.
 struct LibraryMonthsMosaic: View {
     let months: [LibraryMosaicMonth]
     /// The year a Years card narrowed the days to, or nil for every year.
@@ -62,14 +63,16 @@ struct LibraryMonthsMosaic: View {
     let errorText: String?
     /// Widens the days back to every year.
     let clearYear: () -> Void
-    /// A day was tapped: the screen jumps to the All grid at that day (MEMNG-587).
+    /// A day was tapped, or a month's "more days" line: the screen jumps to the All grid at that
+    /// day (MEMNG-587).
     let showDay: (LibraryBucket) -> Void
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: DesignTokens.Space.tight) {
+            LazyVStack(alignment: .leading, spacing: DesignTokens.Space.section) {
                 if let error = errorText {
                     NoticeCard(text: error, tone: .error)
+                        .padding(.horizontal, DesignTokens.Space.roomy)
                 }
                 if let year {
                     HStack {
@@ -77,68 +80,97 @@ struct LibraryMonthsMosaic: View {
                         Spacer(minLength: 0)
                         Button("All Years", action: clearYear)
                     }
+                    .padding(.horizontal, DesignTokens.Space.roomy)
                 }
                 ForEach(months) { month in
-                    LibraryMonthHeader(label: month.label)
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.adaptive(minimum: 76), spacing: DesignTokens.Space.tight)
-                        ],
-                        spacing: DesignTokens.Space.tight
-                    ) {
-                        ForEach(month.tiles) { tile in
-                            LibraryDayTile(tile: tile)
-                                .contentShape(.rect)
-                                .onTapGesture { showDay(tile.bucket) }
-                        }
-                    }
+                    LibraryMosaicMonthSection(month: month, showDay: showDay)
                 }
             }
-            .padding(.horizontal, DesignTokens.Space.snug)
             .padding(.vertical, DesignTokens.Space.tight)
         }
     }
 }
 
-/// One day of the mosaic: its cover, the day of the month and how many files fall on it.
+/// One month of the mosaic: its title, its tiles in the frames their slots name, and the line
+/// that opens All at the month's first SHOWN day when days were left out.
+struct LibraryMosaicMonthSection: View {
+    let month: LibraryMosaicMonth
+    let showDay: (LibraryBucket) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+            Text(month.label)
+                .font(.title3.bold())
+                .accessibilityAddTraits(.isHeader)
+                .padding(.horizontal, DesignTokens.Space.roomy)
+            MonthMosaicLayout(slots: month.tiles.map(\.slot), gap: DesignTokens.Space.hair) {
+                ForEach(month.tiles) { tile in
+                    Button {
+                        showDay(tile.bucket)
+                    } label: {
+                        LibraryDayTile(tile: tile)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(tile.dayLabel)
+                }
+            }
+            if let more = month.moreDaysLabel, let first = month.firstShownDay {
+                Button(more) { showDay(first) }
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, DesignTokens.Space.roomy)
+            }
+        }
+    }
+}
+
+/// One day of the mosaic: its cover in the shape of its frame and the day of the month, top-left.
+/// No count: plan decision 9 puts no badge on a day tile.
 struct LibraryDayTile: View {
     let tile: LibraryMosaicTile
 
     var body: some View {
-        LibraryBucketCover(bucket: tile.bucket)
-            .overlay(alignment: .topLeading) {
-                Text(tile.dayLabel)
-                    .font(.caption.bold())
-                    .foregroundStyle(.white)
-                    .shadow(radius: 2)
-                    .padding(DesignTokens.Space.tight)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                Text("\(tile.bucket.count)")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.white)
-                    .shadow(radius: 2)
-                    .padding(DesignTokens.Space.tight)
-            }
-            .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+        LibraryBucketCover(
+            bucket: tile.bucket,
+            aspectRatio: tile.slot == .wide ? 16 / 9 : 1,
+            cornerRadius: DesignTokens.Radius.mosaic
+        )
+        .overlay(alignment: .topLeading) {
+            Text(tile.dayLabel)
+                .font(.body.bold())
+                .foregroundStyle(.white)
+                .shadow(radius: 2)
+                .padding(.horizontal, DesignTokens.Space.snug)
+                .padding(.top, DesignTokens.Space.tight)
+        }
+        .clipShape(.rect(cornerRadius: DesignTokens.Radius.mosaic))
     }
 }
 
-/// A bucket's cover, square: the picture through the same tile and loader the grid uses, or a
-/// placeholder when the bucket names no cover that resolves.
+/// A bucket's cover, square unless a mosaic frame asks for another shape: the picture through the
+/// same tile and loader the grid uses, or a placeholder when the bucket names no cover that
+/// resolves.
 ///
 /// A cover is never assumed. `LibraryBucket.coverThumbnailURL` is nil when the server's URL does
 /// not resolve, and a tile handed a nil URL would wear the failure glyph — which says the file is
 /// broken, when all that is missing is a picture to put on a day.
 struct LibraryBucketCover: View {
     let bucket: LibraryBucket
+    /// Width over height; the picture fills it.
+    var aspectRatio: Double = 1
+    /// The corner the picture is cut to (`AttachmentThumbnail.cornerRadius`).
+    var cornerRadius: CGFloat = DesignTokens.Radius.tile
 
     var body: some View {
         if let cover = Self.attachment(for: bucket) {
-            AttachmentThumbnail(attachment: cover, tier: .thumb, slot: MemoPresentation.gridSlot)
+            AttachmentThumbnail(
+                attachment: cover,
+                tier: .thumb,
+                slot: AttachmentSlot(aspectRatio: aspectRatio, contentMode: .fill),
+                cornerRadius: cornerRadius
+            )
         } else {
             Color.clear
-                .aspectRatio(1, contentMode: .fit)
+                .aspectRatio(aspectRatio, contentMode: .fit)
                 .overlay {
                     ZStack {
                         Rectangle().fill(.quaternary)
