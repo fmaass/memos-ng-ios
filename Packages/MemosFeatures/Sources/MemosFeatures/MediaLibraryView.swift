@@ -48,14 +48,12 @@ struct MediaLibraryView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("Library")
-            .navigationSubtitle(MediaLibraryPresentation.subtitle(for: library?.tag))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if let library {
-                    ToolbarItem(placement: .topBarTrailing) { optionsMenu(library) }
-                }
+            // One header over All, Years and Months alike, and nothing over the grid below it:
+            // the kind, the sort and the tag are chosen in its options menu (page 3929 decision 5).
+            .safeAreaBar(edge: .top) {
+                if let library { header(library) }
             }
+            .toolbarVisibility(.hidden, for: .navigationBar)
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
             // on one view is how one of them silently stops appearing, and this screen now has
             // both a cover and a sheet.
@@ -171,8 +169,8 @@ struct MediaLibraryView: View {
         }
     }
 
-    /// Years and Months: the buckets under the same filter bar, the view on screen drawn only from
-    /// a list read for it (`bucketsShown`).
+    /// Years and Months: the buckets under the same header, the view on screen drawn only from a
+    /// list read for it (`bucketsShown`).
     @ViewBuilder
     private func bucketContent(
         _ library: MediaLibraryStore,
@@ -210,7 +208,6 @@ struct MediaLibraryView: View {
                 .feedsDock(dock, on: .library)
             }
         }
-        .safeAreaInset(edge: .top) { filterBar(library) }
         .overlay {
             if shown.isEmpty {
                 if store.isLoading {
@@ -261,9 +258,6 @@ struct MediaLibraryView: View {
             landed: { library.consumeLanding($0) }
         )
         .feedsDock(dock, on: .library)
-        // Pinned above the scroll rather than inside it: the filter is how you change what the
-        // grid IS, and one that scrolls away is one you have to scroll back up to reach.
-        .safeAreaInset(edge: .top) { filterBar(library) }
         .overlay {
             if library.isJumping {
                 ProgressView()
@@ -284,55 +278,37 @@ struct MediaLibraryView: View {
         .refreshable { await load() }
     }
 
-    /// The three tabs of the filter, as a segmented control — the iOS shape of the SPA's
-    /// `SelectButton`. Changing it resets the paging (`setFilter`) and reads the first page of the
-    /// tab that was chosen.
-    private func filterBar(_ library: MediaLibraryStore) -> some View {
-        let selection = Binding(
+    /// The title, the line naming what the grid holds, and the options menu that changes it.
+    private func header(_ library: MediaLibraryStore) -> some View {
+        LibraryHeader(
+            subtitle: MediaLibraryPresentation.subtitle(
+                filter: library.filter,
+                order: library.order,
+                tag: library.tag
+            )
+        ) {
+            LibraryOptionsMenuContent(
+                order: sortBinding(library),
+                filter: filterBinding(library),
+                tag: tagBinding(library),
+                tagRows: tagRows(library)
+            )
+        }
+    }
+
+    /// Choosing a kind resets the paging (`setFilter`) and reads the first page of the kind that
+    /// was chosen, as the segmented bar it replaces did; the tags and the buckets follow through
+    /// their task keys, which name the kind. A menu row can be chosen again while it is already
+    /// the choice, and that is no change: it must not start a second read of the same page.
+    private func filterBinding(_ library: MediaLibraryStore) -> Binding<MediaLibraryFilter> {
+        Binding(
             get: { library.filter },
             set: { chosen in
+                guard chosen != library.filter else { return }
                 library.setFilter(chosen)
                 Task { await load() }
             }
         )
-        return Picker("Filter media type", selection: selection) {
-            ForEach(MediaLibraryFilter.allCases) { filter in
-                Text(MediaLibraryPresentation.label(for: filter)).tag(filter)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .accessibilityLabel("Filter media type")
-        .padding(.horizontal, DesignTokens.Space.roomy)
-        .padding(.vertical, DesignTokens.Space.snug)
-        .background(.bar)
-    }
-
-    /// Which end of the library the grid starts at — a menu of checkmark rows, which is the shape
-    /// Photos gives a single sort key on an album. A segmented control beside the filter would put
-    /// two different questions on one bar and spend the width of the screen on the one that is
-    /// answered once a year (MEMNG-190).
-    /// The Library's options: the sort, and the tag the grid is narrowed to. Each section is an
-    /// inline Picker, which is what draws the checkmark on the chosen row — one selection each, so
-    /// choosing a row un-chooses the other.
-    private func optionsMenu(_ library: MediaLibraryStore) -> some View {
-        Menu {
-            Picker("Sort", selection: sortBinding(library)) {
-                ForEach(MediaLibraryOrder.allCases) { order in
-                    Text(order.label).tag(order)
-                }
-            }
-            .pickerStyle(.inline)
-            Picker("Tags", selection: tagBinding(library)) {
-                ForEach(tagRows(library)) { row in
-                    Text(row.label).tag(row.selection)
-                }
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Image(systemName: "line.3.horizontal.decrease.circle")
-        }
-        .accessibilityLabel("Options")
     }
 
     private func tagRows(_ library: MediaLibraryStore) -> [LibraryTagRow] {

@@ -308,7 +308,10 @@ extension MediaImageLoaderTests {
 
     /// Signs in, hosts the app on the Library under the real dock, scrolls it past the dock's
     /// threshold and switches it to Years through the segment the dock turns into.
-    private func hostYears(_ wire: SegmentTransport) async -> (SessionStore, UIWindow) {
+    private func hostYears(
+        _ wire: SegmentTransport,
+        atRest: (UIWindow) -> Void = { _ in }
+    ) async -> (SessionStore, UIWindow) {
         let session = segmentSession(wire)
         await session.enteredForeground()
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_segment")
@@ -338,6 +341,7 @@ extension MediaImageLoaderTests {
         await segmentSettle(window)
         #expect(wire.sizesAsked.isEmpty, "All read buckets: \(wire.sizesAsked)")
         #expect(!Self.labels(in: window).contains("12 items"), "a year card drawn under All")
+        atRest(window)
 
         // Past the threshold the dock collapses to the Library icon beside Years | Months | All.
         var moved = 0
@@ -397,6 +401,86 @@ extension MediaImageLoaderTests {
             #expect(await probe.requests(for: "\(SegmentWire.coverPrefix)2019") == 0)
             let paths = await probe.paths
             #expect(!paths.contains { $0.isEmpty || $0 == "/" }, "a cover fetched \(paths)")
+        }
+    }
+
+    /// The words of the kind filter, and the name its bar was read out by. Since MEMNG-595 the
+    /// kind is chosen in the header's options menu, whose rows are drawn only while it is open.
+    private static let kindWords: Set<String> = [
+        "All Items", "Images", "Photos", "Videos", "Filter media type",
+    ]
+
+    /// Every kind word a segmented control on screen draws, or any element reads out.
+    private static func kindFilterShown(in window: UIWindow) -> [String] {
+        var found: [String] = []
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let control = view as? UISegmentedControl {
+                for index in 0..<control.numberOfSegments {
+                    if let title = control.titleForSegment(at: index), kindWords.contains(title) {
+                        found.append(title)
+                    }
+                }
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return found + labels(in: window).filter { kindWords.contains($0) }
+    }
+
+    /// Plan page 3929 decision 5: sort and filter are in the header's options button, not on a bar
+    /// over the Library, so no segmented control draws Photos or Videos over All, Years or Months.
+    @Test("no kind filter bar is drawn over the grid, Years or Months")
+    func noKindFilterBar() async {
+        let wire = SegmentTransport()
+        let probe = CoverProbe()
+        await withTransport(probe) {
+            var overAll: [String] = ["never looked"]
+            var select: [NSObject] = []
+            var options: [NSObject] = []
+            let (_, window) = await hostYears(wire) { window in
+                overAll = Self.kindFilterShown(in: window)
+                Self.elements(labelled: "Select", in: window, into: &select)
+                Self.elements(labelled: "Options", in: window, into: &options)
+            }
+            defer {
+                wire.release()
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            #expect(overAll.isEmpty, "a kind filter over the All grid: \(overAll)")
+            // The header the kind moved into, on the real Library: its options button, and the
+            // Select capsule drawn but inert (decision 10).
+            #expect(!options.isEmpty, "the Library draws no options button")
+            let inert = select.allSatisfy { $0.accessibilityTraits.contains(.notEnabled) }
+            #expect(!select.isEmpty && inert, "the Library's Select capsule is missing or live")
+
+            var labels: [String] = []
+            for _ in 0..<80 where !labels.contains("12 items") {
+                await segmentSettle(window, turns: 1)
+                labels = Self.labels(in: window)
+            }
+            // The control: this is Years, drawn.
+            #expect(labels.contains("12 items"), "precondition: the Years cards are on screen")
+            let overYears = Self.kindFilterShown(in: window)
+            #expect(overYears.isEmpty, "a kind filter over Years: \(overYears)")
+
+            // Years opens at its top, where the dock is the tab pill again; a tap on the active
+            // Library tab brings the segment back (decision 8).
+            if Self.dockElement("Months", in: window) == nil {
+                _ = Self.dockElement(MainTab.library.title, in: window)?.accessibilityActivate()
+                for _ in 0..<80 where Self.dockElement("Months", in: window) == nil {
+                    await segmentSettle(window, turns: 1)
+                }
+            }
+            let months = Self.dockElement("Months", in: window)?.accessibilityActivate() == true
+            #expect(months, "precondition: the dock's Months took the press")
+            for _ in 0..<80 where !wire.sizesAsked.contains("day") {
+                await segmentSettle(window, turns: 1)
+            }
+            #expect(wire.sizesAsked.contains("day"), "precondition: Months read day buckets")
+            await segmentSettle(window)
+            let overMonths = Self.kindFilterShown(in: window)
+            #expect(overMonths.isEmpty, "a kind filter over Months: \(overMonths)")
         }
     }
 

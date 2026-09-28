@@ -196,14 +196,20 @@ public enum MediaLibraryPresentation {
         return "doc"
     }
 
-    /// The name of a tab of the filter control. The SPA's own three, so the two clients offer the
-    /// same choice under the same words (`frontend/src/views/ResourcesView.vue`).
+    /// The name of a kind row in the options menu, which is also the kind's word in the header's
+    /// subtitle. The web client's own three (`frontend/src/components/LibraryOptionsMenu.vue`), so
+    /// the two clients offer the same choice under the same words (plan page 3929, Phase 3).
     public static func label(for filter: MediaLibraryFilter) -> String {
         switch filter {
-        case .all: "All"
-        case .images: "Images"
+        case .all: "All Items"
+        case .images: "Photos"
         case .videos: "Videos"
         }
+    }
+
+    /// The name of a sort row in the options menu. The subtitle says the order without the verb.
+    public static func sortLabel(for order: MediaLibraryOrder) -> String {
+        "Sort by \(order.label)"
     }
 
     /// What a tab says when it holds nothing.
@@ -293,9 +299,17 @@ public enum MediaLibraryPresentation {
         return rows
     }
 
-    /// The line under the Library's title: the chosen tag, or nothing.
-    public static func subtitle(for tag: String?) -> String {
-        tag.map { "#\($0)" } ?? ""
+    /// The line under the Library's title: the kind, the order and, when one is chosen, the tag —
+    /// "All Items · Newest First · #recap", the web header's line
+    /// (`frontend/src/components/LibraryHeader.vue`). Every choice the options menu holds is on
+    /// screen without opening it (plan page 3929 decisions 10 and 12).
+    public static func subtitle(
+        filter: MediaLibraryFilter,
+        order: MediaLibraryOrder,
+        tag: String?
+    ) -> String {
+        ([label(for: filter), order.label] + (tag.map { ["#\($0)"] } ?? []))
+            .joined(separator: " · ")
     }
 
     /// How wide the picture a long press lifts off the grid is drawn.

@@ -83,10 +83,10 @@ struct MediaLibraryPresentationTests {
         #expect(AttachmentMediaKind.of(mime: "application/x-image") == .other)
     }
 
-    @Test("the three tabs are named what the web app names them")
+    @Test("the three kind rows are named what the web app's options menu names them")
     func filterLabels() {
-        #expect(MediaLibraryPresentation.label(for: .all) == "All")
-        #expect(MediaLibraryPresentation.label(for: .images) == "Images")
+        #expect(MediaLibraryPresentation.label(for: .all) == "All Items")
+        #expect(MediaLibraryPresentation.label(for: .images) == "Photos")
         #expect(MediaLibraryPresentation.label(for: .videos) == "Videos")
     }
 

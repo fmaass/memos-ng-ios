@@ -185,6 +185,58 @@ struct MediaLibraryRenderTests {
         #expect(headers == ["September 2026", "August 2026"])
     }
 
+    /// Plan page 3929 decision 10: a large title with the subtitle under it, then on the right the
+    /// round options button and, after it, the Select capsule — drawn, and inert until MEMNG-588.
+    @Test("the header draws the title, the subtitle, the options button and a disabled Select")
+    func headerChrome() async throws {
+        let subtitle = "Videos · Oldest First · #travel"
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(
+            rootView: VStack {
+                LibraryHeader(subtitle: subtitle) { Text("row") }
+                Spacer()
+            })
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
+        var found: [NSObject] = []
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            found = []
+            Self.collectElements(window, into: &found)
+            if found.contains(where: { $0.accessibilityLabel == "Select" }) { break }
+        }
+        func element(_ label: String) -> NSObject? {
+            found.first { $0.accessibilityLabel == label }
+        }
+        let title = try #require(element("Library"), "no title")
+        #expect(title.accessibilityTraits.contains(.header), "the title is not a heading")
+        #expect(element(subtitle) != nil, "no subtitle line")
+        let options = try #require(element("Options"), "no options button")
+        let select = try #require(element("Select"), "no Select capsule")
+        #expect(!options.accessibilityTraits.contains(.notEnabled), "the options button is inert")
+        #expect(select.accessibilityTraits.contains(.notEnabled), "Select is live too early")
+        // Right of the title, the options button first and the capsule after it.
+        let left = title.accessibilityFrame.midX
+        let middle = options.accessibilityFrame.midX
+        let right = select.accessibilityFrame.midX
+        #expect(left < middle && middle < right, "x: title \(left), ••• \(middle), \(right)")
+    }
+
+    /// Every element the hosted hierarchy reads out, in the order it offers them.
+    private static func collectElements(_ node: Any, into found: inout [NSObject]) {
+        guard let object = node as? NSObject else { return }
+        if let label = object.accessibilityLabel, !label.isEmpty { found.append(object) }
+        for child in object.accessibilityElements ?? [] { collectElements(child, into: &found) }
+        if let view = object as? UIView {
+            for subview in view.subviews { collectElements(subview, into: &found) }
+        }
+    }
+
     /// Every label the hosted hierarchy reads out, in the order it offers them — the walk
     /// `LayoutProbe.reads` makes, collecting rather than searching.
     private static func collectLabels(_ node: Any, into found: inout [String]) {
