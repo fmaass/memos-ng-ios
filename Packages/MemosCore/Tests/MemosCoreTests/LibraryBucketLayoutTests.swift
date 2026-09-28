@@ -52,11 +52,12 @@ struct LibraryBucketLayoutTests {
 
     // MARK: - scope
 
-    @Test("each scope reads its own bucket size, and All reads none")
+    @Test("each scope reads its own bucket size, All the day buckets its headings count")
     func scopeSizes() {
         #expect(LibraryScope.years.bucketSize == .year)
         #expect(LibraryScope.months.bucketSize == .day)
-        #expect(LibraryScope.all.bucketSize == nil)
+        // MEMNG-597: All reads day buckets for its day headings' counts.
+        #expect(LibraryScope.all.bucketSize == .day)
         #expect(LibraryScope.allCases == [.years, .months, .all], "the segment's order")
         #expect(LibraryScope.allCases.map(\.label) == ["Years", "Months", "All"])
     }

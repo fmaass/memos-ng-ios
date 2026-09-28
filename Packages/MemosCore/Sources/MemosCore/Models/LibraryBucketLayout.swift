@@ -21,15 +21,17 @@ public enum LibraryScope: String, Sendable, Equatable, CaseIterable, Identifiabl
         }
     }
 
-    /// The buckets this view is drawn from, or nil for All, which reads the list instead.
+    /// The buckets this view reads.
     ///
     /// Months reads DAY buckets, not month buckets: its tiles are days, and a year chosen on the
-    /// Years view narrows them on the device (`dayBuckets(_:inYear:)`), the way the web does.
+    /// Years view narrows them on the device (`dayBuckets(_:inYear:)`), the way the web does. All
+    /// draws the list, and reads day buckets too for its day headings' counts (MEMNG-597, plan page
+    /// 3929 decision 13): a heading counts the WHOLE day, as the web's does, never the fragment of
+    /// it the pages loaded so far.
     public var bucketSize: LibraryBucketSize? {
         switch self {
         case .years: .year
-        case .months: .day
-        case .all: nil
+        case .months, .all: .day
         }
     }
 }

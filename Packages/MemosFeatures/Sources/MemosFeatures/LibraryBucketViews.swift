@@ -66,8 +66,34 @@ struct LibraryMonthsMosaic: View {
     /// A day was tapped, or a month's "more days" line: the screen jumps to the All grid at that
     /// day (MEMNG-587).
     let showDay: (LibraryBucket) -> Void
+    /// The `YYYY-MM` month the All view's date pill asked for, scrolled to once the months are
+    /// read (plan page 3929 decision 13); nil when nothing asked.
+    var target: String?
+    /// Told once the target is scrolled to, or once the months are read without it.
+    var reachedTarget: () -> Void = {}
 
     var body: some View {
+        ScrollViewReader { proxy in
+            scroll
+                .onChange(
+                    of: MonthTargetReadiness(target: target, months: months.map(\.key)),
+                    initial: true
+                ) {
+                    bring(proxy)
+                }
+        }
+    }
+
+    /// A month Months does not show is not waited for: the view opens at its top, as the web's does.
+    private func bring(_ proxy: ScrollViewProxy) {
+        guard let target, !months.isEmpty else { return }
+        if months.contains(where: { $0.key == target }) {
+            proxy.scrollTo(target, anchor: .top)
+        }
+        reachedTarget()
+    }
+
+    private var scroll: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: DesignTokens.Space.section) {
                 if let error = errorText {
@@ -84,11 +110,18 @@ struct LibraryMonthsMosaic: View {
                 }
                 ForEach(months) { month in
                     LibraryMosaicMonthSection(month: month, showDay: showDay)
+                        .id(month.key)
                 }
             }
             .padding(.vertical, DesignTokens.Space.tight)
         }
     }
+}
+
+/// What Months asks again on for the pill's month: the month, and the months it has to look in.
+private struct MonthTargetReadiness: Equatable {
+    let target: String?
+    let months: [String]
 }
 
 /// One month of the mosaic: its title, its tiles in the frames their slots name, and the line

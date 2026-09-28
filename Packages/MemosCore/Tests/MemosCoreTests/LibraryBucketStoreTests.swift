@@ -92,7 +92,7 @@ struct LibraryBucketStoreTests {
         )
     }
 
-    @Test("All with no tag sends neither, and the zone defaults to the device's")
+    @Test("All with no tag sends neither, and the zone defaults to the library's calendar")
     func allAndNoTagAreAbsent() async {
         let paths = LockedValue<[String]>([])
         let client = Stub.client { request, _, _ in
@@ -100,7 +100,7 @@ struct LibraryBucketStoreTests {
             return Stub.json("[]")
         }
         let store = LibraryBucketStore()
-        #expect(store.timeZoneIdentifier == TimeZone.current.identifier)
+        #expect(store.timeZoneIdentifier == libraryTimeZone)
         await store.load(
             size: .month,
             filter: .all,
@@ -111,7 +111,7 @@ struct LibraryBucketStoreTests {
 
         let items = Self.items(paths.get().first)
         #expect(items["size"] == ["month"], "control: the query was read: \(paths.get())")
-        #expect(items["tz"] == [TimeZone.current.identifier], "\(paths.get())")
+        #expect(items["tz"] == [libraryTimeZone], "\(paths.get())")
         #expect(items["type"] == nil, "All sent a type: \(paths.get())")
         #expect(items["tag"] == nil, "no tag sent a tag: \(paths.get())")
     }
@@ -343,6 +343,224 @@ struct LibraryBucketStoreTests {
         #expect(calls.get() == 1, "two overlapping reads of one request were two requests")
         #expect(store.buckets.map(\.key) == ["2026-09"], "control: the one read landed")
         #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a refresh during a pending identical read lands counts read after the refresh began",
+        .timeLimit(.minutes(1))
+    )
+    func aRefreshOutlivesAPendingRead() async {
+        let calls = LockedValue<Int>(0)
+        let firstAnswered = LockedValue<Bool>(false)
+        let overlapped = LockedValue<Bool>(false)
+        let entered = BucketSignal()
+        let release = BucketSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+                firstAnswered.set(true)
+                return Self.day(count: 12)
+            }
+            if !firstAnswered.get() { overlapped.set(true) }
+            return Self.day(count: 13)
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        let initial = Task { await Self.read(store, client, refreshing: false) }
+        await entered.wait()
+        let refreshing = Task { await Self.read(store, client, refreshing: true) }
+        await Self.settle()
+        #expect(calls.get() == 1, "the refresh sent a second read beside the pending one")
+        release.signal()
+        await initial.value
+        await refreshing.value
+
+        #expect(calls.get() == 2, "the refresh was answered by a read asked before it began")
+        #expect(!overlapped.get(), "the refresh's read went out beside the pending one")
+        #expect(store.buckets.map(\.count) == [13], "the pending read's older count landed last")
+        #expect(!store.isLoading)
+    }
+
+    @Test("a refresh with nothing pending is one request on the wire", .timeLimit(.minutes(1)))
+    func anIdleRefreshIsOneRead() async {
+        let calls = LockedValue<Int>(0)
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            return Self.day(count: 13)
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        await Self.read(store, client, refreshing: true)
+
+        #expect(calls.get() == 1, "a refresh with nothing pending sent more than one read")
+        #expect(store.buckets.map(\.count) == [13], "control: the refresh's read landed")
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "two refreshes during one pending read send one read of their own",
+        .timeLimit(.minutes(1))
+    )
+    func twoRefreshesShareOneRead() async {
+        let calls = LockedValue<Int>(0)
+        let entered = BucketSignal()
+        let release = BucketSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+                return Self.day(count: 12)
+            }
+            return Self.day(count: 13)
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        let initial = Task { await Self.read(store, client, refreshing: false) }
+        await entered.wait()
+        let one = Task { await Self.read(store, client, refreshing: true) }
+        let two = Task { await Self.read(store, client, refreshing: true) }
+        await Self.settle()
+        release.signal()
+        await initial.value
+        await one.value
+        await two.value
+
+        #expect(calls.get() == 2, "two refreshes were two reads after the pending one")
+        #expect(store.buckets.map(\.count) == [13], "control: the refreshes' read landed")
+        #expect(!store.isLoading)
+    }
+
+    @Test("a pending read that fails still lets the refresh read", .timeLimit(.minutes(1)))
+    func aFailedPendingReadStillLetsTheRefreshRead() async {
+        let calls = LockedValue<Int>(0)
+        let entered = BucketSignal()
+        let release = BucketSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+                return Stub.json(#"{"not":"a list"}"#)
+            }
+            return Self.day(count: 13)
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        let initial = Task { await Self.read(store, client, refreshing: false) }
+        await entered.wait()
+        let refreshing = Task { await Self.read(store, client, refreshing: true) }
+        await Self.settle()
+        release.signal()
+        await initial.value
+        await refreshing.value
+
+        #expect(calls.get() == 2, "the refresh ended with the read it waited for")
+        #expect(store.buckets.map(\.count) == [13], "the refresh's own read did not land")
+        #expect(store.lastError == nil, "control: the refresh's success cleared the failure")
+    }
+
+    @Test(
+        "a refresh that waited sends nothing once the account has changed",
+        .timeLimit(.minutes(1))
+    )
+    func aRefreshAfterAnIdentityChangeSendsNothing() async {
+        let calls = LockedValue<Int>(0)
+        let entered = BucketSignal()
+        let release = BucketSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            return Self.day(count: 12)
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        let initial = Task { await Self.read(store, client, refreshing: false) }
+        await entered.wait()
+        let refreshing = Task { await Self.read(store, client, refreshing: true) }
+        await Self.settle()
+        store.sessionIdentityChanged()
+        release.signal()
+        await initial.value
+        await refreshing.value
+
+        #expect(calls.get() == 1, "a refresh asked by the outgoing account read after it left")
+        #expect(store.buckets.isEmpty, "the outgoing account's buckets came back")
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a refresh that waited sends nothing once another request was read",
+        .timeLimit(.minutes(1))
+    )
+    func aRefreshAfterTheScreenMovedOnSendsNothing() async {
+        let calls = LockedValue<Int>(0)
+        let entered = BucketSignal()
+        let release = BucketSignal()
+        let client = Stub.client { request, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            let tag = Self.items(request.path)["tag"]?.first ?? "none"
+            return Stub.json(
+                #"[{"key":"\#(tag)","count":1,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+            )
+        }
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        let initial = Task { await Self.read(store, client, refreshing: false) }
+        await entered.wait()
+        let refreshing = Task { await Self.read(store, client, refreshing: true) }
+        await Self.settle()
+        await Self.read(store, client, refreshing: false, tag: "food")
+        release.signal()
+        await initial.value
+        await refreshing.value
+
+        #expect(calls.get() == 2, "the refresh read back a request the screen had left")
+        #expect(store.buckets.map(\.key) == ["food"], "the left request's buckets came back")
+        #expect(store.loadedRequest?.tag == "food")
+    }
+
+    /// One day bucket counting `count` pictures.
+    nonisolated private static func day(count: Int) -> (HTTPResponse, HTTPBody?) {
+        Stub.json(
+            #"[{"key":"2026-09-28","count":\#(count),"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+        )
+    }
+
+    /// All's day buckets, the read a pull-to-refresh of All makes, under `tag` ("travel" unless
+    /// told otherwise), through `load` or `refresh`.
+    private static func read(
+        _ store: LibraryBucketStore,
+        _ client: any APIProtocol,
+        refreshing: Bool,
+        tag: String = "travel"
+    ) async {
+        if refreshing {
+            await store.refresh(
+                size: .day,
+                filter: .all,
+                tag: tag,
+                using: client.handle,
+                baseURL: Stub.baseURL
+            )
+        } else {
+            await store.load(
+                size: .day,
+                filter: .all,
+                tag: tag,
+                using: client.handle,
+                baseURL: Stub.baseURL
+            )
+        }
+    }
+
+    /// Lets every task already started on the main actor run to its first suspension — a started
+    /// refresh has then either sent its read or begun waiting — before the test goes on.
+    private static func settle() async {
+        for _ in 0..<5 { await Task.yield() }
     }
 
     @Test("signing in as somebody else empties the list and drops the read in flight")

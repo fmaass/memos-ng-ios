@@ -92,3 +92,35 @@ public func pickDays(_ days: [LibraryBucket], cap: Int = 6) -> PickedDays {
     .prefix(max(cap, 0))
     return PickedDays(shown: kept.sorted { $0.key < $1.key }, dropped: days.count - kept.count)
 }
+
+/// The order the All view's day blocks walk the patterns in: A B C B D (plan page 3929 decision 13
+/// and its 20:05 CEST amendment, `docs/design/all-by-day-mockup.md` §2).
+public let dayMosaicCycle: [MosaicPattern] = [.a, .b, .c, .b, .d]
+
+/// The slots of one day's block in the All view (MEMNG-597), ported from memos-ng
+/// `frontend/src/lib/mosaic.ts` `daySlots` with its spec's vectors.
+///
+/// `dayIndex` is the day's place in the whole loaded list, counted across month boundaries, so a
+/// day starts the cycle one step later than the day before it and two neighbours never open alike;
+/// any integer is valid, wrapped onto the cycle. A pattern is placed whole or not at all: a
+/// remainder too short for the next one is squares, a single leftover one wide frame, and a day of
+/// one or two pictures is wide frames only. Unlike `mosaicSlots`, no pattern is ever cut short —
+/// a day block has no trailing gap to leave, where a month mosaic may.
+public func daySlots(_ count: Int, dayIndex: Int = 0) -> [MosaicSlot] {
+    guard count > 2 else { return Array(repeating: .wide, count: max(count, 0)) }
+    let cycle = dayMosaicCycle
+    var out: [MosaicSlot] = []
+    out.reserveCapacity(count)
+    var index = ((dayIndex % cycle.count) + cycle.count) % cycle.count
+    while out.count < count {
+        let pattern = cycle[index].slots
+        let left = count - out.count
+        if left < pattern.count {
+            out += left == 1 ? [.wide] : Array(repeating: .square, count: left)
+            break
+        }
+        out += pattern
+        index = (index + 1) % cycle.count
+    }
+    return out
+}

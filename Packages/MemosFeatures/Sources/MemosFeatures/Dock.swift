@@ -46,6 +46,9 @@ final class AppDock {
 final class LibraryScopeChoice {
     private(set) var scope: LibraryScope = .all
     private(set) var year: String?
+    /// The `YYYY-MM` month the date pill asked Months to open at, until Months has scrolled to it
+    /// (plan page 3929 decision 13).
+    private(set) var monthTarget: String?
     /// What a choice made by hand also does to the Library — abandoning a jump still reading. Set
     /// by the Library, which owns the store the jump is reading on, and called synchronously so
     /// no page of the abandoned jump can land between the choice and the abandonment.
@@ -64,17 +67,34 @@ final class LibraryScopeChoice {
         // A jump still reading was on its way to the view being left; it lands nowhere.
         if chosen != scope { handChoiceAction?() }
         year = nil
+        monthTarget = nil
         scope = chosen
+    }
+
+    /// The date pill's tap in All: Months, across every year, at that month. Leaving All by hand
+    /// abandons a jump still reading, as a choice in the segment does.
+    func showMonth(_ key: String) {
+        if scope != .months { handChoiceAction?() }
+        year = nil
+        monthTarget = key
+        scope = .months
+    }
+
+    /// Months has scrolled to the pill's month, or found it is not among its months.
+    func consumeMonthTarget() {
+        monthTarget = nil
     }
 
     /// A Years card: that year's days in Months.
     func showMonths(of key: String) {
         year = key
+        monthTarget = nil
         scope = .months
     }
 
     /// A day tile: the All grid, where the jump lands.
     func showAll() {
+        monthTarget = nil
         scope = .all
     }
 

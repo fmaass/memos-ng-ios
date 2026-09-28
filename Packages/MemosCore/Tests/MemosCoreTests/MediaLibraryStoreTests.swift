@@ -125,6 +125,38 @@ struct MediaLibraryStoreTests {
         #expect(!store.hasMore, "a page with no X-Next-Cursor is the last one")
     }
 
+    @Test("the list's generation stays through its next page and moves with every other list")
+    func listGenerationNamesTheList() async {
+        let client = Stub.client { request, _, _ in
+            if (request.path ?? "").contains("cursor=page-2") {
+                return Self.page(Self.uids(["c"]))
+            }
+            return Self.page(Self.uids(["a", "b"]), nextCursor: "page-2")
+        }
+        let store = MediaLibraryStore(pageSize: 2)
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let listed = store.listGeneration
+        await store.loadMore(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.items.count == 3, "control: the next page appended")
+        #expect(store.listGeneration == listed, "a next page of the same list moved its generation")
+
+        var seen = [listed]
+        let changes: [(String, () -> Void)] = [
+            ("filter", { store.setFilter(.videos) }),
+            ("tag", { store.setTag("walks") }),
+            ("order", { store.setOrder(.oldestFirst) }),
+            ("identity", { store.sessionIdentityChanged() }),
+        ]
+        for (name, change) in changes {
+            change()
+            #expect(
+                !seen.contains(store.listGeneration), "a \(name) change kept the list's generation")
+            seen.append(store.listGeneration)
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(!seen.contains(store.listGeneration), "a refresh kept the list's generation")
+    }
+
     @Test("a page with no X-Next-Cursor ends the list, and nothing is asked for after it")
     func absentHeaderEndsTheList() async {
         let requests = Counter()

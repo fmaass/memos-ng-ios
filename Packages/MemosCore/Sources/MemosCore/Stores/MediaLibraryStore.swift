@@ -193,6 +193,11 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         return landed.landing
     }
 
+    /// Which list is on screen: it moves whenever the rows stop being a continuation of the list
+    /// before — a refresh, a filter, order or tag change, another signed-in identity, a jump — and
+    /// never for a next page of the same list. What the grid holds for one list it judges by this.
+    public var listGeneration: Int { generation }
+
     /// Whether a jump is reading pages for the list on screen.
     public var isJumping: Bool {
         guard let jumping else { return false }

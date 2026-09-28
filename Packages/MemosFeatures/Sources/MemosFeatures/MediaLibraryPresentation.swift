@@ -63,14 +63,88 @@ public struct LibraryGalleryRow: Identifiable, Equatable, Sendable {
     public var id: String { tiles.first?.id ?? "empty" }
 }
 
-/// One month of the library as the grid draws it: its header, then its justified rows.
-public struct LibraryGallerySection: Identifiable, Equatable, Sendable {
+/// One picture of a day block, in the frame its slot names.
+public struct LibraryDayPicture: Identifiable, Equatable, Sendable {
+    public let attachment: MemoAttachment
+    /// Where this file sits in the WHOLE loaded list — the number the paging trigger is measured in.
+    public let index: Int
+    public let slot: MosaicSlot
+
+    public var id: String { attachment.uid }
+}
+
+/// One band of a day block: a hero with its sides, a row of squares, or one wide frame.
+public struct LibraryDayBand: Identifiable, Equatable, Sendable {
+    public let pictures: [LibraryDayPicture]
+
+    /// The first file in it, for the reason `LibraryGalleryRow.id` gives: a page arriving at the
+    /// bottom does not rename the bands above it.
+    public var id: String { pictures.first?.id ?? "empty" }
+}
+
+/// One day of the All view (plan page 3929 decision 13): its heading row and its mosaic block.
+public struct LibraryDayGroup: Identifiable, Equatable, Sendable {
+    /// `YYYY-MM-DD`, or `undatedSectionKey`.
+    public let key: String
+    /// "Sat", or "Undated".
+    public let weekday: String
+    /// "26 Sep", or empty for the undated group.
+    public let date: String
+    /// The day's place in the whole loaded list, across months: where its block starts the cycle.
+    public let dayIndex: Int
+    public let bands: [LibraryDayBand]
+
+    public var id: String { key }
+    /// What the scroll is brought to when a jump lands on this day: its heading (MEMNG-587, moved
+    /// to the heading by decision 13).
+    public var headingID: String { "day:\(key)" }
+    public var pictures: [LibraryDayPicture] { bands.flatMap(\.pictures) }
+}
+
+/// Where a band sits in its day: which day, and whether it opens or closes the block.
+public struct LibraryBandPlace: Equatable, Sendable {
+    public let day: String
+    public let dayIndex: Int
+    public let first: Bool
+    public let last: Bool
+}
+
+/// One row of the All view's lazy stack: a day's heading, or one band of its block.
+public enum LibraryAllRow: Identifiable, Equatable, Sendable {
+    case heading(LibraryDayGroup)
+    case band(LibraryDayBand, LibraryBandPlace)
+
+    /// A heading is `LibraryDayGroup.headingID`, a band its first file.
+    public var id: String {
+        switch self {
+        case .heading(let day): day.headingID
+        case .band(let band, _): band.id
+        }
+    }
+}
+
+/// One month of the All view: its header, then its day groups.
+public struct LibraryAllMonth: Identifiable, Equatable, Sendable {
     /// `YYYY-MM`, or `undatedSectionKey` (`groupByMonth`).
     public let key: String
     public let label: String
-    public let rows: [LibraryGalleryRow]
+    public let days: [LibraryDayGroup]
 
     public var id: String { key }
+
+    /// The month as the lazy stack's rows: each day's heading, then its bands.
+    public var rows: [LibraryAllRow] {
+        days.flatMap { day in
+            [LibraryAllRow.heading(day)]
+                + day.bands.enumerated().map { place, band in
+                    LibraryAllRow.band(
+                        band,
+                        LibraryBandPlace(
+                            day: day.key, dayIndex: day.dayIndex, first: place == 0,
+                            last: place == day.bands.count - 1))
+                }
+        }
+    }
 }
 
 /// Decisions the library screen needs, kept out of the view — the same split `MemoPresentation`
@@ -126,48 +200,84 @@ public enum MediaLibraryPresentation {
         }
     }
 
-    /// The library as month sections, each packed into justified rows of its own (MEMNG-585).
+    /// The library as month sections, each holding its day groups (MEMNG-597, plan page 3929
+    /// decision 13): a day is a calendar day in `timeZone` (`groupByDay`) inside its calendar month
+    /// (`groupByMonth`), and its pictures are one mosaic block cycling the Months frame patterns
+    /// (`daySlots`), cut into bands the lazy stack builds one at a time.
     ///
-    /// A month is a calendar month in `timeZone` (`groupByMonth`), and each month is solved on its
-    /// own, so a row never straddles two headers. Every tile keeps its index in the WHOLE list —
-    /// the number the paging trigger is measured in — rather than its place in its month: a month
-    /// that reported indices from zero would put the trigger for the end of the library at the top
-    /// of every section.
-    public static func sections(
-        for items: [LibraryRow],
-        width: Double,
-        targetHeight: Double = targetRowHeight,
-        gap: Double,
-        timeZone: String
-    ) -> [LibraryGallerySection] {
+    /// A day's index counts days across the WHOLE list, so the cycle runs on over a month boundary,
+    /// and every picture keeps its index in the whole list — the number the paging trigger is
+    /// measured in — rather than its place in its day.
+    public static func daySections(
+        for items: [LibraryRow], timeZone: String = libraryTimeZone
+    ) -> [LibraryAllMonth] {
         // Rows are unique by file (`MediaLibraryStore.merged`), so a uid names one place.
         let position = Dictionary(
             items.enumerated().map { ($0.element.id, $0.offset) },
             uniquingKeysWith: { first, _ in first }
         )
+        var dayIndex = 0
         return groupByMonth(items, timeZone: timeZone).map { month in
-            let packed = Self.rows(
-                for: month.items.map(\.attachment),
-                width: width,
-                targetHeight: targetHeight,
-                gap: gap
-            )
-            .map { row in
-                LibraryGalleryRow(
-                    tiles: row.tiles.compactMap { tile in
-                        guard let index = position[tile.id] else { return nil }
-                        return LibraryTile(
-                            attachment: tile.attachment,
-                            index: index,
-                            width: tile.width,
-                            height: tile.height
-                        )
-                    },
-                    height: row.height
+            let days = groupByDay(month.items, timeZone: timeZone).map { day in
+                defer { dayIndex += 1 }
+                let slots = daySlots(day.items.count, dayIndex: dayIndex)
+                let pictures = zip(day.items, slots).map { row, slot in
+                    LibraryDayPicture(
+                        attachment: row.attachment, index: position[row.id] ?? 0, slot: slot)
+                }
+                let heading = dayHeadingParts(day.key)
+                return LibraryDayGroup(
+                    key: day.key,
+                    weekday: heading.weekday,
+                    date: heading.date,
+                    dayIndex: dayIndex,
+                    bands: mosaicBands(slots).map { LibraryDayBand(pictures: Array(pictures[$0])) }
                 )
             }
-            return LibraryGallerySection(key: month.key, label: month.label, rows: packed)
+            return LibraryAllMonth(key: month.key, label: month.label, days: days)
         }
+    }
+
+    /// The bands a mosaic's slots fall into, as ranges of the slots, read as
+    /// `MonthMosaicGeometry.frames` reads them: a hero and at most two sides of its own after it,
+    /// a row of at most three squares, or one wide frame alone. A band is what the lazy stack
+    /// builds, so a day of two hundred pictures is not one view of two hundred tiles.
+    public static func mosaicBands(_ slots: [MosaicSlot]) -> [Range<Int>] {
+        // A side with no hero before it is drawn as a square, as the geometry draws it.
+        let squareSlots: Set<MosaicSlot> = [.square, .sideRight, .sideLeft]
+        var bands: [Range<Int>] = []
+        var index = 0
+        while index < slots.count {
+            let start = index
+            switch slots[index] {
+            case .heroLeft, .heroRight:
+                let side: MosaicSlot = slots[index] == .heroLeft ? .sideRight : .sideLeft
+                index += 1
+                var stacked = 0
+                while stacked < 2, index < slots.count, slots[index] == side {
+                    stacked += 1
+                    index += 1
+                }
+            case .wide:
+                index += 1
+            case .square, .sideRight, .sideLeft:
+                var inRow = 0
+                while inRow < 3, index < slots.count, squareSlots.contains(slots[index]) {
+                    inRow += 1
+                    index += 1
+                }
+            }
+            bands.append(start..<index)
+        }
+        return bands
+    }
+
+    /// A day heading's count: the day bucket's, which counts the WHOLE day, or nil while the
+    /// buckets are unread, failed or answer another request, and for the undated group. Never the
+    /// number of the day's pictures loaded so far (the web's `dayCount`, `ResourcesView.vue`).
+    public static func dayCount(_ key: String, in buckets: [LibraryBucket]?) -> Int? {
+        guard key != undatedSectionKey else { return nil }
+        return buckets?.first { $0.key == key }?.count
     }
 
     /// What the tile at this file draws. Derived from the KIND rather than from the status: what

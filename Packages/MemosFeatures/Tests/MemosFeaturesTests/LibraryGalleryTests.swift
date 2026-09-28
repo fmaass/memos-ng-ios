@@ -115,11 +115,13 @@ struct LibraryGalleryTests {
         let items = [("s0", september), ("a1", august), ("s2", september), ("a3", august)].map {
             LibraryRow(attachment: file($0.0), takenAt: $0.1, mine: true, filename: $0.0)
         }
-        let sections = MediaLibraryPresentation.sections(
-            for: items, width: width, gap: gap, timeZone: "Europe/Zurich")
+        // MEMNG-597: the All view draws day groups now; a day's pictures keep the same promise.
+        let sections = MediaLibraryPresentation.daySections(for: items, timeZone: "Europe/Zurich")
 
         #expect(sections.map(\.label) == ["September 2026", "August 2026"])
-        let placed = sections.map { $0.rows.flatMap(\.tiles).map { "\($0.id)@\($0.index)" } }
+        let placed = sections.map {
+            $0.days.flatMap(\.pictures).map { "\($0.id)@\($0.index)" }
+        }
         #expect(placed == [["s0@0", "s2@2"], ["a1@1", "a3@3"]])
     }
 

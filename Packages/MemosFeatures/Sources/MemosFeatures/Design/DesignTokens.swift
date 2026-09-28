@@ -43,6 +43,9 @@ public enum DesignTokens {
         public static let tile: CGFloat = 8
         /// A Months mosaic tile (plan decision 9): the tiles sit two points apart, edge to edge.
         public static let mosaic: CGFloat = 6
+        /// An All view day block (plan page 3929 decision 13): the whole block is rounded, its
+        /// tiles inside it are not.
+        public static let dayBlock: CGFloat = 12
     }
 
     /// Dimensions that must grow with the type size. Every one of these is read through

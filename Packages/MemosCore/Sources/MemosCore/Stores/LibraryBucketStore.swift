@@ -59,7 +59,8 @@ public struct LibraryBucketRequest: Sendable, Equatable {
 ///
 /// * one read per request at a time — a second `load` for the request already in flight is
 ///   REFUSED, not joined and not issued: it returns at once, and the answer already on its way is
-///   the one that lands, so two appearances in a row are one request on the wire;
+///   the one that lands, so two appearances in a row are one request on the wire. `refresh` is the
+///   one exception, and it CHAINS rather than overlaps: see there;
 /// * a read for a different request supersedes the one in flight, whose answer is then dropped (a
 ///   generation bumped by every read and by `sessionIdentityChanged`, plus the request itself);
 /// * an answer for a session that has ended is dropped, so a stale list cannot repopulate a list
@@ -80,11 +81,13 @@ public final class LibraryBucketStore {
 
     private var generation = 0
     private var loadingLineage: Lineage?
+    /// Refreshes waiting for the read of one generation to end, however it ends.
+    private var readEndWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
 
     public init(
-        timeZoneIdentifier: String = TimeZone.current.identifier,
+        timeZoneIdentifier: String = libraryTimeZone,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded }
     ) {
@@ -114,8 +117,59 @@ public final class LibraryBucketStore {
             tag: tag,
             timeZoneIdentifier: timeZoneIdentifier
         )
-        let client = handle.client
         guard loadingLineage?.request != request else { return }
+        await read(request, using: handle, baseURL: baseURL)
+    }
+
+    /// A pull-to-refresh's read. It differs from `load` only when the same request is already in
+    /// flight: that read was asked for before the refresh began, so its counts can predate whatever
+    /// else the refresh re-read, and letting it answer for the refresh is how a day showed 12 above
+    /// 13 pictures. So the refresh lets it finish — its answer lands or is dropped under the usual
+    /// fences — and then sends ONE read of its own. The two follow each other, so there is still
+    /// never more than one read of a request on the wire; and a refresh that finds a read issued
+    /// after it began (another refresh's) joins that one instead of sending a third.
+    ///
+    /// It sends nothing if, while it waited, the device changed account or a read for another
+    /// request was issued: the screen has moved on, and its buckets are not to be read back over it.
+    public func refresh(
+        size: LibraryBucketSize,
+        filter: MediaLibraryFilter,
+        tag: String?,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        let request = LibraryBucketRequest(
+            size: size,
+            filter: filter,
+            tag: tag,
+            timeZoneIdentifier: timeZoneIdentifier
+        )
+        let began = generation
+        while let pending = loadingLineage, pending.request == request {
+            await readEnds(pending.generation)
+            // A read issued after the refresh began is one it can stand on.
+            guard pending.generation <= began else { return }
+            if generation == pending.generation { break }
+            // Something else was issued while it waited. Another refresh's read of this request is
+            // joined on the next pass; anything else — a read for another request, or the account
+            // changing, which moves the generation too — means the screen has moved on.
+            guard loadingLineage?.request == request else { return }
+        }
+        await read(request, using: handle, baseURL: baseURL)
+    }
+
+    private func readEnds(_ generation: Int) async {
+        await withCheckedContinuation { waiter in
+            readEndWaiters[generation, default: []].append(waiter)
+        }
+    }
+
+    private func read(
+        _ request: LibraryBucketRequest,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        let client = handle.client
         // A read for another request supersedes whatever is in flight: that answer is for buckets
         // nobody is showing any more.
         generation += 1
@@ -126,6 +180,9 @@ public final class LibraryBucketStore {
             if loadingLineage == lineage {
                 loadingLineage = nil
                 isLoading = false
+            }
+            for waiter in readEndWaiters.removeValue(forKey: lineage.generation) ?? [] {
+                waiter.resume()
             }
         }
         do {

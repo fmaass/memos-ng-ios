@@ -163,3 +163,146 @@ struct LibraryDayKeyTests {
         #expect(dayKey(nil, timeZone: zurich) == nil)
     }
 }
+
+// MEMNG-597 (plan page 3929 decision 13): the All view's day groups, their labels and the day the
+// scroll pill names — memos-ng `frontend/src/lib/__tests__/librarySections.spec.ts` at c8bd91e,
+// titles verbatim and vectors unchanged. The spec's `not-a-date` string arrives here as a row
+// whose `takenAt` is nil, as in `undatedSection` above.
+
+private func dayShape(_ items: [LibraryRow], _ timeZone: String? = nil) -> [[String]] {
+    let groups = timeZone.map { groupByDay(items, timeZone: $0) } ?? groupByDay(items)
+    return groups.map { [$0.key] + $0.items.map(\.id) }
+}
+
+@Suite("groupByDay")
+struct LibraryDayGroupTests {
+    @Test("files a 23:30 UTC item on 30 September under 1 October in Zurich")
+    func lateSeptemberIsOctober() throws {
+        let item = try at("a", "2026-09-30T23:30:00Z")
+        #expect(
+            groupByDay([item], timeZone: zurich) == [
+                LibraryDaySection(key: "2026-10-01", items: [item])
+            ])
+    }
+
+    @Test(
+        "keeps the list order, newest first: days in order of first appearance, items in list order"
+    )
+    func keepsListOrder() throws {
+        let items = try [
+            at("c", "2026-10-01T08:00:00Z"),
+            at("b", "2026-09-30T23:30:00Z"),  // 01:30 CEST on 1 October
+            at("a", "2026-09-30T12:00:00Z"),
+            at("z", "2026-09-27T09:00:00Z"),
+        ]
+        #expect(
+            dayShape(items, zurich) == [
+                ["2026-10-01", "c", "b"],
+                ["2026-09-30", "a"],
+                ["2026-09-27", "z"],
+            ])
+    }
+
+    @Test("keeps an ascending list ascending rather than re-sorting it")
+    func keepsAscending() throws {
+        let items = try [
+            at("a", "2026-09-26T10:00:00Z"), at("b", "2026-09-27T10:00:00Z"),
+            at("c", "2026-09-27T11:00:00Z"),
+        ]
+        #expect(dayShape(items, zurich) == [["2026-09-26", "a"], ["2026-09-27", "b", "c"]])
+    }
+
+    @Test("starts the day at exactly Zurich midnight, not a millisecond later")
+    func startsAtMidnight() throws {
+        #expect(try dayShape([at("m", "2026-09-26T22:00:00Z")], zurich) == [["2026-09-27", "m"]])
+        #expect(
+            try dayShape([at("m", "2026-09-26T21:59:59.999Z")], zurich) == [["2026-09-26", "m"]])
+    }
+
+    @Test("defaults to Europe/Zurich and honours another zone when one is passed")
+    func defaultZone() throws {
+        let late = try [at("a", "2026-09-30T23:30:00Z")]
+        #expect(dayShape(late) == [["2026-10-01", "a"]])
+        #expect(dayShape(late, "America/New_York") == [["2026-09-30", "a"]])
+        #expect(dayShape(late, zurich) == [["2026-10-01", "a"]])
+    }
+
+    @Test("keeps an unreadable takenAt in its own group instead of dropping it or throwing")
+    func undatedGroup() throws {
+        let items = try [
+            at("ok", "2026-09-27T10:00:00Z"), row("bad", takenAt: nil),
+            at("ok2", "2026-09-27T11:00:00Z"),
+        ]
+        #expect(dayShape(items, zurich) == [["2026-09-27", "ok", "ok2"], ["undated", "bad"]])
+    }
+
+    @Test("returns no groups for no items")
+    func noItems() {
+        #expect(groupByDay([], timeZone: zurich).isEmpty)
+    }
+}
+
+// 2026-09-26 is a Saturday and 2026-09-27 a Sunday.
+@Suite("day labels")
+struct LibraryDayLabelTests {
+    @Test("names the heading row as weekday and day-month")
+    func headingParts() {
+        #expect(dayHeadingParts("2026-09-26") == DayHeadingParts(weekday: "Sat", date: "26 Sep"))
+        #expect(dayHeadingParts("2026-09-27") == DayHeadingParts(weekday: "Sun", date: "27 Sep"))
+    }
+
+    @Test("names the scroll pill as weekday · day month year")
+    func pillLabel() {
+        #expect(dayPillLabel("2026-09-26") == "Sat · 26 Sep 2026")
+        #expect(dayPillLabel("2027-01-01") == "Fri · 1 Jan 2027")
+    }
+
+    @Test("formats the key as a calendar date, so the first and last of a year stay put")
+    func yearEdges() {
+        #expect(dayHeadingParts("2026-01-01") == DayHeadingParts(weekday: "Thu", date: "1 Jan"))
+        #expect(dayPillLabel("2025-12-31") == "Wed · 31 Dec 2025")
+    }
+
+    @Test("labels the undated group Undated")
+    func undated() {
+        #expect(dayHeadingParts("undated") == DayHeadingParts(weekday: "Undated", date: ""))
+        #expect(dayPillLabel("undated") == "Undated")
+    }
+
+    @Test(
+        "treats a key that only contains a date, or names no real day, as undated rather than throwing",
+        arguments: ["x2026-09-26", "2026-09-26T10:00", "2026-02-30", "2026-13-01", ""]
+    )
+    func notADay(_ key: String) {
+        #expect(dayHeadingParts(key) == DayHeadingParts(weekday: "Undated", date: ""))
+        #expect(dayPillLabel(key) == "Undated")
+    }
+}
+
+@Suite("topDay")
+struct LibraryTopDayTests {
+    private static let headings = [
+        DayMarker(key: "2026-09-27", top: -300),
+        DayMarker(key: "2026-09-26", top: 40),
+        DayMarker(key: "2026-09-20", top: 400),
+    ]
+
+    @Test("is null when no heading has reached the threshold")
+    func noneReached() {
+        #expect(topDay(Self.headings, threshold: -301) == nil)
+        #expect(topDay([], threshold: 100) == nil)
+    }
+
+    @Test("names the last heading in document order that has reached the threshold")
+    func lastReached() {
+        #expect(topDay(Self.headings, threshold: 100) == "2026-09-26")
+        #expect(topDay(Self.headings, threshold: 1000) == "2026-09-20")
+        #expect(topDay(Self.headings, threshold: -100) == "2026-09-27")
+    }
+
+    @Test("counts a heading exactly at the threshold as reached")
+    func exactlyAtThreshold() {
+        #expect(topDay(Self.headings, threshold: 40) == "2026-09-26")
+        #expect(topDay(Self.headings, threshold: 39.5) == "2026-09-27")
+    }
+}

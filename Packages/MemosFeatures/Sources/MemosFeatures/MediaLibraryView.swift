@@ -203,7 +203,9 @@ struct MediaLibraryView: View {
                     year: year,
                     errorText: store.lastError,
                     clearYear: { choice.clearYear() },
-                    showDay: { showDay($0) }
+                    showDay: { showDay($0) },
+                    target: answered == nil ? nil : choice.monthTarget,
+                    reachedTarget: { choice.consumeMonthTarget() }
                 )
                 .feedsDock(dock, on: .library)
             }
@@ -221,7 +223,7 @@ struct MediaLibraryView: View {
                 }
             }
         }
-        .refreshable { await loadBuckets() }
+        .refreshable { await loadBuckets(refreshing: true) }
     }
 
     /// A Years card opens that year's days in the Months view, narrowed on the device from the one
@@ -244,9 +246,6 @@ struct MediaLibraryView: View {
     private func grid(_ library: MediaLibraryStore) -> some View {
         LibraryGrid(
             items: library.items,
-            // The device's zone, which is the one the month buckets are asked for in, so a header
-            // and the bucket it stands for name the same month.
-            timeZone: TimeZone.current.identifier,
             errorText: library.lastError,
             loadingMore: library.isLoadingMore,
             zoom: mediaZoom,
@@ -255,7 +254,21 @@ struct MediaLibraryView: View {
             fetch: { file, rendition in await fetch(file, rendition) },
             loadMore: { await loadMore() },
             landing: library.landing,
-            landed: { library.consumeLanding($0) }
+            landed: { library.consumeLanding($0) },
+            // Asked where it is acted on, never remembered from the last drawing: the store can
+            // replace the list between a drawing and a geometry callback already on its way.
+            listGeneration: { library.listGeneration },
+            dayBuckets: buckets.flatMap { store in
+                bucketsShown(
+                    for: .all,
+                    filter: library.filter,
+                    tag: library.tag,
+                    timeZoneIdentifier: store.timeZoneIdentifier,
+                    buckets: store.buckets,
+                    answering: store.loadedRequest
+                )
+            },
+            showMonth: { choice.showMonth($0) }
         )
         .feedsDock(dock, on: .library)
         .overlay {
@@ -275,7 +288,17 @@ struct MediaLibraryView: View {
                 )
             }
         }
-        .refreshable { await load() }
+        .refreshable { await refreshAll() }
+    }
+
+    /// All's pull-to-refresh: the list and the day buckets its headings count from, read side by
+    /// side, so a day that gained a picture is not drawn under its old count. The buckets go
+    /// through the store's refreshing read, so a read still pending from before the pull cannot
+    /// answer for it.
+    private func refreshAll() async {
+        async let list: Void = load()
+        async let counts: Void = loadBuckets(refreshing: true)
+        _ = await (list, counts)
     }
 
     /// The title, the line naming what the grid holds, and the options menu that changes it.
@@ -376,18 +399,29 @@ struct MediaLibraryView: View {
     }
 
     /// Reads the buckets the view on screen is drawn from, under the kind and tag the grid is
-    /// narrowed to. All is drawn from the list and reads none.
-    private func loadBuckets() async {
+    /// narrowed to. `refreshing` is a pull-to-refresh, which a read already pending does not
+    /// answer for.
+    private func loadBuckets(refreshing: Bool = false) async {
         guard let library, let buckets, let size = choice.scope.bucketSize,
             let handle = session.activeHandle, let baseURL = session.serverBaseURL
         else { return }
-        await buckets.load(
-            size: size,
-            filter: library.filter,
-            tag: library.tag,
-            using: handle,
-            baseURL: baseURL
-        )
+        if refreshing {
+            await buckets.refresh(
+                size: size,
+                filter: library.filter,
+                tag: library.tag,
+                using: handle,
+                baseURL: baseURL
+            )
+        } else {
+            await buckets.load(
+                size: size,
+                filter: library.filter,
+                tag: library.tag,
+                using: handle,
+                baseURL: baseURL
+            )
+        }
     }
 
     private func loadMore() async {
@@ -435,14 +469,12 @@ private struct LandingReadiness: Equatable {
 }
 
 /// The rows a grid's lazy stack has built now, kept out of SwiftUI's observation (`LibraryGrid`).
-private final class RowsOnScreen {
+final class RowsOnScreen {
     var rows: Set<String> = []
 }
 
 struct LibraryGrid: View {
     let items: [LibraryRow]
-    /// The zone the month sections are calendar months of.
-    let timeZone: String
     /// What the store last failed with, shown at the top of the scroll.
     let errorText: String?
     /// Whether the next page is on its way — the spinner at the bottom of the scroll.
@@ -463,6 +495,15 @@ struct LibraryGrid: View {
     var landing: LibraryLanding?
     /// Told once the scroll has been brought to `landing`'s built row, so it is scrolled to once.
     var landed: (LibraryLanding) -> Void = { _ in }
+    /// Which list `items` is now (`MediaLibraryStore.listGeneration`), read live: a heading a
+    /// landing held belongs to the list it landed in, and a filter, order or tag change is
+    /// another list.
+    var listGeneration: () -> Int = { 0 }
+    /// The day buckets a heading's count is read from, or nil while none answer this list
+    /// (`MediaLibraryPresentation.dayCount`).
+    var dayBuckets: [LibraryBucket]?
+    /// The date pill's tap: Months at this `YYYY-MM` month (plan page 3929 decision 13).
+    var showMonth: (String) -> Void = { _ in }
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
@@ -473,6 +514,12 @@ struct LibraryGrid: View {
     /// The landing this grid has brought its scroll to: a width measured again afterwards must not
     /// bring the reader back to it.
     @State private var scrolledTo: LibraryLanding?
+    /// The heading a landing brought to the line, held there until the reader's own hand moves
+    /// the scroll. Each time the lazy stack measures rows it has not built yet, the scroll is put
+    /// back where its estimate says — for a heading on the first screen, the top of the page — so
+    /// reaching the line once does not keep it there. It belongs to the list it landed in
+    /// (`listGeneration`): a next page keeps it, any other list lets it go.
+    @State private var holding: (heading: String, listGeneration: Int)?
     /// The rows the lazy stack has built now, the ones on or beside the screen. A reference rather
     /// than observed state on purpose: it changes with every row scrolled past, and observing it
     /// would re-solve the whole library each time.
@@ -482,6 +529,12 @@ struct LibraryGrid: View {
     @State private var laidOut: CGFloat = 0
     /// How many rows the lazy stack has built while a landing waits to be reached.
     @State private var built = 0
+    /// The day the date pill names, read only by the pill, so a scroll re-draws the pill and not
+    /// the library.
+    @State private var pill = DatePillModel()
+    /// Where each built heading and band starts on the page, for the pill. A reference for the
+    /// reason `onScreen` is one.
+    @State private var markers = DayMarkers()
 
     var body: some View {
         // Hoisted because the measuring closure below is `Sendable` and may run off the main
@@ -499,8 +552,32 @@ struct LibraryGrid: View {
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     geometry.contentSize.height
                 } action: { _, laid in
+                    hold(proxy)
                     guard landing != nil, landing != scrolledTo else { return }
                     laidOut = laid
+                }
+                // The line under the header, in the page's own coordinates: the day whose marker
+                // has reached it is the day at the top of the screen. Every move shows the pill
+                // and starts its one-second fade again (`DatePillModel`).
+                .onScrollGeometryChange(for: PageLine.self) { geometry in
+                    PageLine(geometry)
+                } action: { _, line in
+                    markers.line = line
+                    pill.scrolled(to: topDay(markers.inOrder, threshold: line.y + 1))
+                    // A landing still waiting asks again whenever the scroll moves: its heading is
+                    // reached only once the scroll has actually brought it to the line.
+                    bring(proxy)
+                    hold(proxy)
+                }
+                // The reader's own scroll lets go of the landing's heading.
+                .onScrollPhaseChange { _, phase in
+                    if phase == .tracking || phase == .interacting || phase == .decelerating {
+                        holding = nil
+                    }
+                }
+                .overlay(alignment: .top) {
+                    DatePill(model: pill, showMonth: showMonth)
+                        .padding(.top, DesignTokens.Space.snug)
                 }
         }
     }
@@ -510,29 +587,51 @@ struct LibraryGrid: View {
             landing: landing, width: contentWidth, laidOut: laidOut, built: built)
     }
 
-    /// Scrolls to the landing's row, again as often as asked until the lazy stack has built that
-    /// row: each ask lands nearer, and only a built row's place is exact rather than estimated.
+    /// Scrolls to the landing's day heading, again as often as asked until the lazy stack has built
+    /// it: each ask lands nearer, and only a built heading's place is exact rather than estimated.
     private func bring(_ proxy: ScrollViewProxy) {
-        guard let landing, landing != scrolledTo, let row = rowID(holding: landing.rowID) else {
-            return
+        guard let landing, landing != scrolledTo, let heading = headingID(holding: landing.rowID)
+        else { return }
+        // A new landing takes over from the one held before it.
+        holding = nil
+        proxy.scrollTo(heading, anchor: .top)
+        // Built AND at the line — or the scroll at its end, when too little follows the heading
+        // for it to rise that far. A heading built on the first screen is built before the scroll
+        // can move, so being built alone does not say the scroll went there.
+        if onScreen.rows.contains(heading), markers.reached(heading) {
+            settle(landing)
+            holding = (heading, listGeneration())
         }
-        proxy.scrollTo(row, anchor: .top)
-        // Built, the row's place is known rather than estimated, so this scroll is the last one.
-        if onScreen.rows.contains(row) { settle(landing) }
     }
 
-    /// The landing's row is built and scrolled to: the landing is done with, here and in the store.
+    /// Brings the held heading back to the line whenever a layout has moved the scroll off it.
+    private func hold(_ proxy: ScrollViewProxy) {
+        guard let holding, !markers.reached(holding.heading) else { return }
+        // Judged against the list it was taken in, asked of the store here, with nothing between
+        // the question and the scroll: after a filter, tag or order change the store has dropped
+        // the landing, and the same day in the new list is not the reader's to be brought back to.
+        guard holding.listGeneration == listGeneration() else {
+            self.holding = nil
+            return
+        }
+        proxy.scrollTo(holding.heading, anchor: .top)
+    }
+
+    /// The landing's heading is built and scrolled to: the landing is done with, here and in the
+    /// store.
     private func settle(_ landing: LibraryLanding) {
         scrolledTo = landing
         landed(landing)
     }
 
-    /// The justified row a file sits in — what the scroll is brought to, because a row is what the
-    /// lazy stack places.
-    private func rowID(holding fileID: String) -> String? {
-        for section in sections {
-            if let row = section.rows.first(where: { $0.tiles.contains { $0.id == fileID } }) {
-                return row.id
+    /// The heading of the day a file sits in — what a jump lands on (plan page 3929 decision 13:
+    /// the day's heading, not its first tile). Found by the file rather than by the landing's day
+    /// key, so a grid grouping in another zone than the buckets were counted in still lands on the
+    /// day that holds the row the store found.
+    private func headingID(holding fileID: String) -> String? {
+        for month in sections {
+            if let day = month.days.first(where: { $0.pictures.contains { $0.id == fileID } }) {
+                return day.headingID
             }
         }
         return nil
@@ -552,6 +651,7 @@ struct LibraryGrid: View {
                 }
             }
             .padding(.vertical, DesignTokens.Space.tight)
+            .coordinateSpace(.named(DayMarkers.space))
         }
         // Measured on the scroll, whose frame is real from the first layout pass, items or none.
         // It was measured on the row stack itself, which is EMPTY until a width exists — and an
@@ -569,68 +669,98 @@ struct LibraryGrid: View {
         }
     }
 
-    /// The library as justified rows: every file in its own proportions, rows that fill the width.
+    /// The library as day groups under month headers (MEMNG-597, plan page 3929 decision 13):
+    /// per day a heading row, then its pictures as one mosaic block inset from the edges, cut into
+    /// bands (`MediaLibraryPresentation.mosaicBands`).
     ///
-    /// A `LazyVStack` of rows rather than one layout over every tile, and that is the reason the
-    /// solving happens in `MediaLibraryPresentation` instead of inside a `Layout`: a `Layout`
-    /// places all of its subviews, and this grid is a thousand files long. Solved into rows first,
-    /// the stack stays lazy — only the rows near the screen are ever built — while each row is a
-    /// plain `HStack` of boxes the solver has already sized.
-    ///
-    /// Each month is headed by its name and solved on its own (MEMNG-585), the headers and rows
-    /// siblings in the one lazy stack so it stays lazy across months as well as within them.
+    /// Headings and bands are siblings in the one lazy stack, so it stays lazy inside a long day as
+    /// well as across days: only what is near the screen is ever built.
     private var gallery: some View {
-        LazyVStack(spacing: DesignTokens.Space.tight) {
-            ForEach(sections) { section in
-                LibraryMonthHeader(label: section.label)
-                ForEach(section.rows) { row in
-                    HStack(spacing: DesignTokens.Space.tight) {
-                        ForEach(row.tiles) { placed in
-                            tile(placed.attachment)
-                                .frame(width: placed.width, height: placed.height)
-                                .onAppear {
-                                    guard wantsMore(placed.index) else { return }
-                                    Task { await loadMore() }
-                                }
-                        }
-                        // Rows are packed from the left; the trailing one is short by design and
-                        // must not be stretched across the width (`JustifiedGallery`).
-                        Spacer(minLength: 0)
+        LazyVStack(spacing: 0) {
+            ForEach(sections) { month in
+                LibraryMonthHeader(label: month.label)
+                    .padding(.horizontal, DesignTokens.Space.tight)
+                    .padding(.bottom, DesignTokens.Space.snug)
+                // One view per element, whose `.id` IS the element's identity: a lazy stack
+                // resolves a scroll to a row it has not built through the ForEach's identity, so
+                // a heading that was one of several views of a day's element could never be
+                // scrolled to before it was on screen.
+                ForEach(month.rows) { row in
+                    switch row {
+                    case .heading(let day):
+                        LibraryDayHeading(
+                            weekday: day.weekday,
+                            date: day.date,
+                            count: MediaLibraryPresentation.dayCount(day.key, in: dayBuckets)
+                        )
+                        .padding(.horizontal, DesignTokens.Space.regular)
+                        .padding(.bottom, DesignTokens.Space.snug)
+                        .id(row.id)
+                        .modifier(marker(row.id, day: day.key, order: 2 * day.dayIndex))
+                    case .band(let band, let place):
+                        dayBand(band, first: place.first, last: place.last)
+                            .padding(.horizontal, DesignTokens.Space.regular)
+                            // 2 pt between bands, 22 pt of air before the next day's heading.
+                            .padding(
+                                .bottom,
+                                place.last ? LibraryDayHeading.air : DesignTokens.Space.hair
+                            )
+                            .id(row.id)
+                            .modifier(marker(row.id, day: place.day, order: 2 * place.dayIndex + 1))
                     }
-                    .id(row.id)
-                    // The lazy stack builds only the rows on or beside the screen, so a row that
-                    // appears is one the scroll has reached.
-                    .onAppear {
-                        onScreen.rows.insert(row.id)
-                        guard landing != nil, landing != scrolledTo else { return }
-                        built += 1
-                    }
-                    .onDisappear { onScreen.rows.remove(row.id) }
                 }
             }
         }
-        .padding(.horizontal, DesignTokens.Space.tight)
     }
 
-    private var sections: [LibraryGallerySection] {
-        MediaLibraryPresentation.sections(
-            for: items,
-            width: Double(contentWidth),
-            gap: Double(DesignTokens.Space.tight),
-            timeZone: timeZone
-        )
+    /// One band of a day block, its corners rounded where the block's are.
+    private func dayBand(_ band: LibraryDayBand, first: Bool, last: Bool) -> some View {
+        let radius = DesignTokens.Radius.dayBlock
+        return MonthMosaicLayout(slots: band.pictures.map(\.slot), gap: DesignTokens.Space.hair) {
+            ForEach(band.pictures) { placed in
+                tile(placed.attachment, slot: placed.slot)
+                    .onAppear {
+                        guard wantsMore(placed.index) else { return }
+                        Task { await loadMore() }
+                    }
+            }
+        }
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: first ? radius : 0,
+                bottomLeadingRadius: last ? radius : 0,
+                bottomTrailingRadius: last ? radius : 0,
+                topTrailingRadius: first ? radius : 0
+            ))
+    }
+
+    /// What every heading and band reports while it is built: that it is (for a landing), and
+    /// where on the page it starts (for the pill).
+    private func marker(_ id: String, day: String, order: Int) -> BuiltMarker {
+        BuiltMarker(
+            id: id, day: day, order: order, onScreen: onScreen, markers: markers,
+            reached: {
+                guard landing != nil, landing != scrolledTo else { return }
+                built += 1
+            })
+    }
+
+    private var sections: [LibraryAllMonth] {
+        // The library's one calendar, never the device's (`libraryTimeZone`).
+        MediaLibraryPresentation.daySections(for: items)
     }
 
     @ViewBuilder
-    private func tile(_ attachment: MemoAttachment) -> some View {
+    private func tile(_ attachment: MemoAttachment, slot: MosaicSlot) -> some View {
         let kind = MediaLibraryPresentation.tileKind(for: attachment)
         if MediaLibraryPresentation.isOpenable(kind) {
             AttachmentThumbnail(
                 attachment: attachment,
                 tier: .thumb,
-                // The box IS the picture's own shape now, so nothing is cropped into it — the
-                // same slot the memo card's justified rows use.
-                slot: MemoPresentation.justifiedSlot(for: attachment)
+                // The picture fills its frame, a square or a 16:9 band, as a Months tile does; the
+                // block's corners are the block's, so the tile's own are square.
+                slot: AttachmentSlot(aspectRatio: slot == .wide ? 16 / 9 : 1, contentMode: .fill),
+                cornerRadius: 0
             )
             .mediaTransitionSource(id: attachment.uid, in: zoom)
             .contentShape(.rect)

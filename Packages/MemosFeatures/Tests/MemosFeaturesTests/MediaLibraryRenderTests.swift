@@ -17,12 +17,15 @@ struct MediaLibraryRenderTests {
         let items: [LibraryRow]
         var landing: LibraryLanding?
         var landed: (LibraryLanding) -> Void = { _ in }
+        /// The store's list generation, which a test moves without drawing the harness again.
+        var generation = GenerationBox(0)
+        var dayBuckets: [LibraryBucket]?
+        var showMonth: (String) -> Void = { _ in }
         @Namespace private var zoom
 
         var body: some View {
             LibraryGrid(
                 items: items,
-                timeZone: MediaLibraryRenderTests.zone,
                 errorText: nil,
                 loadingMore: false,
                 zoom: zoom,
@@ -31,7 +34,10 @@ struct MediaLibraryRenderTests {
                 fetch: { _, _ in },
                 loadMore: {},
                 landing: landing,
-                landed: landed
+                landed: landed,
+                listGeneration: { generation.value },
+                dayBuckets: dayBuckets,
+                showMonth: showMonth
             )
         }
     }
@@ -50,8 +56,8 @@ struct MediaLibraryRenderTests {
         MediaViewerPageTests.image("lib-h", width: 2448, height: 3264),
     ].map { MediaLibraryRenderTests.row($0, takenAt: MediaLibraryRenderTests.september) }
 
-    /// A fixed zone, so what month a fixture falls in does not depend on the simulator's.
-    private static let zone = "Europe/Zurich"
+    /// The library's calendar, which the grid cuts in whatever the simulator's zone is.
+    private static let zone = libraryTimeZone
     /// Mid-month in either zone a reader could be in, so no fixture sits on a month's edge.
     private static let september = Date(timeIntervalSince1970: 1_789_387_200)  // 2026-09-14 12:00Z
     private static let august = Date(timeIntervalSince1970: 1_786_708_800)  // 2026-08-14 12:00Z
@@ -117,27 +123,43 @@ struct MediaLibraryRenderTests {
         window.makeKeyAndVisible()
         window.layoutIfNeeded()
 
-        // What the solver itself packs for the width the grid must derive: the window's 390,
-        // less the grid's own horizontal padding either side. The grid draws that packing as a
-        // scroll whose content is each month's header and rows, the gaps between them and the
-        // stack's vertical padding — so the content height IS the placement, readable from
-        // outside the hierarchy. A header's height is the one number the solver does not know,
-        // so it is measured, by UIKit, at the same width.
-        let gap = DesignTokens.Space.tight
-        let width = 390 - 2 * gap
-        let sections = MediaLibraryPresentation.sections(
-            for: Self.items, width: Double(width), gap: Double(gap), timeZone: Self.zone)
-        let solved = sections.flatMap(\.rows)
-        #expect(!solved.isEmpty, "the fixture must solve to rows — otherwise this asserts nothing")
+        // MEMNG-597: what the day groups pack for the width the grid must derive — the window's
+        // 390, less the block's 12 pt inset either side. The grid draws that packing as a scroll
+        // whose content is each month's header, each day's heading and each band of its block,
+        // their spacing and the stack's vertical padding, so the content height IS the placement,
+        // readable from outside the hierarchy. A header's and a heading's heights are the numbers
+        // the geometry does not know, so they are measured, by UIKit, at the same width.
+        let inset = DesignTokens.Space.regular
+        let block = 390 - 2 * inset
+        let sections = MediaLibraryPresentation.daySections(for: Self.items, timeZone: Self.zone)
+        let days = sections.flatMap(\.days)
+        let bands = days.flatMap(\.bands)
+        #expect(
+            bands.count > 1, "the fixture must pack into bands — otherwise this asserts nothing")
         let header = LayoutProbe.size(
-            LibraryMonthHeader(label: "September 2026"), width: width, height: LayoutProbe.unbounded
+            LibraryMonthHeader(label: "September 2026"), width: 390 - 2 * DesignTokens.Space.tight,
+            height: LayoutProbe.unbounded
         ).height
-        let stacked = solved.count + sections.count
+        let heading = LayoutProbe.size(
+            LibraryDayHeading(weekday: "Mon", date: "14 Sep", count: nil), width: block,
+            height: LayoutProbe.unbounded
+        ).height
+        let bandHeights = days.reduce(CGFloat(0)) { sum, day in
+            sum
+                + day.bands.enumerated().reduce(CGFloat(0)) { inner, entry in
+                    inner
+                        + MonthMosaicGeometry.frames(
+                            for: entry.element.pictures.map(\.slot), width: block,
+                            gap: DesignTokens.Space.hair
+                        ).height
+                        + (entry.offset == day.bands.count - 1
+                            ? LibraryDayHeading.air : DesignTokens.Space.hair)
+                }
+        }
         let expected =
-            solved.reduce(CGFloat(0)) { $0 + CGFloat($1.height) }
-            + CGFloat(sections.count) * header
-            + CGFloat(stacked - 1) * gap + 2 * gap
-
+            CGFloat(sections.count) * (header + DesignTokens.Space.snug)
+            + CGFloat(days.count) * (heading + DesignTokens.Space.snug)
+            + bandHeights + 2 * DesignTokens.Space.tight
         var placed: CGFloat = 0
         for _ in 0..<60 where abs(placed - expected) > 2 {
             try await Task.sleep(for: .milliseconds(50))
@@ -147,7 +169,7 @@ struct MediaLibraryRenderTests {
         window.isHidden = true
         #expect(
             abs(placed - expected) <= 2,
-            "the grid placed \(placed)pt of content where the solver packs \(expected)pt")
+            "the grid placed \(placed)pt of content where the day groups pack \(expected)pt")
     }
 
     @Test("a two-month page shows a header per month, in the list's order")
@@ -227,6 +249,276 @@ struct MediaLibraryRenderTests {
         #expect(left < middle && middle < right, "x: title \(left), ••• \(middle), \(right)")
     }
 
+    // MARK: - MEMNG-597: day groups and the date pill (plan page 3929 decision 13)
+
+    /// A day of `count` square pictures taken at `instant`, uids `<prefix>-0…`.
+    private static func day(_ prefix: String, _ count: Int, at instant: Date) -> [LibraryRow] {
+        (0..<count).map {
+            row(
+                MediaViewerPageTests.image("\(prefix)-\($0)", width: 1000, height: 1000),
+                takenAt: instant)
+        }
+    }
+
+    private static func noon(_ day: Int) -> Date {
+        // 2026-09-<day> 12:00Z; 2026-09-14 is a Monday.
+        Date(timeIntervalSince1970: 1_789_387_200 + Double(day - 14) * 86_400)
+    }
+
+    /// On the test host's own scene, as the landing test explains.
+    private static func show(_ harness: Harness) -> UIWindow {
+        let frame = CGRect(origin: .zero, size: CGSize(width: 390, height: 844))
+        let window: UIWindow
+        if let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene })
+            as? UIWindowScene
+        {
+            window = UIWindow(windowScene: scene)
+            window.frame = frame
+        } else {
+            window = UIWindow(frame: frame)
+        }
+        window.rootViewController = UIHostingController(rootView: harness)
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    private static func element(_ label: String, in window: UIWindow) -> NSObject? {
+        var found: [NSObject] = []
+        collectElements(window, into: &found)
+        return found.first { $0.accessibilityLabel == label }
+    }
+
+    /// The first scroll view in the hierarchy, and the line under its top inset in window points.
+    private static func visibleTop(in root: UIView) -> (scroll: UIScrollView, top: CGFloat)? {
+        var stack: [UIView] = [root]
+        while let view = stack.popLast() {
+            if let scroll = view as? UIScrollView {
+                // A scroll view's bounds origin IS its content offset, so this point is the line
+                // under the top inset, in the scroll's own coordinates.
+                let line = CGPoint(
+                    x: 0, y: scroll.contentOffset.y + scroll.adjustedContentInset.top)
+                return (scroll, scroll.convert(line, to: nil).y)
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    @Test("a day heading reads its weekday, its date and the whole day's count")
+    func dayHeadingReadsWeekdayDateCount() async throws {
+        let items = Self.day("mon", 3, at: Self.noon(14))
+        let bucket = LibraryBucket(
+            key: "2026-09-14", count: 12, coverUID: "mon-0", coverThumbnailURL: nil)
+        let window = Self.show(Harness(items: items, dayBuckets: [bucket]))
+        let bare = Self.show(Harness(items: items))
+        defer {
+            window.isHidden = true
+            bare.isHidden = true
+        }
+        var heading: NSObject?
+        var unread: NSObject?
+        for _ in 0..<60 where heading == nil || unread == nil {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            bare.layoutIfNeeded()
+            heading = Self.element("Mon 14 Sep", in: window)
+            unread = Self.element("Mon 14 Sep", in: bare)
+        }
+        let row = try #require(heading, "no day heading reads Mon 14 Sep")
+        #expect(row.accessibilityTraits.contains(.header), "the day heading is not a heading")
+        // The bucket's 12, not the 3 of the day that are loaded.
+        #expect(row.accessibilityValue == "12 items")
+        let pending = try #require(unread, "no day heading without buckets")
+        #expect((pending.accessibilityValue ?? "").isEmpty, "a count drawn with no bucket read")
+    }
+
+    /// MEMNG-587's jump lands on the day's HEADING under the month header, not its first tile.
+    @Test("a jump lands the day's heading at the top of the screen")
+    func jumpLandsOnTheDayHeading() async throws {
+        let items =
+            Self.day("sun", 6, at: Self.noon(20)) + Self.day("mon", 4, at: Self.noon(14))
+            + Self.day("old", 30, at: Self.noon(13))
+        let landing = LibraryLanding(day: "2026-09-14", rowID: "mon-0", serial: 1)
+        let consumed = LockedLandings()
+        let window = Self.show(
+            Harness(items: items, landing: landing, landed: { consumed.append($0) }))
+        defer { window.isHidden = true }
+
+        var gap: CGFloat = .infinity
+        var offset: CGFloat = 0
+        var settledPasses = 0
+        for _ in 0..<80 where settledPasses < 5 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            guard let heading = Self.element("Mon 14 Sep", in: window),
+                let visible = Self.visibleTop(in: window)
+            else { continue }
+            gap = heading.accessibilityFrame.minY - visible.top
+            offset = visible.scroll.contentOffset.y
+            if abs(gap) <= 2, !consumed.all.isEmpty { settledPasses += 1 }
+        }
+        #expect(
+            abs(gap) <= 2,
+            "the heading sits \(gap)pt from the top of the screen (offset \(offset))"
+        )
+        #expect(consumed.all == [landing], "the landing was not reported scrolled to exactly once")
+    }
+
+    /// The list a landing held its heading in, and a move that is not the reader's hand.
+    private struct HeldLanding {
+        let window: UIWindow
+        let host: UIHostingController<Harness>
+        let items: [LibraryRow]
+
+        /// Every pass after a move: where the heading stands against the top of the screen.
+        func gaps(after passes: Int) async throws -> [CGFloat] {
+            var seen: [CGFloat] = []
+            for _ in 0..<passes {
+                try await Task.sleep(for: .milliseconds(50))
+                window.layoutIfNeeded()
+                guard let heading = MediaLibraryRenderTests.element("Mon 14 Sep", in: window),
+                    let visible = MediaLibraryRenderTests.visibleTop(in: window)
+                else { continue }
+                seen.append(heading.accessibilityFrame.minY - visible.top)
+            }
+            return seen
+        }
+
+        /// Straight back to the top of the page, as no finger would: the geometry path alone.
+        func toTop() throws {
+            let scroll = try #require(MediaLibraryRenderTests.visibleTop(in: window)?.scroll)
+            scroll.setContentOffset(
+                CGPoint(x: 0, y: -scroll.adjustedContentInset.top), animated: false)
+        }
+    }
+
+    /// Hosts a grid landed on Mon 14 Sep under `generation`, and waits until the landing holds.
+    private static func landAndHold(_ generation: GenerationBox) async throws -> HeldLanding {
+        let items =
+            Self.day("sun", 6, at: Self.noon(20)) + Self.day("mon", 4, at: Self.noon(14))
+            + Self.day("old", 30, at: Self.noon(13))
+        let landing = LibraryLanding(day: "2026-09-14", rowID: "mon-0", serial: 1)
+        let consumed = LockedLandings()
+        let window = Self.show(
+            Harness(
+                items: items, landing: landing, landed: { consumed.append($0) },
+                generation: generation))
+        let host = try #require(window.rootViewController as? UIHostingController<Harness>)
+        let held = HeldLanding(window: window, host: host, items: items)
+        var landed = false
+        for _ in 0..<80 where !landed {
+            let gap = try await held.gaps(after: 1).last ?? .infinity
+            landed = abs(gap) <= 2 && !consumed.all.isEmpty
+        }
+        try #require(landed, "control: the landing never reached its heading")
+        return held
+    }
+
+    /// A landing's heading is held at the line against the lazy stack's re-measuring, and only for
+    /// the list it landed in: a filter, tag or order change is another list, and a move the reader
+    /// did not make must not pull that list back to the old heading. A next page of the SAME list
+    /// keeps the hold (the control).
+    @Test("a landing's hold lasts through the list's next page and ends with the list")
+    func holdEndsWithTheList() async throws {
+        let held = try await Self.landAndHold(GenerationBox(1))
+        defer { held.window.isHidden = true }
+
+        // The same list's next page: the hold stands, and pulls the heading back.
+        let paged = held.items + Self.day("older", 6, at: Self.noon(12))
+        held.host.rootView = Harness(items: paged, generation: GenerationBox(1))
+        try held.toTop()
+        let kept = try await held.gaps(after: 12)
+        #expect(
+            kept.last.map { abs($0) <= 2 } == true,
+            "control: a next page let go of the landing's heading (gaps \(kept))")
+
+        // Another list holding the same day — a filter, tag or order change: the hold is gone.
+        held.host.rootView = Harness(items: paged, generation: GenerationBox(2))
+        try held.toTop()
+        let after = try await held.gaps(after: 12)
+        #expect(
+            after.allSatisfy { $0 > 100 },
+            "another list was pulled back to the old landing's heading (gaps \(after))")
+    }
+
+    /// The store's generation is asked where the hold would scroll, not remembered from the last
+    /// time the grid was drawn: a list replaced between that drawing and a geometry callback
+    /// already on its way must not be scrolled back to the old heading.
+    @Test("a hold asks the live list generation at the scroll, not the one it was drawn with")
+    func holdAsksTheLiveGeneration() async throws {
+        let generation = GenerationBox(1)
+        let held = try await Self.landAndHold(generation)
+        defer { held.window.isHidden = true }
+
+        // The control: with the generation unchanged, the geometry path pulls the heading back.
+        try held.toTop()
+        let kept = try await held.gaps(after: 12)
+        #expect(
+            kept.last.map { abs($0) <= 2 } == true,
+            "control: the hold did not pull the heading back (gaps \(kept))")
+
+        // The store moves on and nothing draws the grid again before the next geometry change.
+        generation.value = 2
+        try held.toTop()
+        let after = try await held.gaps(after: 12)
+        #expect(
+            after.allSatisfy { $0 > 100 },
+            "a replaced list was pulled back to the old landing's heading (gaps \(after))")
+    }
+
+    @Test("the date pill names the day at the top after a scroll, fades, and opens its month")
+    func datePillNamesTheTopDay() async throws {
+        let items = [20, 19, 18, 17, 16].flatMap { Self.day("d\($0)", 6, at: Self.noon($0)) }
+        let months = LockedMonths()
+        let window = Self.show(Harness(items: items, showMonth: { months.append($0) }))
+        defer { window.isHidden = true }
+        let target = "Thu 17 Sep"
+        let pillLabel = "Thu · 17 Sep 2026"
+
+        // Scroll down until the target heading is built, then put it 10 pt above the line.
+        var placed = false
+        for _ in 0..<80 where !placed {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            guard let visible = Self.visibleTop(in: window) else { continue }
+            let (scroll, top) = visible
+            if Self.element(pillLabel, in: window) == nil, scroll.contentOffset.y <= 0 {
+                // The control: at the top of the page no pill shows.
+                #expect(Self.element("Sun · 20 Sep 2026", in: window) == nil)
+            }
+            if let heading = Self.element(target, in: window),
+                heading.accessibilityFrame.minY < top + 400
+            {
+                let delta = heading.accessibilityFrame.minY - top + 10
+                scroll.setContentOffset(
+                    CGPoint(x: 0, y: scroll.contentOffset.y + delta), animated: false)
+                placed = true
+            } else {
+                scroll.setContentOffset(
+                    CGPoint(x: 0, y: scroll.contentOffset.y + 300), animated: false)
+            }
+        }
+        #expect(placed, "the target heading was never built")
+        var pill: NSObject?
+        for _ in 0..<20 where pill == nil {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            pill = Self.element(pillLabel, in: window)
+        }
+        let shown = try #require(pill, "no pill names \(pillLabel) after the scroll")
+        #expect(shown.accessibilityActivate(), "the pill took no tap")
+        #expect(months.all == ["2026-09"], "the pill's tap asked for \(months.all)")
+
+        // One second after the scrolling stopped, it fades.
+        var gone = false
+        for _ in 0..<60 where !gone {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            gone = Self.element(pillLabel, in: window) == nil
+        }
+        #expect(gone, "the pill never faded")
+    }
+
     /// Every element the hosted hierarchy reads out, in the order it offers them.
     private static func collectElements(_ node: Any, into found: inout [NSObject]) {
         guard let object = node as? NSObject else { return }
@@ -283,4 +575,18 @@ struct MediaLibraryRenderTests {
 private final class LockedLandings {
     private(set) var all: [LibraryLanding] = []
     func append(_ landing: LibraryLanding) { all.append(landing) }
+}
+
+/// A list generation a test moves behind the grid's back, the way the store's moves.
+@MainActor
+private final class GenerationBox {
+    var value: Int
+    init(_ value: Int) { self.value = value }
+}
+
+/// The months a hosted grid's date pill asked for, in order.
+@MainActor
+private final class LockedMonths {
+    private(set) var all: [String] = []
+    func append(_ month: String) { all.append(month) }
 }

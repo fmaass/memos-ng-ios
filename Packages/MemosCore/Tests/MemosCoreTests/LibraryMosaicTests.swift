@@ -272,3 +272,94 @@ struct LibraryMosaicTests {
         #expect(six.firstShownDay?.key == "2026-09-04")
     }
 }
+
+/// The All view's day blocks (MEMNG-597, plan page 3929 decision 13 and its 20:05 CEST amendment,
+/// `docs/design/all-by-day-mockup.md` §2), held to the web's `daySlots` vectors in memos-ng
+/// `frontend/src/lib/__tests__/mosaic.spec.ts` at c8bd91e, titles verbatim and vectors unchanged.
+/// The cycle is A B C B D, each day one step later. Expected layouts are spelled from the pattern
+/// constants, never from the code under test.
+@Suite("Day mosaic")
+struct DayMosaicTests {
+    private static let a: [MosaicSlot] = [.heroLeft, .sideRight, .sideRight]
+    private static let b: [MosaicSlot] = [.square, .square, .square]
+    private static let c: [MosaicSlot] = [.heroRight, .sideLeft, .sideLeft]
+    private static let d: [MosaicSlot] = [.wide]
+
+    @Test("gives a day of one or two pictures wide frames only, whatever its index")
+    func oneOrTwoAreWide() {
+        for k in 0...4 {
+            #expect(daySlots(1, dayIndex: k) == [.wide])
+            #expect(daySlots(2, dayIndex: k) == [.wide, .wide])
+        }
+    }
+
+    @Test("lays out no slots for no pictures")
+    func noPictures() {
+        #expect(daySlots(0, dayIndex: 0) == [])
+    }
+
+    @Test("walks A B C B D from day 0")
+    func walksTheCycle() {
+        #expect(daySlots(13, dayIndex: 0) == Self.a + Self.b + Self.c + Self.b + Self.d)
+    }
+
+    @Test("wraps the day index past the end of the cycle")
+    func wrapsTheIndex() {
+        #expect(daySlots(3, dayIndex: 5) == Self.a)
+        #expect(daySlots(3, dayIndex: 9) == [.wide, .square, .square])
+    }
+
+    @Test("opens each of five neighbouring days on its own step of the cycle")
+    func neighboursDiffer() {
+        #expect(
+            [0, 1, 2, 3, 4].map { daySlots(3, dayIndex: $0) } == [
+                Self.a, Self.b, Self.c, Self.b, [.wide, .square, .square],
+            ])
+        #expect(daySlots(6, dayIndex: 0) == Self.a + Self.b)
+        #expect(daySlots(6, dayIndex: 1) == Self.b + Self.c)
+        #expect(daySlots(6, dayIndex: 2) == Self.c + Self.b)
+        #expect(daySlots(6, dayIndex: 3) == Self.b + Self.d + [.square, .square])
+        #expect(daySlots(6, dayIndex: 4) == Self.d + Self.a + [.square, .square])
+    }
+
+    @Test("turns a single leftover into a wide frame")
+    func singleLeftoverIsWide() {
+        #expect(daySlots(4, dayIndex: 0) == Self.a + [.wide])
+        #expect(daySlots(7, dayIndex: 0) == Self.a + Self.b + [.wide])
+    }
+
+    @Test("turns a leftover of two into squares, not a cut pattern")
+    func leftoverOfTwoIsSquares() {
+        #expect(daySlots(5, dayIndex: 0) == Self.a + [.square, .square])
+        #expect(daySlots(3, dayIndex: 4) == [.wide, .square, .square])
+    }
+
+    @Test("reaches D on a leftover of one without a stray square")
+    func reachesD() {
+        #expect(daySlots(10, dayIndex: 1) == Self.b + Self.c + Self.b + Self.d)
+    }
+
+    @Test("treats a negative day index as its place in the cycle")
+    func negativeIndex() {
+        #expect(daySlots(3, dayIndex: -1) == [.wide, .square, .square])
+    }
+
+    /// Ported as written, though a Swift array is a value and cannot be shared the way the JS one
+    /// could: it still pins that the pattern constants are not handed out for editing.
+    @Test("hands out a fresh list, so a caller that edits it cannot change the next day")
+    func freshList() {
+        var first = daySlots(3, dayIndex: 0)
+        first[0] = .wide
+        #expect(first != Self.a, "control: the copy was edited")
+        #expect(daySlots(3, dayIndex: 0) == Self.a)
+        #expect(mosaicSlots(3, offset: 0) == Self.a)
+    }
+
+    /// Not a web vector: the day cycle is the amendment's order over the SAME four patterns Months
+    /// walks, not a second copy of them.
+    @Test("the day cycle walks the Months patterns in the order A B C B D")
+    func cycleIsTheAmendment() {
+        #expect(dayMosaicCycle == [.a, .b, .c, .b, .d])
+        #expect(Set(dayMosaicCycle) == Set(monthMosaicCycle))
+    }
+}
