@@ -152,16 +152,16 @@ struct MediaLibraryPresentationTests {
 @MainActor
 @Suite("Main navigation")
 struct MainTabTests {
-    @Test("the app has exactly three ways in, and the timeline is still the first")
+    @Test("the app has exactly three ways in: Library, then Timeline in the middle, then Places")
     func tabsAndOrder() {
-        #expect(MainTab.allCases == [.timeline, .library, .places])
+        #expect(MainTab.allCases == [.library, .timeline, .places])
     }
 
     @Test("every tab has a name and a glyph, and no two share either")
     func tabsAreDistinct() {
         let titles = MainTab.allCases.map(\.title)
         let symbols = MainTab.allCases.map(\.symbol)
-        #expect(titles == ["Timeline", "Library", "Places"])
+        #expect(titles == ["Library", "Timeline", "Places"])
         #expect(Set(symbols).count == MainTab.allCases.count, "two tabs share a glyph")
         #expect(symbols.allSatisfy { !$0.isEmpty })
         #expect(symbols.allSatisfy { UIImage(systemName: $0) != nil }, "a tab names no real symbol")

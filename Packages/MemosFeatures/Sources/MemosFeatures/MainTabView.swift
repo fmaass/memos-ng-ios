@@ -7,8 +7,11 @@ import SwiftUI
 /// written inline in a view body is a thing no test can read back, and this is the one list that
 /// says how many ways into the app there are.
 public enum MainTab: String, CaseIterable, Identifiable, Sendable {
-    case timeline
+    // Declaration order IS the bar's order, left to right: Library, Timeline in the middle, Places —
+    // the same pill the web dock draws (plan page 3929 decision 11), so the two clients read alike.
+    // Which tab the app opens on is not this order's business; `MainTabView.selection` says it.
     case library
+    case timeline
     case places
 
     public var id: String { rawValue }

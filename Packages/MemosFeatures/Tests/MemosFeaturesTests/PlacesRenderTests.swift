@@ -13,10 +13,10 @@ struct PlacesRenderTests {
     /// The tab bar's own content, because `MainTabView.tabs` iterates `MainTab.allCases` — so this
     /// is not a statement about an enum nothing reads, it is a statement about the bar a person
     /// touches.
-    @Test("the app offers a third way in, named Places, after the library")
+    @Test("the app offers a third way in, named Places, last in the bar after the timeline")
     func placesIsInTheTabBar() {
         #expect(MainTab.allCases.count == 3)
-        #expect(MainTab.allCases.map(\.rawValue) == ["timeline", "library", "places"])
-        #expect(MainTab.allCases.map(\.title) == ["Timeline", "Library", "Places"])
+        #expect(MainTab.allCases.map(\.rawValue) == ["library", "timeline", "places"])
+        #expect(MainTab.allCases.map(\.title) == ["Library", "Timeline", "Places"])
     }
 }
