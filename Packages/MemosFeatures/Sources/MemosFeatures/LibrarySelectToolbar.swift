@@ -42,6 +42,14 @@ enum LibrarySelectionPresentation {
 
     /// How far another member's picture is dimmed in select mode.
     static let inertOpacity = 0.4
+
+    /// Whether the toolbar's share and delete take a tap: something is chosen, and neither a share
+    /// batch nor a delete run is out. One run at a time across both — a share fetching a file a
+    /// delete is removing, or a delete of a file a share is still fetching, is a race nobody asked
+    /// for.
+    static func actionsEnabled(count: Int, isSharing: Bool, isDeleting: Bool) -> Bool {
+        count > 0 && !isSharing && !isDeleting
+    }
 }
 
 /// Select mode on a tile: other members' pictures dimmed and inert, and a small blue checkmark in
@@ -74,10 +82,21 @@ struct LibrarySelectToolbar: View {
     let count: Int
     /// A share batch is fetching: the share button shows a spinner and takes no second tap.
     let isSharing: Bool
+    /// A delete run is out: the delete button shows a spinner, and neither button takes a tap.
+    let isDeleting: Bool
     let share: () -> Void
+    let delete: () -> Void
 
     /// The smallest target a finger is promised, the header's round controls' size.
     private static var control: CGFloat { 44 }
+
+    private var enabled: Bool {
+        LibrarySelectionPresentation.actionsEnabled(
+            count: count,
+            isSharing: isSharing,
+            isDeleting: isDeleting
+        )
+    }
 
     var body: some View {
         HStack(spacing: DesignTokens.Space.snug) {
@@ -93,26 +112,58 @@ struct LibrarySelectToolbar: View {
                 .frame(width: Self.control, height: Self.control)
             }
             .glassEffect(.regular.interactive(), in: .circle)
-            .disabled(count == 0 || isSharing)
+            .disabled(!enabled)
             .accessibilityLabel("Share")
             Spacer(minLength: DesignTokens.Space.snug)
             Text(LibrarySelectionPresentation.countText(count))
                 .font(.headline)
                 .lineLimit(1)
             Spacer(minLength: DesignTokens.Space.snug)
-            // Drawn so the bar has its final shape; what it does is MEMNG-589 (confirm, then delete
-            // one at a time through the single-picture endpoint), so until then it promises nothing.
-            Button(action: {}) {
-                Image(systemName: "trash")
-                    .font(.body.weight(.semibold))
-                    .frame(width: Self.control, height: Self.control)
+            // Asks first (`LibraryDeleteFlow`); only the alert's yes deletes, one picture at a time
+            // through the single-picture endpoint (MEMNG-589).
+            Button(action: delete) {
+                Group {
+                    if isDeleting {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "trash")
+                            .font(.body.weight(.semibold))
+                    }
+                }
+                .frame(width: Self.control, height: Self.control)
             }
             .glassEffect(.regular.interactive(), in: .circle)
-            .disabled(true)
+            .disabled(!enabled)
             .accessibilityLabel("Delete")
         }
         .padding(.horizontal, DesignTokens.Space.roomy)
         .padding(.vertical, DesignTokens.Space.snug)
         .background(.bar)
+    }
+}
+
+/// What a delete run that did not delete everything says, above select mode's toolbar
+/// (`LibraryDeleteFlow.resultText`). It goes by itself after a few seconds, or on a tap.
+struct LibraryDeleteToast: View {
+    let text: String
+    let dismiss: () -> Void
+
+    /// Long enough to read "3 deleted, 7 failed" twice.
+    static let lifetime: Duration = .seconds(4)
+
+    var body: some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, DesignTokens.Space.roomy)
+            .padding(.vertical, DesignTokens.Space.snug)
+            .glassEffect(.regular, in: .capsule)
+            .onTapGesture(perform: dismiss)
+            // Keyed on the text, so a second report restarts the clock rather than inheriting the
+            // first one's remaining seconds.
+            .task(id: text) {
+                try? await Task.sleep(for: Self.lifetime)
+                guard !Task.isCancelled else { return }
+                dismiss()
+            }
     }
 }

@@ -270,7 +270,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     return
                 }
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
-                rows = Self.merged(rows, with: page.items, filter: lineage.filter)
+                rows = Self.merged(
+                    rows,
+                    with: page.items,
+                    filter: lineage.filter,
+                    dropping: removed
+                )
                 if let index = firstRowIndex(onDay: day, in: rows, timeZone: timeZone) {
                     items = rows
                     nextCursor = page.nextCursor
@@ -316,6 +321,110 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     public func abandonJump() {
         guard isJumping else { return }
         generation += 1
+    }
+
+    // MARK: - Deleting the selection (MEMNG-589)
+
+    /// A run of `delete(_:using:)` is out. The spinner on the toolbar's Delete, and the reason a
+    /// second run is refused.
+    public private(set) var isDeleting = false
+
+    /// The uids this store has watched the server confirm gone. A page read before a delete and
+    /// answered after it still lists the file, and merged as it stands it would put a picture back
+    /// on the grid that the server no longer has. Never cleared, for the reason
+    /// `TimelineStore.removedAttachments` is not: a hard-deleted uid cannot legitimately return.
+    private var removed: Set<String> = []
+
+    /// Deletes the chosen pictures, one `DELETE /api/attachments/{uid}` at a time, in the order
+    /// they were chosen, through the single-picture endpoint — there is no bulk one, and none is
+    /// wanted (the mockup's section 7).
+    ///
+    /// * ONE handle for the whole run, taken by the caller when the question was answered yes.
+    ///   Before each send it is asked whether that session is still the one this device runs; once
+    ///   it is not, nothing further is sent, and nothing the run learned is applied — the rows are
+    ///   the next account's to read. A DELETE is not a read: an answer discarded afterwards does
+    ///   not put the file back, which is why the question comes BEFORE the send.
+    /// * A 204 is done, and so is a 404, as `TimelineStore.performAttachmentDelete` decides.
+    /// * The first other failure stops the run: no later uid reaches the wire. It is reported the
+    ///   way this store reports every failure (`report`) — to the session when the server never
+    ///   answered, through the typed funnel when the credential was refused — except that no
+    ///   sentence is written over the grid: the screen's toast says what the run did.
+    /// * Serialised by REFUSAL, not by joining: a second call while a run is out sends nothing and
+    ///   returns nil. A second selection is a different list of files, so there is no run to join
+    ///   it to, and two runs side by side would be two deletes on the wire at once.
+    ///
+    /// - Returns: what the run did, or nil when it was refused.
+    public func delete(
+        _ uids: [String],
+        using handle: SessionHandle
+    ) async -> LibraryDeleteOutcome? {
+        guard !isDeleting else {
+            MemosLog.api.info("a delete asked for while another is running is refused")
+            return nil
+        }
+        isDeleting = true
+        defer { isDeleting = false }
+        let client = handle.client
+        var deleted: [String] = []
+        var failed: String?
+        var stoppedForSession = false
+        for uid in uids {
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("a delete run outlived its session; nothing further is sent")
+                stoppedForSession = true
+                break
+            }
+            do {
+                try await Self.deleteOne(uid, client)
+                deleted.append(uid)
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+            } catch {
+                failed = uid
+                await report(error, issuedUnder: handle, writesSentence: false)
+                break
+            }
+        }
+        // Asked again after the last answer, whichever way the loop ended: a session that changed
+        // while the final request was out, or while a failing one was, is never asked about by the
+        // check before a next send, and the run is as stale as one stopped by that check.
+        if !stoppedForSession, !sessionStillCurrent(handle) {
+            MemosLog.api.info("a delete run's last answer arrived for a session that has ended")
+            stoppedForSession = true
+        }
+        let reached = deleted.count + (failed == nil ? 0 : 1)
+        let outcome = LibraryDeleteOutcome(
+            deleted: deleted,
+            failed: failed,
+            notAttempted: Array(uids.dropFirst(reached)),
+            stoppedForSessionChange: stoppedForSession
+        )
+        guard !stoppedForSession else { return outcome }
+        forget(deleted)
+        return outcome
+    }
+
+    /// The deleted pictures leave the grid, and stay gone (`removed`).
+    private func forget(_ uids: [String]) {
+        guard !uids.isEmpty else { return }
+        removed.formUnion(uids)
+        items.removeAll { removed.contains($0.id) }
+    }
+
+    /// One picture, through the generated client. A 404 says what a 204 says: the file is not on
+    /// the server — deleted from the web first, or by a retry whose first answer was lost.
+    private static func deleteOne(_ uid: String, _ client: any APIProtocol) async throws {
+        let response = try await client.deleteAttachmentApiAttachmentsUidDelete(
+            .init(path: .init(uid: uid))
+        )
+        switch response {
+        case .noContent:
+            MemosLog.api.info("DELETE /api/attachments/{uid} -> 204")
+        case .unprocessableContent:
+            throw APIError.server(status: 422)
+        case .undocumented(let statusCode, _):
+            guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
+            MemosLog.api.info("DELETE /api/attachments/{uid} -> 404, already gone")
+        }
     }
 
     /// Which list a page in flight belongs to — the generation, the filter, the direction AND the
@@ -377,7 +486,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("a page answered for a session that has ended is not applied")
                 return
             }
-            items = Self.merged([], with: page.items, filter: lineage.filter)
+            items = Self.merged([], with: page.items, filter: lineage.filter, dropping: removed)
             nextCursor = page.nextCursor
             nextCursorLimit = limit
             hasMore = page.nextCursor != nil
@@ -442,7 +551,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     MemosLog.api.info("a page answered for a session that has ended is not merged")
                     return
                 }
-                items = Self.merged(items, with: page.items, filter: lineage.filter)
+                items = Self.merged(
+                    items,
+                    with: page.items,
+                    filter: lineage.filter,
+                    dropping: removed
+                )
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
@@ -480,10 +594,14 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     static func merged(
         _ loaded: [LibraryRow],
         with page: [LibraryRow],
-        filter: MediaLibraryFilter
+        filter: MediaLibraryFilter,
+        dropping removed: Set<String> = []
     ) -> [LibraryRow] {
-        var known = Set(loaded.map(\.id))
-        var out = loaded
+        // A uid this store saw deleted counts as already known, so no page can add it back — and it
+        // leaves the rows already gathered too: a jump collects pages before it installs them, and
+        // a picture it collected before its delete landed would otherwise ride back in with them.
+        var out = loaded.filter { !removed.contains($0.id) }
+        var known = Set(out.map(\.id)).union(removed)
         for item in page {
             guard filter.includes(item.attachment.mediaKind) else { continue }
             guard known.insert(item.id).inserted else { continue }
@@ -495,7 +613,14 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Says what went wrong — unless what went wrong was this app cancelling its own request.
     /// Same rule, same helper, as `TimelineStore.report`: a supersede cancels the transport before
     /// it moves the lineage, so the fence above cannot tell that `-999` from a real failure.
-    private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
+    ///
+    /// `writesSentence` false is the delete run's: its toast reports the failure, and a sentence
+    /// over the grid as well would say it twice.
+    private func report(
+        _ error: any Error,
+        issuedUnder handle: SessionHandle,
+        writesSentence: Bool = true
+    ) async {
         // Fenced for the reason `TimelineStore.report` is: a stale refusal reaching `onUnauthorized`
         // ends the session running now, and a stale sentence lands on a grid that never asked.
         guard sessionStillCurrent(handle) else {
@@ -526,6 +651,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
+        guard writesSentence else { return }
         lastError = apiError.errorDescription
     }
 

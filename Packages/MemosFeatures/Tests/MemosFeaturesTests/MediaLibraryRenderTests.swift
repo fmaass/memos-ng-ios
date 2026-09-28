@@ -301,13 +301,15 @@ struct MediaLibraryRenderTests {
         #expect(all.contains { $0.accessibilityLabel == "Deselect All" }, "no way to clear")
     }
 
-    /// MEMNG-588: the bottom bar says how many are chosen; share is live, delete waits on MEMNG-589.
-    @Test("the select toolbar counts the selection, with share live and delete not yet")
+    /// MEMNG-588 and MEMNG-589: the bottom bar says how many are chosen, and share and delete take
+    /// a tap while something is chosen and nothing is running.
+    @Test("the select toolbar counts the selection, with share and delete live")
     func selectToolbar() async throws {
         let found = try await Self.elements(
             of: VStack {
                 Spacer()
-                LibrarySelectToolbar(count: 2, isSharing: false, share: {})
+                LibrarySelectToolbar(
+                    count: 2, isSharing: false, isDeleting: false, share: {}, delete: {})
             },
             waitFor: "2 Items Selected")
         func element(_ label: String) -> NSObject? {
@@ -317,13 +319,32 @@ struct MediaLibraryRenderTests {
         let share = try #require(element("Share"), "no share button")
         let delete = try #require(element("Delete"), "no delete button")
         #expect(!share.accessibilityTraits.contains(.notEnabled), "share is inert")
-        #expect(delete.accessibilityTraits.contains(.notEnabled), "delete is live before MEMNG-589")
+        #expect(!delete.accessibilityTraits.contains(.notEnabled), "delete is inert")
 
         let none = try await Self.elements(
-            of: LibrarySelectToolbar(count: 0, isSharing: false, share: {}),
+            of: LibrarySelectToolbar(
+                count: 0, isSharing: false, isDeleting: false, share: {}, delete: {}),
             waitFor: "0 Items Selected")
         let idle = try #require(none.first { $0.accessibilityLabel == "Share" })
         #expect(idle.accessibilityTraits.contains(.notEnabled), "share is live with nothing chosen")
+        let idleDelete = try #require(none.first { $0.accessibilityLabel == "Delete" })
+        #expect(
+            idleDelete.accessibilityTraits.contains(.notEnabled),
+            "delete is live with nothing chosen")
+    }
+
+    /// MEMNG-589: while a delete run is out, neither button takes a tap — a second run would be
+    /// refused by the store, and a share would fetch files the run is removing.
+    @Test("the select toolbar takes no tap while a delete runs")
+    func selectToolbarWhileDeleting() async throws {
+        let found = try await Self.elements(
+            of: LibrarySelectToolbar(
+                count: 2, isSharing: false, isDeleting: true, share: {}, delete: {}),
+            waitFor: "2 Items Selected")
+        let share = try #require(found.first { $0.accessibilityLabel == "Share" })
+        let delete = try #require(found.first { $0.accessibilityLabel == "Delete" })
+        #expect(share.accessibilityTraits.contains(.notEnabled), "share is live during a delete")
+        #expect(delete.accessibilityTraits.contains(.notEnabled), "a second delete is offered")
     }
 
     // MARK: - MEMNG-597: day groups and the date pill (plan page 3929 decision 13)

@@ -37,6 +37,8 @@ struct MediaLibraryView: View {
     @State private var sharing = MediaBatchShareFlow()
     /// The running share batch, cancelled when select mode ends so its download stops early.
     @State private var shareTask: Task<Void, Never>?
+    /// Select mode's Delete: the question, and the run its yes starts (MEMNG-589).
+    @State private var deleting = LibraryDeleteFlow()
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
     @State private var dockClaim = UUID()
     /// What the zoom transition matches the viewer to: the tile it grew out of.
@@ -65,12 +67,32 @@ struct MediaLibraryView: View {
             // (`dockClaim`), so the two are never drawn together.
             .safeAreaBar(edge: .bottom) {
                 if selection.isActive {
-                    LibrarySelectToolbar(
-                        count: selection.count,
-                        isSharing: sharing.isSharing,
-                        share: { shareSelection() }
-                    )
-                    .sharingFiles(sharing)
+                    VStack(spacing: DesignTokens.Space.tight) {
+                        if let message = deleting.message {
+                            LibraryDeleteToast(text: message) { deleting.dismissMessage() }
+                        }
+                        LibrarySelectToolbar(
+                            count: selection.count,
+                            isSharing: sharing.isSharing,
+                            isDeleting: deleteRunning,
+                            share: { shareSelection() },
+                            delete: { deleting.claim(.tapped(selection.uids)) }
+                        )
+                        .sharingFiles(sharing)
+                    }
+                    // On the stack around the toolbar, not on the toolbar that carries the share
+                    // sheet: two presentations on one view is how one of them stops appearing.
+                    .alert(
+                        LibraryDeleteFlow.question(count: deleting.asking?.count ?? 0),
+                        isPresented: askingDelete
+                    ) {
+                        Button(LibraryDeleteFlow.confirmTitle, role: .destructive) {
+                            confirmDelete()
+                        }
+                        Button("Cancel", role: .cancel) { deleting.claim(.cancelled) }
+                    } message: {
+                        Text(LibraryDeleteFlow.explanation)
+                    }
                 }
             }
             .toolbarVisibility(.hidden, for: .navigationBar)
@@ -170,6 +192,7 @@ struct MediaLibraryView: View {
                 dock?.claim(dockClaim)
             } else {
                 abandonShare()
+                deleting.abandon()
                 dock?.release(dockClaim)
             }
         }
@@ -177,6 +200,7 @@ struct MediaLibraryView: View {
         .onDisappear {
             selection.close()
             abandonShare()
+            deleting.abandon()
             dock?.release(dockClaim)
         }
     }
@@ -458,6 +482,44 @@ struct MediaLibraryView: View {
         sharing.abandon()
         shareTask?.cancel()
         shareTask = nil
+    }
+
+    /// A delete run is out — this flow's, or one an abandoned select mode left running, which the
+    /// store would refuse a second run beside anyway.
+    private var deleteRunning: Bool {
+        deleting.isDeleting || library?.isDeleting == true
+    }
+
+    private var askingDelete: Binding<Bool> {
+        Binding(
+            get: { deleting.asking != nil },
+            set: { if !$0 { deleting.claim(.cancelled) } }
+        )
+    }
+
+    /// The alert's yes. The session handle is taken HERE, at the answer, and the whole run goes out
+    /// on it (`MediaLibraryStore.delete`). Claimed synchronously, before any task, for the reason
+    /// `MemoDetailView.sendPictureDelete` gives.
+    ///
+    /// The run's task is deliberately not kept for cancelling: a DELETE already sent cannot be
+    /// recalled, so select mode ending lets the run finish and only stops listening to it
+    /// (`LibraryDeleteFlow.abandon`). The grid drops what went either way — the store applies it —
+    /// and the day counts are read again, so Months and Years do not count pictures that are gone.
+    private func confirmDelete() {
+        guard let library, let handle = session.activeHandle else {
+            deleting.claim(.cancelled)
+            return
+        }
+        guard deleting.claim(.confirmed) else { return }
+        Task {
+            let outcome = await deleting.perform { uids in
+                await library.delete(uids, using: handle)
+            }
+            guard let outcome, !outcome.deleted.isEmpty, !outcome.stoppedForSessionChange else {
+                return
+            }
+            await loadBuckets(refreshing: true)
+        }
     }
 
     private func load() async {
