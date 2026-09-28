@@ -5,6 +5,12 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.1.2 (28)
+
+- The same app as 2.1.1 (27), rebuilt from an unchanged tree. This build checks that the build and TestFlight lane still work end to end after the build machine moved its build trees to a new drive.
+- Nothing in the app changed. The All-by-day layout and selecting pictures to share or delete are still to come.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.1.1 (27)
 
 - Tap a day in Months and the Library jumps to that day in All, scrolled into view. If you tap something else before it gets there, the jump is dropped.

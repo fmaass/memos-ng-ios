@@ -1661,6 +1661,13 @@ sys.exit(rc)
 PY
 }
 
+# -destination-timeout: xcodebuild looks the device up through CoreSimulator with a timeout of
+# its own, and under a loaded host (three booted simulators, ~770 simulator processes, load
+# average above 300 on 2026-09-28) that lookup outran the default and the run failed with
+# "Unable to find a device matching the provided destination specifier" listing NO simulators
+# at all — twice on a device this same script had created, booted and read back seconds
+# earlier. The device existed; the question was slow. Ten minutes is the wait a loaded host
+# needs; it costs nothing when the host is idle.
 s_xcodebuild() {
   # -onlyUsePackageVersionsFromResolvedFile is the second half of the pins step: that step proves
   # the tracked graph and the resolved graph agree, this makes the build itself unable to resolve
@@ -1668,6 +1675,7 @@ s_xcodebuild() {
   xcodebuild test \
     -scheme MemosNG \
     -destination "$GATE_DESTINATION" \
+    -destination-timeout 600 \
     -derivedDataPath "$DERIVED" \
     -resultBundlePath "$XCRESULT" \
     -onlyUsePackageVersionsFromResolvedFile \
@@ -1687,6 +1695,7 @@ s_bundlecheck() {
   xcodebuild -showBuildSettings -json \
     -scheme MemosNG \
     -destination "$GATE_DESTINATION" \
+    -destination-timeout 600 \
     -derivedDataPath "$DERIVED" \
     -skipPackagePluginValidation > "$settings" 2>"$GATE_WORK/build-settings.err" || {
       echo "BUNDLE FAIL: xcodebuild -showBuildSettings failed"
@@ -2281,6 +2290,7 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
     xcodebuild build-for-testing \
       -scheme MemosNG \
       -destination "$GATE_DESTINATION" \
+      -destination-timeout 600 \
       -derivedDataPath "$DERIVED" \
       -onlyUsePackageVersionsFromResolvedFile \
       -skipPackagePluginValidation 2>&1 | tee .gate-artifacts/quick-build.log
@@ -2292,6 +2302,7 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
     set -- xcodebuild test-without-building \
       -scheme MemosNG \
       -destination "$GATE_DESTINATION" \
+      -destination-timeout 600 \
       -derivedDataPath "$DERIVED" \
       -resultBundlePath "$QUICK_XCRESULT" \
       -onlyUsePackageVersionsFromResolvedFile \
