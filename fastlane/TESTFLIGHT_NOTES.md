@@ -5,6 +5,16 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.1.1 (27)
+
+- Tap a day in Months and the Library jumps to that day in All, scrolled into view. If you tap something else before it gets there, the jump is dropped.
+- The tab bar is now Library, Timeline, Places, and the app opens on Timeline.
+- Inside the Library the tab bar collapses to the Library icon plus Years, Months and All. The picker is gone from the navigation bar.
+- The Images and Videos filter moved into the options menu as its own group. There is no bar above the grid any more.
+- Months shows at most six days per month, the busiest ones, laid out as a hero mosaic, with a row that says how many more days there are.
+- An intermediate build: the All-by-day layout and selecting pictures to share or delete are still to come.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.1.0 (26)
 
 - The Library now sorts pictures by the day they were taken, newest first, with a header for each month. Months follow your phone's time zone.
