@@ -31,6 +31,14 @@ struct MediaLibraryView: View {
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
+    /// Select mode in All, and what it has chosen (MEMNG-588).
+    @State private var selection = LibrarySelection()
+    /// Select mode's Share: the chosen originals, fetched one by one into one sheet.
+    @State private var sharing = MediaBatchShareFlow()
+    /// The running share batch, cancelled when select mode ends so its download stops early.
+    @State private var shareTask: Task<Void, Never>?
+    /// This Library's claim on the dock while select mode's toolbar stands in its place.
+    @State private var dockClaim = UUID()
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
     /// Which direction this device reads the library in, across launches. Read once, when the
@@ -52,6 +60,18 @@ struct MediaLibraryView: View {
             // the kind, the sort and the tag are chosen in its options menu (page 3929 decision 5).
             .safeAreaBar(edge: .top) {
                 if let library { header(library) }
+            }
+            // Select mode's toolbar, in the dock's place: the dock is claimed away while it is up
+            // (`dockClaim`), so the two are never drawn together.
+            .safeAreaBar(edge: .bottom) {
+                if selection.isActive {
+                    LibrarySelectToolbar(
+                        count: selection.count,
+                        isSharing: sharing.isSharing,
+                        share: { shareSelection() }
+                    )
+                    .sharingFiles(sharing)
+                }
             }
             .toolbarVisibility(.hidden, for: .navigationBar)
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
@@ -125,6 +145,7 @@ struct MediaLibraryView: View {
         // The rows on this grid belong to the account they were read as. If the session becomes
         // somebody else's — or nobody's — while the tab is up, they go, the way the timeline's do.
         .onChange(of: session.state.user?.subject) {
+            selection.close()
             library?.sessionIdentityChanged()
             tags?.sessionIdentityChanged()
             buckets?.sessionIdentityChanged()
@@ -133,6 +154,30 @@ struct MediaLibraryView: View {
         .reloadsOnRecovery(session.reachabilityRecoveries) {
             await load()
             await loadBuckets()
+        }
+        // A picture that leaves the grid leaves the selection with it.
+        .onChange(of: library?.items) { _, items in
+            selection.prune(keeping: items ?? [])
+        }
+        // Select mode belongs to All: any way off it ends select mode.
+        .onChange(of: choice.scope) { _, scope in
+            if scope != .all { selection.close() }
+        }
+        // Every way select mode ends comes through here — close, leaving All, another account —
+        // and each one abandons a share still fetching, so it can never offer its files later.
+        .onChange(of: selection.isActive) { _, active in
+            if active {
+                dock?.claim(dockClaim)
+            } else {
+                abandonShare()
+                dock?.release(dockClaim)
+            }
+        }
+        // The dock is one for every tab: a claim left behind would take it off all of them.
+        .onDisappear {
+            selection.close()
+            abandonShare()
+            dock?.release(dockClaim)
         }
     }
 
@@ -258,6 +303,8 @@ struct MediaLibraryView: View {
             // Asked where it is acted on, never remembered from the last drawing: the store can
             // replace the list between a drawing and a geometry callback already on its way.
             listGeneration: { library.listGeneration },
+            selection: selection,
+            toggle: { selection.toggle($0) },
             dayBuckets: buckets.flatMap { store in
                 bucketsShown(
                     for: .all,
@@ -308,7 +355,12 @@ struct MediaLibraryView: View {
                 filter: library.filter,
                 order: library.order,
                 tag: library.tag
-            )
+            ),
+            select: choice.scope == .all ? { selection.begin() } : nil,
+            selecting: selection.isActive,
+            allMineSelected: selection.coversAllMine(in: library.items),
+            toggleAll: { selection.toggleAllMine(in: library.items) },
+            close: { selection.close() }
         ) {
             LibraryOptionsMenuContent(
                 order: sortBinding(library),
@@ -381,6 +433,31 @@ struct MediaLibraryView: View {
         await saving.save(attachment) { [session] file in
             try await session.download(file, rendition)
         }
+    }
+
+    /// Select mode's Share: the chosen rows, in the order they were chosen, each fetched as its
+    /// ORIGINAL through the session's download lane, the batch fenced by the session generation it
+    /// started under (`MediaBatchShareFlow`).
+    private func shareSelection() {
+        guard let library else { return }
+        let rows = selection.rows(in: library.items)
+        shareTask = Task {
+            _ = await sharing.share(
+                rows,
+                generation: { [session] in session.activeHandle?.generation },
+                download: { [session] file, rendition in
+                    try await session.download(file, rendition)
+                }
+            )
+        }
+    }
+
+    /// Select mode ended: the batch stops being the live one (`MediaBatchShareFlow.abandon`) and
+    /// its task is cancelled, so the download it is waiting on ends early.
+    private func abandonShare() {
+        sharing.abandon()
+        shareTask?.cancel()
+        shareTask = nil
     }
 
     private func load() async {
@@ -499,6 +576,10 @@ struct LibraryGrid: View {
     /// landing held belongs to the list it landed in, and a filter, order or tag change is
     /// another list.
     var listGeneration: () -> Int = { 0 }
+    /// Select mode (MEMNG-588): while it is on, a tap chooses rather than opens.
+    var selection = LibrarySelection()
+    /// A tap on an own picture in select mode.
+    var toggle: (LibraryRow) -> Void = { _ in }
     /// The day buckets a heading's count is read from, or nil while none answer this list
     /// (`MediaLibraryPresentation.dayCount`).
     var dayBuckets: [LibraryBucket]?
@@ -718,11 +799,16 @@ struct LibraryGrid: View {
         let radius = DesignTokens.Radius.dayBlock
         return MonthMosaicLayout(slots: band.pictures.map(\.slot), gap: DesignTokens.Space.hair) {
             ForEach(band.pictures) { placed in
-                tile(placed.attachment, slot: placed.slot)
-                    .onAppear {
-                        guard wantsMore(placed.index) else { return }
-                        Task { await loadMore() }
-                    }
+                tile(
+                    placed.attachment,
+                    slot: placed.slot,
+                    row: LibrarySelectionPresentation.row(
+                        at: placed.index, uid: placed.id, in: items)
+                )
+                .onAppear {
+                    guard wantsMore(placed.index) else { return }
+                    Task { await loadMore() }
+                }
             }
         }
         .clipShape(
@@ -751,8 +837,12 @@ struct LibraryGrid: View {
     }
 
     @ViewBuilder
-    private func tile(_ attachment: MemoAttachment, slot: MosaicSlot) -> some View {
+    private func tile(
+        _ attachment: MemoAttachment, slot: MosaicSlot, row: LibraryRow?
+    ) -> some View {
         let kind = MediaLibraryPresentation.tileKind(for: attachment)
+        let state = LibrarySelectionPresentation.tile(for: row, in: selection)
+        let hint = LibrarySelectionPresentation.tileHint(for: kind, selecting: state != .browsing)
         if MediaLibraryPresentation.isOpenable(kind) {
             AttachmentThumbnail(
                 attachment: attachment,
@@ -764,15 +854,16 @@ struct LibraryGrid: View {
             )
             .mediaTransitionSource(id: attachment.uid, in: zoom)
             .contentShape(.rect)
-            .onTapGesture { open(attachment) }
+            .onTapGesture { tapped(attachment, row: row) }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: kind))
-            .accessibilityHint(kind == .video ? "Plays full screen" : "Opens full screen")
+            .accessibilityHint(hint)
             .contextMenu {
                 menu(attachment)
             } preview: {
                 tilePreview(attachment)
             }
+            .modifier(SelectableTile(state: state))
         } else {
             // The SAME menu, and that is the whole of this branch's change: a PDF or a voice memo
             // has a memo it hangs on and an original to keep, exactly as a photograph does. What it
@@ -784,14 +875,31 @@ struct LibraryGrid: View {
             // no picture here to lift.
             DocumentTile(
                 mime: attachment.mime,
-                actions: MediaTileMenu.actions(for: attachment),
+                // In select mode a tap chooses, so the tile's own button is not drawn over it.
+                actions: state == .browsing ? MediaTileMenu.actions(for: attachment) : [],
                 showMemo: { jump?.request($0) },
                 fetch: { file, rendition in
                     Task { await fetch(file, rendition) }
                 }
             )
+            .contentShape(.rect)
+            .onTapGesture {
+                if state != .browsing { tapped(attachment, row: row) }
+            }
             .contextMenu { menu(attachment) }
+            .modifier(SelectableTile(state: state))
         }
+    }
+
+    /// A tile's tap: the viewer while browsing, the selection in select mode. Another member's
+    /// tile never gets here in select mode (`SelectableTile` makes it inert), and the selection
+    /// refuses it besides (`LibrarySelection.toggle`).
+    private func tapped(_ attachment: MemoAttachment, row: LibraryRow?) {
+        guard selection.isActive else {
+            open(attachment)
+            return
+        }
+        if let row { toggle(row) }
     }
 
     /// What a long press offers, built once for both kinds of tile. Written into each branch

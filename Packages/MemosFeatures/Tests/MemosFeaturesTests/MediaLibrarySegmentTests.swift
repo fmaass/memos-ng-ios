@@ -591,10 +591,11 @@ extension MediaImageLoaderTests {
             }
             #expect(overAll.isEmpty, "a kind filter over the All grid: \(overAll)")
             // The header the kind moved into, on the real Library: its options button, and the
-            // Select capsule drawn but inert (decision 10).
+            // Select capsule (decision 10), live over All where there are files to choose
+            // (MEMNG-588).
             #expect(!options.isEmpty, "the Library draws no options button")
-            let inert = select.allSatisfy { $0.accessibilityTraits.contains(.notEnabled) }
-            #expect(!select.isEmpty && inert, "the Library's Select capsule is missing or live")
+            let live = select.allSatisfy { !$0.accessibilityTraits.contains(.notEnabled) }
+            #expect(!select.isEmpty && live, "Select is missing or inert in All")
 
             var labels: [String] = []
             for _ in 0..<80 where !labels.contains("12 items") {
@@ -605,6 +606,11 @@ extension MediaImageLoaderTests {
             #expect(labels.contains("12 items"), "precondition: the Years cards are on screen")
             let overYears = Self.kindFilterShown(in: window)
             #expect(overYears.isEmpty, "a kind filter over Years: \(overYears)")
+            // Over Years there is nothing to select: the capsule is drawn and inert.
+            var selectOverYears: [NSObject] = []
+            Self.elements(labelled: "Select", in: window, into: &selectOverYears)
+            let inert = selectOverYears.allSatisfy { $0.accessibilityTraits.contains(.notEnabled) }
+            #expect(!selectOverYears.isEmpty && inert, "Select is missing or live over Years")
 
             // Years opens at its top, where the dock is the tab pill again; a tap on the active
             // Library tab brings the segment back (decision 8).

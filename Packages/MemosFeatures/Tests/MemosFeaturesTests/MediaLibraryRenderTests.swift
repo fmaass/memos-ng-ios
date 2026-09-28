@@ -208,7 +208,8 @@ struct MediaLibraryRenderTests {
     }
 
     /// Plan page 3929 decision 10: a large title with the subtitle under it, then on the right the
-    /// round options button and, after it, the Select capsule — drawn, and inert until MEMNG-588.
+    /// round options button and, after it, the Select capsule — drawn, and inert where there is
+    /// nothing to select (no `select` action: Years and Months).
     @Test("the header draws the title, the subtitle, the options button and a disabled Select")
     func headerChrome() async throws {
         let subtitle = "Videos · Oldest First · #travel"
@@ -247,6 +248,82 @@ struct MediaLibraryRenderTests {
         let middle = options.accessibilityFrame.midX
         let right = select.accessibilityFrame.midX
         #expect(left < middle && middle < right, "x: title \(left), ••• \(middle), \(right)")
+    }
+
+    /// Hosts `view` in a real window until an element labelled `waitFor` appears, and returns
+    /// every labelled element it holds.
+    private static func elements(of view: some View, waitFor: String) async throws -> [NSObject] {
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(rootView: view)
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var found: [NSObject] = []
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            found = []
+            collectElements(window, into: &found)
+            if found.contains(where: { $0.accessibilityLabel == waitFor }) { break }
+        }
+        return found
+    }
+
+    /// MEMNG-588: on All the Select capsule is live.
+    @Test("the Select capsule is live where there are files to select")
+    func selectCapsuleIsLiveInAll() async throws {
+        let found = try await Self.elements(
+            of: LibraryHeader(subtitle: "All", select: {}) { Text("row") }, waitFor: "Select")
+        let select = try #require(found.first { $0.accessibilityLabel == "Select" })
+        #expect(!select.accessibilityTraits.contains(.notEnabled), "Select is still inert in All")
+    }
+
+    /// MEMNG-588, the mockup's section 7: in select mode the options button and the capsule give
+    /// way to a round select-all toggle and a round close button.
+    @Test("select mode swaps the header's controls for select all and close")
+    func selectModeHeader() async throws {
+        let found = try await Self.elements(
+            of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
+            waitFor: "Close")
+        let labels = found.compactMap(\.accessibilityLabel)
+        #expect(labels.contains("Select All"), "no select-all toggle: \(labels)")
+        #expect(labels.contains("Close"), "no close button: \(labels)")
+        #expect(!labels.contains("Options"), "the options button stayed in select mode")
+        #expect(!labels.contains("Select"), "the Select capsule stayed in select mode")
+
+        let all = try await Self.elements(
+            of: LibraryHeader(subtitle: "All", selecting: true, allMineSelected: true) {
+                Text("row")
+            },
+            waitFor: "Close")
+        #expect(all.contains { $0.accessibilityLabel == "Deselect All" }, "no way to clear")
+    }
+
+    /// MEMNG-588: the bottom bar says how many are chosen; share is live, delete waits on MEMNG-589.
+    @Test("the select toolbar counts the selection, with share live and delete not yet")
+    func selectToolbar() async throws {
+        let found = try await Self.elements(
+            of: VStack {
+                Spacer()
+                LibrarySelectToolbar(count: 2, isSharing: false, share: {})
+            },
+            waitFor: "2 Items Selected")
+        func element(_ label: String) -> NSObject? {
+            found.first { $0.accessibilityLabel == label }
+        }
+        #expect(element("2 Items Selected") != nil, "no count line")
+        let share = try #require(element("Share"), "no share button")
+        let delete = try #require(element("Delete"), "no delete button")
+        #expect(!share.accessibilityTraits.contains(.notEnabled), "share is inert")
+        #expect(delete.accessibilityTraits.contains(.notEnabled), "delete is live before MEMNG-589")
+
+        let none = try await Self.elements(
+            of: LibrarySelectToolbar(count: 0, isSharing: false, share: {}),
+            waitFor: "0 Items Selected")
+        let idle = try #require(none.first { $0.accessibilityLabel == "Share" })
+        #expect(idle.accessibilityTraits.contains(.notEnabled), "share is live with nothing chosen")
     }
 
     // MARK: - MEMNG-597: day groups and the date pill (plan page 3929 decision 13)
