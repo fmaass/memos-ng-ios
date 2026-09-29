@@ -171,6 +171,84 @@ struct UploadBudgetTests {
         #expect(action == .wait(until: Date(timeIntervalSince1970: 1450)))
     }
 
+    @Test("a resume that found no new bytes keeps its spacing growing; one that did resets it")
+    func resumeWithoutProgressKeepsSpacing() throws {
+        var job = wholeJob(files: 1)
+        job.files[0].uploadUID = "u1"
+        job.files[0].bytesConfirmed = 40
+        let fileID = job.files[0].id
+        let instant = Date(timeIntervalSince1970: 1000)
+        /// One HEAD that reported `offset`, then the tail it sent failing: the spacing that
+        /// failure was given.
+        func resumeThenFail(at offset: Int64) throws -> TimeInterval? {
+            let term = job.files[0].uploadAttempt ?? 0
+            job = try #require(
+                job.applyingFileAnswer(
+                    fileID: fileID, attempt: term, change: .resumeFrom(offset),
+                    stillCurrent: true, at: instant
+                )
+            )
+            job = try #require(
+                job.applyingFileAnswer(
+                    fileID: fileID, attempt: term + 1, change: .resume(FileRetry(draw: 1)),
+                    stillCurrent: true, at: instant
+                )
+            )
+            return job.files[0].nextAttemptAt?.timeIntervalSince(instant)
+        }
+        #expect(try resumeThenFail(at: 40) == 900)
+        #expect(try resumeThenFail(at: 40) == 1800, "a resume with no progress reset the count")
+        #expect(try resumeThenFail(at: 40) == 3600, "a resume with no progress reset the count")
+        #expect(job.files[0].attemptCount == 3)
+        #expect(try resumeThenFail(at: 70) == 900, "control: progress starts the spacing over")
+        #expect(job.files[0].attemptCount == 1)
+        #expect(job.files[0].bytesConfirmed == 70)
+    }
+
+    private func failedTwice(at confirmed: Int64) -> UploadJob {
+        var job = wholeJob(files: 1)
+        job.files[0].uploadUID = "u1"
+        job.files[0].bytesConfirmed = confirmed
+        job.files[0].attemptCount = 2
+        return job
+    }
+
+    @Test("a resume below the bytes already held keeps the count; one byte more resets it")
+    func resumeProgressBoundary() {
+        let fewer = failedTwice(at: 40)
+        let lower = fewer.retryingFromOffset(fileID: fewer.files[0].id, bytesConfirmed: 39)
+        #expect(lower.files[0].attemptCount == 2, "a server holding fewer bytes is no progress")
+        #expect(lower.files[0].bytesConfirmed == 39, "control: the count is the server's")
+        let one = failedTwice(at: 40)
+        let more = one.retryingFromOffset(fileID: one.files[0].id, bytesConfirmed: 41)
+        #expect(more.files[0].attemptCount == nil, "one new byte is progress")
+    }
+
+    @Test("advancing clears a file's count even at the same offset, for its other callers")
+    func advancingStillClears() {
+        let job = failedTwice(at: 40)
+        let advanced = job.advancing(fileID: job.files[0].id, bytesConfirmed: 40)
+        #expect(advanced.files[0].attemptCount == nil)
+    }
+
+    @Test("a resume answer for a term already moved on is refused, and the count stands")
+    func staleResumeAnswerRefused() throws {
+        let job = failedTwice(at: 40)
+        let fileID = job.files[0].id
+        let resumed = try #require(
+            job.applyingFileAnswer(
+                fileID: fileID, attempt: 0, change: .resumeFrom(70),
+                stillCurrent: true, at: Date(timeIntervalSince1970: 1000)
+            )
+        )
+        #expect(resumed.files[0].attemptCount == nil, "control: the first answer made progress")
+        let late = resumed.applyingFileAnswer(
+            fileID: fileID, attempt: 0, change: .resumeFrom(40),
+            stillCurrent: true, at: Date(timeIntervalSince1970: 1001)
+        )
+        #expect(late == nil, "a second answer for the same term moved the row again")
+    }
+
     @Test("a fractional instant's deadline is rounded up to the whole second a manifest keeps")
     func deadlineRoundsUp() throws {
         let job = wholeJob(files: 1)

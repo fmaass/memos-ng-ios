@@ -2935,6 +2935,41 @@ struct WholeResumeTests {
         #expect(held.holdReason == .serverRefused)
     }
 
+    static func busyHead(_ status: Int = 429) -> OutboxHTTPResponse {
+        OutboxHTTPResponse(statusCode: status, headers: ["Retry-After": "3600"])
+    }
+
+    @Test("a resume's HEAD answered 429 with Retry-After waits as long as the server asked")
+    func resumeHeadHonoursRetryAfter() async throws {
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(), answerHead: { _ in Self.busyHead() }
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+        #expect(heads(rig) == 1)
+        #expect(rig.session.createdTasks.isEmpty)
+        let row = try await rig.reload()
+        #expect(row.state != .held)
+        #expect(row.file(rig.picture.id)?.nextAttemptAt == start.addingTimeInterval(3600))
+    }
+
+    @Test("an unreadable success's HEAD answered 503 with Retry-After waits as long as asked")
+    func unreadableSuccessHeadHonoursRetryAfter() async throws {
+        let rig = try await WholeRig.make(answerHead: { _ in Self.busyHead(503) })
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        await rig.engine.handle(try rig.answer(picture, status: 200))
+        await rig.engine.untilQuiescent()
+        #expect(heads(rig) == 1)
+        let row = try await rig.reload()
+        #expect(row.state != .held)
+        #expect(row.file(rig.picture.id)?.nextAttemptAt == start.addingTimeInterval(3600))
+    }
+
     @Test("a manifest written before the resume counters existed decodes with none")
     func olderManifestDecodes() throws {
         let id = UUID()

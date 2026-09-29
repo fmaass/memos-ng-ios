@@ -131,9 +131,17 @@ extension UploadJob {
     /// Resumes ONE file from the offset the server just reported for its session, under a new
     /// attempt term: the session is kept, the count is the server's own, and the task that failed
     /// before is told apart from the one that carries the rest. Only this file moves.
+    ///
+    /// The file's failure count survives a resume that found no byte the row did not already
+    /// hold: that is the same failure again, and a count cleared by it would space every
+    /// following attempt as a first one, against a server that has not moved.
     public func retryingFromOffset(fileID: UUID, bytesConfirmed offset: Int64) -> UploadJob {
-        advancing(fileID: fileID, bytesConfirmed: offset).updating(fileID) { file in
+        let before = file(fileID)
+        return advancing(fileID: fileID, bytesConfirmed: offset).updating(fileID) { file in
             file.uploadAttempt = (file.uploadAttempt ?? 0) + 1
+            if let before, file.bytesConfirmed <= before.bytesConfirmed {
+                file.attemptCount = before.attemptCount
+            }
         }
     }
 }

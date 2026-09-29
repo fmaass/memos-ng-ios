@@ -1738,7 +1738,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         guard response.isSuccess, let offset = reported, offset >= 0 else {
             await answer(
                 fileID, of: job, term: term, credentials: credentials,
-                with: .backOff("The server's answer was unreadable.", FileRetry(draw: rng()))
+                with: Self.offsetUnusable(response, draw: rng())
             )
             return true
         }
@@ -1903,6 +1903,24 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             return nil
         }
         return session
+    }
+
+    /// An offset HEAD that came back with no offset to resume from. A 429 or 503 is the server
+    /// asking for time, and its `Retry-After` is honoured as the session request's and the tail's
+    /// are: sooner, the file would only be turned away again.
+    private static func offsetUnusable(_ response: OutboxHTTPResponse, draw: Double)
+        -> WholeFileChange
+    {
+        guard response.statusCode == 429 || response.statusCode == 503 else {
+            return .backOff("The server's answer was unreadable.", FileRetry(draw: draw))
+        }
+        return .backOff(
+            "The server was busy (\(response.statusCode)).",
+            FileRetry(
+                retryAfter: WholeOutcome.seconds(inRetryAfter: response.header("Retry-After")),
+                draw: draw
+            )
+        )
     }
 
     /// A status that says nothing about the request, only about the server's state: spaced out on
@@ -2169,8 +2187,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             requestDrain()
             return nil
         }
+        let draw = rng()
         let unreadable = WholeFileChange.backOff(
-            "The server's answer was unreadable.", FileRetry(draw: rng()))
+            "The server's answer was unreadable.", FileRetry(draw: draw))
         guard let uploadUID = file.uploadUID else { return unreadable }
         switch await wholeOffsetHead(uploadUID: uploadUID, credentials: credentials) {
         case .withdrawn:
@@ -2186,7 +2205,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             guard response.isSuccess,
                 let raw = response.header(OutboxRequests.offsetHeader),
                 let offset = Int64(raw)
-            else { return unreadable }
+            else { return Self.offsetUnusable(response, draw: draw) }
             let confirmed =
                 job.advancing(fileID: fileID, bytesConfirmed: offset).file(fileID)?.bytesConfirmed
                 ?? offset

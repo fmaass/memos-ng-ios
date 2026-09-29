@@ -5,6 +5,19 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.0 (29)
+
+- The tab bar reads Library, Timeline, Places, and the app opens on Timeline. Scroll the Library and the bar turns into the Library icon plus Years, Months and All; back at the top, or with a tap on the Library icon, the tabs return.
+- The Library has a new header with an options menu for the sort, the kind (All Items, Photos, Videos) and the tags, and a Select button. The picker in the navigation bar and the bar above the grid are gone.
+- Months shows up to six days per month, the ones with the most pictures, as a mosaic, with an "and N more days" line under a month that has more. Tap a day and the Library jumps to that day in All; the line opens All at that month. Tapping something else before it gets there drops the jump.
+- All now groups pictures by day: a heading with the weekday, the date and the day's count, then that day's pictures in a mosaic that opens differently from the day before. While you scroll, a pill at the top names the day on screen; tap it to open Months at that month. It fades a second after you stop.
+- Days and months in the Library now follow Zurich time, whatever time zone the phone is set to, so a Months tile, its count and its day in All agree on where a day ends.
+- Select pictures in All: tap Select, then tap pictures to choose them. Only your own pictures can be chosen; other people's are dimmed. Select All chooses all of your own pictures in view. Share downloads the originals and offers them all in one share sheet.
+- Delete asks "Delete N Items?" first. The pictures are deleted from the server and from any memo they belong to, and this can't be undone. Closing select mode does not stop a delete already under way. If some fail, a message says how many were deleted and how many failed.
+- Photo and video uploads now go at most two at a time, and the app waits when the server asks it to slow down. An interrupted upload continues from where it stopped when the server still has the part already sent; otherwise it starts again. The app checks this while it is open.
+- In the Library, the Timeline and a memo, a picture whose link has expired now asks for a fresh link and loads, instead of showing as failed. If new pictures arrive in the Library at the same moment, one can still show as failed until the Library next refreshes.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.1.2 (28)
 
 - The same app as 2.1.1 (27), rebuilt from an unchanged tree. This build checks that the build and TestFlight lane still work end to end after the build machine moved its build trees to a new drive.

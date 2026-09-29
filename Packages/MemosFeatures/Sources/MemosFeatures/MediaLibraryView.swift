@@ -201,6 +201,9 @@ struct MediaLibraryView: View {
         }
         // The dock is one for every tab: a claim left behind would take it off all of them.
         .onDisappear {
+            // A jump still reading when the tab is left would otherwise land its page in a grid
+            // the reader no longer sees, and scroll it on their return.
+            library?.abandonJump()
             selection.close()
             abandonShare()
             deleting.abandon()
