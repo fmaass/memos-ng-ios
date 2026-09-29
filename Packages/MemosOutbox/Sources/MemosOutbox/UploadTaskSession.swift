@@ -38,6 +38,9 @@ public enum OutboxUploadSession {
         // The system relaunches the app for a task that finished while it was gone. Without this,
         // a capture completed in the background is heard about only at the next foreground.
         configuration.sessionSendsLaunchEvents = true
+        // The transport's own fence under the engine's budget: however many tasks exist, no more
+        // than the budget's connections reach the server at once.
+        configuration.httpMaximumConnectionsPerHost = UploadBudget.inFlightUploads
         return configuration
     }
 }

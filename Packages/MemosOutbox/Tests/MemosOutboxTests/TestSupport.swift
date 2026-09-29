@@ -1091,3 +1091,76 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
         }
     }
 }
+
+/// A sleeper the test advances: every sleep waits until `advance(to:)` passes its deadline or its
+/// task is cancelled, and what is armed is on record, so "one timer at a time" is asserted rather
+/// than assumed.
+final class ControlledSleeper: OutboxSleeping, @unchecked Sendable {
+    private struct Sleep {
+        var deadline: Date
+        var continuation: CheckedContinuation<Void, any Error>
+    }
+
+    private let lock = NSLock()
+    private var sleeping: [Int: Sleep] = [:]
+    private var cancelledEarly: Set<Int> = []
+    private var nextID = 0
+    private var mostAtOnce = 0
+    private var armedDeadlines: [Date] = []
+    private var cancels = 0
+    /// When false a cancelled sleep is NOT woken: it stays armed, so a test can fire a timer the
+    /// engine has already replaced — the callback that was on its way when the re-arm happened.
+    private let honoursCancellation: Bool
+
+    init(honoursCancellation: Bool = true) {
+        self.honoursCancellation = honoursCancellation
+    }
+
+    /// Sleeps armed right now.
+    var armed: [Date] { lock.withLock { sleeping.values.map(\.deadline).sorted() } }
+    /// The most sleeps ever armed at one instant.
+    var mostArmedAtOnce: Int { lock.withLock { mostAtOnce } }
+    /// How many sleeps were cancelled, honoured or not.
+    var cancellations: Int { lock.withLock { cancels } }
+    /// Every deadline ever armed, in order.
+    var history: [Date] { lock.withLock { armedDeadlines } }
+
+    func sleep(until deadline: Date) async throws {
+        let id: Int = lock.withLock {
+            nextID += 1
+            return nextID
+        }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let early = lock.withLock { () -> Bool in
+                    if cancelledEarly.remove(id) != nil, honoursCancellation { return true }
+                    sleeping[id] = Sleep(deadline: deadline, continuation: continuation)
+                    armedDeadlines.append(deadline)
+                    mostAtOnce = Swift.max(mostAtOnce, sleeping.count)
+                    return false
+                }
+                if early { continuation.resume(throwing: CancellationError()) }
+            }
+        } onCancel: {
+            lock.withLock { cancels += 1 }
+            guard honoursCancellation else { return }
+            let woken = lock.withLock { () -> Sleep? in
+                guard let found = sleeping.removeValue(forKey: id) else {
+                    cancelledEarly.insert(id)
+                    return nil
+                }
+                return found
+            }
+            woken?.continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Wakes every sleep whose deadline is at or before `instant`.
+    func advance(to instant: Date) {
+        let due: [Sleep] = lock.withLock {
+            let ids = sleeping.filter { $0.value.deadline <= instant }.map(\.key)
+            return ids.compactMap { sleeping.removeValue(forKey: $0) }
+        }
+        for sleep in due { sleep.continuation.resume() }
+    }
+}

@@ -124,6 +124,12 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// reaches the memo through the edit instead. Optional and last, so a manifest written before
     /// this existed decodes unchanged and reads as "captured", which is what it is.
     public var stagedForEdit: Bool?
+    /// When this file on the whole lane may be sent again, and how many of its sends have failed in
+    /// a row. The file's own, not the capture's: a sibling's success says nothing about this file's
+    /// server, and clearing it there was a retry storm. Optional and last, so a manifest written
+    /// before they existed decodes unchanged and reads as "never failed".
+    public var nextAttemptAt: Date?
+    public var attemptCount: Int?
 
     public init(
         id: UUID = UUID(),
@@ -137,7 +143,9 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         chunkSize: Int = OutboxDefaults.chunkSize,
         uploadAttempt: Int? = nil,
         attachmentUID: String? = nil,
-        stagedForEdit: Bool? = nil
+        stagedForEdit: Bool? = nil,
+        nextAttemptAt: Date? = nil,
+        attemptCount: Int? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -151,6 +159,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.uploadAttempt = uploadAttempt
         self.attachmentUID = attachmentUID
         self.stagedForEdit = stagedForEdit
+        self.nextAttemptAt = nextAttemptAt
+        self.attemptCount = attemptCount
     }
 
     public var isComplete: Bool { uploadUID != nil && bytesConfirmed >= byteSize }

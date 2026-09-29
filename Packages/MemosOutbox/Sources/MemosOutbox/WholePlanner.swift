@@ -12,10 +12,27 @@ public enum WholeAction: Sendable, Equatable {
     case wait(until: Date)
     /// Send these files, each whole, in ONE pass, in capture order. `starting` have no upload
     /// session yet. `retrying` have one that holds less than the whole file and that no task is
-    /// carrying, so each is sent again from its first byte (`UploadJob.retryingWhole`).
+    /// carrying, so each is sent again from its first byte (`UploadJob.retryingWhole`). Together at
+    /// most `UploadBudget.inFlightUploads` less the files already carried, and possibly none: every
+    /// file that still needs sending is carried, and its task's answer is what comes next.
     case upload(starting: [UUID], retrying: [UUID])
     /// Every file is on the server: create the memo that links them.
     case createMemo
+}
+
+/// How many whole-file uploads may be in flight at once, across every capture.
+///
+/// A phone that hands the system every file of every capture at once has, in effect, asked the
+/// server for all of them at once: a rate limit answers most of them, and each of those answers is
+/// a retry. Two keeps one large file from starving the rest without making a burst of it.
+public enum UploadBudget {
+    public static let inFlightUploads = 2
+
+    /// The longest `Retry-After`, in seconds, taken as a usable hint: seven days. A longer one
+    /// cannot be a real backpressure answer from this server, and a deadline that far out risks
+    /// the manifest's ISO 8601 round trip — an unreadable capture. It is ignored like an
+    /// HTTP-date, and the computed schedule applies.
+    public static let longestRetryAfter: TimeInterval = 604_800
 }
 
 extension OutboxPlanner {
@@ -28,13 +45,18 @@ extension OutboxPlanner {
     ///   the foreground, and a background wake finishes a transfer that already happened and
     ///   schedules nothing new: the answer is a memo create or a wait, never a hold either — the
     ///   hold is written by the next foreground pass, where the row is on screen.
+    ///   - carried: the files of this capture a task is carrying, or this engine is still handing
+    ///     off or applying an answer to. They are never sent again, and they spend the budget.
     public static func nextWholeAction(
         for job: UploadJob,
         credentials: OutboxCredentials,
         now: Date,
-        schedulingOpen: Bool
+        schedulingOpen: Bool,
+        carried: Set<UUID> = []
     ) -> WholeAction {
-        let action = nextWholeActionWhenOpen(for: job, credentials: credentials, now: now)
+        let action = nextWholeActionWhenOpen(
+            for: job, credentials: credentials, now: now, carried: carried
+        )
         if schedulingOpen { return action }
         switch action {
         case .createMemo, .wait:
@@ -47,7 +69,8 @@ extension OutboxPlanner {
     private static func nextWholeActionWhenOpen(
         for job: UploadJob,
         credentials: OutboxCredentials,
-        now: Date
+        now: Date,
+        carried: Set<UUID>
     ) -> WholeAction {
         // The binding before anything else, as on the chunk lane: a capture made under another
         // account never reaches a request, a memo create included.
@@ -56,10 +79,24 @@ extension OutboxPlanner {
         if job.state == .held { return .hold(job.holdReason ?? .serverRefused) }
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
 
-        let starting = job.files.filter { $0.uploadUID == nil }.map(\.id)
-        let retrying = job.files.filter { $0.uploadUID != nil && !$0.isComplete }.map(\.id)
-        if starting.isEmpty && retrying.isEmpty { return .createMemo }
-        return .upload(starting: starting, retrying: retrying)
+        let needing = job.files.filter { !$0.isComplete }
+        if needing.isEmpty { return .createMemo }
+        // Eligibility before the budget is counted, so a file waiting out its own deadline never
+        // takes a place a sibling could have used.
+        let eligible = needing.filter { file in
+            !carried.contains(file.id) && (file.nextAttemptAt.map { now >= $0 } ?? true)
+        }
+        let spent = needing.filter { carried.contains($0.id) }.count
+        let chosen = eligible.prefix(Swift.max(UploadBudget.inFlightUploads - spent, 0))
+        if eligible.isEmpty,
+            let deadline = needing.compactMap(\.nextAttemptAt).filter({ $0 > now }).min()
+        {
+            return .wait(until: deadline)
+        }
+        return .upload(
+            starting: chosen.filter { $0.uploadUID == nil }.map(\.id),
+            retrying: chosen.filter { $0.uploadUID != nil }.map(\.id)
+        )
     }
 }
 

@@ -21,4 +21,25 @@ public enum RetrySchedule {
     public static func nextAttempt(afterFailure attempt: Int, from now: Date) -> Date {
         now.addingTimeInterval(delay(forAttempt: attempt))
     }
+
+    /// The whole lane's per-file spacing: full jitter over the same curve, unless the server named
+    /// its own delay.
+    ///
+    /// A separate entry point because the curve above also spaces the chunk lane and the memo
+    /// create, which one job at a time never storms. Files of one capture fail together — the same
+    /// rate limit, the same outage — and identical delays would bring them back together.
+    ///
+    /// - Parameters:
+    ///   - retryAfter: seconds the server asked for, which REPLACE the curve un-jittered and are
+    ///     taken as named: `cap` bounds the curve this computes, not a delay the server chose.
+    ///   - rng: a draw in `[0, 1]`; the live one is the system generator.
+    public static func delay(
+        forAttempt attempt: Int,
+        retryAfter: TimeInterval?,
+        rng: () -> Double
+    ) -> TimeInterval {
+        if let retryAfter, retryAfter >= 0 { return retryAfter }
+        let draw = Swift.min(Swift.max(rng(), 0), 1)
+        return delay(forAttempt: attempt) * draw
+    }
 }

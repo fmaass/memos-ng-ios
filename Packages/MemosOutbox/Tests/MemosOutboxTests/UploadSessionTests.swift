@@ -787,3 +787,62 @@ struct UploadInterleavingTests {
         #expect(session.createdTasks.count == 1)
     }
 }
+
+@Suite("Whole lane: the scheduler fences the upload budget")
+struct UploadBudgetFenceTests {
+    @Test("the scheduler refuses a third task while two are in flight, and takes one once one ends")
+    func thirdTaskRefused() async throws {
+        let session = ScriptedUploadTaskSession()
+        let delegate = UploadSessionDelegate()
+        let scheduler = Upload.scheduler(on: session, delegate: delegate)
+        let open = SendAuthority { true }
+        func send() async -> WholeTask? {
+            await scheduler.upload(
+                Upload.request(), fromFile: URL(fileURLWithPath: "/dev/null"),
+                for: WholeFileRef(jobID: UUID(), fileID: UUID()), attempt: 0,
+                under: open, issuedUnder: 1
+            )
+        }
+        let first = try #require(await send())
+        _ = try #require(await send())
+        #expect(await send() == nil)
+        #expect(session.createdTasks.count == 2)
+
+        let created = try #require(session.createdTasks.first)
+        delegate.complete(
+            taskIdentifier: first.taskIdentifier, taskDescription: created.description,
+            statusCode: 204, errorDescription: nil
+        )
+        #expect(await send() != nil)
+        #expect(session.createdTasks.count == 3)
+    }
+
+    @Test("a task another launch left sending counts against the fence once a listing shows it")
+    func listedTaskCounts() async throws {
+        let listed = (0..<2).map { index in
+            WholeTaskListing(
+                taskIdentifier: 50 + index,
+                taskDescription: Upload.identity().taskDescription,
+                access: WholeTaskNetworkAccess(request: Upload.request()),
+                state: .running
+            )
+        }
+        let session = ScriptedUploadTaskSession(listing: listed)
+        let scheduler = Upload.scheduler(on: session)
+        _ = await scheduler.tasks()
+        let refused = await scheduler.upload(
+            Upload.request(), fromFile: URL(fileURLWithPath: "/dev/null"),
+            for: WholeFileRef(jobID: UUID(), fileID: UUID()), attempt: 0,
+            under: SendAuthority { true }, issuedUnder: 1
+        )
+        #expect(refused == nil)
+        session.forget(50)
+        _ = await scheduler.tasks()
+        let admitted = await scheduler.upload(
+            Upload.request(), fromFile: URL(fileURLWithPath: "/dev/null"),
+            for: WholeFileRef(jobID: UUID(), fileID: UUID()), attempt: 0,
+            under: SendAuthority { true }, issuedUnder: 1
+        )
+        #expect(admitted != nil)
+    }
+}

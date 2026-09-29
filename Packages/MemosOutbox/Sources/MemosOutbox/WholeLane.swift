@@ -45,15 +45,55 @@ extension BackgroundUploadScheduler: OutboxUploadScheduling {}
 public enum WholeFileChange: Sendable, Equatable {
     /// The server holds this many bytes of the file.
     case confirmed(Int64)
-    /// The file goes again from its first byte, under a fresh session and its own next term.
-    case retryWhole
-    /// Nothing the server said about this file: the capture spaces itself out.
-    case backOff(String)
+    /// The file goes again from its first byte, under a fresh session and its own next term —
+    /// once its own schedule allows, never at once.
+    case retryWhole(FileRetry)
+    /// Nothing the server said about this file: this file spaces itself out, and only this file.
+    case backOff(String, FileRetry)
+    /// The request for this file's upload session failed without a refusal — no answer, a rate
+    /// limit, a server error. The file may have no session yet, which no answer's file lacks.
+    case sessionFailed(String, FileRetry)
     /// A refusal. Held or backed off by `OutboxRefusal`, chosen where the write is.
     case refused(OutboxRefusal)
 }
 
+/// What one file's next attempt is spaced by: the server's own delay when it named one, and the
+/// jitter draw, taken by the engine and carried to the write because the attempt count it scales
+/// is only known there.
+public struct FileRetry: Sendable, Equatable {
+    public var retryAfter: TimeInterval?
+    public var draw: Double
+
+    public init(retryAfter: TimeInterval? = nil, draw: Double) {
+        self.retryAfter = retryAfter
+        self.draw = draw
+    }
+}
+
 extension UploadJob {
+    /// One file's failure, spaced out on that file alone.
+    ///
+    /// The deadline is rounded UP to a whole second because a manifest keeps whole seconds: what
+    /// is read back is then never earlier than what the schedule or the server asked for.
+    func backingOffFile(
+        _ fileID: UUID, retry: FileRetry, error: String, at instant: Date
+    ) -> UploadJob {
+        updating(fileID) { file in
+            let count = (file.attemptCount ?? 0) + 1
+            file.attemptCount = count
+            let delay = RetrySchedule.delay(
+                forAttempt: count, retryAfter: retry.retryAfter, rng: { retry.draw }
+            )
+            let due = instant.addingTimeInterval(delay).timeIntervalSince1970
+            file.nextAttemptAt = Date(timeIntervalSince1970: due.rounded(.up))
+        }
+        .with {
+            $0.state = .waiting
+            $0.lastError = error
+            $0.waitReason = nil
+        }
+    }
+
     /// This job with one file's answer applied, or nil when the answer is no longer about it.
     ///
     /// Pure, and asked of the manifest ON DISK at the instant of the write rather than of the value
@@ -78,19 +118,30 @@ extension UploadJob {
         stillCurrent: Bool,
         at instant: Date
     ) -> UploadJob? {
-        guard lane == .whole, cancelledAt == nil, state != .held, state != .creating,
+        // A session request is made for a file that may have no session yet, on a row the first
+        // hand-off has not yet written onto the whole lane.
+        let asking: Bool
+        if case .sessionFailed = change { asking = true } else { asking = false }
+        guard lane == .whole || (asking && OutboxEngine.claimsWhole(self)),
+            cancelledAt == nil, state != .held, state != .creating,
             let file = file(fileID),
             (file.uploadAttempt ?? 0) == attempt,
-            file.uploadUID != nil,
+            asking || file.uploadUID != nil,
             !file.isComplete
         else { return nil }
         switch change {
         case .confirmed(let bytes):
             return advancing(fileID: fileID, bytesConfirmed: bytes)
-        case .retryWhole:
-            return retryingWhole(fileID: fileID)
-        case .backOff(let message):
-            return backingOff(at: instant, error: message)
+        case .retryWhole(let retry):
+            return retryingWhole(fileID: fileID).backingOffFile(
+                fileID, retry: retry, error: "The server kept less than the whole file.",
+                at: instant
+            )
+        case .backOff(let message, let retry):
+            return backingOffFile(fileID, retry: retry, error: message, at: instant)
+        case .sessionFailed(let message, let retry):
+            return backingOffFile(fileID, retry: retry, error: message, at: instant)
+                .with { $0.transport = .whole }
         case .refused(let refusal):
             return applying(refusal.disposition(assumingCurrent: stillCurrent), at: instant)
         }

@@ -326,12 +326,19 @@ struct WholeOutcomeTests {
         #expect(classify(nil, 1000) == .backOff)
     }
 
-    @Test("a timeout and a rate limit back off", arguments: [408, 429])
-    func timeoutAndRateLimit(_ status: Int) {
-        #expect(classify(status) == .backOff)
+    @Test("a timeout backs off")
+    func timeout() {
+        #expect(classify(408) == .backOff)
     }
 
-    @Test("a server error backs off", arguments: [500, 502, 503, 599])
+    /// A rate limit and an unavailable server say how busy the server is, not what is wrong with
+    /// the file: backpressure, with no `Retry-After` to honour here.
+    @Test("a rate limit and an unavailable server are backpressure", arguments: [429, 503])
+    func backpressure(_ status: Int) {
+        #expect(classify(status) == .backpressure(retryAfter: nil))
+    }
+
+    @Test("a server error backs off", arguments: [500, 502, 599])
     func serverError(_ status: Int) {
         #expect(classify(status) == .backOff)
     }

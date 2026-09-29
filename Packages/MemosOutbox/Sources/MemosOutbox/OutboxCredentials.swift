@@ -115,11 +115,29 @@ public final class SchedulingGate: @unchecked Sendable {
         self.state = isOpen
     }
 
+    private var observers: [@Sendable () -> Void] = []
+
     public var isOpen: Bool { lock.withLock { state } }
 
-    public func open() { lock.withLock { state = true } }
+    public func open() { move(to: true) }
 
-    public func close() { lock.withLock { state = false } }
+    public func close() { move(to: false) }
+
+    /// Told after every change of state — never for an open that finds it open — outside the lock.
+    /// The observer is told THAT it moved and reads `isOpen` itself, so two changes whose news
+    /// arrives out of order still leave it looking at the latest.
+    public func observe(_ observer: @escaping @Sendable () -> Void) {
+        lock.withLock { observers.append(observer) }
+    }
+
+    private func move(to open: Bool) {
+        let told: [@Sendable () -> Void] = lock.withLock {
+            guard state != open else { return [] }
+            state = open
+            return observers
+        }
+        for observer in told { observer() }
+    }
 }
 
 /// Which clause of an authority refused a send.

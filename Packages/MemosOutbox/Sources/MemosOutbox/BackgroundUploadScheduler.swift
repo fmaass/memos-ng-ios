@@ -11,19 +11,23 @@ public struct WholeAnswer: Sendable, Equatable {
     public var statusCode: Int?
     public var body: Data
     public var errorDescription: String?
+    /// The response's `Retry-After`, as sent: how long a busy server asked this file to wait.
+    public var retryAfter: String?
 
     public init(
         taskIdentifier: Int,
         identity: WholeTaskIdentity,
         statusCode: Int?,
         body: Data = Data(),
-        errorDescription: String? = nil
+        errorDescription: String? = nil,
+        retryAfter: String? = nil
     ) {
         self.taskIdentifier = taskIdentifier
         self.identity = identity
         self.statusCode = statusCode
         self.body = body
         self.errorDescription = errorDescription
+        self.retryAfter = retryAfter
     }
 }
 
@@ -171,11 +175,13 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         task: URLSessionTask,
         didCompleteWithError error: (any Error)?
     ) {
+        let response = task.response as? HTTPURLResponse
         complete(
             taskIdentifier: task.taskIdentifier,
             taskDescription: task.taskDescription,
-            statusCode: (task.response as? HTTPURLResponse)?.statusCode,
-            errorDescription: error?.localizedDescription
+            statusCode: response?.statusCode,
+            errorDescription: error?.localizedDescription,
+            retryAfter: response?.value(forHTTPHeaderField: "Retry-After")
         )
     }
 
@@ -189,7 +195,8 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
         taskIdentifier: Int,
         taskDescription: String?,
         statusCode: Int?,
-        errorDescription: String?
+        errorDescription: String?,
+        retryAfter: String? = nil
     ) -> Bool {
         let body: Data? = lock.withLock {
             guard claimed.insert(taskIdentifier).inserted else { return nil }
@@ -230,7 +237,8 @@ public final class UploadSessionDelegate: NSObject, URLSessionDataDelegate, @unc
                 identity: identity,
                 statusCode: statusCode,
                 body: body,
-                errorDescription: errorDescription
+                errorDescription: errorDescription,
+                retryAfter: retryAfter
             )
         )
         return true
@@ -334,6 +342,10 @@ public actor BackgroundUploadScheduler {
     /// Any one of them may be carrying any file, so while one is live no task is created at all.
     private var unreadableLive: Set<Int> = []
     private var observing = false
+    /// The readable tasks this scheduler knows to be in flight — created here, or seen live in a
+    /// listing — each until its terminal callback or its absence from a later listing. The fence
+    /// behind the engine's budget: the engine decides, and this refuses what it decided wrongly.
+    private var live: Set<Int> = []
 
     public init(appGroup: String = OutboxDefaults.appGroup) {
         let delegate = UploadSessionDelegate()
@@ -371,7 +383,21 @@ public actor BackgroundUploadScheduler {
 
     /// Every task the session holds, raw: readable or not, whatever process created it.
     public func tasks() async -> [WholeTaskListing] {
-        await session.allTasks()
+        // Only what was known BEFORE the listing is judged by its absence: a task created while it
+        // was awaited is missing from it and still sending.
+        let known = live
+        let listing = await session.allTasks()
+        let listed = Set(listing.map(\.taskIdentifier))
+        live.subtract(known.subtracting(listed))
+        live.subtract(listing.filter { $0.state == .completed }.map(\.taskIdentifier))
+        for task in listing
+        where task.state != .completed
+            && WholeTaskIdentity(taskDescription: task.taskDescription) != nil
+            && !delegate.terminations.hasEnded(task.taskIdentifier)
+        {
+            live.insert(task.taskIdentifier)
+        }
+        return listing
     }
 
     public func holdsUnappliedAnswers() async -> Bool {
@@ -401,6 +427,8 @@ public actor BackgroundUploadScheduler {
         // The one place every task is created — a first hand-off, a retry and a replacement's
         // successor alike — so the barrier is asked here, synchronously, beside the authority.
         guard unreadableLive.allSatisfy({ delegate.terminations.hasEnded($0) }) else { return nil }
+        live = live.filter { !delegate.terminations.hasEnded($0) }
+        guard live.count < UploadBudget.inFlightUploads else { return nil }
         guard authority.holds() else { return nil }
         let identity = WholeTaskIdentity(
             jobID: ref.jobID, fileID: ref.fileID, attempt: attempt, launch: launch, epoch: epoch
@@ -408,6 +436,7 @@ public actor BackgroundUploadScheduler {
         let taskIdentifier = session.uploadTask(
             with: request, fromFile: file, description: identity.taskDescription
         )
+        live.insert(taskIdentifier)
         return WholeTask(taskIdentifier: taskIdentifier, identity: identity)
     }
 
@@ -516,6 +545,7 @@ public actor BackgroundUploadScheduler {
         let listed = Set(await session.allTasks().map(\.taskIdentifier))
         var sent: [WholeTask] = []
         for id in candidates where delegate.terminations.hasEnded(id) || !listed.contains(id) {
+            live.remove(id)
             guard let successor = deferred.removeValue(forKey: id) else { continue }
             if let task = await send(successor) { sent.append(task) }
         }
@@ -527,7 +557,10 @@ public actor BackgroundUploadScheduler {
         while true {
             if delegate.terminations.hasEnded(id) { return true }
             let listed = await session.allTasks()
-            if !listed.contains(where: { $0.taskIdentifier == id }) { return true }
+            if !listed.contains(where: { $0.taskIdentifier == id }) {
+                live.remove(id)
+                return true
+            }
             if now() >= deadline { return false }
             await pause()
         }

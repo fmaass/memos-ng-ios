@@ -118,6 +118,9 @@ extension UploadJob {
     public func advancing(fileID: UUID, bytesConfirmed: Int64) -> UploadJob {
         updating(fileID) { file in
             file.bytesConfirmed = Swift.min(Swift.max(bytesConfirmed, 0), file.byteSize)
+            // Only this file's own spacing: a sibling's stays where its own failure put it.
+            file.attemptCount = nil
+            file.nextAttemptAt = nil
         }
         .with {
             $0.state = .uploading
@@ -176,6 +179,11 @@ extension UploadJob {
             $0.nextAttemptAt = now
             $0.lastError = nil
             $0.cancelledAt = nil
+            // "Try again" means now, for every file, whatever each one was last told to wait for.
+            for index in $0.files.indices {
+                $0.files[index].attemptCount = nil
+                $0.files[index].nextAttemptAt = nil
+            }
         }
     }
 
