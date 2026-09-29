@@ -457,6 +457,7 @@ struct MediaEventClientTests {
         let client = MediaEventClient(
             credentials: { throw UnreadableCredentials.Unreadable() },
             generation: { 0 },
+            jitter: FixedJitter(1),
             transport: transport,
             sleeper: sleeper
         )
@@ -466,6 +467,123 @@ struct MediaEventClientTests {
         #expect(!items.states.contains(.stopped(.signedOut)), "unreadable is not signed out")
         #expect(await sleeper.waits == [1, 2, 4], "it backs off and keeps trying")
         #expect(await transport.connectCount == 0, "and presents no credential it does not have")
+    }
+
+    @Test("a failure's wait is drawn from below the schedule, not the schedule itself")
+    func failureWaitsAreJittered() async {
+        let transport = ScriptedSSETransport([
+            .unreachable(),
+            .unreachable(),
+            .unreachable(),
+            .whole(SSEFixture.liveStream),
+        ])
+        let sleeper = RecordingSleeper(budget: 4)
+        let client = LiveStub.client(
+            transport: transport,
+            sleeper: sleeper,
+            jitter: FixedJitter(0.5)
+        )
+
+        _ = await client.collect()
+
+        // Half of 1, 2 and 4; the idle wait after a clean end is not a failure and is not drawn.
+        #expect(await sleeper.waits == [0.5, 1, 2, 15])
+    }
+
+    @Test(
+        "a backpressure answer's Retry-After is the next wait exactly, and only the next one",
+        arguments: [429, 503]
+    )
+    func retryAfterOverridesTheNextWaitOnly(status: Int) async {
+        let transport = ScriptedSSETransport([
+            .unreachable(),
+            .status(status, retryAfter: 7),
+            .unreachable(),
+        ])
+        let sleeper = RecordingSleeper(budget: 3)
+        let client = LiveStub.client(
+            transport: transport,
+            sleeper: sleeper,
+            jitter: FixedJitter(0.5)
+        )
+
+        _ = await client.collect()
+
+        // Attempt 2 waits the header's 7 s — not jittered, and not doubled the way a base would
+        // be. Attempt 3 is back on the drawn schedule, and at its THIRD step (half of 4): the
+        // override did not reset the failure count.
+        #expect(await sleeper.waits == [0.5, 7, 2])
+    }
+
+    @Test("Retry-After answered twice in a row is honoured twice, never doubled")
+    func repeatedRetryAfterIsNotEscalated() async {
+        let transport = ScriptedSSETransport([
+            .unreachable(),
+            .status(503, retryAfter: 7),
+            .status(503, retryAfter: 7),
+            .unreachable(),
+        ])
+        let sleeper = RecordingSleeper(budget: 4)
+        let client = LiveStub.client(
+            transport: transport,
+            sleeper: sleeper,
+            jitter: FixedJitter(0.5)
+        )
+
+        _ = await client.collect()
+
+        #expect(await sleeper.waits == [0.5, 7, 7, 4])
+    }
+
+    @Test("Retry-After on any answer but a 429 or a 503 is not a backpressure answer")
+    func retryAfterOnOtherStatusesIsIgnored() async {
+        let transport = ScriptedSSETransport([
+            .unreachable(),
+            .status(502, retryAfter: 7),
+            .unreachable(),
+        ])
+        let sleeper = RecordingSleeper(budget: 3)
+        let client = LiveStub.client(
+            transport: transport,
+            sleeper: sleeper,
+            jitter: FixedJitter(0.5)
+        )
+
+        _ = await client.collect()
+
+        #expect(await sleeper.waits == [0.5, 1, 2])
+    }
+
+    @Test("Retry-After never undercuts the stream's own retry, and does not wait less than it asks")
+    func retryAfterAndTheStreamHint() async {
+        // A 60 s `retry:` and a 7 s Retry-After: the stream's own ask stands.
+        let longHint = ScriptedSSETransport([
+            .dropping(after: "retry: 60000\n\n"),
+            .status(503, retryAfter: 7),
+        ])
+        let longSleeper = RecordingSleeper(budget: 2)
+        let longClient = LiveStub.client(
+            transport: longHint,
+            sleeper: longSleeper,
+            jitter: FixedJitter(0)
+        )
+        _ = await longClient.collect()
+        #expect(await longSleeper.waits == [60, 60])
+
+        // A 5 s `retry:` and a 7 s Retry-After: the header's longer ask stands, where the hint
+        // alone would have come back after 5.
+        let shortHint = ScriptedSSETransport([
+            .dropping(after: "retry: 5000\n\n"),
+            .status(503, retryAfter: 7),
+        ])
+        let shortSleeper = RecordingSleeper(budget: 2)
+        let shortClient = LiveStub.client(
+            transport: shortHint,
+            sleeper: shortSleeper,
+            jitter: FixedJitter(0)
+        )
+        _ = await shortClient.collect()
+        #expect(await shortSleeper.waits == [5, 7])
     }
 }
 
@@ -513,6 +631,64 @@ struct SSEBackoffTests {
     func negativeHint() {
         #expect(SSEBackoff().delay(forAttempt: 1, serverHint: -5) == 0)
     }
+
+    @Test("a draw names an exact wait: the bottom of the window, its middle and its top")
+    func jitterIsExact() {
+        let backoff = SSEBackoff()
+        #expect(backoff.wait(forAttempt: 3, jitter: FixedJitter(0)) == 0)
+        #expect(backoff.wait(forAttempt: 3, jitter: FixedJitter(0.5)) == 2)
+        #expect(backoff.wait(forAttempt: 3, jitter: FixedJitter(1)) == 4)
+        // Under a stream hint the window starts at the hint, not at zero.
+        #expect(backoff.wait(forAttempt: 3, serverHint: 5, jitter: FixedJitter(0)) == 5)
+        #expect(backoff.wait(forAttempt: 3, serverHint: 5, jitter: FixedJitter(0.5)) == 12.5)
+        #expect(backoff.wait(forAttempt: 3, serverHint: 5, jitter: FixedJitter(1)) == 20)
+    }
+
+    @Test("every draw lands inside the window, and a draw outside 0...1 is held to its edge")
+    func jitterStaysInsideItsWindow() {
+        let backoff = SSEBackoff()
+        let draws = stride(from: 0.0, through: 1.0, by: 0.125).map { $0 }
+        for hint in [nil, 5.0] as [TimeInterval?] {
+            for attempt in 1...10 {
+                let floor = hint ?? 0
+                let ceiling = backoff.delay(forAttempt: attempt, serverHint: hint)
+                for draw in draws {
+                    let wait = backoff.wait(
+                        forAttempt: attempt,
+                        serverHint: hint,
+                        jitter: FixedJitter(draw)
+                    )
+                    #expect(wait >= floor && wait <= ceiling, "attempt \(attempt) draw \(draw)")
+                }
+                let below = backoff.wait(
+                    forAttempt: attempt,
+                    serverHint: hint,
+                    jitter: FixedJitter(-1)
+                )
+                let above = backoff.wait(
+                    forAttempt: attempt,
+                    serverHint: hint,
+                    jitter: FixedJitter(2)
+                )
+                #expect(below == floor, "attempt \(attempt)")
+                #expect(above == ceiling, "attempt \(attempt)")
+            }
+        }
+    }
+
+    @Test("a 60 s retry the stream asked for is never undercut by the jitter")
+    func aSixtySecondHintIsNeverShrunk() {
+        let backoff = SSEBackoff()
+        for attempt in 1...10 {
+            for draw in [0, 0.5, 1.0] {
+                #expect(
+                    backoff.wait(forAttempt: attempt, serverHint: 60, jitter: FixedJitter(draw))
+                        == 60,
+                    "attempt \(attempt) draw \(draw)"
+                )
+            }
+        }
+    }
     /// The channel's loop outlives any one session: it reconnects for as long as the screen is up,
     /// presenting the credential this device held when it started. A withdrawn session must not
     /// open a stream — and the check belongs in the transport, because every reconnect is a send
@@ -536,4 +712,90 @@ struct SSEBackoffTests {
         #expect(await transport.verdicts.allSatisfy { !$0 }, "and the authority said so each time")
     }
 
+}
+
+/// The real transport, through the real URL loading system: the one place the header is read.
+@Suite("URLSessionSSETransport")
+struct URLSessionSSETransportTests {
+    @Test("a backpressure answer's Retry-After reaches the connection in seconds")
+    func surfacesRetryAfter() async throws {
+        let connection = try await Self.connect(status: 503, retryAfter: "7")
+        #expect(connection.statusCode == 503)
+        #expect(connection.retryAfter == 7)
+    }
+
+    @Test("an answer without Retry-After, or with a date in it, surfaces none")
+    func surfacesNothingElse() async throws {
+        #expect(try await Self.connect(status: 200, retryAfter: nil).retryAfter == nil)
+        let date = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let dated = try await Self.connect(status: 429, retryAfter: date)
+        #expect(dated.statusCode == 429)
+        #expect(dated.retryAfter == nil)
+    }
+
+    @Test("only delay-seconds is read: digits, and nothing a lenient parser would let through")
+    func parsesDelaySecondsOnly() {
+        #expect(SSEConnection.retryAfterSeconds("7") == 7)
+        #expect(SSEConnection.retryAfterSeconds("0") == 0)
+        #expect(SSEConnection.retryAfterSeconds(" 120 ") == 120)
+        let refused: [String?] = [
+            nil, "", " ", "+7", "-1", "1.5", "7s", "0x10", "\u{0667}", "99999999999999999999999",
+        ]
+        for value in refused {
+            #expect(SSEConnection.retryAfterSeconds(value) == nil, "\(String(describing: value))")
+        }
+    }
+
+    /// One request through a session whose only protocol is the stub, which answers with the
+    /// status and header the request's query names.
+    private static func connect(status: Int, retryAfter: String?) async throws -> SSEConnection {
+        var components = URLComponents(string: "https://memos.example.invalid/api/events")!
+        var items = [URLQueryItem(name: "status", value: String(status))]
+        if let retryAfter { items.append(URLQueryItem(name: "retryAfter", value: retryAfter)) }
+        components.queryItems = items
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RetryAfterStubProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+        let transport = URLSessionSSETransport(session: session)
+        return try await transport.connect(
+            URLRequest(url: try #require(components.url)),
+            under: .unfenced
+        )
+    }
+}
+
+final class RetryAfterStubProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url,
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+            let status = items.first(where: { $0.name == "status" })?.value.flatMap({ Int($0) })
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        var headers = ["Content-Type": "text/event-stream"]
+        if let retryAfter = items.first(where: { $0.name == "retryAfter" })?.value {
+            headers["Retry-After"] = retryAfter
+        }
+        guard
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            )
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

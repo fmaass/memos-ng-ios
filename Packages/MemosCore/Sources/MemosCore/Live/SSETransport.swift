@@ -9,11 +9,30 @@ import MemosOutbox
 /// thing `Sendable` with nothing to reason about.
 public struct SSEConnection: Sendable {
     public let statusCode: Int
+    /// The response's `Retry-After` in seconds, or `nil` when it sent none or sent a date. A date
+    /// would have to be read against a clock this device does not share with the server, and a
+    /// skewed clock turns "come back at noon" into "never" or "now"; the normal schedule is the
+    /// better answer to a header that cannot be read honestly.
+    public let retryAfter: TimeInterval?
     public let body: AsyncThrowingStream<[UInt8], any Error>
 
-    public init(statusCode: Int, body: AsyncThrowingStream<[UInt8], any Error>) {
+    public init(
+        statusCode: Int,
+        retryAfter: TimeInterval? = nil,
+        body: AsyncThrowingStream<[UInt8], any Error>
+    ) {
         self.statusCode = statusCode
+        self.retryAfter = retryAfter
         self.body = body
+    }
+
+    /// `Retry-After` as delay-seconds (RFC 9110 §10.2.3: one or more digits), and nothing else.
+    static func retryAfterSeconds(_ value: String?) -> TimeInterval? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespaces), !trimmed.isEmpty,
+            trimmed.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }),
+            let seconds = Int(trimmed)
+        else { return nil }
+        return TimeInterval(seconds)
     }
 }
 
@@ -65,7 +84,11 @@ public struct URLSessionSSETransport: SSEConnecting {
         let (bytes, response) = try await session.bytes(for: authority.presenting(request))
         // A non-HTTP response has no status to read. Zero is not 200, so it takes the retry path
         // rather than being mistaken for an open stream.
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let http = response as? HTTPURLResponse
+        let statusCode = http?.statusCode ?? 0
+        let retryAfter = SSEConnection.retryAfterSeconds(
+            http?.value(forHTTPHeaderField: "Retry-After")
+        )
         let body = AsyncThrowingStream<[UInt8], any Error> { continuation in
             // `URLSession.AsyncBytes` is `Sendable` (iPhoneOS.sdk Foundation swiftinterface), and
             // this pump is the only reader of it; it is cancelled with the stream, which is what
@@ -91,6 +114,6 @@ public struct URLSessionSSETransport: SSEConnecting {
             }
             continuation.onTermination = { _ in pump.cancel() }
         }
-        return SSEConnection(statusCode: statusCode, body: body)
+        return SSEConnection(statusCode: statusCode, retryAfter: retryAfter, body: body)
     }
 }

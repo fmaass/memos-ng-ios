@@ -45,6 +45,8 @@ enum SSEFixture {
 /// A connection the fake server is scripted to hand over.
 struct ScriptedConnection: Sendable {
     var statusCode = 200
+    /// The `Retry-After` the transport read off the response, in seconds.
+    var retryAfter: TimeInterval?
     /// Delivered in exactly these pieces — the boundaries are half of what is under test.
     var chunks: [[UInt8]] = []
     /// The connection could not be made at all (offline, DNS, TLS).
@@ -63,8 +65,8 @@ struct ScriptedConnection: Sendable {
         ScriptedConnection(chunks: Array(body.utf8).map { [$0] })
     }
 
-    static func status(_ code: Int) -> ScriptedConnection {
-        ScriptedConnection(statusCode: code)
+    static func status(_ code: Int, retryAfter: TimeInterval? = nil) -> ScriptedConnection {
+        ScriptedConnection(statusCode: code, retryAfter: retryAfter)
     }
 
     static func unreachable() -> ScriptedConnection {
@@ -161,8 +163,23 @@ actor ScriptedSSETransport: SSEConnecting {
                 continuation.finish()
             }
         }
-        return SSEConnection(statusCode: scripted.statusCode, body: body)
+        return SSEConnection(
+            statusCode: scripted.statusCode,
+            retryAfter: scripted.retryAfter,
+            body: body
+        )
     }
+}
+
+/// A jitter that always draws the same value, so a wait can be stated exactly.
+struct FixedJitter: SSEJitter {
+    let value: Double
+
+    init(_ value: Double) {
+        self.value = value
+    }
+
+    func unit() -> Double { value }
 }
 
 /// Waiting, recorded instead of served.
@@ -215,6 +232,9 @@ enum LiveStub {
             token: LiveStub.token
         ),
         backoff: SSEBackoff = SSEBackoff(),
+        // The top of every window, so a test about the SCHEDULE reads the ceiling it can state;
+        // a test about the jitter itself passes its own draw.
+        jitter: any SSEJitter = FixedJitter(1),
         idleReconnectDelay: TimeInterval = 15,
         authority: SendAuthority = .unfenced
     ) -> MediaEventClient {
@@ -222,6 +242,7 @@ enum LiveStub {
             credentials: { credentials },
             generation: { await generation.current() },
             backoff: backoff,
+            jitter: jitter,
             idleReconnectDelay: idleReconnectDelay,
             transport: transport,
             sleeper: sleeper,

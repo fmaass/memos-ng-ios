@@ -6,9 +6,11 @@ import Foundation
 /// offline (15 minutes to 6 hours), and a live channel that waited 15 minutes to notice the server
 /// came back would be no channel at all. The scales are different because the promises are.
 ///
-/// Deterministic — no jitter. Jitter answers a thundering herd of clients synchronised by one
-/// outage; this channel is one connection per signed-in device against a household server, and a
-/// schedule a test can state exactly is worth more here than a herd defence with nobody to herd.
+/// Jittered. One device holds one connection, but an outage drops every device's connection at the
+/// same instant, and a deterministic schedule then brings them all back at the same instants too —
+/// the 2026-09-28 reconnect flood against a server whose connection pool was exhausted was exactly
+/// that herd. `delay(forAttempt:serverHint:)` is the ceiling a test can state exactly; the wait
+/// actually taken is drawn below it by `wait(forAttempt:serverHint:jitter:)`.
 public struct SSEBackoff: Sendable, Equatable {
     /// The first wait, and the multiplicand every later one doubles from.
     public var base: TimeInterval
@@ -33,6 +35,39 @@ public struct SSEBackoff: Sendable, Equatable {
         // infinity is a channel that never comes back.
         let exponent = Double(min(attempt - 1, 16))
         return min(start * pow(2, exponent), max(cap, start))
+    }
+
+    /// The wait actually taken: full jitter, drawn uniformly between the floor and
+    /// `delay(forAttempt:serverHint:)`.
+    ///
+    /// The floor is zero, except under a stream `retry:` hint, where it is the hint itself: the
+    /// jitter spreads the herd out AFTER the time the server asked for, never before it, for the
+    /// reason the hint is never shrunk above.
+    public func wait(
+        forAttempt attempt: Int,
+        serverHint: TimeInterval? = nil,
+        jitter: any SSEJitter
+    ) -> TimeInterval {
+        let ceiling = delay(forAttempt: attempt, serverHint: serverHint)
+        let floor = min(max(serverHint ?? 0, 0), ceiling)
+        let draw = min(max(jitter.unit(), 0), 1)
+        return floor + draw * (ceiling - floor)
+    }
+}
+
+/// Where the jitter's randomness comes from, as a dependency — so a test can state the exact wait
+/// a given draw produces instead of only its bounds.
+public protocol SSEJitter: Sendable {
+    /// A value in `0...1`. Anything outside it is clamped by the caller.
+    func unit() -> Double
+}
+
+/// The real one: the system random number generator.
+public struct SystemSSEJitter: SSEJitter {
+    public init() {}
+
+    public func unit() -> Double {
+        Double.random(in: 0...1)
     }
 }
 

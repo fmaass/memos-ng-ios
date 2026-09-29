@@ -141,6 +141,7 @@ public final class MediaEventClient: Sendable {
     /// any one session (`SendAuthority`).
     private let authority: SendAuthority
     private let backoff: SSEBackoff
+    private let jitter: any SSEJitter
     private let idleReconnectDelay: TimeInterval
     private let transport: any SSEConnecting
     private let sleeper: any SSESleeper
@@ -149,6 +150,7 @@ public final class MediaEventClient: Sendable {
         credentials: @escaping @Sendable () async throws -> MediaEventCredentials?,
         generation: @escaping @Sendable () async -> Int,
         backoff: SSEBackoff = SSEBackoff(),
+        jitter: any SSEJitter = SystemSSEJitter(),
         idleReconnectDelay: TimeInterval = 15,
         transport: any SSEConnecting = URLSessionSSETransport(),
         sleeper: any SSESleeper = ContinuousClockSleeper(),
@@ -158,6 +160,7 @@ public final class MediaEventClient: Sendable {
         self.generation = generation
         self.authority = authority
         self.backoff = backoff
+        self.jitter = jitter
         self.idleReconnectDelay = idleReconnectDelay
         self.transport = transport
         self.sleeper = sleeper
@@ -277,7 +280,18 @@ public final class MediaEventClient: Sendable {
                     attempt = 0
                     regrants = 0
                 }
-                delay = backoff.delay(forAttempt: max(attempt, 1), serverHint: serverRetryHint)
+                if let retryAfter = result.retryAfter {
+                    // The server said when it can take this connection back, so the answer is
+                    // that instant and not a draw below it; the failure count still advances, so
+                    // the schedule after it is the one this run of failures has earned.
+                    delay = max(retryAfter, serverRetryHint ?? 0)
+                } else {
+                    delay = backoff.wait(
+                        forAttempt: max(attempt, 1),
+                        serverHint: serverRetryHint,
+                        jitter: jitter
+                    )
+                }
             }
 
             continuation.yield(.state(.waiting(delay)))
@@ -300,11 +314,15 @@ public final class MediaEventClient: Sendable {
         // exactly as much on the path where the connection then died.
         var lastEventID = lastEventID
         var serverRetryHint = serverRetryHint
-        func result(_ outcome: ConnectionOutcome) -> ConnectionResult {
+        func result(
+            _ outcome: ConnectionOutcome,
+            retryAfter: TimeInterval? = nil
+        ) -> ConnectionResult {
             ConnectionResult(
                 outcome: outcome,
                 lastEventID: lastEventID,
-                serverRetryHint: serverRetryHint
+                serverRetryHint: serverRetryHint,
+                retryAfter: retryAfter
             )
         }
 
@@ -364,6 +382,13 @@ public final class MediaEventClient: Sendable {
                 }
                 MemosLog.media.info("GET /api/events refused the credential")
                 return result(.unauthorized)
+            case 429, 503:
+                // Backpressure: the server is up and asking for time, which is the one failure
+                // that says how long to wait.
+                MemosLog.media.info(
+                    "GET /api/events -> \(connection.statusCode, privacy: .public)"
+                )
+                return result(.failed(opened: false), retryAfter: connection.retryAfter)
             default:
                 MemosLog.media.info(
                     "GET /api/events -> \(connection.statusCode, privacy: .public)"
@@ -420,6 +445,10 @@ public final class MediaEventClient: Sendable {
         var outcome: ConnectionOutcome
         var lastEventID: String?
         var serverRetryHint: TimeInterval?
+        /// A 429 or 503's `Retry-After`, for the next reconnect ONLY. Not folded into
+        /// `serverRetryHint`: that one replaces the backoff's base and doubles with every later
+        /// failure, which would turn "come back in 7 seconds" into 14, then 28.
+        var retryAfter: TimeInterval?
     }
 
     /// How one connection ended, and — for a failure — whether it had opened first, which
