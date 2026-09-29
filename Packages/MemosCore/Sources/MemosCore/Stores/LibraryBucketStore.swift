@@ -158,6 +158,33 @@ public final class LibraryBucketStore {
         await read(request, using: handle, baseURL: baseURL)
     }
 
+    /// A lapsed cover's read: the list the cover was drawn from, read again for fresh signatures.
+    ///
+    /// Refused at entry, before anything is claimed or sent, unless everything the ask was issued
+    /// under is still what this store is showing: the session, `request` as the list on screen,
+    /// and `uid` among its covers. Refused too while a read for ANOTHER request is on its way —
+    /// the screen has moved on, and that read, not this one, is what replaces these covers (with
+    /// fresh signatures of its own). Only a refresh of the list on screen is ever sent, and a
+    /// refresh never supersedes a read for another request.
+    public func rereadCovers(
+        of request: LibraryBucketRequest,
+        holding uid: String,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        guard sessionStillCurrent(handle), loadedRequest == request,
+            buckets.contains(where: { $0.coverUID == uid }),
+            loadingLineage.map({ $0.request == request }) ?? true
+        else { return }
+        await refresh(
+            size: request.size,
+            filter: request.filter,
+            tag: request.tag,
+            using: handle,
+            baseURL: baseURL
+        )
+    }
+
     private func readEnds(_ generation: Int) async {
         await withCheckedContinuation { waiter in
             readEndWaiters[generation, default: []].append(waiter)

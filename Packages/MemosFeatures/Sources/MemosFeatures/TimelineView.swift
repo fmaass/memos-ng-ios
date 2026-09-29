@@ -61,6 +61,9 @@ public struct TimelineView: View {
     /// The media a tile tap opened, full screen. A tapped video opens it too — on the video's
     /// own page, already playing — so the rest of the memo stays one swipe away.
     @State private var viewing: MediaViewerSelection?
+    /// The memo `viewing` was opened from. A memo's attachments do not name their memo
+    /// (`MemoAttachment.memoUID` is the library's field), so it is kept beside the selection.
+    @State private var viewingMemo: String?
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
 
@@ -71,6 +74,8 @@ public struct TimelineView: View {
             Group {
                 if let timeline {
                     content(timeline)
+                        // A tile whose signature lapsed asks for its memo to be read again.
+                        .environment(\.signedURLRefresher, refresher(for: timeline))
                 } else {
                     ProgressView()
                 }
@@ -115,10 +120,14 @@ public struct TimelineView: View {
         // from the one presenting the compose sheet — two presentations on one view is how one of
         // them silently stops appearing.
         .fullScreenCover(item: $viewing) { selection in
-            // A memo's media is all there when the card is drawn and never grows, so the viewer
-            // over it pages through a value rather than through a store.
-            MediaViewerView(selection: selection, source: .fixed(selection.pages))
-                .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
+            // A memo's media never grows, but its signatures lapse: the viewer reads the memo as
+            // the timeline holds it, so a re-read with fresh URLs reaches a page already open.
+            MediaViewerView(
+                selection: selection,
+                source: Self.viewerSource(for: selection, memo: viewingMemo, in: timeline)
+            )
+            .environment(\.signedURLRefresher, timeline.map(refresher(for:)))
+            .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
         .sensoryFeedback(trigger: feedback) { _, latest in latest.act?.feedback }
@@ -240,6 +249,20 @@ public struct TimelineView: View {
         // `onChange`, because satisfying it can mean reading the memo from the server first and
         // that read must be cancellable with the screen.
         .task(id: jump?.pending) { await consumeJump() }
+    }
+
+    /// The viewer over a memo's media, reading the memo through the timeline when it can name it.
+    static func viewerSource(
+        for selection: MediaViewerSelection,
+        memo memoUID: String?,
+        in timeline: TimelineStore?
+    ) -> MediaViewerSource {
+        guard let memoUID else { return .fixed(selection.pages) }
+        return .memo(uid: memoUID, in: timeline, fallback: selection.pages)
+    }
+
+    private func refresher(for timeline: TimelineStore) -> MemoURLRefresher {
+        MemoURLRefresher(timeline: timeline, session: IssuingSession(session))
     }
 
     /// Opens the memo a jump named, reading it first when this list has never loaded it.
@@ -577,6 +600,7 @@ public struct TimelineView: View {
     /// because a tap that does nothing at all reads as a broken card.
     private func open(_ attachment: MemoAttachment, of memo: Memo) {
         if let selection = MediaViewerPresentation.viewer(for: memo, startingAt: attachment.uid) {
+            viewingMemo = memo.uid
             viewing = selection
         } else {
             path.append(MemoRoute(uid: memo.uid))

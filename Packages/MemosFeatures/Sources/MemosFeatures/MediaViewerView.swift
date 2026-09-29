@@ -39,6 +39,9 @@ struct MediaViewerView: View {
     /// memo these pictures hang on. `nil` is a viewer that cannot delete — the media library's —
     /// and it is what makes a control with nothing behind it impossible rather than merely absent.
     let delete: (@MainActor (String) async -> Bool)?
+    /// What every page's still is fetched through. The app's own session everywhere but a test
+    /// that watches a page's next request go out.
+    let transport: any MediaTransport
 
     @Environment(\.dismiss) private var dismiss
     /// The way out of a tab that cannot open a memo. Optional: a preview or a test host has no
@@ -80,11 +83,13 @@ struct MediaViewerView: View {
     init(
         selection: MediaViewerSelection,
         source: MediaViewerSource,
-        delete: (@MainActor (String) async -> Bool)? = nil
+        delete: (@MainActor (String) async -> Bool)? = nil,
+        transport: any MediaTransport = MediaSession.shared
     ) {
         self.selection = selection
         self.source = source
         self.delete = delete
+        self.transport = transport
         _currentPage = State(initialValue: selection.startPage.id)
         _shown = State(initialValue: selection.pages)
         _playback = State(initialValue: MediaViewerPlaybackCoordinator(selection: selection))
@@ -175,7 +180,8 @@ struct MediaViewerView: View {
                         // Handed to exactly one page: the one the single player belongs to. Every
                         // other page gets `nil` and draws its poster.
                         player: playback.player(for: page.id),
-                        play: { playback.advance(.played(page: page.id)) }
+                        play: { playback.advance(.played(page: page.id)) },
+                        transport: transport
                     )
                     .containerRelativeFrame(.horizontal)
                     .id(page.id)
@@ -522,6 +528,8 @@ struct MediaViewerPage: View {
     /// swiped on must not wear the previous picture's failure, and a picture nobody answered about
     /// is worth asking for again.
     @State private var picture = PictureLoad()
+    /// Who mints a fresh URL for this page's still when the server says its signature expired.
+    @Environment(\.signedURLRefresher) private var refresher
 
     var body: some View {
         GeometryReader { proxy in
@@ -698,7 +706,12 @@ struct MediaViewerPage: View {
         }
 
         let generation = MediaImageLoader.store.generation
-        let answer = await MediaImageLoader.answer(for: requested, url: url, transport: transport)
+        let answer = await MediaImageLoader.answer(
+            for: requested,
+            url: url,
+            transport: transport,
+            refresher: refresher
+        )
         // The same fence the loader applies to its cache, applied to the screen: an answer about
         // the account that was signed in when this started must not be painted for the one signed
         // in now — not even as a failure.

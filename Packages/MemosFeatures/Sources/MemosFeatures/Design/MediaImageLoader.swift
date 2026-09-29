@@ -135,6 +135,9 @@ enum MediaImageAnswer: Equatable {
     /// an answer that outlived the identity that asked for it — or a fetch that failed on the way
     /// without having been cancelled, which is no answer either but is not the view's doing.
     case unavailable
+    /// Refused because the URL's signature has expired. Nothing is wrong with the picture: the
+    /// owner of its list has been asked for a freshly signed URL, and the view waits for it.
+    case signatureExpired
 }
 
 /// The photo behind a tile: fetched once, decoded once, and answered synchronously ever after.
@@ -177,6 +180,10 @@ public enum MediaImageLoader {
     /// Substituted in tests. Never `URLSession.shared`: that is the session whose cache this app
     /// cannot guarantee, and the reason this layer has one of its own.
     static var transport: any MediaTransport = MediaSession.shared
+
+    /// Every fetch on the wire and every one waiting for a turn (`MediaFetchTable`). A `var` for
+    /// the reason `store` is one.
+    static var flights = MediaFetchTable()
 
     public static func key(for attachment: MemoAttachment, tier: MediaTier) -> MediaImageKey {
         MediaImageKey(uid: attachment.uid, tier: tier.rawValue)
@@ -248,15 +255,18 @@ public enum MediaImageLoader {
     /// that the session its picture arrives through holds the very `URLCache` it evicts from,
     /// rather than hoping two singletons happen to agree.
     ///
-    /// Two calls for one key while neither has answered both reach the transport. A repeated ask
-    /// is refused by the VIEW that already holds a request of its own (`PictureLoad`); two
-    /// DIFFERENT views wanting one picture at one moment is a race the store settles by the key
-    /// they file under, and refusing it here would leave whichever of them asked second waiting on
-    /// a fetch it cannot see.
+    /// Two calls for one key while neither has answered are ONE request: the second waits for the
+    /// first's answer (`MediaFetchTable`). A repeated ask from one view is still refused by that
+    /// view (`PictureLoad`); what the table adds is that two DIFFERENT views wanting one picture at
+    /// one moment no longer put the same bytes on the wire twice.
+    ///
+    /// A refusal for an expired signature asks `refresher` — the owner of the list the URL came
+    /// from — for a freshly signed one, at most once per picture per cooldown.
     static func answer(
         for key: MediaImageKey,
         url: URL,
-        transport: any MediaTransport = MediaImageLoader.transport
+        transport: any MediaTransport = MediaImageLoader.transport,
+        refresher: (any SignedURLRefreshing)? = nil
     ) async -> MediaImageAnswer {
         // Before anything is awaited. A hit here is what makes a remount free, and it is also what
         // keeps a second view of the same photo off the wire entirely.
@@ -266,7 +276,24 @@ public enum MediaImageLoader {
         // out of one server and into another, and this answer would then be about a uid that
         // belongs to somebody else's photo.
         let generation = store.generation
+        let flight = MediaFetchTable.Key(image: key, generation: generation)
+        // The table is read at the call, like the transport: a test that installs its own sees
+        // every ask made after it did.
+        let flights = self.flights
+        let answer = await flights.answer(flight, url: url) {
+            await fetch(key, url: url, generation: generation, transport: transport)
+        }
+        if answer == .signatureExpired { flights.refresh(flight, via: refresher) }
+        return answer
+    }
 
+    /// The one request behind a flight: sent in its turn, decoded once, stored once.
+    private static func fetch(
+        _ key: MediaImageKey,
+        url: URL,
+        generation: Int,
+        transport: any MediaTransport
+    ) async -> MediaImageAnswer {
         var request = URLRequest(url: url)
         // A URL whose signature has already lapsed must not be answered out of the URLCache: the
         // entry can only be stale, and the request is going to be refused anyway.
@@ -292,6 +319,7 @@ public enum MediaImageLoader {
             // none.
             return wasAbandoned(error) ? .interrupted : .unavailable
         }
+        if isExpiredRefusal(fetched.response, of: url, at: Date()) { return .signatureExpired }
         guard isUsable(fetched.response) else { return .unavailable }
         let data = fetched.data
         let decoded = await Task.detached(priority: .userInitiated) {
@@ -323,6 +351,14 @@ public enum MediaImageLoader {
     /// `UIImage(data:)` would produce nil a moment later anyway — but only after it had been paid
     /// for, and a 403 answered from a `URLCache` would be a refusal cached as though it were a
     /// picture. It is cheaper and clearer to refuse it here.
+    /// A 403 is about the signature only when the signature has in fact expired. The server says
+    /// 403 for a signature that does not verify at all, too, and asking for a fresh URL then would
+    /// only fetch the same refusal again.
+    static func isExpiredRefusal(_ response: URLResponse, of url: URL, at now: Date) -> Bool {
+        guard (response as? HTTPURLResponse)?.statusCode == 403 else { return false }
+        return SignedMediaURL(url: url).isExpired(at: now)
+    }
+
     private static func isUsable(_ response: URLResponse) -> Bool {
         guard let http = response as? HTTPURLResponse else { return true }
         return (200..<300).contains(http.statusCode)
@@ -463,7 +499,9 @@ struct PictureLoad {
             // The signal held during this fetch has been answered BY it: the picture it was
             // asking for is here.
             heldAsk = false
-        case .interrupted:
+        case .interrupted, .signatureExpired:
+            // An expired signature is not a broken picture: a fresh URL has been asked for, and
+            // it is the changed link that loads it.
             break
         case .unavailable:
             failedKey = key

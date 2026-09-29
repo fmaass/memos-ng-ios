@@ -53,6 +53,8 @@ struct MediaLibraryView: View {
             Group {
                 if let library {
                     content(library)
+                        // A tile whose signature lapsed asks the list it came from to re-sign it.
+                        .environment(\.signedURLRefresher, refresher)
                 } else {
                     ProgressView()
                 }
@@ -108,6 +110,7 @@ struct MediaLibraryView: View {
             // the tile was tapped: swiping to the end of them is where the swiping used to stop,
             // on a library of over a thousand files (MEMNG-189).
             MediaViewerView(selection: selection, source: viewerSource)
+                .environment(\.signedURLRefresher, refresher)
                 .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
@@ -207,6 +210,14 @@ struct MediaLibraryView: View {
 
     /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a
     /// state no tap can be made in — the grid it would be tapped on does not exist either.
+    /// Who re-signs a lapsed picture of the grid or the viewer: a walk of the pages the library
+    /// holds. The covers under Years and Months are re-signed by their own store, set on the
+    /// subtree that draws them (`bucketContent`).
+    private var refresher: LibraryURLRefresher? {
+        guard let library else { return nil }
+        return LibraryURLRefresher(library: library, session: IssuingSession(session))
+    }
+
     private var viewerSource: MediaViewerSource {
         Self.viewerSource(for: library) { await loadMore() }
     }
@@ -279,6 +290,11 @@ struct MediaLibraryView: View {
                 .feedsDock(dock, on: .library)
             }
         }
+        // Nearer than the grid's refresher, so it is the one a cover's tile reads.
+        .environment(
+            \.signedURLRefresher,
+            BucketURLRefresher(buckets: store, session: IssuingSession(session))
+        )
         .overlay {
             if shown.isEmpty {
                 if store.isLoading {

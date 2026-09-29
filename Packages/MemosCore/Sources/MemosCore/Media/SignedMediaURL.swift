@@ -178,6 +178,27 @@ public enum MediaCache {
         configuration.urlCache = cache
         configuration.requestCachePolicy = .useProtocolCachePolicy
         configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.httpMaximumConnectionsPerHost = MediaBudget.connectionsPerHost
         return configuration
     }
+}
+
+/// How much of the link the pictures may take at once, and how often a lapsed signature may send
+/// a screen back to its owner for a fresh one.
+///
+/// A library scrolled fast mounts dozens of tiles in a second, and each used to be a request of
+/// its own the moment it appeared: the ones that scrolled away were still ahead of the ones the
+/// reader stopped on, and on a slow link the visible row waited behind a screenful nobody was
+/// looking at any more.
+public enum MediaBudget {
+    /// Connections the media session opens to one host. The session also carries the original
+    /// download, so this is a ceiling on the socket, not on the pictures — `inFlight` is theirs.
+    public static let connectionsPerHost = 4
+    /// Renditions on the wire at once. Beyond it a fetch waits its turn, newest first: the row
+    /// that appeared last is the one the reader is looking at.
+    public static let inFlight = 6
+    /// How long after one refresh for a lapsed signature another is not asked for. A refresh
+    /// that came back with the same refused signature would otherwise be asked again on every
+    /// remount, and each ask is a list read.
+    public static let refreshCooldown: TimeInterval = 60
 }

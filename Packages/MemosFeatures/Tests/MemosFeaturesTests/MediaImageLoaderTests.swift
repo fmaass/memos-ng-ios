@@ -391,6 +391,8 @@ struct MediaImageLoaderTests {
         // Reset rather than restored afterwards: a test that fails part-way through still leaves
         // the next one a real transport, instead of whatever stub it was holding.
         MediaImageLoader.transport = MediaSession.shared
+        // A fresh table too: a request a previous case left held would otherwise be joined.
+        MediaImageLoader.flights = MediaFetchTable()
         // This test's own signal, for the reason the store is this test's own: it is read by every
         // mounted tile in the process, and a case that publishes on it must not be telling some
         // other suite's view to fetch.

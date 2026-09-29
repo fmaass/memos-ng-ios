@@ -17,6 +17,10 @@ enum MediaViewerSource {
     /// the store because asking the server needs the session, and the session belongs to the screen
     /// that presented this viewer, not to the viewer.
     case library(any MediaLibraryPaging, more: @MainActor () async -> Void)
+    /// A memo's media as whoever holds the memo holds it NOW, read on every evaluation: a memo
+    /// read again for fresh signatures reaches a viewer already open over it. The pages the
+    /// viewer was opened with stand in only while nobody holds the memo.
+    case memo(resolve: @MainActor () -> Memo?, fallback: [MediaPage])
 
     /// The pages this source can show right now.
     ///
@@ -28,6 +32,8 @@ enum MediaViewerSource {
         case .fixed(let pages): pages
         case .library(let pager, _):
             MediaViewerPresentation.pages(for: pager.items.map(\.attachment))
+        case .memo(let resolve, let fallback):
+            resolve().map { MediaViewerPresentation.pages(for: $0.attachments) } ?? fallback
         }
     }
 
@@ -47,7 +53,7 @@ enum MediaViewerSource {
     /// Whether the server still has rows this source has not read.
     var hasMore: Bool {
         switch self {
-        case .fixed: false
+        case .fixed, .memo: false
         case .library(let pager, _): pager.hasMore
         }
     }
@@ -124,10 +130,17 @@ enum MediaViewerPager {
     /// change, reversed by a sort, replaced by a refresh — and the pages open in front of somebody
     /// are not something to pull out from under them. They are kept until the viewer is dismissed,
     /// which is also the only answer that cannot leave the pager holding an index into nothing.
+    ///
+    /// Kept as pages, not as URLs: a page the source still holds takes the source's copy of it,
+    /// whose URLs are the ones the server signed last. Otherwise a memo re-read for fresh
+    /// signatures while a sibling was deleted elsewhere would leave the reader's page on the URL
+    /// that was refused, and the still keyed on that URL would never load again.
     static func extended(_ shown: [MediaPage], with source: [MediaPage]) -> [MediaPage] {
-        guard source.count >= shown.count else { return shown }
-        guard source.prefix(shown.count).map(\.id) == shown.map(\.id) else { return shown }
-        return source
+        if source.count >= shown.count, source.prefix(shown.count).map(\.id) == shown.map(\.id) {
+            return source
+        }
+        let fresh = Dictionary(source.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return shown.map { fresh[$0.id] ?? $0 }
     }
 
     /// What the viewer shows once some of its pages have been DELETED.

@@ -67,6 +67,8 @@ struct AttachmentThumbnail: View {
 
     /// This tile's own load: what it captured, what it gave up on, and the request it has out.
     @State private var picture = PictureLoad()
+    /// Who mints a fresh URL for this picture when the server says its signature expired.
+    @Environment(\.signedURLRefresher) private var refresher
 
     private var url: URL? { MemoPresentation.url(for: attachment, tier: tier) }
     private var key: MediaImageKey { MediaImageLoader.key(for: attachment, tier: tier) }
@@ -188,7 +190,7 @@ struct AttachmentThumbnail: View {
         }
 
         let generation = MediaImageLoader.store.generation
-        let answer = await MediaImageLoader.answer(for: requested, url: url)
+        let answer = await MediaImageLoader.answer(for: requested, url: url, refresher: refresher)
         // The same fence the loader applies to its cache, applied to the screen: an answer about
         // the account that was signed in when this started must not be painted for the one signed
         // in now. Nothing is assigned at all — not even a failure, which would put a warning

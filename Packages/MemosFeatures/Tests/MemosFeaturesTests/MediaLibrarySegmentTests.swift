@@ -31,6 +31,15 @@ private final class SegmentTransport: ClientTransport, @unchecked Sendable {
     private var swapped = false
     private var released = false
     private var bucketSizes: [String] = []
+    /// Set by `signing`: covers and rows carry `?exp&scope&sig`, lapsed on the first read of each
+    /// and signed afresh on every read after it, the way an hour-old list and a fresh one differ.
+    private let signs: Bool
+    private var yearReads = 0
+    private var listReads = 0
+
+    init(signing: Bool = false) {
+        signs = signing
+    }
 
     func swapSubject() { lock.withLock { swapped = true } }
     func release() { lock.withLock { released = true } }
@@ -57,9 +66,23 @@ private final class SegmentTransport: ClientTransport, @unchecked Sendable {
             let size = Self.size(in: request.path)
             lock.withLock { bucketSizes.append(size) }
             if isSwapped { try await held() }
+            if signs, size == "year" {
+                let first = lock.withLock {
+                    yearReads += 1
+                    return yearReads == 1
+                }
+                return Self.json(Self.signedYears(sig: first ? "old" : "newcover"))
+            }
             return Self.json(size == "year" ? Self.years : "[]")
         case SegmentWire.listAttachments:
             if isSwapped { try await held() }
+            if signs {
+                let first = lock.withLock {
+                    listReads += 1
+                    return listReads == 1
+                }
+                return Self.json("[\(Self.signedRow(sig: first ? "old" : "newrow"))]")
+            }
             return Self.json("[]")
         case SegmentWire.attachmentTags:
             return Self.json("[]")
@@ -82,6 +105,37 @@ private final class SegmentTransport: ClientTransport, @unchecked Sendable {
         {"key":"2019","count":3,"coverUid":"\(SegmentWire.coverPrefix)2019",\
         "coverThumbnailUrl":""}]
         """
+
+    /// The signed server's one year, whose cover is the library's one row.
+    nonisolated static let signedUID = "signed-cover"
+
+    private static func signedQuery(_ sig: String) -> String {
+        let exp = sig == "old" ? 1_000_000_000 : 4_000_000_000
+        return "?exp=\(exp)&scope=1&sig=\(sig)"
+    }
+
+    private static func signedYears(sig: String) -> String {
+        """
+        [{"key":"2026","count":12,"coverUid":"\(signedUID)",\
+        "coverThumbnailUrl":"/api/attachments/\(signedUID)/thumb\(signedQuery(sig))"}]
+        """
+    }
+
+    private static func signedRow(sig: String) -> String {
+        let query = signedQuery(sig)
+        return """
+            {"uid":"\(signedUID)","mime":"image/jpeg","status":"ready","blurhash":null,\
+            "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+            "renditions":[],"orphan":true,"memoUid":null,\
+            "takenAt":"2026-09-26T10:00:00Z","filename":"cover.jpg",\
+            "thumbnailUrl":"/api/attachments/\(signedUID)/thumb\(query)",\
+            "previewUrl":"/api/attachments/\(signedUID)/mobile\(query)",\
+            "webUrl":"/api/attachments/\(signedUID)/web\(query)",\
+            "posterUrl":"/api/attachments/\(signedUID)/poster\(query)",\
+            "downloadUrl":"/api/attachments/\(signedUID)/download",\
+            "printUrl":"/api/attachments/\(signedUID)/print"}
+            """
+    }
 
     private static func size(in path: String?) -> String {
         let query = path.flatMap { URLComponents(string: $0)?.queryItems } ?? []
@@ -441,6 +495,34 @@ extension MediaImageLoaderTests {
             wire.sizesAsked.first { $0 != "day" } == "year", "Years read no year buckets: \(chosen)"
         )
         return (session, window)
+    }
+
+    @Test("a lapsed cover that is also a library row is re-signed by reading the buckets again")
+    func aLapsedCoverIsReSignedByItsBuckets() async {
+        let wire = SegmentTransport(signing: true)
+        let media = SignatureMediaServer(payload: MediaFixture.png(.red))
+        await withTransport(media) {
+            let (_, window) = await hostYears(wire)
+            defer {
+                wire.release()
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            let uid = SegmentTransport.signedUID
+            let lapsed = await eventually(tries: 200) {
+                await media.asked(uid: uid, sig: "old") >= 1
+            }
+            #expect(lapsed, "precondition: the lapsed cover was never asked for")
+
+            let recovered = await eventually(tries: 200) {
+                await media.asked(uid: uid, sig: "newcover") >= 1
+            }
+            #expect(recovered, "the cover kept its refused URL: the year buckets were not re-read")
+            #expect(
+                wire.sizesAsked.filter { $0 == "year" }.count >= 2,
+                "the year buckets were read once: \(wire.sizesAsked)"
+            )
+        }
     }
 
     @Test("the dock's segment switches the Library to Years, which draws a card per year")

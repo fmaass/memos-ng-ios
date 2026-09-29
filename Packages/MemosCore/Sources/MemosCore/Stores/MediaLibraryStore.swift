@@ -73,13 +73,35 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// (`TimelineStore`).
     private var session: (any SessionReporting)?
 
+    /// Which page of the list each held row was read on, and how many pages are held: the map a
+    /// reissue walks back through (`reissue(uids:using:baseURL:)`). Kept beside the rows rather
+    /// than derived from their offsets, because a page's rows are filtered and de-duplicated on
+    /// the way in and an offset says nothing about which cursor page a row came from.
+    private var pageOf: [String: Int] = [:]
+    private var pagesHeld = 0
+    /// Rows whose signed URLs the server refused as expired and no walk has re-read yet. Held
+    /// until a walk re-reads them, so one that arrives while a walk is out or cooling down is
+    /// still answered rather than dropped.
+    private var outstanding: Set<String> = []
+    /// The walk on the wire, claimed before its first suspension point so two askers in one turn
+    /// of the main actor cannot both start one.
+    private var walking: Task<Void, Never>?
+    private var cooling = false
+    /// What the walk that runs when the cooldown ends is issued under: the latest asker's.
+    private var deferred: (handle: SessionHandle, baseURL: URL)?
+    private let cooldown: @MainActor @Sendable () async -> Void
+
     public init(
         pageSize: Int = 60,
         filter: MediaLibraryFilter = .all,
         order: MediaLibraryOrder = .newestFirst,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
-            { _ in .superseded }
+            { _ in .superseded },
+        reissueCooldown: @escaping @MainActor @Sendable () async -> Void = {
+            try? await Task.sleep(for: .seconds(MediaBudget.refreshCooldown))
+        }
     ) {
+        self.cooldown = reissueCooldown
         self.pageSize = pageSize
         self.nextCursorLimit = pageSize
         self.filter = filter
@@ -102,6 +124,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         guard filter != self.filter else { return }
         self.filter = filter
         items = []
+        forgetPages()
         // The old cursor is a position inside the old tab's rows and describes nothing under this
         // one; `loadMore` reads nothing until a refresh hands it a cursor of this filter's own.
         nextCursor = nil
@@ -122,6 +145,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         guard order != self.order else { return }
         self.order = order
         items = []
+        forgetPages()
         nextCursor = nil
         hasMore = true
         lastError = nil
@@ -136,6 +160,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         guard tag != self.tag else { return }
         self.tag = tag
         items = []
+        forgetPages()
         nextCursor = nil
         hasMore = true
         lastError = nil
@@ -169,6 +194,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// not about the account, and the grid reloads under it either way.
     public func sessionIdentityChanged() {
         items = []
+        forgetPages()
         nextCursor = nil
         hasMore = true
         lastError = nil
@@ -249,6 +275,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         }
         let limit = Self.jumpPageSize
         var rows: [LibraryRow] = []
+        var rowPages: [String: Int] = [:]
+        var pagesRead = 0
         var cursor: String?
         while true {
             do {
@@ -276,8 +304,13 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     filter: lineage.filter,
                     dropping: removed
                 )
+                for row in rows where rowPages[row.id] == nil { rowPages[row.id] = pagesRead }
+                pagesRead += 1
                 if let index = firstRowIndex(onDay: day, in: rows, timeZone: timeZone) {
                     items = rows
+                    forgetPages()
+                    pageOf = rowPages
+                    pagesHeld = pagesRead
                     nextCursor = page.nextCursor
                     nextCursorLimit = limit
                     hasMore = page.nextCursor != nil
@@ -408,6 +441,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         guard !uids.isEmpty else { return }
         removed.formUnion(uids)
         items.removeAll { removed.contains($0.id) }
+        outstanding.subtract(uids)
     }
 
     /// One picture, through the generated client. A 404 says what a 204 says: the file is not on
@@ -487,6 +521,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 return
             }
             items = Self.merged([], with: page.items, filter: lineage.filter, dropping: removed)
+            forgetPages()
+            recordPage(items)
             nextCursor = page.nextCursor
             nextCursorLimit = limit
             hasMore = page.nextCursor != nil
@@ -557,6 +593,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     filter: lineage.filter,
                     dropping: removed
                 )
+                recordPage(items)
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
                 lastError = nil
@@ -572,6 +609,167 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 return
             }
         }
+    }
+
+    // MARK: - Reissuing lapsed signatures (MEMNG-623)
+
+    /// Re-reads the pages holding these rows, so their tiles get freshly signed URLs, and changes
+    /// nothing else about the list.
+    ///
+    /// `refresh` cannot be the answer: it reads the first page and REPLACES the list, so a reader
+    /// three pages down whose tile lapsed would be thrown back to the top and lose everything
+    /// below the first sixty rows. The server has no endpoint that re-signs one attachment, and a
+    /// cursor is only valid as the continuation of the page before it, so the pages are walked
+    /// again from the first cursor, under the size and lineage this list was read with, and each
+    /// held row is replaced IN PLACE by its re-read self. Rows the walk does not reach, and the
+    /// order and identity of every row, stay exactly as they were.
+    ///
+    /// One walk at a time, claimed before anything is awaited: an asker arriving while one is out
+    /// joins it, and a row it names that lies beyond the walk's current end extends it. An asker
+    /// arriving inside the cooldown after a walk is queued, and one walk runs when the cooldown
+    /// ends — so a lapsed row is never dropped, and never waits longer than the cooldown and one
+    /// walk.
+    ///
+    /// An ask issued under a session that is no longer running is refused before it touches
+    /// anything: it would otherwise start a walk its own first guard stops, and the cooldown after
+    /// that walk would hold back the running session's ask for the same rows.
+    public func reissue(uids: [String], using handle: SessionHandle, baseURL: URL) async {
+        guard sessionStillCurrent(handle) else { return }
+        let held = uids.filter { pageOf[$0] != nil }
+        guard !held.isEmpty else { return }
+        outstanding.formUnion(held)
+        deferred = (handle, baseURL)
+        if let walking {
+            await walking.value
+            return
+        }
+        guard !cooling else { return }
+        await startWalk(using: handle, baseURL: baseURL).value
+    }
+
+    /// Whether a walk is on the wire. Read by a test to assert that a second is never started.
+    public var isReissuing: Bool { walking != nil }
+
+    private func startWalk(using handle: SessionHandle, baseURL: URL) -> Task<Void, Never> {
+        let task = Task { [self] in
+            await walk(using: handle, baseURL: baseURL)
+            walking = nil
+            coolDown()
+        }
+        walking = task
+        return task
+    }
+
+    private func coolDown() {
+        cooling = true
+        Task { [self] in
+            await cooldown()
+            cooling = false
+            guard !outstanding.isEmpty, walking == nil, let deferred,
+                let handle = walkableHandle(asked: deferred.handle)
+            else { return }
+            _ = startWalk(using: handle, baseURL: deferred.baseURL)
+        }
+    }
+
+    /// The handle a deferred walk runs under: the one it was asked under while that is still the
+    /// running session, otherwise the running session's own.
+    ///
+    /// The obligation is KEPT across a replaced handle rather than dropped: the rows are the same
+    /// list's (a changed identity empties the list and every obligation with it, in
+    /// `forgetPages`), and they still carry the signatures that lapsed. A walk sent under a handle
+    /// already known to be over would be refused by its own first guard, and the cooldown after it
+    /// would send the same doomed walk again, for as long as the screen lived. The walk it gets
+    /// instead is fenced by the handle it is given, exactly as any other. With no session running,
+    /// nothing is sent and the obligation waits for the next asker.
+    private func walkableHandle(asked: SessionHandle) -> SessionHandle? {
+        guard let session else { return asked }
+        if session.activeHandle?.generation == asked.generation { return asked }
+        return session.activeHandle
+    }
+
+    /// The walk itself. It reads page after page for as long as a row it is looking for can still
+    /// be ahead of it — its own page, or the one after, because a picture added at the top since
+    /// the list was read pushes every row down — and never past the pages this list holds.
+    private func walk(using handle: SessionHandle, baseURL: URL) async {
+        let client = handle.client
+        let lineage = self.lineage
+        let limit = nextCursorLimit
+        var cursor: String?
+        var index = 0
+        // The rows that were owed a reissue when their own page was read.
+        var looked: Set<String> = []
+        while index < pagesHeld, index == 0 || cursor != nil,
+            outstanding.contains(where: { (pageOf[$0] ?? -2) + 1 >= index })
+        {
+            // Never sent under a client whose session is over.
+            guard sessionStillCurrent(handle) else { return }
+            looked.formUnion(outstanding.filter { pageOf[$0] == index })
+            do {
+                let page = try await Self.page(
+                    client,
+                    filter: lineage.filter,
+                    order: lineage.order,
+                    tag: lineage.tag,
+                    cursor: cursor,
+                    limit: limit,
+                    baseURL: baseURL
+                )
+                // The rows this walk set out to re-sign are not the rows on screen any more; the
+                // read that replaced them brought fresh signatures of its own.
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("a reissue page answered for a list that has moved on")
+                    outstanding = []
+                    return
+                }
+                // Judged by the session that ISSUED the page, never the one running now: a list
+                // the next account is reading must not take this one's rows.
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("a reissue page for a session that has ended is not merged")
+                    return
+                }
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                reissued(page.items)
+                cursor = page.nextCursor
+                index += 1
+            } catch {
+                guard lineage == self.lineage else { return }
+                await report(error, issuedUnder: handle, writesSentence: false)
+                return
+            }
+        }
+        // A row this walk looked for and did not find is no longer where this list says it is; the
+        // next refresh is what finds it. A row that arrived after the walk passed its page is
+        // still owed one, and the walk after the cooldown is it.
+        outstanding.subtract(looked)
+    }
+
+    /// A walked page's rows, each replacing the held row with its uid, where it stands.
+    private func reissued(_ rows: [LibraryRow]) {
+        let fresh = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for position in items.indices {
+            guard let row = fresh[items[position].id] else { continue }
+            outstanding.remove(row.id)
+            guard row != items[position] else { continue }
+            items[position] = row
+        }
+    }
+
+    /// The rows now held and not yet placed are the page just read.
+    private func recordPage(_ rows: [LibraryRow]) {
+        var placed = false
+        for row in rows where pageOf[row.id] == nil {
+            pageOf[row.id] = pagesHeld
+            placed = true
+        }
+        if placed { pagesHeld += 1 }
+    }
+
+    /// A list replaced or emptied takes its page map, and the rows owed a reissue, with it.
+    private func forgetPages() {
+        pageOf = [:]
+        pagesHeld = 0
+        outstanding = []
     }
 
     /// True once the reader is close enough to the end of the grid that the next page should

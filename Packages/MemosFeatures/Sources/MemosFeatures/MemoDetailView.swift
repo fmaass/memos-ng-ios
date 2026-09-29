@@ -28,22 +28,45 @@ public struct MemoDetailView: View {
     /// for the opposite of what the first one is still doing.
     @State private var isArchiving = false
     @State private var feedback = MemoFeedbackTrigger()
+    /// This screen's own copy of a memo its timeline does not hold, read again when one of its
+    /// signatures lapses.
+    @State private var detached: DetachedMemo
     /// What the zoom transition matches the full-screen viewer to: the picture that was tapped.
     @Namespace private var mediaZoom
     @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
 
+    /// The session a re-read is issued under when it is not the environment's. A seam for a test
+    /// that hosts this screen without signing a `SessionStore` in; the app never passes it.
+    private let issuing: IssuingSession?
+
     public init(uid: String, initial: Memo, timeline: TimelineStore) {
+        self.init(uid: uid, initial: initial, timeline: timeline, issuing: nil)
+    }
+
+    init(uid: String, initial: Memo, timeline: TimelineStore, issuing: IssuingSession?) {
         self.uid = uid
         self.initial = initial
         self.timeline = timeline
+        self.issuing = issuing
+        _detached = State(initialValue: DetachedMemo(uid: uid))
     }
 
     private var memo: Memo {
-        timeline.memos.first { $0.uid == uid } ?? initial
+        timeline.memos.first { $0.uid == uid } ?? detached.fetched ?? initial
     }
 
     private var tasks: [(text: String, checked: Bool)] {
         MemoPresentation.tasks(in: memo.content)
+    }
+
+    /// Who re-signs this memo's pictures: the timeline when it holds the memo, this screen's own
+    /// copy when it does not.
+    private var refresher: MemoURLRefresher {
+        MemoURLRefresher(
+            timeline: timeline,
+            session: issuing ?? IssuingSession(session),
+            detached: detached
+        )
     }
 
     public var body: some View {
@@ -83,13 +106,19 @@ public struct MemoDetailView: View {
             .padding(DesignTokens.Space.roomy)
         }
         .fullScreenCover(item: $viewing) { selection in
-            // A memo's media is all there when the screen opens and never grows, so the viewer
-            // over it pages through a value rather than through a store.
+            // A memo's media never grows, but its signatures lapse: the viewer reads the memo as
+            // this screen holds it, so a re-read with fresh URLs reaches a page already open.
             MediaViewerView(
                 selection: selection,
-                source: .fixed(selection.pages),
+                source: .memo(
+                    uid: uid,
+                    in: timeline,
+                    detached: detached,
+                    fallback: selection.pages
+                ),
                 delete: deletePicture
             )
+            .environment(\.signedURLRefresher, refresher)
             .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         // The question the gallery's own destructive row asks. It sits on the screen the row is
@@ -108,6 +137,7 @@ public struct MemoDetailView: View {
         } message: { _ in
             Text(AttachmentDeleteFlow.explanation)
         }
+        .environment(\.signedURLRefresher, refresher)
         .background(Color(.systemGroupedBackground))
         .scrollEdgeEffectStyle(.soft, for: .top)
         .tint(DesignTokens.accent)
