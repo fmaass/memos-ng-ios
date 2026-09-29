@@ -175,6 +175,8 @@ public protocol OutboxPersisting: Sendable {
     /// Where this job's copy of the original lives. The drain reads those bytes to answer a
     /// question only they can answer — which of the memo's pictures this original became.
     func mediaURL(job: UploadJob, file: OutboxFile) -> URL
+    /// Where a resumed whole-lane file's remaining bytes are staged (`WholeTailStaging`).
+    var tails: WholeTailStaging { get }
 
     /// One whole-file answer, rebased onto the manifest as it stands at the write: only that
     /// file's fields move, so a sibling's completion that landed first is kept. Nil when the job is
@@ -389,6 +391,13 @@ public actor OutboxRepository {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(job)
         try data.write(to: manifestURL(job.id), options: .atomic)
+        // Every write passes here, so whichever path lands a capture in `.held` or cancels it — a
+        // hold, a refusal's disposition, a storage failure, a person's cancel — takes every staged
+        // tail of it along, on this isolation with no suspension since the write: nothing sends a
+        // held or cancelled capture, and a release resumes from a fresh HEAD that stages its own.
+        if job.state == .held || job.cancelledAt != nil {
+            tails.removeAll(jobID: job.id)
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         // The bytes ARE written by now, so a round trip that somehow could not be read back is not
@@ -791,6 +800,8 @@ public actor OutboxRepository {
         guard let attempt else { return chunksRoot.appending(path: "\(stem).part") }
         return chunksRoot.appending(path: "\(stem)-a\(attempt).part")
     }
+
+    public nonisolated var tails: WholeTailStaging { WholeTailStaging(directory: chunksRoot) }
 
     public func removeChunk(at url: URL) {
         try? FileManager.default.removeItem(at: url)

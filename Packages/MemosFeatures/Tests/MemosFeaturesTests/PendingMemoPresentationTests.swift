@@ -182,7 +182,7 @@ struct PendingMemoPresentationTests {
                 expected = ([.retry, .remove], [.retry, .remove])
             case .editIncomplete:
                 expected = ([.reopen, .retry], [.retry])
-            case .accountMismatch, .serverRefused, .storageFailed:
+            case .accountMismatch, .serverRefused, .storageFailed, .uploadSessionLost:
                 expected = ([.retry], [.retry])
             }
             let (answered, whileUnanswered) = expected

@@ -114,7 +114,7 @@ public enum PendingMemoPresentation {
                 // is offered back — unless a change already stands unanswered, whose body stays
                 // frozen until the server settles it.
                 return job.editUnansweredSince == nil ? [.reopen, .retry] : [.retry]
-            case .accountMismatch, .serverRefused, .storageFailed, .none:
+            case .accountMismatch, .serverRefused, .storageFailed, .uploadSessionLost, .none:
                 // No Remove here: a change turned away while it was still unanswered is not a
                 // deleted memo, and Remove would throw away a capture whose change may have landed.
                 return [.retry]
@@ -159,7 +159,7 @@ public enum PendingMemoPresentation {
                 // The reason is the whole of what the person needs to read, so the server's own
                 // words for the refusal do not replace it.
                 return "This memo is no longer on the server"
-            case .serverRefused, .none:
+            case .serverRefused, .uploadSessionLost, .none:
                 return job.lastError ?? "Needs attention"
             }
         case .creating:

@@ -52,7 +52,8 @@ public enum OutboxRequests {
         return request
     }
 
-    /// The whole-file PATCH: one request at offset 0 carrying the entire original, which the
+    /// The whole-file PATCH: one request carrying every byte from `offset` to the end — the entire
+    /// original at 0, or the rest of a resumed one at the offset its HEAD reported — which the
     /// contract allows ("any length from 1 byte to the bytes remaining"). Like the chunk, its body
     /// is a file handed to the background session, never set here.
     ///
@@ -64,9 +65,10 @@ public enum OutboxRequests {
         baseURL: URL,
         token: String,
         uploadUID: String,
-        allowsMobileData: Bool
+        allowsMobileData: Bool,
+        offset: Int64 = 0
     ) -> URLRequest {
-        var request = chunk(baseURL: baseURL, token: token, uploadUID: uploadUID, offset: 0)
+        var request = chunk(baseURL: baseURL, token: token, uploadUID: uploadUID, offset: offset)
         let access = WholeTaskNetworkAccess.policy(allowsMobileData: allowsMobileData)
         request.allowsCellularAccess = access.allowsCellular
         request.allowsExpensiveNetworkAccess = access.allowsExpensive

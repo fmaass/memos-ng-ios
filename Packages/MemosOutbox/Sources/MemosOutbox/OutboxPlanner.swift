@@ -121,6 +121,11 @@ extension UploadJob {
             // Only this file's own spacing: a sibling's stays where its own failure put it.
             file.attemptCount = nil
             file.nextAttemptAt = nil
+            // A confirmed file owes nothing to the sessions it lost on the way.
+            if file.bytesConfirmed >= file.byteSize {
+                file.freshSessions = nil
+                file.conflictResync = nil
+            }
         }
         .with {
             $0.state = .uploading
@@ -183,6 +188,9 @@ extension UploadJob {
             for index in $0.files.indices {
                 $0.files[index].attemptCount = nil
                 $0.files[index].nextAttemptAt = nil
+                // A person asking again gives the lost sessions a fresh allowance too.
+                $0.files[index].freshSessions = nil
+                $0.files[index].conflictResync = nil
             }
         }
     }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import MemosOutbox
 import Testing
@@ -127,6 +128,8 @@ private actor AnswerWriteGate: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
 
     func applyFileAnswer(
         jobID: UUID,
@@ -350,7 +353,8 @@ private struct WholeRig {
         chunksInFlight: [OutboxTaskIdentity] = [],
         launch: UUID = UUID(),
         attached: Bool = true,
-        headStatus: Int = 500,
+        headStatus: Int = 404,
+        answerHead: (@Sendable (URLRequest) -> OutboxHTTPResponse?)? = nil,
         sleeper: any OutboxSleeping = ControlledSleeper(),
         rng: @escaping @Sendable () -> Double = { 1 },
         answerPost: (@Sendable (URLRequest) -> OutboxHTTPResponse?)? = nil,
@@ -397,6 +401,7 @@ private struct WholeRig {
                     uid: "u\(posts.count)", chunkSize: 5 * 1024 * 1024, received: 0
                 )
             case ("HEAD", _):
+                if let scripted = answerHead?(request) { return scripted }
                 return OutboxHTTPResponse(statusCode: headStatus)
             default:
                 return OutboxHTTPResponse(statusCode: 500)
@@ -781,16 +786,21 @@ struct WholeLaneEngineTests {
         #expect(await rig.repository.job(rig.job.id) == nil)
     }
 
-    @Test("matrix: a record with no task is sent again whole only while scheduling is open")
+    @Test("matrix: a record with no task is resumed only while scheduling is open")
     func recordOnlyWaitsForTheGate() async throws {
-        let rig = try await WholeRig.make(prepare: { job in
-            var started = job
-            started.transport = .whole
-            started.state = .uploading
-            started.files[0].uploadUID = "old-a"
-            started.files[1].uploadUID = "old-b"
-            return started
-        })
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var started = job
+                started.transport = .whole
+                started.state = .uploading
+                started.files[0].uploadUID = "old-a"
+                started.files[1].uploadUID = "old-b"
+                return started
+            },
+            answerHead: { _ in
+                OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": "0"])
+            }
+        )
         defer { rig.cleanUp() }
         let before = try await rig.reload()
         rig.gate.close()
@@ -802,8 +812,11 @@ struct WholeLaneEngineTests {
         rig.gate.open()
         await rig.engine.drain()
         let saved = try await rig.reload()
+        // Each session is kept and asked where it stands; nothing arrived, so each original goes.
         #expect(saved.files.map(\.uploadAttempt) == [1, 1])
-        #expect(saved.files.map(\.uploadUID) == ["u1", "u2"])
+        #expect(saved.files.map(\.uploadUID) == ["old-a", "old-b"])
+        #expect(rig.http.requests(method: "HEAD").count == 2)
+        #expect(rig.attemptedUploadPosts == 0)
         #expect(rig.session.createdTasks.count == 2)
     }
 
@@ -1371,9 +1384,10 @@ struct WholeLaneEngineTests {
         let drain = Task { await rig.engine.drain() }
         await listed.waitUntilParked()
         // The picture's task leaves the list with no callback. The video's success lands, and its
-        // continuation sends the picture again whole: posted, then held at its write.
+        // continuation asks where the picture stands: the HEAD finds no session, the fresh term is
+        // written, and the picture goes again whole — posted, then held at its hand-off's write.
         rig.session.forget(picture.taskIdentifier)
-        await gated.value?.arm(1, skipping: 1)
+        await gated.value?.arm(1, skipping: 2)
         let continuation = Task { await rig.engine.handle(videoAnswer) }
         await written.waitUntilParked()
         #expect(rig.attemptedUploadPosts == 3)
@@ -1516,10 +1530,11 @@ struct WholeLaneEngineTests {
         await rig.engine.drain()
         let picture = try rig.task(for: rig.picture.id)
         let video = try rig.task(for: rig.video.id)
-        // The picture's task is gone from the list: a drain sends it again whole, owning it.
+        // The picture's task is gone from the list: a drain asks the server, finds no session,
+        // writes the fresh term and sends it again whole, owning it; the failure's write is held.
         rig.session.forget(picture.taskIdentifier)
         failing.value = true
-        await gated.value?.arm(1)
+        await gated.value?.arm(1, skipping: 1)
         let drain = Task { await rig.engine.drain() }
         await written.waitUntilParked()
         #expect(rig.attemptedUploadPosts == 3)
@@ -2411,5 +2426,621 @@ struct WholeBudgetEngineTests {
         #expect(try await rig.reload().file(pictureID)?.isComplete == true)
         // The video's cancelled task still holds one place; the picture's successor gave its back.
         #expect(try await rig.eventually { rig.postsNaming("second.heic") == 1 })
+    }
+}
+
+/// Bytes that differ from block to block and within a block, so a tail cut at the wrong offset
+/// cannot hash the same as the right one.
+private enum Pattern {
+    static func block(_ index: Int, size: Int) -> Data {
+        var data = Data(repeating: UInt8(truncatingIfNeeded: index &* 31 &+ 7), count: size)
+        withUnsafeBytes(of: UInt64(index).bigEndian) { data.replaceSubrange(0..<8, with: $0) }
+        data[size / 2] = UInt8(truncatingIfNeeded: index &+ 1)
+        return data
+    }
+
+    /// Writes `blocks` blocks of `size` bytes to `url`, one block in memory at a time.
+    static func write(to url: URL, blocks: Int, size: Int) throws {
+        FileManager.default.createFile(atPath: url.path(percentEncoded: false), contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        for index in 0..<blocks { try handle.write(contentsOf: block(index, size: size)) }
+    }
+
+    /// The SHA-256 of bytes `from...` of what `write` produced, computed from the generator and
+    /// never from the file.
+    static func digest(blocks: Int, size: Int, from offset: Int) -> String {
+        var hasher = SHA256()
+        for index in 0..<blocks {
+            let start = index * size
+            guard start + size > offset else { continue }
+            let data = block(index, size: size)
+            hasher.update(data: data.subdata(in: Swift.max(offset - start, 0)..<size))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func digest(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// The original's reads, recorded: how large each ask was and how much came back.
+private struct CountingReader: TailReading {
+    let handle: FileHandle
+    var largestAsk = 0
+    var largestRead = 0
+    var reads = 0
+
+    mutating func read(upToCount count: Int) throws -> Data? {
+        largestAsk = Swift.max(largestAsk, count)
+        let data = try handle.read(upToCount: count)
+        largestRead = Swift.max(largestRead, data?.count ?? 0)
+        reads += 1
+        return data
+    }
+}
+
+@Suite("Whole lane: an interrupted upload resumes from the server's offset")
+struct WholeResumeTests {
+    static let mebibyte = 1 << 20
+    static let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+    /// The picture has a session nothing is carrying; the video is already on the server.
+    static func resumable(
+        uid: String = "s1", attempt: Int? = nil, freshSessions: Int? = nil,
+        bytesConfirmed: Int64 = 0
+    ) -> @Sendable (UploadJob) -> UploadJob? {
+        { job in
+            var started = job
+            started.transport = .whole
+            started.state = .waiting
+            started.files[0].uploadUID = uid
+            started.files[0].uploadAttempt = attempt
+            started.files[0].freshSessions = freshSessions
+            started.files[0].bytesConfirmed = bytesConfirmed
+            started.files[1].uploadUID = "v1"
+            started.files[1].bytesConfirmed = started.files[1].byteSize
+            return started
+        }
+    }
+
+    static func offset(_ value: Int64) -> OutboxHTTPResponse {
+        OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": String(value)])
+    }
+
+    private func heads(_ rig: WholeRig) -> Int { rig.http.requests(method: "HEAD").count }
+
+    private func stagedTails(_ rig: WholeRig) -> [WholeStagedTail] {
+        rig.repository.tails.staged()
+    }
+
+    @Test("planner: a session with missing bytes is resumed while open and waits while closed")
+    func plannerResumes() throws {
+        let file = OutboxFile(
+            relativePath: "a", filename: "a.mov", mime: "video/quicktime", byteSize: 100,
+            uploadUID: "s1", bytesConfirmed: 40
+        )
+        var job = Fixture.job(files: [file])
+        job.transport = .whole
+        let open = OutboxPlanner.nextWholeAction(
+            for: job, credentials: Fixture.credentials(), now: Self.now, schedulingOpen: true
+        )
+        #expect(open == .resume(file.id))
+        let closed = OutboxPlanner.nextWholeAction(
+            for: job, credentials: Fixture.credentials(), now: Self.now, schedulingOpen: false
+        )
+        #expect(closed == .wait(until: .distantFuture))
+        let carried = OutboxPlanner.nextWholeAction(
+            for: job, credentials: Fixture.credentials(), now: Self.now, schedulingOpen: true,
+            carried: [file.id]
+        )
+        #expect(carried == .upload(starting: []))
+    }
+
+    @Test("HEAD 200 at 30 MiB of 50 → one PATCH of the staged 20 MiB tail at that offset")
+    func resumesFromTheOffset() async throws {
+        let size = 50 * Self.mebibyte
+        let offset = Int64(30 * Self.mebibyte)
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(),
+            answerHead: { _ in Self.offset(offset) }
+        )
+        defer { rig.cleanUp() }
+        var job = try await rig.reload()
+        let original = rig.repository.mediaURL(job: job, file: job.files[0])
+        try Pattern.write(to: original, blocks: 50, size: Self.mebibyte)
+        job.files[0].byteSize = Int64(size)
+        try await rig.repository.save(job)
+
+        await rig.engine.drain()
+
+        #expect(heads(rig) == 1)
+        #expect(rig.attemptedUploadPosts == 0)
+        #expect(rig.session.createdTasks.count == 1)
+        let task = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(task.request.httpMethod == "PATCH")
+        #expect(task.request.value(forHTTPHeaderField: "Upload-Offset") == "31457280")
+        #expect(task.request.url?.path() == "/api/uploads/s1")
+        let expected = OutboxRequests.wholeUpload(
+            baseURL: Fixture.credentials().serverBaseURL, token: "t", uploadUID: "s1",
+            allowsMobileData: false
+        )
+        #expect(task.request.allowsCellularAccess == expected.allowsCellularAccess)
+        #expect(
+            task.request.allowsExpensiveNetworkAccess == expected.allowsExpensiveNetworkAccess)
+        #expect(
+            task.request.allowsConstrainedNetworkAccess
+                == expected.allowsConstrainedNetworkAccess)
+        let ref = WholeFileRef(jobID: job.id, fileID: job.files[0].id)
+        #expect(task.file == rig.repository.tails.url(for: ref, attempt: 1))
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: task.file.path(percentEncoded: false))
+        #expect((attributes[.size] as? NSNumber)?.int64Value == Int64(20 * Self.mebibyte))
+        #expect(
+            try Pattern.digest(of: task.file)
+                == Pattern.digest(blocks: 50, size: Self.mebibyte, from: Int(offset)))
+        // The original is untouched, and the count is the server's.
+        #expect(
+            try Pattern.digest(of: original)
+                == Pattern.digest(blocks: 50, size: Self.mebibyte, from: 0))
+        let saved = try await rig.reload()
+        #expect(saved.files[0].bytesConfirmed == offset)
+        #expect(saved.files[0].uploadUID == "s1")
+        #expect(saved.files[0].uploadAttempt == 1)
+    }
+
+    @Test("HEAD 200 at offset 0 → the original itself is sent at offset 0, nothing staged")
+    func offsetZeroSendsTheOriginal() async throws {
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(), answerHead: { _ in Self.offset(0) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let task = try rig.task(for: rig.picture.id, attempt: 1)
+        let job = try await rig.reload()
+        #expect(task.file == rig.repository.mediaURL(job: job, file: job.files[0]))
+        #expect(task.request.value(forHTTPHeaderField: "Upload-Offset") == "0")
+        #expect(stagedTails(rig).isEmpty)
+    }
+
+    @Test("the copy reads the original a MiB at a time and writes exactly its tail (200 MB)")
+    func boundedCopy() throws {
+        let directory = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appending(path: "original.mov")
+        try Pattern.write(to: source, blocks: 200, size: Self.mebibyte)
+        let offset = 123_456_789
+        let handle = try FileHandle(forReadingFrom: source)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(offset))
+        var reader = CountingReader(handle: handle)
+        let destination = directory.appending(path: "tail")
+
+        let copied = try WholeTailStaging.copy(from: &reader, to: destination)
+
+        #expect(copied == Int64(200 * Self.mebibyte - offset))
+        #expect(reader.largestAsk <= Self.mebibyte)
+        #expect(reader.largestRead <= Self.mebibyte)
+        #expect(reader.reads >= (200 * Self.mebibyte - offset) / Self.mebibyte)
+        #expect(
+            try Pattern.digest(of: destination)
+                == Pattern.digest(blocks: 200, size: Self.mebibyte, from: offset))
+    }
+
+    @Test("HEAD 200 with the whole file → confirmed with no request, and the memo is created")
+    func wholeOnTheServerIsConfirmed() async throws {
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(), answerHead: { _ in Self.offset(1000) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(heads(rig) == 1)
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(rig.attemptedUploadPosts == 0)
+        #expect(!rig.attempted.value.contains { $0.contains("finalize") })
+        #expect(!rig.attempted.value.contains { $0.hasPrefix("PATCH") })
+        #expect(await rig.repository.job(rig.job.id) == nil)
+    }
+
+    @Test("HEAD 404 → one fresh POST /api/uploads, and the original sent from byte 0")
+    func lostSessionStartsFresh() async throws {
+        let rig = try await WholeRig.make(prepare: Self.resumable(), headStatus: 404)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(heads(rig) == 1)
+        #expect(rig.uploadPosts == 1)
+        let task = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(task.request.value(forHTTPHeaderField: "Upload-Offset") == "0")
+        #expect(task.request.url?.path() == "/api/uploads/u1")
+        let saved = try await rig.reload()
+        #expect(saved.files[0].uploadUID == "u1")
+        #expect(saved.files[0].freshSessions == 1)
+    }
+
+    @Test("the fourth HEAD 404 in a row holds the capture with its reason and sends nothing")
+    func fourthLossHolds() async throws {
+        let rig = try await WholeRig.make(prepare: Self.resumable(), headStatus: 404)
+        defer { rig.cleanUp() }
+        for round in 1...3 {
+            await rig.engine.drain()
+            // An answer's place, given back, asks for a drain of its own that may still be running.
+            await rig.engine.untilQuiescent()
+            #expect(rig.uploadPosts == round)
+            let task = try #require(rig.session.createdTasks.last)
+            // The transfer drops: the session is kept, and the next attempt asks the server.
+            await rig.engine.handle(try rig.answer(task, status: nil))
+            rig.session.forget(task.taskIdentifier)
+            rig.clock.advance(86_400)
+            #expect(try await rig.reload().files[0].freshSessions == round)
+        }
+        let tasksBefore = rig.session.createdTasks.count
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+        #expect(heads(rig) == 4)
+        #expect(rig.uploadPosts == 3)
+        #expect(rig.session.createdTasks.count == tasksBefore)
+        let saved = try await rig.reload()
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .uploadSessionLost)
+        #expect(saved.lastError == OutboxEngine.message(for: .uploadSessionLost))
+    }
+
+    @Test("a confirmed file's lost sessions are forgotten, so a later loss starts again at one")
+    func confirmResetsTheAllowance() {
+        let file = OutboxFile(
+            relativePath: "a", filename: "a", mime: "a", byteSize: 10, uploadUID: "s1",
+            freshSessions: 3, conflictResync: true
+        )
+        let job = Fixture.job(files: [file])
+        let confirmed = job.advancing(fileID: file.id, bytesConfirmed: 10)
+        #expect(confirmed.files[0].freshSessions == nil)
+        #expect(confirmed.files[0].conflictResync == nil)
+        let partial = job.advancing(fileID: file.id, bytesConfirmed: 5)
+        #expect(partial.files[0].freshSessions == 3)
+    }
+
+    @Test("409 on the tail → exactly one HEAD re-sync and the same rule; a second 409 starts fresh")
+    func conflictResyncsOnce() async throws {
+        let reported = WholeBox<Int64>(400)
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(), answerHead: { _ in Self.offset(reported.value) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let first = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(heads(rig) == 1)
+
+        reported.value = 600
+        await rig.engine.handle(try rig.answer(first, status: 409))
+        #expect(heads(rig) == 2)
+        let second = try rig.task(for: rig.picture.id, attempt: 2)
+        #expect(second.request.value(forHTTPHeaderField: "Upload-Offset") == "600")
+        #expect(try await rig.reload().files[0].conflictResync == true)
+        #expect(rig.uploadPosts == 0)
+
+        await rig.engine.handle(try rig.answer(second, status: 409))
+        #expect(heads(rig) == 2)
+        let saved = try await rig.reload()
+        #expect(saved.files[0].uploadUID == nil)
+        #expect(saved.files[0].freshSessions == 1)
+        #expect(saved.files[0].conflictResync == nil)
+    }
+
+    @Test("HEAD refused for the credential it presented holds; under a replaced one it backs off")
+    func headRefusalCarriesItsEpoch() async throws {
+        let current = try await WholeRig.make(prepare: Self.resumable(), headStatus: 401)
+        defer { current.cleanUp() }
+        await current.engine.drain()
+        let held = try await current.reload()
+        #expect(held.state == .held)
+        #expect(held.holdReason == .serverRefused)
+        #expect(current.session.createdTasks.isEmpty)
+
+        let renew = WholeBox<(@Sendable () -> Void)?>(nil)
+        let stale = try await WholeRig.make(
+            prepare: Self.resumable(),
+            answerHead: { _ in
+                renew.value?()
+                return OutboxHTTPResponse(statusCode: 401)
+            }
+        )
+        defer { stale.cleanUp() }
+        let credentials = stale.credentials
+        renew.value = { credentials.supersede() }
+        await stale.engine.drain()
+        let waiting = try await stale.reload()
+        #expect(waiting.state == .waiting)
+        #expect(waiting.holdReason == nil)
+        let superseded = OutboxRefusal(statusCode: 0, issuedUnder: nil, what: "upload")
+        #expect(waiting.lastError == superseded.supersededMessage)
+        #expect(stale.session.createdTasks.isEmpty)
+    }
+
+    @Test("a background wake with a resumable file sends no HEAD, stages nothing, starts no task")
+    func wakeNeverResumes() async throws {
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(bytesConfirmed: 400), answerHead: { _ in Self.offset(400) }
+        )
+        defer { rig.cleanUp() }
+        rig.gate.close()
+        await rig.engine.drain()
+        #expect(heads(rig) == 0)
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(stagedTails(rig).isEmpty)
+        #expect(try await rig.reload().files[0].uploadUID == "s1")
+    }
+
+    @Test("relaunch: the tail's task listed with its record → adopted, no second task, tail kept")
+    func relaunchAdoptsTheTailTask() async throws {
+        let other = UUID()
+        let rig = try await WholeRig.make(
+            listing: { job in
+                [
+                    WholeTaskListing(
+                        taskIdentifier: 77,
+                        taskDescription: WholeTaskIdentity(
+                            jobID: job.id, fileID: job.files[0].id, attempt: 1, launch: other,
+                            epoch: 0
+                        ).taskDescription,
+                        access: WholeTaskNetworkAccess(
+                            request: OutboxRequests.wholeUpload(
+                                baseURL: Fixture.server, token: "t", uploadUID: "s1",
+                                allowsMobileData: false, offset: 400
+                            )
+                        ),
+                        state: .running
+                    )
+                ]
+            },
+            prepare: Self.resumable(attempt: 1, bytesConfirmed: 400),
+            answerHead: { _ in Self.offset(400) }
+        )
+        defer { rig.cleanUp() }
+        let ref = WholeFileRef(jobID: rig.job.id, fileID: rig.picture.id)
+        let tail = rig.repository.tails.url(for: ref, attempt: 1)
+        try Data(repeating: 1, count: 600).write(to: tail)
+
+        await rig.engine.drain()
+
+        #expect(heads(rig) == 0)
+        #expect(rig.session.createdTasks.isEmpty)
+        #expect(rig.session.cancelledIdentifiers.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: tail.path(percentEncoded: false)))
+    }
+
+    @Test("relaunch: a record with no task → its tail is deleted and a foreground HEAD resumes it")
+    func relaunchWithoutTaskResumesInTheForeground() async throws {
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(attempt: 1, bytesConfirmed: 400),
+            answerHead: { _ in Self.offset(700) }
+        )
+        defer { rig.cleanUp() }
+        let ref = WholeFileRef(jobID: rig.job.id, fileID: rig.picture.id)
+        let tail = rig.repository.tails.url(for: ref, attempt: 1)
+        try Data(repeating: 1, count: 600).write(to: tail)
+
+        rig.gate.close()
+        await rig.engine.drain()
+        #expect(!FileManager.default.fileExists(atPath: tail.path(percentEncoded: false)))
+        #expect(heads(rig) == 0)
+        #expect(rig.session.createdTasks.isEmpty)
+
+        rig.gate.open()
+        await rig.engine.drain()
+        #expect(heads(rig) == 1)
+        let task = try rig.task(for: rig.picture.id, attempt: 2)
+        #expect(task.request.value(forHTTPHeaderField: "Upload-Offset") == "700")
+        #expect(task.file == rig.repository.tails.url(for: ref, attempt: 2))
+    }
+
+    @Test("a tail task's confirmed answer deletes its tail")
+    func tailsGoWithTheirTask() async throws {
+        let rig = try await WholeRig.make(
+            prepare: Self.resumable(), answerHead: { _ in Self.offset(400) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let task = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(FileManager.default.fileExists(atPath: task.file.path(percentEncoded: false)))
+        await rig.engine.handle(try rig.answer(task, status: 204, received: 1000))
+        #expect(!FileManager.default.fileExists(atPath: task.file.path(percentEncoded: false)))
+        #expect(stagedTails(rig).isEmpty)
+    }
+
+    @Test("a hold one tail task's refusal lands deletes every tail of the capture, a sibling's too")
+    func holdViaCallbackTakesEveryTail() async throws {
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var started = job
+                started.transport = .whole
+                started.state = .waiting
+                started.files[0].uploadUID = "s1"
+                started.files[1].uploadUID = "v1"
+                return started
+            },
+            answerHead: { _ in Self.offset(400) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        await rig.engine.untilQuiescent()
+        let picture = try rig.task(for: rig.picture.id, attempt: 1)
+        let video = try rig.task(for: rig.video.id, attempt: 1)
+        #expect(stagedTails(rig).count == 2)
+        // The app leaves the foreground: the video's task is suspended, the picture's answers.
+        rig.gate.close()
+
+        await rig.engine.handle(try rig.answer(picture, status: 401))
+
+        let saved = try await rig.reload()
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .serverRefused)
+        #expect(stagedTails(rig).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: video.file.path(percentEncoded: false)))
+    }
+
+    @Test("an unreadable success's HEAD refused for its credential holds; a replaced one backs off")
+    func unreadableSuccessHeadRefusal() async throws {
+        let current = try await WholeRig.make(headStatus: 401)
+        defer { current.cleanUp() }
+        await current.engine.drain()
+        let picture = try current.task(for: current.picture.id)
+        await current.engine.handle(try current.answer(picture, status: 200))
+        #expect(heads(current) == 1)
+        let held = try await current.reload()
+        #expect(held.state == .held)
+        #expect(held.holdReason == .serverRefused)
+
+        let renew = WholeBox<(@Sendable () -> Void)?>(nil)
+        let stale = try await WholeRig.make(
+            answerHead: { _ in
+                renew.value?()
+                return OutboxHTTPResponse(statusCode: 401)
+            }
+        )
+        defer { stale.cleanUp() }
+        await stale.engine.drain()
+        let task = try stale.task(for: stale.picture.id)
+        let credentials = stale.credentials
+        renew.value = { credentials.supersede() }
+        await stale.engine.handle(try stale.answer(task, status: 200))
+        #expect(heads(stale) == 1)
+        let waiting = try await stale.reload()
+        #expect(waiting.state == .waiting)
+        #expect(waiting.holdReason == nil)
+        let superseded = OutboxRefusal(statusCode: 0, issuedUnder: nil, what: "upload")
+        #expect(waiting.lastError == superseded.supersededMessage)
+    }
+
+    @Test("an unreadable success's HEAD is judged by the credential it presented, not the task's")
+    func unreadableSuccessHeadJudgedByItsOwnEpoch() async throws {
+        let rig = try await WholeRig.make(headStatus: 401)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        // Renewed after the task went out: the HEAD presents the credential that stands now.
+        rig.credentials.supersede()
+
+        await rig.engine.handle(try rig.answer(picture, status: 200))
+
+        #expect(heads(rig) == 1)
+        let held = try await rig.reload()
+        #expect(held.state == .held)
+        #expect(held.holdReason == .serverRefused)
+    }
+
+    @Test("a manifest written before the resume counters existed decodes with none")
+    func olderManifestDecodes() throws {
+        let id = UUID()
+        let json = """
+            {"id":"\(id.uuidString)","relativePath":"a","filename":"a.mov","mime":"video/quicktime",
+            "byteSize":100,"uploadUID":"s1","bytesConfirmed":40,"chunkSize":5242880}
+            """
+        let file = try JSONDecoder().decode(OutboxFile.self, from: Data(json.utf8))
+        #expect(file.freshSessions == nil)
+        #expect(file.conflictResync == nil)
+        #expect(file.uploadUID == "s1")
+        let counted = """
+            {"id":"\(id.uuidString)","relativePath":"a","filename":"a.mov","mime":"video/quicktime",
+            "byteSize":100,"bytesConfirmed":0,"chunkSize":1,"freshSessions":2,"conflictResync":true}
+            """
+        let later = try JSONDecoder().decode(OutboxFile.self, from: Data(counted.utf8))
+        #expect(later.freshSessions == 2)
+        #expect(later.conflictResync == true)
+    }
+
+    @Test("reconciliation keeps a tail only for a live task naming its file and term")
+    func planDiscardsUnclaimedTails() {
+        let file = OutboxFile(
+            relativePath: "a", filename: "a", mime: "a", byteSize: 10, uploadUID: "s1",
+            bytesConfirmed: 4, uploadAttempt: 2
+        )
+        var job = Fixture.job(files: [file])
+        job.transport = .whole
+        let ref = WholeFileRef(jobID: job.id, fileID: file.id)
+        let root = URL(filePath: "/tails")
+        let staging = WholeTailStaging(directory: root)
+        let claimed = WholeStagedTail(ref: ref, attempt: 2, url: staging.url(for: ref, attempt: 2))
+        let older = WholeStagedTail(ref: ref, attempt: 1, url: staging.url(for: ref, attempt: 1))
+        let task = WholeTaskListing(
+            taskIdentifier: 5,
+            taskDescription: WholeTaskIdentity(
+                jobID: job.id, fileID: file.id, attempt: 2, launch: UUID(), epoch: 0
+            ).taskDescription
+        )
+        let live = WholeReconciliation.plan(jobs: [job], tasks: [task], tails: [claimed, older])
+        #expect(live.discardedTails == [older.url])
+        let none = WholeReconciliation.plan(jobs: [job], tasks: [], tails: [claimed, older])
+        #expect(Set(none.discardedTails) == [claimed.url, older.url])
+        #expect(none.retryWhole == [ref])
+    }
+
+    @Test("a name that only contains a tail's marks is no tail; a half-written copy still is one")
+    func stagedNamesOnlyTails() throws {
+        let directory = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = WholeTailStaging(directory: directory)
+        let ref = WholeFileRef(jobID: UUID(), fileID: UUID())
+        let tail = staging.url(for: ref, attempt: 3)
+        let partial = staging.url(for: ref, attempt: 4).appendingPathExtension("partial")
+        let prefix = "\(ref.jobID.uuidString)-\(ref.fileID.uuidString)"
+        var decoys = ["\(prefix)-a3.tail.bak", "\(prefix)-a.tail", "\(prefix)-a-1.tail"]
+        decoys += ["\(prefix).tail", "\(prefix)-a3.chunk", "-a3.tail"]
+        decoys.append("\(ref.jobID.uuidString)-0")
+        let files = [tail, partial] + decoys.map { directory.appending(path: $0) }
+        for url in files {
+            try Data([1]).write(to: url)
+        }
+
+        let staged = staging.staged()
+
+        let names = Set(staged.map(\.url.lastPathComponent))
+        #expect(names == [tail.lastPathComponent, partial.lastPathComponent])
+        #expect(staged.allSatisfy { $0.ref == ref })
+        #expect(Set(staged.map(\.attempt)) == [3, 4])
+    }
+
+    @Test("a resume held at its write owns its file: a sibling's answer sends it nothing more")
+    func resumeOwnsItsFile() async throws {
+        let written = TestGate()
+        let gated = WholeBox<AnswerWriteGate?>(nil)
+        let rig = try await WholeRig.make(
+            persistence: { repository in
+                let persistence = AnswerWriteGate(repository, gate: written)
+                gated.value = persistence
+                return persistence
+            },
+            completion: [.retry("later")],
+            answerHead: { _ in Self.offset(400) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        await rig.engine.handle(try rig.answer(picture, status: nil))
+        rig.session.forget(picture.taskIdentifier)
+        await rig.engine.untilQuiescent()
+        rig.clock.advance(86_400)
+        // The picture's resume is held at its write, after its HEAD and its staging.
+        await gated.value?.arm(1)
+        let drain = Task { await rig.engine.drain() }
+        await written.waitUntilParked()
+        #expect(heads(rig) == 1)
+
+        // The video's success lands and its continuation plans the row while the resume owns the
+        // picture.
+        await rig.engine.handle(try rig.answer(video, status: 200, received: 3000))
+        #expect(heads(rig) == 1)
+        await written.open()
+        await drain.value
+        await rig.engine.untilQuiescent()
+        #expect(heads(rig) == 1)
+        #expect(rig.attempts(of: rig.picture.id) == [0, 1])
     }
 }

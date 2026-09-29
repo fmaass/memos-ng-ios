@@ -57,6 +57,9 @@ public enum HoldReason: String, Codable, Sendable, Equatable, CaseIterable {
     /// the reason, and this is the one unanswered change a person may remove outright — the editor
     /// stays closed to it while the change is unanswered.
     case memoGone
+    /// The server lost this capture's upload session every time a fresh one was opened, up to
+    /// `UploadBudget.maxFreshSessionsPerFile`. Opening yet another would only repeat it.
+    case uploadSessionLost
 }
 
 /// Why a waiting job is waiting on an EVENT rather than on the clock.
@@ -130,6 +133,15 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// before they existed decodes unchanged and reads as "never failed".
     public var nextAttemptAt: Date?
     public var attemptCount: Int?
+    /// How many fresh upload sessions this file has been given in a row because the offset HEAD
+    /// found its session gone. Bounded by `UploadBudget.maxFreshSessionsPerFile`: past it the
+    /// capture holds rather than opening sessions the server keeps losing. Reset when the file is
+    /// confirmed or a person releases the capture. Optional and last, so an older manifest decodes.
+    public var freshSessions: Int?
+    /// Set when a resumed transfer was refused for disagreeing about the offset: the next step is
+    /// ONE offset HEAD, and a second disagreement in a row starts a fresh session instead of
+    /// asking again. Optional and last, so an older manifest decodes.
+    public var conflictResync: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -145,7 +157,9 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         attachmentUID: String? = nil,
         stagedForEdit: Bool? = nil,
         nextAttemptAt: Date? = nil,
-        attemptCount: Int? = nil
+        attemptCount: Int? = nil,
+        freshSessions: Int? = nil,
+        conflictResync: Bool? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -161,6 +175,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.stagedForEdit = stagedForEdit
         self.nextAttemptAt = nextAttemptAt
         self.attemptCount = attemptCount
+        self.freshSessions = freshSessions
+        self.conflictResync = conflictResync
     }
 
     public var isComplete: Bool { uploadUID != nil && bytesConfirmed >= byteSize }

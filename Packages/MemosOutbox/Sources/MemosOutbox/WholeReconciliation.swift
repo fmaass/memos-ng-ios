@@ -55,13 +55,22 @@ public struct WholeReconciliationPlan: Sendable, Equatable {
     /// dropped: dropped, it would keep sending a file nobody is waiting for.
     public var cancelled: [Int]
     /// Files the server has an upload session for, holding less than the whole file, that no task
-    /// is carrying: each goes again, whole, once scheduling is open. Capture order.
+    /// is carrying: each is resumed from the server's offset once scheduling is open — never from
+    /// a wake. Capture order.
     public var retryWhole: [WholeFileRef]
+    /// Staged tails no adopted task is sending, by where they are: deleted. A tail is kept ONLY for
+    /// a live task whose description names its job, file and attempt; a manifest that still names
+    /// the file does not keep it, because its resume stages a tail of its own from a fresh HEAD.
+    public var discardedTails: [URL]
 
-    public init(adopted: [WholeTask], cancelled: [Int], retryWhole: [WholeFileRef]) {
+    public init(
+        adopted: [WholeTask], cancelled: [Int], retryWhole: [WholeFileRef],
+        discardedTails: [URL] = []
+    ) {
         self.adopted = adopted
         self.cancelled = cancelled
         self.retryWhole = retryWhole
+        self.discardedTails = discardedTails
     }
 }
 
@@ -73,7 +82,8 @@ public struct WholeReconciliationPlan: Sendable, Equatable {
 public enum WholeReconciliation {
     public static func plan(
         jobs: [UploadJob],
-        tasks: [WholeTaskListing]
+        tasks: [WholeTaskListing],
+        tails: [WholeStagedTail] = []
     ) -> WholeReconciliationPlan {
         // One id is one job, the first in capture order — the same reason as the chunk lane's
         // plan: a duplicate key on the launch path must cost one row, not the queue.
@@ -123,8 +133,20 @@ public enum WholeReconciliation {
                 if !carried.contains(ref) { retryWhole.append(ref) }
             }
         }
+        let claimed = Set(
+            adopted.map {
+                WholeStagedTail.key(
+                    WholeFileRef(jobID: $0.identity.jobID, fileID: $0.identity.fileID),
+                    attempt: $0.identity.attempt
+                )
+            }
+        )
+        let discarded =
+            tails.filter { !claimed.contains(WholeStagedTail.key($0.ref, attempt: $0.attempt)) }
+            .map(\.url)
         return WholeReconciliationPlan(
-            adopted: adopted, cancelled: cancelled, retryWhole: retryWhole
+            adopted: adopted, cancelled: cancelled, retryWhole: retryWhole,
+            discardedTails: discarded
         )
     }
 }

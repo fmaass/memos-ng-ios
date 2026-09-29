@@ -110,16 +110,23 @@ struct WholePlannerTests {
         let picture = Whole.file()
         let video = Whole.file(byteSize: 900_000)
         let job = Whole.job(files: [picture, video], state: .waiting)
-        #expect(next(job) == .upload(starting: [picture.id, video.id], retrying: []))
+        #expect(next(job) == .upload(starting: [picture.id, video.id]))
     }
 
-    @Test("a session nothing is carrying is retried whole beside a file that has none yet")
+    @Test("a session nothing is carrying is resumed first, before a file that has none yet")
     func retriesWhatNothingCarries() {
         let started = Whole.file(uploadUID: "p1", bytesConfirmed: 0, attempt: 1)
         let done = Whole.file(uploadUID: "v1", byteSize: 2048, bytesConfirmed: 2048)
         let fresh = Whole.file()
         let job = Whole.job(files: [started, done, fresh])
-        #expect(next(job) == .upload(starting: [fresh.id], retrying: [started.id]))
+        #expect(next(job) == .resume(started.id))
+        // Once the resumed file is carried, the file with no session is sent.
+        #expect(
+            OutboxPlanner.nextWholeAction(
+                for: job, credentials: Fixture.credentials(), now: Whole.now,
+                schedulingOpen: true, carried: [started.id]
+            ) == .upload(starting: [fresh.id])
+        )
     }
 
     @Test("every file on the server is a memo create")
@@ -169,7 +176,7 @@ struct WholePlannerTests {
         switch action {
         case .createMemo, .wait:
             break
-        case .hold, .upload:
+        case .hold, .upload, .resume:
             Issue.record("a closed gate answered \(action) for \(situation)")
         }
         #expect(action == situation.expectedWhenClosed)
@@ -249,7 +256,7 @@ struct RetryWholeTests {
 
         // The picture's session is gone on the server.
         let answer = WholeOutcome.classify(statusCode: 404, bytesReceived: nil, byteSize: 4096)
-        #expect(answer == .retryWhole)
+        #expect(answer == .resume)
         let retried = job.retryingWhole(fileID: picture.id)
 
         // The picture goes again from nothing, under a new term.
@@ -277,7 +284,7 @@ struct RetryWholeTests {
         let after = OutboxPlanner.nextWholeAction(
             for: landed, credentials: Fixture.credentials(), now: Whole.now, schedulingOpen: true
         )
-        #expect(after == .upload(starting: [picture.id], retrying: []))
+        #expect(after == .upload(starting: [picture.id]))
     }
 
     @Test("each retry is one more term, and a file already whole on the server is not sent again")
@@ -309,10 +316,10 @@ struct WholeOutcomeTests {
         #expect(classify(299, 1200) == .completed(bytesReceived: 1200))
     }
 
-    @Test("a success that names fewer bytes than the file sends it again whole")
+    @Test("a success that names fewer bytes than the file resumes it")
     func shortSuccess() {
-        #expect(classify(200, 999) == .retryWhole)
-        #expect(classify(200, 0) == .retryWhole)
+        #expect(classify(200, 999) == .resume)
+        #expect(classify(200, 0) == .resume)
     }
 
     @Test("a success with no readable count is neither complete nor short")
@@ -343,9 +350,10 @@ struct WholeOutcomeTests {
         #expect(classify(status) == .backOff)
     }
 
-    @Test("a lost session and an offset conflict send the file again whole", arguments: [404, 409])
-    func lostOrConflicting(_ status: Int) {
-        #expect(classify(status) == .retryWhole)
+    @Test("a lost session resumes through the offset HEAD; an offset conflict re-syncs")
+    func lostOrConflicting() {
+        #expect(classify(404) == .resume)
+        #expect(classify(409) == .conflict)
     }
 
     @Test("a file too large is a refusal")

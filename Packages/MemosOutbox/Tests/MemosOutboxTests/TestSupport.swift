@@ -364,6 +364,8 @@ actor FaultyPersistence: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
 }
 
 /// A hold a test opens by hand, so that a test can be INSIDE a drain when something happens.
@@ -465,6 +467,8 @@ actor GatedPersistence: OutboxPersisting {
         inner.mediaURL(job: job, file: file)
     }
 
+    nonisolated var tails: WholeTailStaging { inner.tails }
+
     /// Forwarded to the real repository's rebase ungated: the protocol's default would route an
     /// answer through the gated save above and spend a hold a test meant for a drain's write.
     func applyFileAnswer(
@@ -552,6 +556,8 @@ actor SupersedingPersister: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
 }
 
 /// Credentials that let another pass land INSIDE the acquisition hop.
@@ -667,6 +673,8 @@ actor FailingThenInterferingPersister: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
 }
 
 /// The other pass, landing INSIDE the write hop of ONE chosen write.
@@ -756,6 +764,8 @@ actor InterferingPersistence: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
 }
 
 /// A clock a test can move, for the parts of the drain that only happen later.

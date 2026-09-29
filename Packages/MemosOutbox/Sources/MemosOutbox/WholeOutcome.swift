@@ -16,10 +16,13 @@ public enum WholeOutcome: Sendable, Equatable {
     /// The server said it is too busy (429, 503). Only this file waits, for as long as the answer's
     /// `Retry-After` said in seconds when it said so. Never a hold: nothing is wrong with the capture.
     case backpressure(retryAfter: TimeInterval?)
-    /// The upload session is gone, disagrees about the offset, or kept less than the whole file.
-    /// A whole task cannot carry on from where it stopped, so the file is sent again from its first
-    /// byte under a fresh session and a new attempt term (`UploadJob.retryingWhole`).
-    case retryWhole
+    /// The upload session is gone, or kept less than the whole file. The session is kept and the
+    /// file resumes from whatever the server's offset HEAD then reports — a HEAD that finds the
+    /// session gone starts a fresh one (`UploadJob.retryingFromOffset`).
+    case resume
+    /// The server disagrees about the offset the task was sent at. ONE offset HEAD re-syncs it; a
+    /// second disagreement in a row starts a fresh session instead.
+    case conflict
     /// A refusal repeating the same request cannot change. What the queue does about it is
     /// `OutboxRefusal`'s decision, made with the epoch the request presented.
     case refused(statusCode: Int)
@@ -40,10 +43,12 @@ public enum WholeOutcome: Sendable, Equatable {
         switch statusCode {
         case 200...299:
             guard let bytesReceived else { return .unreadable }
-            guard bytesReceived >= byteSize else { return .retryWhole }
+            guard bytesReceived >= byteSize else { return .resume }
             return .completed(bytesReceived: bytesReceived)
-        case 404, 409:
-            return .retryWhole
+        case 404:
+            return .resume
+        case 409:
+            return .conflict
         case 429, 503:
             return .backpressure(retryAfter: seconds(inRetryAfter: retryAfter))
         case 408:

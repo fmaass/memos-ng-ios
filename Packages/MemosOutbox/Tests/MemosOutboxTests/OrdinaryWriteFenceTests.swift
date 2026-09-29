@@ -886,4 +886,6 @@ private actor RefusingOneWrite: OutboxPersisting {
     nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
         inner.mediaURL(job: job, file: file)
     }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
 }

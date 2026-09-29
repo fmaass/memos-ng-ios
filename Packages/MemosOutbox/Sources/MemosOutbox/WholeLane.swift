@@ -45,9 +45,13 @@ extension BackgroundUploadScheduler: OutboxUploadScheduling {}
 public enum WholeFileChange: Sendable, Equatable {
     /// The server holds this many bytes of the file.
     case confirmed(Int64)
-    /// The file goes again from its first byte, under a fresh session and its own next term —
-    /// once its own schedule allows, never at once.
-    case retryWhole(FileRetry)
+    /// The file resumes from the server's offset, its session kept — once its own schedule allows,
+    /// never at once.
+    case resume(FileRetry)
+    /// The server disagreed about the offset: the first time, the file is due at once for ONE
+    /// offset HEAD; again in a row, it starts a fresh session instead, within
+    /// `UploadBudget.maxFreshSessionsPerFile`.
+    case conflicted(FileRetry)
     /// Nothing the server said about this file: this file spaces itself out, and only this file.
     case backOff(String, FileRetry)
     /// The request for this file's upload session failed without a refusal — no answer, a rate
@@ -55,6 +59,12 @@ public enum WholeFileChange: Sendable, Equatable {
     case sessionFailed(String, FileRetry)
     /// A refusal. Held or backed off by `OutboxRefusal`, chosen where the write is.
     case refused(OutboxRefusal)
+    /// The offset HEAD found this many bytes of fewer than the whole: the file's next term sends
+    /// the rest from there, its session kept.
+    case resumeFrom(Int64)
+    /// The offset HEAD found no session: the file's next term opens a fresh one and sends the
+    /// original from byte 0, counted against `UploadBudget.maxFreshSessionsPerFile`.
+    case freshSession
 }
 
 /// What one file's next attempt is spaced by: the server's own delay when it named one, and the
@@ -132,18 +142,52 @@ extension UploadJob {
         switch change {
         case .confirmed(let bytes):
             return advancing(fileID: fileID, bytesConfirmed: bytes)
-        case .retryWhole(let retry):
-            return retryingWhole(fileID: fileID).backingOffFile(
+        case .resume(let retry):
+            return backingOffFile(
                 fileID, retry: retry, error: "The server kept less than the whole file.",
                 at: instant
             )
+            .updating(fileID) { $0.conflictResync = nil }
+        case .conflicted(let retry):
+            let message = "The server disagreed about how much of the file it holds."
+            guard file.conflictResync == true else {
+                return updating(fileID) {
+                    $0.conflictResync = true
+                    $0.nextAttemptAt = nil
+                }
+                .with {
+                    $0.state = .waiting
+                    $0.lastError = message
+                    $0.waitReason = nil
+                }
+            }
+            let lost = file.freshSessions ?? 0
+            guard lost < UploadBudget.maxFreshSessionsPerFile else {
+                return held(
+                    .uploadSessionLost, error: OutboxEngine.message(for: .uploadSessionLost))
+            }
+            return retryingWhole(fileID: fileID)
+                .updating(fileID) {
+                    $0.freshSessions = lost + 1
+                    $0.conflictResync = nil
+                }
+                .backingOffFile(fileID, retry: retry, error: message, at: instant)
         case .backOff(let message, let retry):
             return backingOffFile(fileID, retry: retry, error: message, at: instant)
+                .updating(fileID) { $0.conflictResync = nil }
         case .sessionFailed(let message, let retry):
             return backingOffFile(fileID, retry: retry, error: message, at: instant)
                 .with { $0.transport = .whole }
         case .refused(let refusal):
             return applying(refusal.disposition(assumingCurrent: stillCurrent), at: instant)
+        case .resumeFrom(let offset):
+            return retryingFromOffset(fileID: fileID, bytesConfirmed: offset)
+        case .freshSession:
+            let lost = file.freshSessions ?? 0
+            return retryingWhole(fileID: fileID).updating(fileID) {
+                $0.freshSessions = lost + 1
+                $0.conflictResync = nil
+            }
         }
     }
 }

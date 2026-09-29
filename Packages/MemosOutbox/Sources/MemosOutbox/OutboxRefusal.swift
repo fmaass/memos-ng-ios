@@ -29,6 +29,10 @@ public struct OutboxRefusal: Sendable, Equatable {
         self.what = what
     }
 
+    /// Whether the refusal is about the credential rather than the request — the one status an
+    /// offset HEAD holds on; anything else it meets is spaced out like an unanswered one.
+    public var concernsCredential: Bool { statusCode == 401 }
+
     /// Whether this refusal is decided by the body this edit is frozen on, and so says the same
     /// thing about every transmission of that key. A 401 or 403 is answered before the key is
     /// looked up, a 404 says the memo is gone rather than that this edit never applied, a 429 and

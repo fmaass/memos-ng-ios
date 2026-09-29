@@ -29,7 +29,7 @@ struct UploadBudgetTests {
             for: job, credentials: Fixture.credentials(), now: job.capturedAt,
             schedulingOpen: true, carried: []
         )
-        #expect(action == .upload(starting: [job.files[0].id, job.files[1].id], retrying: []))
+        #expect(action == .upload(starting: [job.files[0].id, job.files[1].id]))
     }
 
     @Test("with two of its files carried, a five-file capture starts none")
@@ -39,7 +39,7 @@ struct UploadBudgetTests {
             for: job, credentials: Fixture.credentials(), now: job.capturedAt,
             schedulingOpen: true, carried: [job.files[0].id, job.files[1].id]
         )
-        #expect(action == .upload(starting: [], retrying: []))
+        #expect(action == .upload(starting: []))
     }
 
     @Test("a file waiting out its deadline takes no place: the next eligible files go instead")
@@ -50,7 +50,7 @@ struct UploadBudgetTests {
             for: job, credentials: Fixture.credentials(), now: job.capturedAt,
             schedulingOpen: true
         )
-        #expect(action == .upload(starting: [job.files[1].id, job.files[2].id], retrying: []))
+        #expect(action == .upload(starting: [job.files[1].id, job.files[2].id]))
         job.files[1].nextAttemptAt = job.capturedAt.addingTimeInterval(30)
         job.files[2].nextAttemptAt = job.capturedAt.addingTimeInterval(90)
         let waiting = OutboxPlanner.nextWholeAction(
@@ -154,14 +154,15 @@ struct UploadBudgetTests {
         var job = wholeJob(files: 1)
         job.files[0].uploadUID = "u1"
         let outcome = WholeOutcome.classify(statusCode: 204, bytesReceived: 40, byteSize: 100)
-        #expect(outcome == .retryWhole)
+        #expect(outcome == .resume)
         let next = try #require(
             job.applyingFileAnswer(
-                fileID: job.files[0].id, attempt: 0, change: .retryWhole(FileRetry(draw: 0.5)),
+                fileID: job.files[0].id, attempt: 0, change: .resume(FileRetry(draw: 0.5)),
                 stillCurrent: true, at: Date(timeIntervalSince1970: 1000)
             )
         )
-        #expect(next.files[0].uploadUID == nil)
+        // The session is kept: the next attempt asks the server where it stands first.
+        #expect(next.files[0].uploadUID == "u1")
         #expect(next.files[0].nextAttemptAt == Date(timeIntervalSince1970: 1450))
         let action = OutboxPlanner.nextWholeAction(
             for: next, credentials: Fixture.credentials(),
