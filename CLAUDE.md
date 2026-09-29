@@ -11,10 +11,12 @@ dependency check runs on the Mac build host through one script:
 
     MAC_GATE_HOST=merkur.local bin/mac-gate.sh
 
-Inside the pfadfinder-lane container the build host is the ssh alias `merkur`: the lane's key is
-bound to that alias, and `merkur.local` does not authenticate there. The same gate therefore reads:
+Inside the pfadfinder-lane container the same gate runs under the jupiter-local flock that is the
+estate-wide exclusion for Mac gates (this script's own lock is per branch and serialises nothing
+across repos), and it names the build host by the ssh alias `merkur`, the only name the container's
+key is bound to (`merkur.local` does not authenticate there):
 
-    `MAC_GATE_HOST=merkur bin/mac-gate.sh`
+    `flock /home/fabian/projects/worktrees/.wp13-gate.lock env MAC_GATE_HOST=merkur bin/mac-gate.sh`
 
 It refuses (exit 2) if the tree has no HEAD or if its remote target resolves outside
 `~/build/memos-ng-ios/gate/`, mirrors the worktree with `rsync --delete`, and runs, fail-fast:
