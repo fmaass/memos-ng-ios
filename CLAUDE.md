@@ -11,6 +11,11 @@ dependency check runs on the Mac build host through one script:
 
     MAC_GATE_HOST=merkur.local bin/mac-gate.sh
 
+Inside the pfadfinder-lane container the build host is the ssh alias `merkur`: the lane's key is
+bound to that alias, and `merkur.local` does not authenticate there. The same gate therefore reads:
+
+    `MAC_GATE_HOST=merkur bin/mac-gate.sh`
+
 It refuses (exit 2) if the tree has no HEAD or if its remote target resolves outside
 `~/build/memos-ng-ios/gate/`, mirrors the worktree with `rsync --delete`, and runs, fail-fast:
 `bin/generate.sh` (which also asserts the version keys in the generated project) → the
