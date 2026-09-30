@@ -227,9 +227,9 @@ else
 fi
 
 # --- rule 2 (the FENCE): the effects are pinned by shape ------------------------------------------
-# Stated plainly, because it is the honest boundary: 2b, 2c and 2e are DECLARATION locks, not proofs
-# of reachability. They guarantee that a new effect path cannot be added silently; the behavioural
-# half is MemosCoreTests/RefusalEpochTests and MemosOutboxTests/RefusalEpochTests.
+# Stated plainly, because it is the honest boundary: 2b, 2c, 2e and 2f are DECLARATION locks, not
+# proofs of reachability. They guarantee that a new effect path cannot be added silently; the
+# behavioural half is MemosCoreTests/RefusalEpochTests and MemosOutboxTests/RefusalEpochTests.
 
 pin() { # $1 label, $2 expected, $3 actual, $4 why
   if [ "$2" = "$3" ]; then
@@ -320,5 +320,71 @@ pin "'OutboxRepository(' constructions" 36 \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the
               stillCurrent predicate — see the classification in the MEMNG-270 design."
+
+# 2f — the chunk lane's offset HEAD is pinned BY CALLER (MEMNG-630). `resync(` reads a 401 as
+# unanswered, which is right for the chunk lane and wrong for a whole-lane file, whose HEAD goes
+# through `wholeOffsetHead(` and comes back as the typed refusal. Review re-caught a whole-lane
+# function sending its HEAD through `resync(`; the compiler cannot see that, since both take the
+# same credentials. So every line naming `resync(` but its declaration — comments included — is
+# pinned to the function it sits in, and the set must read exactly the two chunk-lane callers. The
+# enclosing function is the nearest declaration line above it, which is what a reviewer reads too.
+# The declaration is exempt by its FORM — `func resync(` where a declaration starts, after the
+# indentation and modifiers — and only that prefix is: a call whose trailing comment names the
+# declaration is still a call, and so is anything after the prefix on the declaration's own line.
+expected_resync_callers='private func complete(
+public func handle(_ result: ChunkResult) async'
+resync_sites="$(
+  awk '
+    /^[ \t]*((public|private|fileprivate|internal|nonisolated|static|override|final|@[A-Za-z]+)[ \t]+)*func [A-Za-z_]/ {
+      decl = $0
+      sub(/^[ \t]+/, "", decl)
+      sub(/[ \t]*\{[ \t]*$/, "", decl)
+    }
+    {
+      rest = $0
+      sub(/^[ \t]*((public|private|fileprivate|internal|nonisolated|static|override|final|@[A-Za-z]+)[ \t]+)*func resync\(/, "", rest)
+      if (index(rest, "resync(") > 0) {
+        printf "%d\t%s\n", NR, (decl == "" ? "(no enclosing func)" : decl)
+      }
+    }
+  ' "$outbox_engine"
+)"
+actual_resync_callers="$(printf '%s\n' "$resync_sites" | grep -v '^$' | cut -f2-)"
+pin "'resync(' sites in OutboxEngine.swift" 2 \
+  "$(printf '%s\n' "$resync_sites" | grep -c .)" \
+  "A third is a third HEAD whose 401 is read as unanswered; a whole-lane HEAD goes through
+              'wholeOffsetHead(' instead."
+if [ "$actual_resync_callers" = "$expected_resync_callers" ]; then
+  echo "REFUSAL ok (rule 2f): 'resync(' is called from the two chunk-lane functions and nowhere else"
+else
+  while IFS="$(printf '\t')" read -r line decl; do
+    [ -n "$line" ] || continue
+    if ! printf '%s\n' "$expected_resync_callers" | grep -qxF -e "$decl"; then
+      echo "REFUSAL FAIL: rule 2f — 'resync(' at OutboxEngine.swift:$line, inside '$decl',"
+      echo "              is not a pinned chunk-lane site. A whole-lane HEAD goes through"
+      echo "              'wholeOffsetHead(', which hands the 401 back as the typed refusal."
+    fi
+  done <<EOF
+$resync_sites
+EOF
+  echo "REFUSAL FAIL: rule 2f — the functions calling 'resync(' are not the pinned set."
+  echo "              expected:"
+  printf '%s\n' "$expected_resync_callers" | sed 's/^/                /'
+  echo "              found:"
+  printf '%s\n' "$resync_sites" | sed 's/^/                :/'
+  rc=1
+fi
+# The control: the whole lane's own HEAD helper is still what the whole lane calls. Without it a
+# `resync(` count that reads 2 would say nothing about where a whole-lane HEAD went. A floor, not a
+# pin — a further whole-lane HEAD through it is the right way to write one.
+whole_heads="$(grep -aF 'wholeOffsetHead(' "$outbox_engine" | grep -vF 'func ' | grep -c .)"
+if [ "$whole_heads" -ge 2 ]; then
+  echo "REFUSAL ok (rule 2f control): 'wholeOffsetHead(' is called $whole_heads times"
+else
+  echo "REFUSAL FAIL: rule 2f control — 'wholeOffsetHead(' is called $whole_heads times in"
+  echo "              OutboxEngine.swift, and at least 2 are expected (the whole lane's resume and"
+  echo "              askWhereItStands). Where did the whole lane's HEAD go?"
+  rc=1
+fi
 
 exit $rc
