@@ -697,3 +697,428 @@ struct BackgroundSchedulerEnumerationTests {
         #expect(readCurrent.offset == 400)
     }
 }
+
+/// Holds each answer on the gate its body names, and records which answers have come back out and
+/// every notice that a listed answer settled, in the order they reached it.
+private actor GatedChunkHandler: OutboxChunkHandling {
+    private let gates: [String: TestGate]
+    private(set) var returned: [String] = []
+    /// The answers' names and "wake" for each notice, in arrival order.
+    private(set) var events: [String] = []
+
+    init(_ gates: [String: TestGate]) { self.gates = gates }
+
+    var wakes: Int { events.filter { $0 == "wake" }.count }
+
+    func handle(_ result: ChunkResult) async {
+        let name = String(decoding: result.body, as: UTF8.self)
+        await gates[name]?.pass()
+        returned.append(name)
+        events.append(name)
+    }
+
+    func listedAnswerSettled() async { events.append("wake") }
+}
+
+/// A finished task leaves `session.allTasks` before its answer reaches the row: the engine's
+/// `handle` suspends on the row read first. Listed by the session alone, that chunk looked idle in
+/// the window, and a reschedule could mint a second task under the SAME identity while the first
+/// answer was still on its way — two answers racing one row.
+///
+/// Each scheduler here runs over a session holding no task and shares the delegate that session
+/// reports to, so anything `inFlight()` lists came from the delegate, not from the session.
+@Suite("An answer on its way to the row is still in flight")
+struct PendingDeliveryInFlightTests {
+    private struct Rig {
+        let scheduler: BackgroundChunkScheduler
+        let delegate: OutboxSessionDelegate
+        let session: URLSession
+
+        init() {
+            let delegate = OutboxSessionDelegate()
+            let session = URLSession(
+                configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            self.delegate = delegate
+            self.session = session
+            self.scheduler = BackgroundChunkScheduler(session: session, delegate: delegate)
+        }
+    }
+
+    private static func answer(_ identity: OutboxTaskIdentity, _ name: String) -> ChunkResult {
+        ChunkResult(identity: identity, statusCode: 200, body: Data(name.utf8))
+    }
+
+    /// Waits, bounded, for the bookkeeping a delivery's own task does after its handling returned.
+    /// A mutation that never lets it happen turns the test red instead of parking the bundle.
+    private static func eventually(_ condition: () async -> Bool) async throws -> Bool {
+        for _ in 0..<300 {
+            if await condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
+    }
+
+    @Test("an answer is listed while its handling is held, and gone once it returns")
+    func aHeldAnswerIsListedUntilItsHandlingReturns() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let held = TestGate()
+        let handler = GatedChunkHandler(["A": held])
+        await rig.delegate.attach(handler)
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 400, attempt: 1)
+
+        rig.delegate.deliver(Self.answer(identity, "A"))
+        await held.waitUntilParked()
+
+        #expect(await rig.session.allTasks.isEmpty, "the premise: the session holds no task")
+        #expect(
+            await rig.scheduler.inFlight() == [identity],
+            """
+            an answer whose handling has not returned was not listed — a reschedule in this \
+            window mints a second task under the same identity
+            """
+        )
+
+        await held.open()
+        #expect(try await Self.eventually { await handler.returned == ["A"] })
+        #expect(
+            try await Self.eventually { await rig.scheduler.inFlight().isEmpty },
+            "an answer that has been handled is still listed, so its chunk never looks idle again"
+        )
+    }
+
+    /// Two tasks can carry one identity: a 404 clears the upload without moving the attempt, and
+    /// the handler of the first then schedules the next at the same offset and attempt. The first
+    /// answer finishing must not take the second one's entry with it.
+    ///
+    /// The first arrives before adoption and is replayed; the second arrives once the handler is
+    /// attached, so both are inside `handle` at once. The replay is what `attach` awaits, so once
+    /// it has returned the first answer's bookkeeping is done — no timing involved.
+    @Test("two answers for one identity keep it listed until the second has been handled")
+    func overlappingAnswersKeepTheIdentityListedUntilTheSecondReturns() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let first = TestGate()
+        let second = TestGate()
+        let handler = GatedChunkHandler(["A": first, "B": second])
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 2)
+
+        rig.delegate.deliver(Self.answer(identity, "A"))
+        #expect(
+            await rig.scheduler.inFlight() == [identity],
+            "an answer waiting for adoption was not listed"
+        )
+
+        let adoption = Task { await rig.delegate.attach(handler) }
+        await first.waitUntilParked()
+        rig.delegate.deliver(Self.answer(identity, "B"))
+        await second.waitUntilParked()
+        #expect(
+            await rig.scheduler.inFlight() == [identity],
+            "one identity with two answers outstanding is listed once"
+        )
+
+        await first.open()
+        await adoption.value
+        #expect(await handler.returned == ["A"], "the premise: the first answer was handled")
+        #expect(
+            await handler.wakes == 0,
+            "a pass was asked for while a second answer for the identity was still on its way"
+        )
+        #expect(
+            await rig.scheduler.inFlight() == [identity],
+            """
+            the first answer's return erased the entry of a second one for the same identity \
+            that is still on its way to the row
+            """
+        )
+
+        await second.open()
+        #expect(try await Self.eventually { await handler.returned == ["A", "B"] })
+        #expect(
+            try await Self.eventually { await rig.scheduler.inFlight().isEmpty },
+            "both answers were handled and the identity is still listed"
+        )
+        #expect(
+            try await Self.eventually { await handler.wakes == 1 },
+            "the last answer for a listed identity settled after the replay and asked for no pass"
+        )
+    }
+
+    /// Long enough for a notice already on its way to land, so an assertion that none came is not
+    /// read before one could have.
+    private static func quietPeriod() async throws {
+        try await Task.sleep(for: .milliseconds(150))
+    }
+
+    /// The audit's stall, at the delegate: a pass that read the identity left the row to the
+    /// answer, so the answer's settling is what asks for the next pass.
+    @Test("a listed answer asks for one pass once its handling returns")
+    func aListedAnswerAsksForOnePass() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let held = TestGate()
+        let handler = GatedChunkHandler(["A": held])
+        await rig.delegate.attach(handler)
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 400, attempt: 1)
+
+        rig.delegate.deliver(Self.answer(identity, "A"))
+        await held.waitUntilParked()
+        #expect(await rig.scheduler.inFlight() == [identity], "the premise: a read listed it")
+        #expect(await handler.wakes == 0, "a pass was asked for before the answer was handled")
+
+        await held.open()
+        #expect(try await Self.eventually { await handler.wakes == 1 })
+        try await Self.quietPeriod()
+        #expect(await handler.events == ["A", "wake"], "one settling, one notice")
+    }
+
+    @Test("an answer no read listed asks for nothing")
+    func anUnlistedAnswerAsksForNothing() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let handler = GatedChunkHandler([:])
+        await rig.delegate.attach(handler)
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 400, attempt: 1)
+
+        rig.delegate.deliver(Self.answer(identity, "A"))
+        #expect(try await Self.eventually { await handler.returned == ["A"] })
+        try await Self.quietPeriod()
+        #expect(await handler.wakes == 0, "no pass left this row to its answer, yet one was asked")
+    }
+
+    @Test("two live answers for a listed identity: only the last one's settling asks")
+    func onlyTheLastOfTwoLiveAnswersAsks() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let first = TestGate()
+        let second = TestGate()
+        let handler = GatedChunkHandler(["A": first, "B": second])
+        await rig.delegate.attach(handler)
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 2)
+
+        rig.delegate.deliver(Self.answer(identity, "A"))
+        rig.delegate.deliver(Self.answer(identity, "B"))
+        await first.waitUntilParked()
+        await second.waitUntilParked()
+        #expect(await rig.scheduler.inFlight() == [identity], "the premise: a read listed it")
+
+        await first.open()
+        #expect(try await Self.eventually { await handler.returned == ["A"] })
+        try await Self.quietPeriod()
+        #expect(await handler.wakes == 0, "a pass was asked for with a second answer still out")
+
+        await second.open()
+        #expect(try await Self.eventually { await handler.wakes == 1 })
+        try await Self.quietPeriod()
+        #expect(await handler.events == ["A", "B", "wake"])
+    }
+
+    /// Case A of the premise gate: whatever listed a buffered answer — a pass the engine started
+    /// itself before adoption — the replay that settles it must still ask, once it is over.
+    @Test("a buffered answer a read listed is asked for when the replay is over")
+    func aListedBufferedAnswerIsAskedForAfterTheReplay() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let handler = GatedChunkHandler([:])
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 400, attempt: 1)
+
+        rig.delegate.deliver(Self.answer(identity, "A"))
+        #expect(await rig.scheduler.inFlight() == [identity], "the premise: a read listed it")
+
+        await rig.delegate.attach(handler)
+        #expect(
+            await handler.events == ["A", "wake"],
+            "the replay settled a listed answer and the pass it owed was never asked for"
+        )
+    }
+
+    /// Case B of the premise gate, live first: a live answer for the identity settles while the
+    /// replayed one is still held, and the replayed one settles last.
+    @Test("a live answer settling first leaves the ask to the replayed one, after the replay")
+    func aLiveAnswerFirstLeavesTheAskToTheReplay() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let replayed = TestGate()
+        let handler = GatedChunkHandler(["R": replayed])
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 2)
+
+        rig.delegate.deliver(Self.answer(identity, "R"))
+        #expect(await rig.scheduler.inFlight() == [identity], "the premise: a read listed it")
+        let adoption = Task { await rig.delegate.attach(handler) }
+        await replayed.waitUntilParked()
+        rig.delegate.deliver(Self.answer(identity, "L"))
+        #expect(try await Self.eventually { await handler.returned == ["L"] })
+        try await Self.quietPeriod()
+        #expect(await rig.scheduler.inFlight() == [identity], "the replayed answer is still out")
+        #expect(await handler.wakes == 0, "a pass was asked for with the replayed answer still out")
+
+        await replayed.open()
+        await adoption.value
+        #expect(await handler.events == ["L", "R", "wake"])
+    }
+
+    /// A pass asked for mid-replay would run beside it; the notice waits for the replay's end.
+    ///
+    /// The replayed identity has a second, live answer still out when the replay ends, so its own
+    /// settling cannot reach zero inside the replay: the one notice the replay's end may send is
+    /// the live answer's, and nothing else can stand in for it if that one is lost.
+    ///
+    /// Listing the live identity before the buffered answer arrives cannot be staged: no live
+    /// answer exists before `attach`, and any listing marks every counted identity. Holding the
+    /// buffered identity live past the replay is what keeps it from supplying the lost notice.
+    @Test("a listed live answer settling mid-replay asks only once the replay is over")
+    func aNoticeMidReplayWaitsForTheReplay() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let replayed = TestGate()
+        let later = TestGate()
+        let live = TestGate()
+        let handler = GatedChunkHandler(["R": replayed, "R2": later, "L": live])
+        let buffered = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 1)
+        let identity = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 400, attempt: 1)
+
+        rig.delegate.deliver(Self.answer(buffered, "R"))
+        let adoption = Task { await rig.delegate.attach(handler) }
+        await replayed.waitUntilParked()
+        rig.delegate.deliver(Self.answer(buffered, "R2"))
+        await later.waitUntilParked()
+        rig.delegate.deliver(Self.answer(identity, "L"))
+        await live.waitUntilParked()
+        #expect(await rig.scheduler.inFlight().contains(identity), "the premise: a read listed it")
+
+        await live.open()
+        #expect(
+            try await Self.eventually { await !rig.scheduler.inFlight().contains(identity) },
+            "the premise: the live answer settled"
+        )
+        try await Self.quietPeriod()
+        #expect(await handler.wakes == 0, "a pass was asked for while the replay was running")
+
+        await replayed.open()
+        await adoption.value
+        #expect(
+            await handler.events == ["L", "R", "wake"],
+            "the live answer's notice, owed during the replay, was not sent at its end"
+        )
+
+        await later.open()
+        #expect(try await Self.eventually { await handler.wakes == 2 })
+        #expect(await handler.events == ["L", "R", "wake", "R2", "wake"])
+    }
+
+    /// Owed once the first replayed answer settles, but sent only when the whole replay is over:
+    /// a notice sent between two replayed answers would start a pass beside the second.
+    @Test("a notice owed by the first of two replayed answers waits for the second")
+    func aNoticeOwedEarlyInTheReplayWaitsForItsEnd() async throws {
+        let rig = Rig()
+        defer { rig.session.invalidateAndCancel() }
+        let second = TestGate()
+        let handler = GatedChunkHandler(["B": second])
+        let listed = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 400, attempt: 1)
+        let unlisted = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 1)
+
+        rig.delegate.deliver(Self.answer(listed, "A"))
+        #expect(await rig.scheduler.inFlight() == [listed], "the premise: a read listed it")
+        rig.delegate.deliver(Self.answer(unlisted, "B"))
+
+        let adoption = Task { await rig.delegate.attach(handler) }
+        await second.waitUntilParked()
+        #expect(await handler.returned == ["A"], "the premise: the first replayed answer returned")
+        #expect(await handler.wakes == 0, "a pass was asked for between two replayed answers")
+
+        await second.open()
+        await adoption.value
+        #expect(await handler.events == ["A", "B", "wake"])
+    }
+}
+
+/// The stall the first version of this count was reverted for, end to end. The real session
+/// delegate hands a 409 to the real engine. The handler asks the server where the upload stands,
+/// finds a network it may not use and parks the capture — `OutboxEngine.handle`, the
+/// `permitsNetwork()` guard of its ask-the-server branch (OutboxEngine.swift:1177-1181 on
+/// c5a2254) — while a pass that listed the answer as in flight left the row to it. Nothing else
+/// happens after that, and the capture must move on regardless.
+/// Every list the engine's passes read from the delegate, in order.
+private final class Enumerations: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lists: [[OutboxTaskIdentity]] = []
+
+    func record(_ listed: [OutboxTaskIdentity]) { lock.withLock { lists.append(listed) } }
+
+    var all: [[OutboxTaskIdentity]] { lock.withLock { lists } }
+}
+
+@Suite("A row a pass left to its answer is planned again")
+struct ListedAnswerStallTests {
+    @Test("a capture parked by an answer a pass had listed moves on with no other trigger")
+    func aParkedCaptureAPassListedMovesOn() async throws {
+        let write = TestGate()
+        let harness = try await Harness.make(
+            bytes: 1000,
+            http: .standard(chunkSize: 400),
+            holdingFirstSave: write,
+            // The handler's read is the first and forbids the network; every read after it allows
+            // it. Nothing calls `move`, so no path change asks for a pass.
+            network: StubNetworkPath(.cellular, thenAfterOneRead: .wifi),
+            allowsMobileData: false
+        )
+        defer { harness.cleanUp() }
+        let delegate = OutboxSessionDelegate()
+        let session = URLSession(
+            configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let listing = BackgroundChunkScheduler(session: session, delegate: delegate)
+        // What the engine's own passes enumerated, recorded as they read it: the test itself never
+        // reads the delegate's listing, because a read is what marks an answer as left to it.
+        let enumerated = Enumerations()
+        harness.scheduler.alsoListing = {
+            let listed = await listing.inFlight()
+            enumerated.record(listed)
+            return listed
+        }
+
+        var job = harness.job
+        job.files[0].uploadUID = "u1"
+        job.files[0].chunkSize = 400
+        job.files[0].bytesConfirmed = 400
+        job.files[0].uploadAttempt = 1
+        job.state = .uploading
+        job.nextAttemptAt = harness.now
+        try await harness.repository.save(job)
+        let seeded = try #require(await harness.reload())
+        let identity = OutboxTaskIdentity(
+            jobID: job.id, fileID: job.files[0].id, offset: 400, attempt: 1)
+
+        // The prerequisites, asserted rather than assumed: a chunk-lane row, so no whole-lane
+        // deadline can arm the engine's timer, and no pass running or asked for once the empty
+        // adoption has returned.
+        #expect(seeded.lane == .chunk)
+        #expect(!OutboxEngine.claimsWhole(seeded))
+        await delegate.attach(harness.engine)
+        let waited = Counter()
+        await harness.engine.untilQuiescent(parked: { waited.increment() })
+        #expect(waited.count == 0, "construction or the empty adoption left a pass to come")
+
+        delegate.deliver(ChunkResult(identity: identity, statusCode: 409))
+        // The park's write, held unwritten.
+        await write.waitUntilParked()
+
+        // The one pass, standing for the trigger that started it. The held write does not stop it
+        // finishing: it lists the answer, adopts it and leaves the row exactly as it found it.
+        #expect(enumerated.all.isEmpty, "the premise: nothing enumerated before the pass")
+        await harness.engine.drain()
+        #expect(enumerated.all == [[identity]], "the pass did not see the answer out")
+        #expect(harness.scheduler.uploads.isEmpty, "the pass re-sent a chunk whose answer was out")
+        #expect(await harness.reload() == seeded, "the pass moved a row it had left to the answer")
+
+        await write.open()
+        // Nothing but reads from here on.
+        var moved = false
+        for _ in 0..<300 where !moved {
+            moved = harness.scheduler.uploads.contains { $0.identity.jobID == job.id }
+            if !moved { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(moved, "the capture stalled: parked by an answer a pass had left it to")
+    }
+}

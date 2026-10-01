@@ -1070,6 +1070,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         requestDrain()
     }
 
+    /// A chunk answer a pass may have left its row to has settled, and the row may be sitting with
+    /// no task: plan it again. A request, never an awaited drain — the caller is the session's
+    /// delegate.
+    public func listedAnswerSettled() async {
+        requestDrain()
+    }
+
     // MARK: - chunk answers
 
     /// Called by the background session, possibly in a process launched for this alone.

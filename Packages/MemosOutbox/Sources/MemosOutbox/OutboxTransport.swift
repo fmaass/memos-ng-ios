@@ -93,6 +93,10 @@ public struct ChunkResult: Sendable, Equatable {
 /// Who is told when a chunk finishes.
 public protocol OutboxChunkHandling: Sendable {
     func handle(_ result: ChunkResult) async
+    /// An answer an `inFlight()` read listed while it was being handled has settled: a pass may
+    /// have left its row to that answer, so the row is planned again. A request, never an awaited
+    /// drain.
+    func listedAnswerSettled() async
 }
 
 /// The background session, as the drain needs to see it.

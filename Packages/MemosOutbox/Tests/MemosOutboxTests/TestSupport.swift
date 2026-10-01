@@ -140,7 +140,16 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
             return taken
         }
         await after?()
-        return listed
+        let extra = lock.withLock { alsoListed }
+        return listed + (await extra?() ?? [])
+    }
+
+    private var alsoListed: (@Sendable () async -> [OutboxTaskIdentity])?
+    /// A second source for `inFlight()`, read after the scripted list: how a test puts the
+    /// production delegate's own listing in front of the engine.
+    var alsoListing: (@Sendable () async -> [OutboxTaskIdentity])? {
+        get { lock.withLock { alsoListed } }
+        set { lock.withLock { alsoListed = newValue } }
     }
 
     /// Run INSIDE `inFlight()` once the list is taken but before it is handed back, so a test can

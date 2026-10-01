@@ -586,6 +586,8 @@ actor RecordingChunkHandler: OutboxChunkHandling {
     private(set) var received: [ChunkResult] = []
 
     func handle(_ result: ChunkResult) async { received.append(result) }
+
+    func listedAnswerSettled() async {}
 }
 
 @Suite("Adoption before draining")
