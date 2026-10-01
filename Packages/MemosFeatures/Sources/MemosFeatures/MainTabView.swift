@@ -19,7 +19,7 @@ struct MainTabView: View {
     @State private var jump = MemoJump()
 
     /// Opens on the Timeline, the middle tab (plan page 3929 decision 11). A test that is about
-    /// another tab's screen under the real dock opens there instead.
+    /// another tab's screen under the real bar opens there instead.
     init(opening tab: MainTab = .timeline) {
         _selection = State(initialValue: tab)
     }
@@ -69,8 +69,8 @@ struct MainTabView: View {
     private var tabs: some View {
         // The bar IS `MainTab.allCases`: its content and its order are the enum's, so a case added
         // without a screen is a compile error rather than a tab nobody can reach, and a test that
-        // reads the enum reads what a person touches. The dock that draws it is `DockedTabs`.
-        DockedTabs(selection: $selection) { tab in
+        // reads the enum reads what a person touches. The tabs that hold it are `MainTabs`.
+        MainTabs(selection: $selection) { tab in
             screen(for: tab)
         }
         .environment(jump)
@@ -88,5 +88,17 @@ struct MainTabView: View {
         case .library: MediaLibraryView()
         case .places: PlacesView()
         }
+    }
+}
+
+extension View {
+    /// A tab root's title: stated to the navigation bar, LARGE (MEMNG-666).
+    ///
+    /// One modifier for every root rather than two lines at each, so that "every tab root stands
+    /// under a large title" is a statement a reader finds once — the system bar under a root and
+    /// the large title over it are what make the app read like every other app on the phone.
+    func tabRootTitle(_ title: String) -> some View {
+        navigationTitle(title)
+            .navigationBarTitleDisplayMode(.large)
     }
 }

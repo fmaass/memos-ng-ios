@@ -52,18 +52,25 @@ extension View {
     /// A destination in one of the app's navigation stacks, drawn with the chrome its route asks
     /// for.
     /// The route's answer is read HERE rather than inside the closure, and the closure carries
-    /// only a `Bool` away with it, so what the destination does to the dock cannot disagree with
-    /// the route it was pushed for. The system tab bar is hidden on every destination as on every
-    /// tab root: the dock replaces it, and a pushed screen must not bring it back.
+    /// only a `Bool` away with it, so what the destination does to the bar cannot disagree with
+    /// the route it was pushed for. A screen inside its tab keeps the system tab bar under it, as
+    /// every app's pushed screens do; a screen that takes the tab over hides it while it is up,
+    /// on the destination itself as well as through its claim, so the bar cannot come back under
+    /// it between the push and the claim.
     func stackDestination<Route: StackRoute, Destination: View>(
         for route: Route.Type,
         @ViewBuilder destination: @escaping (Route) -> Destination
     ) -> some View {
         let takesOver = !Route.chrome.showsDock
         return navigationDestination(for: route) { value in
-            destination(value)
-                .toolbarVisibility(.hidden, for: .tabBar)
-                .modifier(DockTakeover(takesOver: takesOver))
+            if takesOver {
+                destination(value)
+                    .toolbarVisibility(.hidden, for: .tabBar)
+                    .modifier(DockTakeover(takesOver: true))
+            } else {
+                destination(value)
+                    .modifier(DockTakeover(takesOver: false))
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import SwiftUI
 import Testing
 
 @testable import MemosFeatures
@@ -19,6 +20,68 @@ struct DockTests {
         #expect(!dock.showsSegment(on: .places))
         dock.send(.leaveLibrary)
         #expect(dock.mode == .tabs)
+    }
+
+    @Test("the system bar stands aside for the Library's segment there alone, and for a takeover")
+    func systemBarStandsAside() {
+        let dock = AppDock()
+        // At rest the bar is the system's on every root (MEMNG-666).
+        #expect(MainTab.allCases.allSatisfy { dock.showsSystemBar(on: $0) })
+
+        dock.send(.tapActive(.library))
+        #expect(!dock.showsSystemBar(on: .library), "the bar is drawn beside the segment")
+        #expect(dock.showsSystemBar(on: .timeline))
+        #expect(dock.showsSystemBar(on: .places))
+
+        dock.send(.tapActive(.library))
+        #expect(dock.showsSystemBar(on: .library), "the Library icon did not give the bar back")
+
+        let settings = UUID()
+        dock.claim(settings)
+        #expect(MainTab.allCases.allSatisfy { !dock.showsSystemBar(on: $0) })
+        dock.release(settings)
+        #expect(MainTab.allCases.allSatisfy { dock.showsSystemBar(on: $0) })
+    }
+
+    @Test("a press on another tab moves the selection; on the tab showing it is the dock's tap")
+    func pressingTheBar() {
+        let dock = AppDock()
+        var selection = MainTab.timeline
+        var writes: [MainTab] = []
+        let root = Binding(
+            get: { selection },
+            set: { tab in
+                writes.append(tab)
+                selection = tab
+            }
+        )
+        let pressing = MainTabs<EmptyView>.pressing(selection: root, dock: dock)
+
+        pressing.wrappedValue = .library
+        #expect(selection == .library)
+        #expect(dock.mode == .tabs, "a switch to the Library collapsed it")
+
+        // The Library pressed while it is showing: the dock's tap, and no write.
+        pressing.wrappedValue = .library
+        #expect(writes == [.library], "a re-selection wrote the selection")
+        #expect(dock.mode == .segment, "the re-selection never reached the dock")
+
+        pressing.wrappedValue = .library
+        #expect(dock.mode == .tabs)
+
+        // The Timeline pressed while it is showing is heard and changes nothing.
+        pressing.wrappedValue = .timeline
+        pressing.wrappedValue = .timeline
+        #expect(selection == .timeline)
+        #expect(writes == [.library, .timeline])
+        #expect(dock.mode == .tabs)
+    }
+
+    @Test("the system bar folds on scroll on every tab but the Library, which has its chrome")
+    func minimisesEverywhereButTheLibrary() {
+        #expect(!MainTabs<EmptyView>.minimizesOnScroll(on: .library))
+        #expect(MainTabs<EmptyView>.minimizesOnScroll(on: .timeline))
+        #expect(MainTabs<EmptyView>.minimizesOnScroll(on: .places))
     }
 
     @Test("a claim delivered twice claims once, and two claims need two releases")

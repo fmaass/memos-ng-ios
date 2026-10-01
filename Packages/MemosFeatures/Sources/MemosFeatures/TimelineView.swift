@@ -81,13 +81,11 @@ public struct TimelineView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
-            // No large title. The app's own name over its only screen told nobody anything, and a
-            // large title spends a whole band of the screen before the first memo — on the surface
-            // where the content is the point. The toolbar keeps both its controls exactly where
-            // they were, and the day headings become what the top of the scroll reads as, which is
-            // what they already looked like they were.
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
+            // A large title, as every tab root has one now that the bar under them is the
+            // system's (MEMNG-666): it names the tab the bar has selected, and it folds into the
+            // inline bar as the first memo scrolls up under it. The toolbar keeps both its
+            // controls exactly where they were.
+            .tabRootTitle(MainTab.timeline.title)
             // `stackDestination`, not `navigationDestination`: what the tab bar does under a
             // pushed screen is the route's to say, and saying it here is how Settings came to be
             // drawn under the Timeline and Library icons it has nothing to do with (MEMNG-220).

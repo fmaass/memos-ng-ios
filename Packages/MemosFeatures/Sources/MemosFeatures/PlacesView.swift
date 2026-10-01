@@ -14,9 +14,18 @@ struct PlacesView: View {
     @Environment(SessionStore.self) private var session
 
     var body: some View {
-        PlacesScreen()
-            .id(session.state.user?.subject)
+        // A stack of its own for the one thing it carries: the tab root's large title, which a
+        // root stands under on every tab now that the bar is the system's (MEMNG-666). The map
+        // still runs under the bars, edge to edge.
+        NavigationStack {
+            PlacesScreen()
+                .id(session.state.user?.subject)
+                .tabRootTitle(MainTab.places.title)
+        }
     }
+
+    /// What the screen's full-size root is found by in a test (MEMNG-605).
+    static let rootIdentifier = "places-root"
 }
 
 /// The screen itself, for as long as one person is signed in.
@@ -50,6 +59,21 @@ private struct PlacesScreen: View {
                 // Before the store exists there is nothing to say about the library yet.
                 ProgressView()
             }
+        }
+        // The whole screen from the first layout, in every state: a spinner sized to itself is a
+        // root the chrome around it was laid out against, which is how the bar came to stand in
+        // the middle of the screen until the map arrived (MEMNG-605). The spinner, the notices
+        // and the map are all drawn inside this one frame.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The frame made readable: a container element reports the union of what it holds, which
+        // while loading is the spinner alone, so the size is carried by a leaf behind everything
+        // that takes the frame's whole size and no touch.
+        .background {
+            Color.clear
+                .allowsHitTesting(false)
+                .accessibilityElement()
+                .accessibilityLabel(MainTab.places.title)
+                .accessibilityIdentifier(PlacesView.rootIdentifier)
         }
         // Outside the view that presents the sheet, for the reason the library's cover is outside
         // its navigation stack: two presentations declared on one view is how one of them silently

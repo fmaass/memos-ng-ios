@@ -17,11 +17,11 @@ private final class TestPath {
     var path = NavigationPath()
 }
 
-/// The signed-in app's shape in miniature: the real tabs under the real dock, a stack inside the
-/// Timeline, and the app's own way of declaring what that stack pushes.
+/// The signed-in app's shape in miniature: the real tabs under the real system bar, a stack inside
+/// the Timeline, and the app's own way of declaring what that stack pushes.
 ///
 /// What is INSIDE each tab and destination is deliberately a stand-in, and only that. Everything
-/// that decides the question is production code — `DockedTabs`, the dock it draws, the real
+/// that decides the question is production code — `MainTabs`, the bar it stands aside for, the real
 /// `SettingsRoute` and `MemoRoute`, the real `stackDestination`, and the chrome each route
 /// declares.
 private struct ChromeHarness: View {
@@ -30,7 +30,7 @@ private struct ChromeHarness: View {
     var body: some View {
         // The selection is constant because nothing here switches tabs — the question is what the
         // dock does while the Timeline pushes.
-        DockedTabs(selection: .constant(MainTab.timeline)) { tab in
+        MainTabs(selection: .constant(MainTab.timeline)) { tab in
             switch tab {
             case .timeline:
                 NavigationStack(path: $nav.path) {
@@ -127,29 +127,20 @@ private final class HostedTabs {
         } while Date() < deadline
     }
 
-    /// Whether the dock is under what is on screen right now: the tab named `title` is offered
-    /// by an element that reads it out, sits in the bottom band of the window where the dock is
-    /// drawn, and is on screen at all.
-    ///
-    /// Read from the accessibility tree, because the dock is SwiftUI all the way down and has no
-    /// view of its own to find. By equality, so the stand-in screens' lower-case "the timeline"
-    /// cannot answer for the tab.
+    /// Whether the bar under what is on screen right now offers the tab named `title`: the
+    /// system tab bar is on screen and one of its items reads it (MEMNG-666). By equality, so the
+    /// stand-in screens' lower-case "the timeline" cannot answer for the tab.
     func showsTab(_ title: String) -> Bool {
-        var found: [NSObject] = []
-        Self.collect(labelled: title, in: window, into: &found)
-        let band = window.bounds.height * 0.8
-        return found.contains { element in
-            let frame = element.accessibilityFrame
-            return !frame.isEmpty && frame.midY > band && frame.intersects(window.bounds)
-        }
+        guard systemTabBarShows, let bar = Self.tabBar(in: window) else { return false }
+        return bar.items?.contains { $0.title == title } ?? false
     }
 
-    /// Whether the dock is drawn: both of the harness's tabs the ticket names are offered in it.
+    /// Whether the bar is drawn: both of the harness's tabs the ticket names are offered in it.
     var dockShows: Bool {
         showsTab(MainTab.timeline.title) && showsTab(MainTab.library.title)
     }
 
-    /// Whether the SYSTEM tab bar is on screen. The dock replaces it, so it never should be.
+    /// Whether the SYSTEM tab bar is on screen.
     ///
     /// Not `UITabBar` merely existing: SwiftUI keeps the bar in the hierarchy and takes it off the
     /// screen, so the question is geometric as well as a matter of flags — is any part of it still
@@ -208,7 +199,7 @@ private final class HostedTabs {
     }
 }
 
-/// Whether the app's dock is under a pushed screen, asked of the real hosted `DockedTabs` rather
+/// Whether the app's tab bar is under a pushed screen, asked of the real hosted `MainTabs` rather
 /// than of the value that decides it.
 ///
 /// `SettingsView` itself cannot be hosted from this bundle — it reads `SessionStore` out of the
@@ -226,14 +217,14 @@ struct StackChromeTests {
         defer { screen.tearDown() }
         screen.settle(waitingFor: { screen.dockShows })
 
-        // The control. Without it, "the dock is gone" below would be equally true of a harness
-        // that never managed to draw one — and it is what says the dock being tracked is THE dock,
+        // The control. Without it, "the bar is gone" below would be equally true of a harness
+        // that never managed to draw one — and it is what says the bar being tracked is THE bar,
         // the one offering the two tabs the ticket names.
         #expect(screen.dockShows, "on the timeline — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
         #expect(screen.showsTab(MainTab.library.title))
-        // The system bar the dock replaced is not drawn beside it.
-        #expect(!screen.systemTabBarShows)
+        // The bar under a tab root is the system's (MEMNG-666).
+        #expect(screen.systemTabBarShows)
 
         withoutAnimation { nav.path.append(SettingsRoute()) }
         screen.settle(waitingFor: { !screen.showsTab(MainTab.library.title) })
@@ -248,7 +239,7 @@ struct StackChromeTests {
         #expect(screen.dockShows, "back on the timeline — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
         #expect(screen.showsTab(MainTab.library.title))
-        #expect(!screen.systemTabBarShows)
+        #expect(screen.systemTabBarShows)
     }
 
     @Test("a memo pushed from the timeline keeps the dock under it")
@@ -268,7 +259,7 @@ struct StackChromeTests {
 
         #expect(screen.dockShows, "on the memo — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
-        #expect(!screen.systemTabBarShows, "the memo brought the system tab bar back")
+        #expect(screen.systemTabBarShows, "the memo took the system tab bar away")
     }
 
     @Test("which screens take the dock over is said once, on the route")

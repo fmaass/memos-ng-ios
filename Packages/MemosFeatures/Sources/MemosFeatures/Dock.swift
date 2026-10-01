@@ -30,6 +30,12 @@ final class AppDock {
 
     var isTakenOver: Bool { !takeovers.isEmpty }
 
+    /// Whether the system tab bar is drawn under `tab`: on every root at rest, and not while the
+    /// Library's segment stands in its place or a screen has taken the whole app over.
+    func showsSystemBar(on tab: MainTab) -> Bool {
+        !isTakenOver && !showsSegment(on: tab)
+    }
+
     func claim(_ id: UUID) { takeovers.insert(id) }
 
     func release(_ id: UUID) { takeovers.remove(id) }
@@ -103,76 +109,19 @@ final class LibraryScopeChoice {
     }
 }
 
-/// The app's one-row bottom bar (plan page 3929 decisions 8 and 11).
+/// The Library's collapsed chrome (plan page 3929 decision 8): the Library icon beside
+/// Years | Months | All, drawn in the system tab bar's place while the Library is in its segment.
 ///
-/// The tab pill everywhere — icon plus label, the chosen tab filled — and, inside the Library once
-/// it has been scrolled, the Library icon beside Years | Months | All. A tap on the chosen tab does
-/// not navigate: on the Library it toggles the two states, so Years and Months stay reachable on a
-/// library too short to scroll.
-struct DockBar: View {
-    @Binding var selection: MainTab
+/// Everything else the bar used to draw by hand is the system's now (MEMNG-666): the tabs, their
+/// glass and the selection's morph between them. This is the one part the system bar cannot be —
+/// it has no state in which it turns into a picker — so it stays the app's, on the Library alone,
+/// and it gives the bar back through its icon.
+struct LibrarySegmentBar: View {
     let dock: AppDock
     let scope: LibraryScopeChoice
 
     var body: some View {
         HStack(spacing: DesignTokens.Space.tight) {
-            if dock.showsSegment(on: selection) {
-                segment
-            } else {
-                tabs
-            }
-        }
-        .padding(DesignTokens.Space.tight)
-        .glassEffect(.regular, in: .capsule)
-        .padding(.horizontal, DesignTokens.Space.roomy)
-        .padding(.bottom, DesignTokens.Space.tight)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(Self.identifier)
-    }
-
-    /// What the dock is found by, in a test and by VoiceOver's rotor alike.
-    static let identifier = "app-dock"
-
-    private var tabs: some View {
-        ForEach(MainTab.allCases) { tab in
-            let chosen = tab == selection
-            Button {
-                if chosen {
-                    dock.send(.tapActive(tab))
-                } else {
-                    selection = tab
-                }
-            } label: {
-                VStack(spacing: DesignTokens.Space.hair) {
-                    Image(systemName: tab.symbol)
-                        .symbolVariant(chosen ? .fill : .none)
-                        .font(.body)
-                    Text(tab.title)
-                        .font(.caption2.weight(.medium))
-                }
-                .frame(minWidth: 72)
-                .padding(.vertical, DesignTokens.Space.tight)
-                .padding(.horizontal, DesignTokens.Space.regular)
-                .foregroundStyle(
-                    chosen ? AnyShapeStyle(DesignTokens.accent) : AnyShapeStyle(.secondary)
-                )
-                .background {
-                    if chosen {
-                        Capsule().fill(DesignTokens.accent.opacity(0.15))
-                    }
-                }
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            // A label, not `.accessibilityElement(children: .ignore)`: that would put a new element
-            // in the button's place, one that reads the title and takes no press.
-            .accessibilityLabel(tab.title)
-            .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : [.isButton])
-        }
-    }
-
-    private var segment: some View {
-        Group {
             Button {
                 dock.send(.tapActive(.library))
             } label: {
@@ -212,43 +161,87 @@ struct DockBar: View {
                 .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : [.isButton])
             }
         }
+        .padding(DesignTokens.Space.tight)
+        // Interactive, as the system bar's own glass is: it answers a press with the glass's
+        // light and give, which the static material cannot (MEMNG-604 #6).
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .padding(.horizontal, DesignTokens.Space.roomy)
+        .padding(.bottom, DesignTokens.Space.tight)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Self.identifier)
     }
+
+    /// What the chrome is found by, in a test and by VoiceOver's rotor alike.
+    static let identifier = "library-segment"
 }
 
-/// The three tabs, each with its own navigation stack and scroll position, under the dock.
+/// The three tabs, each with its own navigation stack and scroll position, under the SYSTEM tab
+/// bar (MEMNG-666).
 ///
-/// A `TabView` still holds the tabs — it is what keeps each one's stack alive while another is on
-/// screen, and what loads a tab only once it is first chosen — but its own bar is hidden: the
-/// system bar cannot turn into the Library's segment. The dock sits in each tab's bottom safe-area
-/// inset, OUTSIDE the tab's navigation stack, so it stays put while a memo is pushed, and the last
-/// row of every scroll view stops above it rather than under it.
-struct DockedTabs<Screen: View>: View {
+/// The bar is the `TabView`'s own, so iOS draws its Liquid Glass, the selection's morph between
+/// tabs and its minimising on scroll itself — none of which a bar drawn by hand can borrow. The
+/// app decides only WHEN it stands aside: under the Library's segment, and under a screen that
+/// takes the whole app over (`AppDock.showsSystemBar(on:)`). The segment sits in the Library tab's
+/// bottom safe-area inset, outside its navigation stack, so the last row of every scroll view
+/// stops above it rather than under it.
+struct MainTabs<Screen: View>: View {
     @Binding var selection: MainTab
     @ViewBuilder let screen: (MainTab) -> Screen
     @State private var dock = AppDock()
     @State private var scope = LibraryScopeChoice()
 
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: Self.pressing(selection: $selection, dock: dock)) {
             ForEach(MainTab.allCases) { tab in
                 Tab(tab.title, systemImage: tab.symbol, value: tab) {
                     screen(tab)
-                        .toolbarVisibility(.hidden, for: .tabBar)
+                        // A condition, never a constant: on every root at rest the bar is the
+                        // system's to draw, and only the dock's rule takes it away.
+                        .toolbarVisibility(
+                            dock.showsSystemBar(on: tab) ? .automatic : .hidden,
+                            for: .tabBar
+                        )
                         .safeAreaInset(edge: .bottom, spacing: 0) {
-                            if !dock.isTakenOver {
-                                DockBar(selection: $selection, dock: dock, scope: scope)
+                            if dock.showsSegment(on: tab), !dock.isTakenOver {
+                                LibrarySegmentBar(dock: dock, scope: scope)
                             }
                         }
                 }
             }
         }
+        .tabBarMinimizeBehavior(Self.minimizesOnScroll(on: selection) ? .onScrollDown : .never)
         .environment(dock)
         .environment(scope)
-        // Every way off the Library — a tap in the dock or a memo jump from the viewer — resets it,
+        // Every way off the Library — a tap in the bar or a memo jump from the viewer — resets it,
         // so coming back finds the tabs.
         .onChange(of: selection) { _, now in
             if now != .library { dock.send(.leaveLibrary) }
         }
+    }
+
+    /// Whether the system bar folds to its selected tab while `tab` scrolls down. Everywhere but
+    /// the Library, which collapses to its own chrome instead: a bar left minimised under that
+    /// chrome would come back folded when the Library icon gives it back, and the icon's tap is
+    /// meant to show Library | Timeline | Places at once (MEMNG-653).
+    static func minimizesOnScroll(on tab: MainTab) -> Bool {
+        tab != .library
+    }
+
+    /// The selection the `TabView` is handed, pressed the way the system bar presses it: a tap on
+    /// another tab is a set of that tab, and a tap on the tab already showing is a set of the value
+    /// the selection already holds. The first moves the selection; the second is the dock's
+    /// `tapActive` and writes nothing — on the Library it is what collapses the bar to the segment.
+    static func pressing(selection: Binding<MainTab>, dock: AppDock) -> Binding<MainTab> {
+        Binding(
+            get: { selection.wrappedValue },
+            set: { tab in
+                if tab == selection.wrappedValue {
+                    dock.send(.tapActive(tab))
+                } else {
+                    selection.wrappedValue = tab
+                }
+            }
+        )
     }
 }
 

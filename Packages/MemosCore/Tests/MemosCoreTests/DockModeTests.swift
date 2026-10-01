@@ -27,11 +27,16 @@ struct DockModeTests {
         #expect(DockMode.segment.after(.scroll(y: 5000, tab: .library)) == .segment)
     }
 
-    @Test("returns to tabs at the top of the Library")
-    func returnsToTabsAtTheTop() {
-        #expect(DockMode.segment.after(.scroll(y: 0, tab: .library)) == .tabs)
-        // Rubber-banding reports a negative offset at the top.
-        #expect(DockMode.segment.after(.scroll(y: -40, tab: .library)) == .tabs)
+    @Test("keeps the segment at the top of the Library: only the icon gives the tabs back")
+    func keepsTheSegmentAtTheTop() {
+        // MEMNG-653: a segment's tap brings a scroll view standing at its top, and rubber-banding
+        // reports a negative offset there; neither may hand the bar back.
+        for y in [0, -40, 1, threshold] {
+            #expect(DockMode.segment.after(.scroll(y: y, tab: .library)) == .segment, "y=\(y)")
+        }
+        // At the top before any scroll, the tabs stay the tabs.
+        #expect(DockMode.tabs.after(.scroll(y: 0, tab: .library)) == .tabs)
+        #expect(DockMode.tabs.after(.scroll(y: -40, tab: .library)) == .tabs)
     }
 
     @Test("leaves the mode unchanged between the top and the threshold")

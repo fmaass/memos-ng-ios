@@ -346,7 +346,8 @@ extension MediaImageLoaderTests {
             && frame.intersects(window.bounds)
     }
 
-    /// The labels among `titles` the dock reads out right now.
+    /// The labels among `titles` the foot of the window reads out right now: the system tab
+    /// bar's items while it is on screen (MEMNG-666), and the Library's segment drawn in its place.
     private static func dockLabels(_ titles: [String], in window: UIWindow) -> Set<String> {
         var shown: Set<String> = []
         for title in titles {
@@ -354,7 +355,65 @@ extension MediaImageLoaderTests {
             elements(labelled: title, in: window, into: &found)
             if found.contains(where: { isInDock($0, window: window) }) { shown.insert(title) }
         }
+        if let bar = systemTabBarOnScreen(in: window) {
+            for title in bar.items?.compactMap(\.title) ?? [] where titles.contains(title) {
+                shown.insert(title)
+            }
+        }
         return shown
+    }
+
+    /// The system tab bar, when it is on screen: nothing up its chain of superviews hiding it,
+    /// and some part of it inside the window.
+    private static func systemTabBarOnScreen(in window: UIWindow) -> UITabBar? {
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let bar = view as? UITabBar {
+                var node: UIView? = bar
+                while let current = node {
+                    if current.isHidden || current.alpha < 0.01 { return nil }
+                    node = current.superview
+                }
+                let frame = bar.convert(bar.bounds, to: window)
+                return !frame.isEmpty && frame.intersects(window.bounds) ? bar : nil
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    /// Presses `tab` through the controller UIKit built for the system bar, the way a tap on its
+    /// item does — on the tab already showing, a re-selection the `TabView` hears.
+    private static func pressTab(_ tab: MainTab, in window: UIWindow) -> Bool {
+        var stack: [UIViewController] = window.rootViewController.map { [$0] } ?? []
+        while let controller = stack.popLast() {
+            if let tabs = controller as? UITabBarController,
+                let index = tabs.tabBar.items?.firstIndex(where: { $0.title == tab.title }),
+                let controllers = tabs.viewControllers, controllers.indices.contains(index)
+            {
+                let target = controllers[index]
+                let delegate = tabs.delegate
+                guard delegate?.tabBarController?(tabs, shouldSelect: target) ?? true else {
+                    return false
+                }
+                tabs.selectedViewController = target
+                delegate?.tabBarController?(tabs, didSelect: target)
+                return true
+            }
+            stack.append(contentsOf: controller.children)
+        }
+        return false
+    }
+
+    /// On the test host's own window scene: a window belonging to no scene never completes the
+    /// appearance transitions the system bar's hiding and showing ride on (`StackChromeTests`).
+    private static func sceneWindow() -> UIWindow {
+        let frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
+        guard let scene = scene as? UIWindowScene else { return UIWindow(frame: frame) }
+        let window = UIWindow(windowScene: scene)
+        window.frame = frame
+        return window
     }
 
     /// Every segmented control in the navigation bar. The Library's toolbar used to carry the
@@ -443,7 +502,7 @@ extension MediaImageLoaderTests {
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_segment")
         #expect(session.state.user?.subject == SegmentWire.outgoing, "precondition: signed in")
 
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        let window = Self.sceneWindow()
         window.rootViewController = UIHostingController(
             rootView: MainTabView(opening: .library).environment(session))
         window.makeKeyAndVisible()
@@ -564,6 +623,80 @@ extension MediaImageLoaderTests {
         }
     }
 
+    /// MEMNG-653, as Photos does it: once the Library has collapsed to its icon beside
+    /// Years | Months | All, neither a segment's tap nor the page's top hands the bar back to the
+    /// tabs. The Library icon is the one gesture that does, and the Library pressed again on the
+    /// bar collapses it once more, on the segment that was chosen.
+    @Test("the Library's collapsed chrome stays through segment taps until its icon is tapped")
+    func collapsedChromeStaysUntilTheIcon() async {
+        let wire = SegmentTransport()
+        await withTransport(CoverProbe()) {
+            // Scrolled past the threshold and switched to Years in the collapsed chrome.
+            let (_, window) = await hostYears(wire)
+            defer {
+                wire.release()
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            let tabs = MainTab.allCases.map(\.title)
+            let segment = LibraryScope.allCases.map(\.label)
+            let collapsed = Set(segment + [MainTab.library.title])
+
+            // Years, then All, each in a scroll view of its own standing at its top.
+            var afterYears: Set<String> = []
+            for _ in 0..<40 {
+                await segmentSettle(window, turns: 1)
+                afterYears = Self.dockLabels(tabs + segment, in: window)
+            }
+            #expect(afterYears == collapsed, "Years handed the bar back: it reads \(afterYears)")
+            #expect(Self.systemTabBarOnScreen(in: window) == nil, "the tab bar is up over Years")
+
+            let all = Self.dockElement("All", in: window)?.accessibilityActivate() == true
+            #expect(all, "the chrome's All took no press")
+            var afterAll: Set<String> = []
+            for _ in 0..<40 {
+                await segmentSettle(window, turns: 1)
+                afterAll = Self.dockLabels(tabs + segment, in: window)
+            }
+            #expect(afterAll == collapsed, "All handed the bar back: it reads \(afterAll)")
+
+            // Down and back to the very top of All: the top is no gesture either.
+            _ = Self.scroll(window, by: DockMode.segmentThreshold * 8)
+            await segmentSettle(window, turns: 5)
+            let moved = Self.scroll(window, by: 0)
+            #expect(moved > 0, "no scroll view to bring back to its top")
+            var atTop: Set<String> = []
+            for _ in 0..<40 {
+                await segmentSettle(window, turns: 1)
+                atTop = Self.dockLabels(tabs + segment, in: window)
+            }
+            #expect(atTop == collapsed, "the top of All handed the bar back: it reads \(atTop)")
+
+            // The Library icon, and only it, gives the tabs back.
+            let icon = Self.dockElement(MainTab.library.title, in: window)
+            let pressed = icon?.accessibilityActivate() == true
+            #expect(pressed, "the chrome's Library icon took no press")
+            var expanded: Set<String> = []
+            for _ in 0..<80 where expanded != Set(tabs) {
+                await segmentSettle(window, turns: 1)
+                expanded = Self.dockLabels(tabs + segment, in: window)
+            }
+            #expect(expanded == Set(tabs), "the icon left the foot reading \(expanded)")
+            #expect(Self.systemTabBarOnScreen(in: window) != nil, "the icon gave no tab bar back")
+
+            // The Library pressed again on the bar: collapsed once more, on All.
+            #expect(Self.pressTab(.library, in: window), "the bar has no Library to press")
+            var again: Set<String> = []
+            for _ in 0..<80 where again != collapsed {
+                await segmentSettle(window, turns: 1)
+                again = Self.dockLabels(tabs + segment, in: window)
+            }
+            #expect(again == collapsed, "the Library pressed again left \(again)")
+            let chosen = Self.dockElement("All", in: window)?.accessibilityTraits
+            #expect(chosen?.contains(.selected) == true, "the chrome came back off All")
+        }
+    }
+
     /// The value a day heading reads out, or nil while no heading of that name is on screen.
     private static func headingValue(_ label: String, in window: UIWindow) -> String? {
         var found: [NSObject] = []
@@ -592,7 +725,7 @@ extension MediaImageLoaderTests {
             await session.enteredForeground()
             await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_refresh")
             #expect(session.state.user?.subject == SegmentWire.outgoing, "precondition: signed in")
-            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            let window = Self.sceneWindow()
             window.rootViewController = UIHostingController(
                 rootView: MainTabView(opening: .library).environment(session))
             window.makeKeyAndVisible()
@@ -661,10 +794,14 @@ extension MediaImageLoaderTests {
             var overAll: [String] = ["never looked"]
             var select: [NSObject] = []
             var options: [NSObject] = []
+            // Read while All is on screen: the elements are live, and by the time `hostYears`
+            // returns they answer for Years, where Select is inert by design.
+            var live = false
             let (_, window) = await hostYears(wire) { window in
                 overAll = Self.kindFilterShown(in: window)
                 Self.elements(labelled: "Select", in: window, into: &select)
                 Self.elements(labelled: "Options", in: window, into: &options)
+                live = select.allSatisfy { !$0.accessibilityTraits.contains(.notEnabled) }
             }
             defer {
                 wire.release()
@@ -676,7 +813,6 @@ extension MediaImageLoaderTests {
             // Select capsule (decision 10), live over All where there are files to choose
             // (MEMNG-588).
             #expect(!options.isEmpty, "the Library draws no options button")
-            let live = select.allSatisfy { !$0.accessibilityTraits.contains(.notEnabled) }
             #expect(!select.isEmpty && live, "Select is missing or inert in All")
 
             var labels: [String] = []
@@ -694,14 +830,8 @@ extension MediaImageLoaderTests {
             let inert = selectOverYears.allSatisfy { $0.accessibilityTraits.contains(.notEnabled) }
             #expect(!selectOverYears.isEmpty && inert, "Select is missing or live over Years")
 
-            // Years opens at its top, where the dock is the tab pill again; a tap on the active
-            // Library tab brings the segment back (decision 8).
-            if Self.dockElement("Months", in: window) == nil {
-                _ = Self.dockElement(MainTab.library.title, in: window)?.accessibilityActivate()
-                for _ in 0..<80 where Self.dockElement("Months", in: window) == nil {
-                    await segmentSettle(window, turns: 1)
-                }
-            }
+            // Years opens at its top and the segment stays where it was (MEMNG-653): Months is
+            // pressed in the same chrome Years was.
             // All reads day buckets too (MEMNG-597), so Months' read is the one AFTER the press.
             let dayReads = { wire.sizesAsked.filter { $0 == "day" }.count }
             let before = dayReads()
