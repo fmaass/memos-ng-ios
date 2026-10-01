@@ -5,6 +5,17 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (31)
+
+- The bar with Library, Timeline and Places is now the standard iOS tab bar instead of one the app drew itself, so iOS draws its glass and the selection glides from tab to tab, as in other apps on the phone. Switch between the three tabs and watch the selection move.
+- Timeline and Places now open with a large title; the Library keeps its own large header. In the Timeline the title folds into the top bar as you scroll.
+- Scroll down in the Timeline: the tab bar shrinks out of the way.
+- Scroll down in the Library and the bar turns into the Library icon plus Years, Months and All. It now stays that way when you switch between Years, Months and All, and when you scroll back to the top; only a tap on the Library icon brings back Library, Timeline and Places.
+- Tap the Library tab while you are already in the Library: the bar turns into Years, Months and All at once, without scrolling.
+- Open Places: the tab bar stays at the bottom while the map loads. Before, it sat in the middle of the screen for a moment.
+- Years, Months and All are still drawn by the app, not by iOS. Their bar now has glass that reacts when you press it, but the highlight jumps to your choice instead of gliding like the tabs.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.2.1 (30)
 
 - Nothing on screen changes.
