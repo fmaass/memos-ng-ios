@@ -54,7 +54,7 @@
 # refusal-sites and openapi-coverage rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
-# lane lock, the load gate and the private simulator — and the lint, which costs seconds and which
+# lane lock, the run admission, the simulator slot and the private simulator — and the lint, which costs seconds and which
 # the full gate would fail on anyway. It prints one line of its own,
 # MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's
 # summary line — a quick run can never be read, or pasted, as a verdict. The verdict is the full
@@ -67,8 +67,19 @@
 # leaves an app whose frameworks belong to the other branch — dyld "Symbol not found" at launch
 # and a red gate that says nothing about the code under test (observed 2026-08-24, three
 # concurrent gates, two false reds). So by default this script gives each run its own device:
-# created on the build host before the build, named for the branch and the local process, and
-# deleted again on every exit path (see the trap in the remote script).
+# created on the build host after the compile, just before the tests, named for the branch and the
+# run token, and deleted again right after them and on every exit path (see the trap in the remote
+# script).
+#
+# Gates of DIFFERENT projects share the host too, and two simulator phases at once fill its disk and
+# its swap (measured 2026-09-28..30). So the simulator phase — device creation, boot, the tests,
+# the device's deletion — runs only inside the host-wide slot, and compiling happens outside it:
+# `xcodebuild build-for-testing` against the generic simulator destination, then
+# `test-without-building` on the private device. Before anything is copied the run waits for room
+# on the disk (run admission); before the device exists it waits for the slot and for the host's
+# conditions (simulator admission). Both are conditions, never timers: a wait ends in admission or
+# in a refusal with its own code. scripts/gate-admission.sh holds both, byte-identical across the
+# projects that gate on the host.
 #
 # Environment:
 #   MAC_GATE_HOST        (required) ssh alias/host of the Mac build host
@@ -108,6 +119,14 @@
 #                 half stopped before touching anything;
 #            10 = --classify-only only: this change set owes the full gate (0 there means the
 #                 fast path applies);
+#            11 = the simulator slot or the host's conditions stayed unmet until the ceiling
+#                 (slot=11; the build ran, no device was created);
+#            12 = free space stayed below the threshold until the ceiling (admit=12 before
+#                 anything was copied, or slot=12 before the device);
+#            13 = a reading the admission depends on could not be taken three polls running
+#                 (admit=13 or slot=13);
+#            14 = slot=14, in the build host's log only: its controller's ssh went away before the
+#                 slot was claimed, so it stopped waiting instead of testing for nobody;
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -174,7 +193,7 @@ fi
 # unset, or exported by a caller at some other directory — makes a fresh copy, because the copy's
 # directory is what the run removes when it ends. The variable is dropped as soon as it is read, so
 # a gate a selftest starts makes a copy of its own.
-GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh"
+GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh gate-admission.sh"
 gate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi \
     | awk '{print $1}'
@@ -526,12 +545,13 @@ if [ "$CLASSIFY_ONLY" -eq 1 ]; then
   exit 10
 fi
 
-# The private device is named here, where the branch and this process are known: the branch so a
-# stray device says which run left it behind, the pid so two runs of the SAME branch (a re-run
-# started before the first one let go) still cannot land on one device. It reuses the branch slug
+# The private device is named here, where the branch and this run's token are known: the branch so
+# a stray device says which run left it behind, the token so two runs of the SAME branch (a re-run
+# started before the first one let go) still cannot land on one device, and so the slot's owner
+# record can name the device before it exists: a recovery finds it by that name alone. It reuses the branch slug
 # the run log is named from, which is already reduced to the character set the branch validation
 # above allows, minus '/', and cut short enough to stay a readable name in `simctl list`.
-DEVICE_NAME="gate-${branch_slug}-$$"
+DEVICE_NAME="gate-${branch_slug}-$RUN_TOKEN"
 
 # Who this run is, for the gate lock below. The host is in it because the pid alone is only
 # meaningful to the machine that issued it, and the lock is read by whoever comes next; the token
@@ -620,6 +640,9 @@ trap 'remove_gate_device; release_gate_lock; exit 129' HUP
 # --- step bookkeeping -------------------------------------------------------------------------
 declare -a STEP_NAMES=() STEP_RCS=()
 first_fail=0
+# Fields the SUMMARY carries that are measurements, not exit codes (disk=, slot_wait=): they never
+# decide the verdict, so they are kept apart from STEP_RCS.
+SUMMARY_INFO=""
 record() {
   STEP_NAMES+=("$1"); STEP_RCS+=("$2")
   if [ "$2" -ne 0 ] && [ "$first_fail" -eq 0 ]; then first_fail="$2"; fi
@@ -627,7 +650,7 @@ record() {
 summary_and_exit() {
   local line="mac-gate SUMMARY:" i
   for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
-  line="$line | exit=$first_fail"
+  line="$line$SUMMARY_INFO | exit=$first_fail"
   say "run log     : $log"
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   say "$line"
@@ -662,8 +685,8 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These three must be there.
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh; do
+# directory. These four must be there.
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 | tee -a "$log"
@@ -676,7 +699,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 | tee -a "$log"
@@ -1061,29 +1084,53 @@ fi
 
 
 # --- (3) mirror the worktree ------------------------------------------------------------------
-# --- load gate ----------------------------------------------------------------------------------
-# The branch lock orders runs of ONE branch; nothing ordered runs of five. Five concurrent
-# xcodebuilds drove the host's one-minute load past nine hundred, at which point the network
-# stack starved and a live gate died mid-run on "no route to host". So a run holds its branch
-# lock but does not START while the host is drowning: above roughly three times the core count
-# it waits, out loud, and takes its turn when the load drains. A pure read — no slot state to
-# leak, no stale slot to reap.
-
-LOAD_LIMIT="${MAC_GATE_LOAD_LIMIT:-24}"
-load_waited=0
-while : ; do
-  host_load="$(timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-    'sysctl -n vm.loadavg' 2>/dev/null | awk '{printf "%d", $2}')"
-  [ -n "$host_load" ] || { say "load gate   : host unreadable, proceeding"; break; }
-  if [ "$host_load" -le "$LOAD_LIMIT" ]; then
-    [ "$load_waited" -eq 0 ] || say "load gate   : load $host_load, proceeding after ${load_waited}m"
-    break
-  fi
-  load_waited=$((load_waited + 1))
-  [ "$load_waited" -le 45 ] || { say "load gate   : still $host_load after 45m — proceeding anyway"; break; }
-  [ $((load_waited % 5)) -ne 1 ] || say "load gate   : host load $host_load > $LOAD_LIMIT, waiting"
-  sleep 60
-done
+# --- (2c) run admission: room on the build host's disk -----------------------------------------
+# The lane lock orders runs of ONE branch; nothing else orders how much disk the host's runs take.
+# So before a byte is copied, the run waits until the volume has room for one run's peak plus a
+# reserve (scripts/gate-admission.sh). The reading sweeps first — below the threshold, unlocked
+# sibling trees go oldest first — and counts what this lane's own trees already hold as room: the
+# peak INCLUDES them, and a warm lane grows into its residue rather than beside it. A condition,
+# never a timer: the wait ends in admission, or in a refusal with admit=12 (the ceiling) or admit=13
+# (three polls that could not read the disk). The load of the host is the simulator admission's
+# question, asked where the simulator runs; the load gate that let a run in on a timer is gone.
+GATE_ADMISSION_SELF="$GATE_RUN_COPY/scripts/gate-admission.sh"
+# shellcheck source=scripts/gate-admission.sh
+. "$GATE_ADMISSION_SELF" 2>/dev/null \
+  || die_refuse "cannot load the admission helper $GATE_ADMISSION_SELF — nothing was copied"
+gate_say() { say "$@"; }
+gate_host_available_kb() {
+  local out free own
+  out="$(
+    {
+      cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
+      cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
+      cat "$GATE_ADMISSION_SELF"
+      printf "target='%s'\nbranch='%s'\ngate_root='%s'\nneed='%s'\n" \
+        "$(esc "$target")" "$(esc "$branch")" "$(esc "$gate_root")" "$(esc "$GATE_ADMISSION_NEED_KB")"
+      cat <<'SPACE_EOF'
+work="$(gate_work_dir "$gate_root" "$branch")" || exit 3
+gate_pressure_sweep "$target" "$work" "$branch" "$need" "$need"
+gate_lane_space "$target" "$work" || exit 3
+SPACE_EOF
+    } | timeout 600 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' 2>&1
+  )" || { printf '%s\n' "$out" | sed -n '/^GATE_HYGIENE/p' >&2; return 1; }
+  printf '%s\n' "$out" | sed -n '/^GATE_HYGIENE/p' | while IFS= read -r l; do say "$l" >&2; done
+  free="$(printf '%s\n' "$out" | sed -n 's/^FREE_KB \([0-9][0-9]*\) OWN_KB [0-9][0-9]*$/\1/p')"
+  own="$(printf '%s\n' "$out" | sed -n 's/^FREE_KB [0-9][0-9]* OWN_KB \([0-9][0-9]*\)$/\1/p')"
+  [ -n "$free" ] && [ -n "$own" ] && [ "$(printf '%s\n' "$free" | wc -l)" -eq 1 ] || return 1
+  # The first reading is the run's disk= field. This runs inside the admission's command
+  # substitution, so it is kept in a file of the run's private copy rather than in a variable.
+  [ -e "$GATE_RUN_COPY/.admit-disk" ] \
+    || awk -v k="$free" 'BEGIN { printf "%.1f\n", k / 1048576 }' > "$GATE_RUN_COPY/.admit-disk"
+  say "admission   : $(gate_kb_h "$free") free on the build host, this lane's trees hold $(gate_kb_h "$own")" >&2
+  echo $((free + own))
+}
+GATE_ADMISSION_NEED_KB=$((GATE_RUN_PEAK_KB + GATE_RESERVE_KB))
+gate_run_admission "$GATE_ADMISSION_NEED_KB" gate_host_available_kb
+admit_rc=$?
+record admit "$admit_rc"
+SUMMARY_INFO=" disk=$(cat "$GATE_RUN_COPY/.admit-disk" 2>/dev/null || echo -)"
+[ "$admit_rc" -eq 0 ] || end_run
 
 say "--- step: rsync ---"
 rsync -a --delete \
@@ -1109,11 +1156,13 @@ say "--- step: remote ---"
   printf "GATE_RUN_TOKEN='%s'\n" "$(esc "$RUN_TOKEN")"
   printf "GATE_TEST_BUNDLES='%s'\n" "$(esc "$TEST_BUNDLES")"
   printf "GATE_BRANCH='%s'\n" "$(esc "$branch")"
+  printf "GATE_PROJECT='%s'\n" "memos-ng-ios"
   printf "GATE_QUICK='%s'\n" "$(esc "$QUICK")"
   printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
   printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
   cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
   cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
+  cat "$GATE_ADMISSION_SELF"
   cat <<'REMOTE_EOF'
 set -uo pipefail
 
@@ -1182,26 +1231,10 @@ for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
       done
 done
 # Age alone is not enough on a busy day: five concurrent branches at ~3G each filled the host
-# to ENOSPC while every tree was hours old. Under PRESSURE the age rule yields — when free
-# space is below 15G, the oldest-stamped sibling trees go, newest-stamped last, until 20G is
-# free or nothing sweepable remains. Locked siblings may be waiting or building, so their
-# trees must survive even under pressure; an unlocked sibling can rebuild its cache next run.
-free_kb() { df -k / | awk 'NR==2 {print $4}'; }
-# The 2026-09-05 mid-run ENOSPC needs more headroom for DerivedData and warnings rebuilds.
-if [ "$(free_kb)" -lt 15728640 ]; then
-  echo "GATE_HYGIENE pressure: under 15G free — reaping oldest sibling trees"
-  for hygiene_root in "${GATE_TARGET%/*/*}" "${GATE_WORK%/*/*}"; do
-    ls -1dtr "$hygiene_root"/*/* 2>/dev/null | while IFS= read -r victim; do
-      [ -d "$victim" ] || continue
-      case "$victim" in
-        "$GATE_TARGET"|"$GATE_WORK"|*.lock*) continue ;;
-      esac
-      [ "$(free_kb)" -ge 20971520 ] && break
-      gate_lane_is_unlocked "$HYGIENE_GATE_ROOT" "$HYGIENE_WORK_ROOT" "$victim" || continue
-      rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
-    done
-  done
-fi
+# to ENOSPC while every tree was hours old. So under pressure the oldest unlocked siblings go too
+# (gate_pressure_sweep in scripts/reap-gate-lanes.sh). The 2026-09-05 mid-run ENOSPC needs more
+# headroom for DerivedData and warnings rebuilds: 15G low, 20G high.
+gate_pressure_sweep "$GATE_TARGET" "$GATE_WORK" "$GATE_BRANCH" 15728640 20971520
 disk_free="$(df -h / | awk 'NR==2 {print $4}')"
 echo "GATE_HYGIENE disk free after sweep: $disk_free"
 case "$disk_free" in
@@ -1213,40 +1246,28 @@ esac
 # A simulator holds ONE installation per bundle id, so two branches building on the same device
 # overwrite each other's app and the loser launches against the winner's frameworks — dyld
 # "Symbol not found", a red gate, and nothing wrong with the code. Each run therefore gets a
-# device of its own and gives it back. The trap is the giving back, and it has to hold on the
-# paths nobody plans for: a failing step, a refusal, the SIGHUP this shell gets when the ssh
-# connection goes away. An undeleted device is disk on a build host that has little to spare.
+# device of its own and gives it back. And since two simulator phases of ANY two runs on this host
+# fill its disk and its swap (2026-09-28..30), the device exists only inside the host-wide slot
+# (scripts/gate-admission.sh): gate_sim_open waits for the slot and the host's conditions, names
+# the device in the slot's owner record, creates, boots and prepares it; gate_sim_close stops what
+# is left of the run, deletes the device, confirms it gone and gives the slot back — a checked step
+# before the summary, repeated by the traps below as an idempotent backstop. A close that cannot
+# confirm keeps the slot (state=cleanup-failed) and fails the run with simrelease=1.
 GATE_DEVICE_UDID=""
+GATE_DESTINATION=""
+GATE_SLOT_RC="-"
 # The warnings check writes one file into the mirrored tree and takes it away again. It is named
 # here, where the give-back below can reach it: a shell killed between writing it and deleting it
 # would otherwise leave a source file the gate invented sitting in the tree for the next run to
 # lint, build and rsync over.
 GATE_CANARY_FILE=""
-device_cleanup() {
-  [ -n "$GATE_DEVICE_UDID" ] || return 0
-  local udid="$GATE_DEVICE_UDID" attempt=1
-  # Cleared first: a signal handler and the EXIT trap both reach here, and the second one in
-  # must not try to delete a device the first one already took away.
-  GATE_DEVICE_UDID=""
-  while : ; do
-    xcrun simctl shutdown "$udid" >/dev/null 2>&1
-    if xcrun simctl delete "$udid" >/dev/null 2>&1; then
-      echo "MAC_GATE_DEVICE deleted $udid"
-      return 0
-    fi
-    [ "$attempt" -lt 5 ] || break
-    attempt=$((attempt + 1))
-    sleep 3
-  done
-  echo "MAC_GATE_DEVICE DELETE-FAILED $udid (delete by hand: xcrun simctl delete $udid)"
-  return 1
-}
-# Everything this run took on the build host goes back together: the device, and the note in the
-# lock that says a build is still running here. The note is removed only while it is still ours.
+# Everything this run took on the build host goes back together: the device and the slot, and the
+# note in the lock that says a build is still running here. The note is removed only while it is
+# still ours.
 gate_give_back() {
   [ -z "${GATE_CANARY_FILE:-}" ] || rm -f "$GATE_CANARY_FILE"
   GATE_CANARY_FILE=""
-  device_cleanup
+  gate_sim_release
   local rc=$?
   if [ -n "${GATE_LOCK:-}" ] && [ "$(cat "$GATE_LOCK/remote-pid" 2>/dev/null)" = "$$" ]; then
     rm -f "$GATE_LOCK/remote-pid"
@@ -1257,11 +1278,36 @@ trap 'gate_give_back' EXIT
 trap 'gate_give_back; exit 130' INT
 trap 'gate_give_back; exit 143' TERM
 trap 'gate_give_back; exit 129' HUP
+# An ssh client that went away is not a signal here; the next write is, and it would end this shell
+# without a trap. So the rest of the output goes to a file, and the run carries on to its own close.
+trap 'gate_on_broken_pipe "$GATE_WORK/remote-after-disconnect.log"' PIPE
 
-if [ -n "$GATE_SIMULATOR" ]; then
-  GATE_DESTINATION="platform=iOS Simulator,name=$GATE_SIMULATOR"
-  echo "MAC_GATE_DEVICE shared '$GATE_SIMULATOR' (MAC_GATE_SIMULATOR is set — no per-run isolation)"
-else
+# The compile needs no device: every build names this destination.
+GATE_BUILD_DESTINATION="generic/platform=iOS Simulator"
+
+gate_sim_open() {
+  local shared_udid="" device_pick device_type device_rest device_runtime device_label
+  if [ -n "$GATE_SIMULATOR" ]; then
+    # A shared device is not created, and never deleted: the slot is still taken for the tests,
+    # the record names the device and marks it shared, and the close shuts it down.
+    shared_udid="$(gate_read_devices)" || {
+      echo "remote: the device list could not be read, so MAC_GATE_SIMULATOR '$GATE_SIMULATOR' cannot be resolved"
+      return 2
+    }
+    shared_udid="$(printf '%s\n' "$shared_udid" | awk -F '\t' -v n="$GATE_SIMULATOR" '$3 == n { print $1 }')"
+    [ -n "$shared_udid" ] && [ "$(printf '%s\n' "$shared_udid" | wc -l)" -eq 1 ] || {
+      echo "remote: MAC_GATE_SIMULATOR '$GATE_SIMULATOR' does not name exactly one device on this host"
+      return 2
+    }
+    # The claim writes the UDID into the record it renames into place and reads it back, so a
+    # slot this run holds always names the device its close must shut down.
+    gate_slot_wait_claim "$GATE_PROJECT" "$GATE_BRANCH" "$GATE_RUN_TOKEN" 1 "$shared_udid"
+    GATE_SLOT_RC=$?
+    [ "$GATE_SLOT_RC" -eq 0 ] || return "$GATE_SLOT_RC"
+    GATE_DESTINATION="platform=iOS Simulator,id=$shared_udid"
+    echo "MAC_GATE_DEVICE shared '$GATE_SIMULATOR' $shared_udid (MAC_GATE_SIMULATOR is set — no per-run isolation)"
+    return 0
+  fi
   # Written out and then run, rather than fed to python on a pipe inside "$( … )": the build
   # host's /bin/bash is 3.2, and its command-substitution scanner reads a quoted here-document as
   # shell text — a stray parenthesis or quote inside the program becomes a syntax error before
@@ -1321,23 +1367,28 @@ sys.stderr.write("no iPhone device type%s is supported by any installed iOS runt
 sys.exit(1)
 PY
   device_pick="$(/usr/bin/python3 "$GATE_WORK/choose-device.py" "$GATE_DEVICE_TYPE")"
-  [ -n "$device_pick" ] || { echo "remote: cannot choose a simulator device type"; exit 2; }
+  [ -n "$device_pick" ] || { echo "remote: cannot choose a simulator device type"; return 2; }
   device_type="${device_pick%%|*}"
   device_rest="${device_pick#*|}"
   device_runtime="${device_rest%%|*}"
   device_label="${device_rest##*|}"
+  gate_slot_wait_claim "$GATE_PROJECT" "$GATE_BRANCH" "$GATE_RUN_TOKEN" 0 ""
+  GATE_SLOT_RC=$?
+  [ "$GATE_SLOT_RC" -eq 0 ] || return "$GATE_SLOT_RC"
+  # Named in the record BEFORE it exists: a recovery finds it by this name even if this shell dies
+  # between the create and writing the UDID down.
+  gate_slot_note_device "$GATE_DEVICE_NAME" || { echo "remote: cannot name the device in the slot record"; return 2; }
   GATE_DEVICE_UDID="$(xcrun simctl create "$GATE_DEVICE_NAME" "$device_type" "$device_runtime")"
   GATE_DEVICE_UDID="$(printf '%s' "$GATE_DEVICE_UDID" | tr -d '[:space:]')"
   case "$GATE_DEVICE_UDID" in
     [0-9A-Fa-f]*-*-*-*-*) ;;
     *)
+      # Whatever was made under that name goes at the close, which deletes by name.
       echo "remote: could not create the simulator $GATE_DEVICE_NAME ($device_label)"
-      # Best effort by name: if a device WAS made and only its id came back unreadable, it still
-      # has to go.
-      xcrun simctl delete "$GATE_DEVICE_NAME" >/dev/null 2>&1
       GATE_DEVICE_UDID=""
-      exit 2 ;;
+      return 2 ;;
   esac
+  gate_slot_note_udid "$GATE_DEVICE_UDID" "$GATE_DEVICE_NAME"
   # Addressed by id, never by name: the name is the thing two runs could collide on.
   GATE_DESTINATION="platform=iOS Simulator,id=$GATE_DEVICE_UDID"
   echo "MAC_GATE_DEVICE created $GATE_DEVICE_NAME $GATE_DEVICE_UDID ($device_label)"
@@ -1350,7 +1401,7 @@ PY
   # is cold every time, so the wait belongs to the gate.
   xcrun simctl bootstatus "$GATE_DEVICE_UDID" -b || {
     echo "remote: the created simulator never finished booting"
-    exit 2
+    return 2
   }
 
   # A factory-fresh simulator has accessibility switched OFF — com.apple.Accessibility has
@@ -1375,11 +1426,39 @@ PY
     [ "$a11y_value" = "1" ] || {
       echo "remote: $a11y_key reads '${a11y_value:-unset}' inside $GATE_DEVICE_NAME —" \
            "hosted-window accessibility would vend an empty tree, so the gate stops here"
-      exit 2
+      return 2
     }
   done
   echo "MAC_GATE_DEVICE accessibility on ($GATE_DEVICE_NAME: AccessibilityEnabled=1 ApplicationAccessibilityEnabled=1, read back inside the device)"
-fi
+  return 0
+}
+
+# The checked close, before anything reports: 0 when the slot went back, 1 when it did not. Its
+# line is the one the controller reads slot=, slot_wait= and simrelease= from.
+gate_sim_close() {
+  gate_sim_release
+  local rc=$?
+  echo "MAC_GATE_SLOT slot=$GATE_SLOT_RC slot_wait=$GATE_SLOT_WAITED simrelease=$GATE_SIMRELEASE"
+  return $rc
+}
+
+# The span every device-bound step runs inside: open, the steps named, close. Its code is the
+# slot refusal, else the first failing step's, else the close's.
+gate_sim_span() { # STEP_FUNCTION...
+  local rc=0 f close_rc
+  gate_sim_open
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    for f in "$@"; do
+      "$f"; rc=$?
+      [ "$rc" -eq 0 ] || break
+    done
+  fi
+  gate_sim_close
+  close_rc=$?
+  [ "$rc" -ne 0 ] || rc="$close_rc"
+  return "$rc"
+}
 
 # --- the version this gate expects --------------------------------------------------------------
 # project.yml is where the version is written, so it is also where the checks below take their
@@ -1668,11 +1747,24 @@ PY
 # at all — twice on a device this same script had created, booted and read back seconds
 # earlier. The device existed; the question was slow. Ten minutes is the wait a loaded host
 # needs; it costs nothing when the host is idle.
-s_xcodebuild() {
+# The compile, outside the simulator slot: every scheme and test plan the tests below run is built
+# here, against the generic simulator destination, so the slotted span compiles nothing.
+s_build() {
   # -onlyUsePackageVersionsFromResolvedFile is the second half of the pins step: that step proves
   # the tracked graph and the resolved graph agree, this makes the build itself unable to resolve
   # its way to anything else. Without it a build is always free to move a pin and say nothing.
-  xcodebuild test \
+  xcodebuild build-for-testing \
+    -scheme MemosNG \
+    -destination "$GATE_BUILD_DESTINATION" \
+    -derivedDataPath "$DERIVED" \
+    -onlyUsePackageVersionsFromResolvedFile \
+    -skipPackagePluginValidation
+}
+
+# The tests, inside the slot, on the private device, from the products s_build made.
+s_tests() {
+  rm -rf "$XCRESULT"
+  xcodebuild test-without-building \
     -scheme MemosNG \
     -destination "$GATE_DESTINATION" \
     -destination-timeout 600 \
@@ -1681,6 +1773,7 @@ s_xcodebuild() {
     -onlyUsePackageVersionsFromResolvedFile \
     -skipPackagePluginValidation
 }
+s_xcodebuild() { gate_sim_span s_tests; }
 
 s_bundlecheck() {
   # What ships is the BUNDLE, not the spec that produced it. XcodeGen can be given a resource and
@@ -1691,11 +1784,12 @@ s_bundlecheck() {
   # WHERE the product is is asked of xcodebuild rather than spelled out here: the configuration
   # and the product name are the project's to change, and a path written down in this script
   # would then point at nothing and read as a broken build instead of an out-of-date gate.
+  # Asked of the generic destination: the device is gone by now, and the answer is the product the
+  # compile made, which no device changes.
   local settings="$GATE_WORK/build-settings.json" app appex
   xcodebuild -showBuildSettings -json \
     -scheme MemosNG \
-    -destination "$GATE_DESTINATION" \
-    -destination-timeout 600 \
+    -destination "$GATE_BUILD_DESTINATION" \
     -derivedDataPath "$DERIVED" \
     -skipPackagePluginValidation > "$settings" 2>"$GATE_WORK/build-settings.err" || {
       echo "BUNDLE FAIL: xcodebuild -showBuildSettings failed"
@@ -2289,15 +2383,16 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
     # its own way would compile against a graph nothing in this repo names.
     xcodebuild build-for-testing \
       -scheme MemosNG \
-      -destination "$GATE_DESTINATION" \
-      -destination-timeout 600 \
+      -destination "$GATE_BUILD_DESTINATION" \
       -derivedDataPath "$DERIVED" \
       -onlyUsePackageVersionsFromResolvedFile \
       -skipPackagePluginValidation 2>&1 | tee .gate-artifacts/quick-build.log
     return "${PIPESTATUS[0]}"
   }
 
-  s_quick_tests() {
+  # The tests run inside the simulator slot, on a device that exists only there.
+  s_quick_tests() { gate_sim_span s_quick_tests_on_device; }
+  s_quick_tests_on_device() {
     rm -rf "$QUICK_XCRESULT"
     set -- xcodebuild test-without-building \
       -scheme MemosNG \
@@ -2415,6 +2510,7 @@ step xcodegen   s_xcodegen
 step entitlements s_entitlements
 step swiftformat s_format
 step pins       s_pins
+step build      s_build
 step xcodebuild s_xcodebuild
 step bundle     s_bundlecheck
 step warnaserr  s_warnings
@@ -2427,12 +2523,28 @@ step picturelist s_picturelist
 step apicover   s_apicover
 step testcount  s_testcount
 
+# The slot went back inside the xcodebuild step, before this line, and said so on its own
+# MAC_GATE_SLOT line; the traps only repeat the release.
 echo "MAC_GATE_REMOTE_SUMMARY:$summary | exit=$first_fail"
 exit "$first_fail"
 REMOTE_EOF
 } | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1 | tee -a "$log"
 remote_rc="${PIPESTATUS[1]}"
 record remote "$remote_rc"
+# The slot's fields, as the build host printed them after its close. A field that is not a run of
+# digits is not repeated as a number: "-" says the run never got as far as the slot.
+slot_line="$(sed -n 's/^MAC_GATE_SLOT //p' "$log" | tail -1)"
+slot_field() {
+  local value
+  value="$(printf '%s\n' "$slot_line" | sed -n "s/.*$1=\\([^ ]*\\).*/\\1/p")"
+  case "$value" in ''|*[!0-9]*) printf -- '-' ;; *) printf '%s' "$value" ;; esac
+}
+slot_rc="$(slot_field slot)"
+simrelease_rc="$(slot_field simrelease)"
+# slot= and simrelease= are codes and take part in the verdict; a "-" is only information.
+if [ "$slot_rc" = "-" ]; then SUMMARY_INFO="$SUMMARY_INFO slot=-"; else record slot "$slot_rc"; fi
+if [ "$simrelease_rc" = "-" ]; then SUMMARY_INFO="$SUMMARY_INFO simrelease=-"; else record simrelease "$simrelease_rc"; fi
+SUMMARY_INFO="$SUMMARY_INFO slot_wait=$(slot_field slot_wait)"
 
 # The quick mode's three numbers come from the line the build host printed, read back out of the log
 # the stream above was tee'd into. Anything that is not a run of digits is not a number this

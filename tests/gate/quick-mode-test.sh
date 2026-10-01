@@ -108,11 +108,12 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok"\nexit 0\n' "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
   done
   printf 'gate_lane_is_unlocked() { return 0; }\n' > "$work/scripts/reap-gate-lanes.sh"
+  cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1
   git -C "$work" remote add origin "$origin"
@@ -120,8 +121,8 @@ new_repo() {
   printf '%s' "$work"
 }
 
-# ssh and rsync, replaced. The ssh stub answers the three questions the local half asks — the load
-# average, the preflight (gate root, target, lock), and the remote script — and records the remote
+# ssh and rsync, replaced. The ssh stub answers the three questions the local half asks — the disk
+# admission, the preflight (gate root, target, lock), and the remote script — and records the remote
 # script it was handed, which is the only place the flags sent to the build host can be read.
 make_stubs() {
   local dir="$1"
@@ -132,10 +133,12 @@ args="$*"
 case "$args" in
   # the device give-back: nothing of this run's is on the host, so it answers as it would there
   *simctl*) exit 1 ;;
-  *"vm.loadavg"*) echo "{ 1.00 1.00 1.00 }"; exit 0 ;;
 esac
 script="$(cat)"
 case "$script" in
+  # the run admission's disk reading, known by its call (the remote script carries the helper that
+  # defines it, so the helper's own text cannot tell the two apart): room enough, admitted at once
+  *'gate_lane_space "$target"'*) echo "FREE_KB 99999999 OWN_KB 0"; exit 0 ;;
   *MAC_GATE_STEP*)
     printf '%s' "$script" > "$QUICK_STUB_DIR/remote-script.txt"
     [ -z "${QUICK_STUB_REMOTE_OUT:-}" ] || cat "$QUICK_STUB_REMOTE_OUT"

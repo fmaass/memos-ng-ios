@@ -85,13 +85,14 @@ new_repo() {
   } > "$work/project.yml"
   # The stubs report what they inherited: neither the pause nor the copy's own marker may reach a
   # child, or a gate run BY a selftest would pause, or trust a copy that is not its own.
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok pause=[${MAC_GATE_SELFTEST_PAUSE_DIR:-}] copy=[${MAC_GATE_RUN_COPY:-}]"\nexit 0\n' \
       "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
   done
   printf 'gate_lane_is_unlocked() { return 0; }\n# helper text: ORIGINAL-REAPER\n' > "$work/scripts/reap-gate-lanes.sh"
   printf '# helper text: ORIGINAL-WORKDIR\n' > "$work/scripts/gate-work-dir.sh"
+  cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1
   git -C "$work" remote add origin "$origin"
@@ -99,7 +100,7 @@ new_repo() {
   printf '%s' "$work"
 }
 
-# ssh and rsync, replaced: the load average, the preflight and the remote script are answered, and
+# ssh and rsync, replaced: the disk admission, the preflight and the remote script are answered, and
 # every script handed over is recorded, since that is the only place a helper's text can be read.
 make_stubs() {
   local dir="$1"
@@ -108,10 +109,12 @@ make_stubs() {
 #!/usr/bin/env bash
 case "$*" in
   *simctl*) exit 1 ;;
-  *"vm.loadavg"*) echo "{ 1.00 1.00 1.00 }"; exit 0 ;;
 esac
 script="$(cat)"
 case "$script" in
+  # the run admission's disk reading, known by its call (the remote script carries the helper that
+  # defines it, so the helper's own text cannot tell the two apart): room enough, admitted at once
+  *'gate_lane_space "$target"'*) echo "FREE_KB 99999999 OWN_KB 0"; exit 0 ;;
   *MAC_GATE_STEP*)
     printf '%s' "$script" > "$STUB_DIR/remote-script.txt"
     exit 0 ;;

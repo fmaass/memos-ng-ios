@@ -27,6 +27,37 @@ gate_lane_is_unlocked() {
   return 0
 }
 
+# Under PRESSURE the age rule yields: when the volume holding TARGET has less than LOW_KB free, the
+# oldest-stamped sibling trees go, newest-stamped last, until HIGH_KB is free or nothing sweepable
+# remains. Locked siblings may be waiting or building, so their trees survive; an unlocked sibling
+# rebuilds its cache next run. The build host's preamble calls it with 15G/20G after the mirror;
+# the run admission calls it with its own threshold before the copy, so room an unlocked tree
+# holds is reclaimed rather than waited for. A free-space reading that is not a number sweeps
+# nothing: an unreadable volume is no licence to delete.
+gate_pressure_sweep() { # TARGET WORK BRANCH LOW_KB HIGH_KB
+  local target="$1" work="$2" branch="$3" low="$4" high="$5" gate_root work_root root free
+  gate_root="${target%/"$branch"}"
+  work_root="${work%/"$branch"}"
+  free="$(df -Pk "$target" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  case "$free" in ''|*[!0-9]*) echo "GATE_HYGIENE pressure: free space unreadable, nothing swept"; return 0 ;; esac
+  [ "$free" -lt "$low" ] || return 0
+  echo "GATE_HYGIENE pressure: under $((low / 1048576))G free — reaping oldest sibling trees"
+  for root in "${target%/*/*}" "${work%/*/*}"; do
+    ls -1dtr "$root"/*/* 2>/dev/null | while IFS= read -r victim; do
+      [ -d "$victim" ] || continue
+      case "$victim" in
+        "$target"|"$work"|*.lock*) continue ;;
+      esac
+      free="$(df -Pk "$target" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+      case "$free" in ''|*[!0-9]*) break ;; esac
+      [ "$free" -ge "$high" ] && break
+      gate_lane_is_unlocked "$gate_root" "$work_root" "$victim" || continue
+      rm -rf "$victim" && echo "GATE_HYGIENE pressure-swept $victim"
+    done
+  done
+  return 0
+}
+
 reap_gate_lanes() (
   set -uo pipefail
   local gate_root="$1" work_root="$2" current="$3" survivors="$4"
