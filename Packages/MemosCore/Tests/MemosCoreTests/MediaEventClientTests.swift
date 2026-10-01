@@ -612,6 +612,62 @@ struct MediaEventClientTests {
         _ = await shortClient.collect()
         #expect(await shortSleeper.waits == [5, 7])
     }
+
+    @Test("a Retry-After longer than the backoff's cap is waited out to the cap, not beyond it")
+    func retryAfterAboveTheCapIsClamped() async {
+        // A day asked for would park the foreground channel for a day. The cap is the longest
+        // this client waits on its own, so it is the longest it waits on the server's say-so too.
+        let transport = ScriptedSSETransport([.status(429, retryAfter: 86400)])
+        let sleeper = RecordingSleeper(budget: 1)
+        let client = LiveStub.client(transport: transport, sleeper: sleeper)
+        _ = await client.collect()
+        #expect(await sleeper.waits == [30])
+
+        // The cap is the one this client was given, not a number of its own.
+        let wider = ScriptedSSETransport([.status(429, retryAfter: 86400)])
+        let widerSleeper = RecordingSleeper(budget: 1)
+        let widerClient = LiveStub.client(
+            transport: wider,
+            sleeper: widerSleeper,
+            backoff: SSEBackoff(base: 1, cap: 45)
+        )
+        _ = await widerClient.collect()
+        #expect(await widerSleeper.waits == [45])
+    }
+
+    @Test(
+        "a Retry-After at or under the backoff's cap is the next wait exactly",
+        arguments: [29.0, 30.0]
+    )
+    func retryAfterWithinTheCapIsUnchanged(seconds: TimeInterval) async {
+        let transport = ScriptedSSETransport([.status(429, retryAfter: seconds)])
+        let sleeper = RecordingSleeper(budget: 1)
+        let client = LiveStub.client(transport: transport, sleeper: sleeper)
+
+        _ = await client.collect()
+
+        #expect(await sleeper.waits == [seconds])
+    }
+
+    @Test("a clamped Retry-After still never undercuts a longer stream retry")
+    func clampedRetryAfterAndALongerStreamHint() async {
+        // The stream's 60 s `retry:` is above the 30 s cap — the hint raises the ceiling rather
+        // than being shrunk to it — so a day-long Retry-After clamped to 30 yields to the 60.
+        let transport = ScriptedSSETransport([
+            .dropping(after: "retry: 60000\n\n"),
+            .status(429, retryAfter: 86400),
+        ])
+        let sleeper = RecordingSleeper(budget: 2)
+        let client = LiveStub.client(
+            transport: transport,
+            sleeper: sleeper,
+            jitter: FixedJitter(0)
+        )
+
+        _ = await client.collect()
+
+        #expect(await sleeper.waits == [60, 60])
+    }
 }
 
 /// A credential that rotates the way a renewal does: the token moves, its epoch moves with it,

@@ -283,8 +283,10 @@ public final class MediaEventClient: Sendable {
                 if let retryAfter = result.retryAfter {
                     // The server said when it can take this connection back, so the answer is
                     // that instant and not a draw below it; the failure count still advances, so
-                    // the schedule after it is the one this run of failures has earned.
-                    delay = max(retryAfter, serverRetryHint ?? 0)
+                    // the schedule after it is the one this run of failures has earned. Up to the
+                    // cap: a header asking for a day would park a foreground channel for a day,
+                    // and the cap is the longest this client waits on its own.
+                    delay = max(min(retryAfter, backoff.cap), serverRetryHint ?? 0)
                 } else {
                     delay = backoff.wait(
                         forAttempt: max(attempt, 1),
