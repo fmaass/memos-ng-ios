@@ -402,7 +402,9 @@ public final class MediaEventClient: Sendable {
             for try await chunk in connection.body {
                 let frames = parser.consume(chunk)
                 lastEventID = parser.lastEventID
-                serverRetryHint = parser.reconnectionTime
+                // The reconnection time belongs to the stream, not to this connection's parser:
+                // a connection that sends no `retry:` leaves the last one standing.
+                if let hint = parser.reconnectionTime { serverRetryHint = hint }
                 if Task.isCancelled { return result(.cancelled) }
                 // The second gate: whatever this connection was opened for, it is not this
                 // device's business any more once the account has moved. An early exit only —

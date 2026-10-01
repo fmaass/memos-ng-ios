@@ -106,6 +106,33 @@ struct MediaEventClientTests {
         #expect(await sleeper.waits == [5])
     }
 
+    @Test(
+        "a retry the stream asked for outlives a connection that says nothing about it",
+        arguments: [
+            ": keep-alive\n\n",
+            // The field's name inside a comment and inside an event's data is not the field.
+            ": retry: 1000\n\n",
+            "data: retry: 1000\n\n",
+        ]
+    )
+    func serverRetryHintIsKeptUntilReplaced(silentBody: String) async {
+        let transport = ScriptedSSETransport([
+            .dropping(after: "retry: 60000\n\n"),
+            .dropping(after: silentBody),
+            .dropping(after: "retry: 5000\n\n"),
+        ])
+        let sleeper = RecordingSleeper(budget: 3)
+        let client = LiveStub.client(transport: transport, sleeper: sleeper)
+
+        _ = await client.collect()
+
+        // Each connection is a fresh parser, but the reconnection time is the stream's, not the
+        // connection's: the second connection never changed it, so its wait is still the 60 s
+        // asked for — not the 1 s base. Only a new `retry:` replaces it, shorter or not.
+        #expect(await sleeper.waits == [60, 60, 5])
+        #expect(await transport.connectCount == 3)
+    }
+
     @Test("a refused credential stops the channel instead of retrying with it")
     func unauthorizedIsTerminal() async {
         let transport = ScriptedSSETransport([.status(401)])
