@@ -340,7 +340,21 @@ private struct WholeRig {
     var picture: OutboxFile { job.files[0] }
     var video: OutboxFile { job.files[1] }
 
+    /// One file of the capture the rig queues.
+    struct Media {
+        var name: String
+        var bytes: Int
+        var mime: String
+
+        /// The rig's own capture: `picture` and `video` name these two.
+        static let pictureAndVideo = [
+            Media(name: "picture.heic", bytes: 1000, mime: "image/heic"),
+            Media(name: "video.mov", bytes: 3000, mime: "video/quicktime"),
+        ]
+    }
+
     static func make(
+        media: [Media] = Media.pictureAndVideo,
         withUploads: Bool = true,
         listing: @Sendable (UploadJob) -> [WholeTaskListing] = { _ in [] },
         onCancel: ScriptedUploadTaskSession.OnCancel = .staysListed,
@@ -366,16 +380,12 @@ private struct WholeRig {
             root: root.appending(path: "outbox"),
             stillCurrent: { provider.stillCurrent(epoch: $0) }
         )
-        let sources = [
+        let sources = try media.map { item in
             StagedSource(
-                url: try Fixture.file(in: root, named: "picture.heic", bytes: 1000),
-                filename: "picture.heic", mime: "image/heic"
-            ),
-            StagedSource(
-                url: try Fixture.file(in: root, named: "video.mov", bytes: 3000),
-                filename: "video.mov", mime: "video/quicktime"
-            ),
-        ]
+                url: try Fixture.file(in: root, named: item.name, bytes: item.bytes),
+                filename: item.name, mime: item.mime
+            )
+        }
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         var job = try await repository.enqueue(
             content: "a picture and a video", visibility: "PRIVATE", capturedAt: now,
@@ -3077,5 +3087,292 @@ struct WholeResumeTests {
         await rig.engine.untilQuiescent()
         #expect(heads(rig) == 1)
         #expect(rig.attempts(of: rig.picture.id) == [0, 1])
+    }
+}
+
+/// The repository the engine writes through, with every row it persisted recorded as written:
+/// each save, each fenced save that landed, each per-file rebase that landed. A state the engine
+/// leaves for a moment — overwritten in the same pass, or written just before the row is deleted —
+/// is on this list though no read after the fact would ever see it.
+private actor RecordingPersistence: OutboxPersisting {
+    private let inner: OutboxRepository
+    private let written: WholeBox<[UploadJob]>
+
+    init(_ inner: OutboxRepository, recording written: WholeBox<[UploadJob]>) {
+        self.inner = inner
+        self.written = written
+    }
+
+    private func record(_ job: UploadJob?) {
+        guard let job else { return }
+        written.mutate { $0.append(job) }
+    }
+
+    func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
+
+    func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
+
+    func save(_ job: UploadJob) async throws {
+        try await inner.save(job)
+        record(job)
+    }
+
+    func save(
+        _ job: UploadJob,
+        ifStillCurrent epoch: Int?,
+        matching snapshot: UploadJob,
+        else fallback: UploadJob
+    ) async throws -> UploadJob? {
+        let saved = try await inner.save(
+            job, ifStillCurrent: epoch, matching: snapshot, else: fallback
+        )
+        record(saved)
+        return saved
+    }
+
+    func delete(_ job: UploadJob) async { await inner.delete(job) }
+
+    func delete(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) async -> Bool {
+        await inner.delete(job, ifStillCurrent: snapshot)
+    }
+
+    func sweepOrphans() async throws -> SweepOutcome { try await inner.sweepOrphans() }
+
+    func sliceChunk(
+        job: UploadJob, file: OutboxFile, offset: Int64, length: Int, attempt: Int?
+    ) async throws -> URL {
+        try await inner.sliceChunk(
+            job: job, file: file, offset: offset, length: length, attempt: attempt
+        )
+    }
+
+    func removeChunk(at url: URL) async { await inner.removeChunk(at: url) }
+
+    nonisolated func chunkURL(jobID: UUID, fileID: UUID, offset: Int64, attempt: Int?) -> URL {
+        inner.chunkURL(jobID: jobID, fileID: fileID, offset: offset, attempt: attempt)
+    }
+
+    nonisolated func mediaURL(job: UploadJob, file: OutboxFile) -> URL {
+        inner.mediaURL(job: job, file: file)
+    }
+
+    nonisolated var tails: WholeTailStaging { inner.tails }
+
+    func applyFileAnswer(
+        jobID: UUID,
+        fileID: UUID,
+        attempt: Int,
+        outcome: WholeFileChange,
+        presented: WholeTaskProvenance,
+        at instant: Date
+    ) async throws -> UploadJob? {
+        let landed = try await inner.applyFileAnswer(
+            jobID: jobID, fileID: fileID, attempt: attempt, outcome: outcome,
+            presented: presented, at: instant
+        )
+        record(landed)
+        return landed
+    }
+}
+
+/// The server of the field report (MEMNG-633), as the whole lane meets it: at most `limit` upload
+/// bodies per person at once, a body past that answered 429 with `Retry-After: 2`, and every
+/// session's offset kept as the bytes it actually took — what its offset HEAD reports.
+///
+/// Bodies are judged in the order the phone sent them, and answered one at a time: every refusal
+/// before any body finishes, as a server turning a body away at the door does, then the oldest
+/// admitted body.
+private struct BodyLimitServer {
+    static let limit = 3
+    static let retryAfter = "2"
+
+    typealias Created = ScriptedUploadTaskSession.Created
+
+    /// Bytes each upload session holds, by upload uid. The HEAD script reads the same box.
+    let held: WholeBox<[String: Int64]>
+    /// Bodies another of the person's devices has on the server until `elsewhereUntil`.
+    let elsewhere: Int
+    let elsewhereUntil: Date
+    var judged = 0
+    var admitted: [(task: Created, bytes: Int64)] = []
+    var refused: [Created] = []
+    /// The most bodies this phone had outstanding at once: admitted, or refused and not yet
+    /// answered — everything it has handed the session that has not been answered yet.
+    var mostOutstanding = 0
+
+    init(held: WholeBox<[String: Int64]>, elsewhere: Int, elsewhereUntil: Date) {
+        self.held = held
+        self.elsewhere = elsewhere
+        self.elsewhereUntil = elsewhereUntil
+    }
+
+    /// Admits or refuses every task the phone created since the last look, in creation order.
+    mutating func judge(_ created: [Created], at now: Date) throws {
+        for task in created.dropFirst(judged) {
+            let others = now < elsewhereUntil ? elsewhere : 0
+            guard others + admitted.count < Self.limit else {
+                refused.append(task)
+                continue
+            }
+            let attributes = try FileManager.default.attributesOfItem(
+                atPath: task.file.path(percentEncoded: false))
+            let bytes = try #require((attributes[.size] as? NSNumber)?.int64Value)
+            admitted.append((task, bytes))
+        }
+        judged = created.count
+        mostOutstanding = Swift.max(mostOutstanding, admitted.count + refused.count)
+    }
+}
+
+@Suite("Whole lane: six pictures and a large video against a per-person body limit")
+struct WholeBodyLimitTests {
+    static let videoSize = 4 * 1024 * 1024
+    /// Where the video's first connection drops: the server has taken this much of it.
+    static let cutAt: Int64 = 1_572_864
+
+    /// The field report's capture, on the engine as it stands: the person's other device holds two
+    /// of the three places for the first five seconds, so this phone's second body meets the 429
+    /// the budget alone would never provoke. The video goes first and its first body is cut off.
+    @Test("one memo, one session per file, the video resumed at the server's offset, never parked")
+    func sixPicturesAndAVideo() async throws {
+        let held = WholeBox<[String: Int64]>([:])
+        let sleeper = ControlledSleeper()
+        let pictures = (1...6).map {
+            WholeRig.Media(name: "picture\($0).heic", bytes: 2000, mime: "image/heic")
+        }
+        let video = WholeRig.Media(
+            name: "video.mov", bytes: Self.videoSize, mime: "video/quicktime")
+        let writes = WholeBox<[UploadJob]>([])
+        let rig = try await WholeRig.make(
+            media: [video] + pictures,
+            persistence: { RecordingPersistence($0, recording: writes) },
+            answerHead: { request in
+                WholeResumeTests.offset(held.value[request.url?.lastPathComponent ?? ""] ?? 0)
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        let videoID = rig.job.files[0].id
+        var server = BodyLimitServer(
+            held: held, elsewhere: 2, elsewhereUntil: start.addingTimeInterval(5))
+        var busyAt: [UUID: Date] = [:]
+        var retryGaps: [TimeInterval] = []
+        var sentOfVideo: Int64 = 0
+        var busyAnswers = 0
+        var cut = false
+        var findings: [String] = []
+
+        await rig.engine.drain()
+        for _ in 0..<200 {
+            await rig.engine.untilQuiescent()
+            guard let row = await rig.repository.job(rig.job.id) else { break }
+            // "Waiting to try again" is a waiting row with a failure counted on the ROW
+            // (`PendingMemoPresentation.status`); a hold waits for the person.
+            if row.state == .held || (row.state == .waiting && row.attemptCount > 0) {
+                findings.append("parked: \(row.state), \(row.lastError ?? "-")")
+            }
+            for task in rig.session.createdTasks.dropFirst(server.judged) {
+                let fileID = WholeTaskIdentity(taskDescription: task.description)?.fileID
+                if let fileID, let refusedAt = busyAt.removeValue(forKey: fileID) {
+                    retryGaps.append(rig.clock.now.timeIntervalSince(refusedAt))
+                }
+            }
+            try server.judge(rig.session.createdTasks, at: rig.clock.now)
+
+            if !server.refused.isEmpty {
+                let task = server.refused.removeFirst()
+                rig.session.forget(task.taskIdentifier)
+                var busy = try rig.answer(task, status: 429)
+                busy.retryAfter = BodyLimitServer.retryAfter
+                let at = rig.clock.now
+                await rig.engine.handle(busy)
+                busyAnswers += 1
+                let fileID = busy.identity.fileID
+                busyAt[fileID] = at
+                let due = try await rig.reload().file(fileID)?.nextAttemptAt
+                let spaced = due.map { $0.timeIntervalSince(at) } ?? -1
+                if spaced != 2 { findings.append("a 429 spaced its file \(spaced) s, not 2") }
+                continue
+            }
+            if !server.admitted.isEmpty {
+                let body = server.admitted.removeFirst()
+                let task = body.task
+                let identity = try #require(WholeTaskIdentity(taskDescription: task.description))
+                let uid = task.request.url?.lastPathComponent ?? ""
+                let offset = task.request.value(forHTTPHeaderField: "Upload-Offset")
+                let holds = held.value[uid] ?? 0
+                rig.session.forget(task.taskIdentifier)
+                guard offset == String(holds) else {
+                    findings.append("\(uid) sent at \(offset ?? "-"), the server holds \(holds)")
+                    await rig.engine.handle(try rig.answer(task, status: 409))
+                    continue
+                }
+                let first = identity.fileID == videoID && !cut
+                let taken = first ? Self.cutAt : body.bytes
+                held.mutate { $0[uid] = holds + taken }
+                if identity.fileID == videoID { sentOfVideo += taken }
+                if first {
+                    // The connection drops part-way: no status, and the server keeps what arrived.
+                    cut = true
+                    await rig.engine.handle(try rig.answer(task, status: nil))
+                } else {
+                    let whole = Int(holds + taken)
+                    await rig.engine.handle(try rig.answer(task, status: 200, received: whole))
+                }
+                continue
+            }
+            // Nothing on the wire: what happens next is the engine's own deadline timer.
+            guard let deadline = sleeper.armed.first else {
+                findings.append("nothing on the wire and no timer armed")
+                break
+            }
+            let tasks = rig.session.createdTasks.count
+            rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
+            sleeper.advance(to: deadline)
+            _ = try await rig.eventually {
+                if rig.session.createdTasks.count > tasks { return true }
+                return await rig.repository.job(rig.job.id) == nil
+            }
+        }
+
+        #expect(findings.isEmpty, "\(findings)")
+        // One memo, and the row has left the queue: the capture completed.
+        #expect(await rig.repository.job(rig.job.id) == nil)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+        // One upload session per file: seven session requests, and every body a file sent names
+        // that file's own uid.
+        #expect(rig.uploadPosts == 7)
+        let sessions = Dictionary(grouping: rig.session.createdTasks) { task in
+            WholeTaskIdentity(taskDescription: task.description)?.fileID
+        }
+        .mapValues { Set($0.map { $0.request.url?.lastPathComponent }) }
+        #expect(sessions.count == 7)
+        #expect(sessions.values.allSatisfy { $0.count == 1 })
+        #expect(Set(sessions.values.flatMap { $0 }).count == 7)
+        // The video's retry went at the offset the server held, so the server took it once.
+        let videoTasks = rig.session.createdTasks.filter {
+            WholeTaskIdentity(taskDescription: $0.description)?.fileID == videoID
+        }
+        #expect(cut)
+        let resumedAt = videoTasks.last?.request.value(forHTTPHeaderField: "Upload-Offset")
+        #expect(resumedAt == String(Self.cutAt))
+        #expect(sentOfVideo == Int64(Self.videoSize))
+        #expect(held.value.values.reduce(0, +) == Int64(Self.videoSize + 6 * 2000))
+        // The 429s happened, and every file a 429 turned away went again exactly two seconds
+        // later on the test's clock: not before the Retry-After, and not after it either.
+        #expect(busyAnswers > 0)
+        #expect(!retryGaps.isEmpty)
+        #expect(retryGaps.allSatisfy { $0 == 2 }, "\(retryGaps)")
+        #expect(sleeper.history.contains(start.addingTimeInterval(2)))
+        // This phone never had more bodies outstanding than the budget, refused ones included.
+        #expect(server.mostOutstanding <= UploadBudget.inFlightUploads)
+        // Every row the engine persisted, those overwritten before any read and the last one
+        // before the delete included: none of them parked the capture for the person.
+        let parked = writes.value
+            .filter { $0.state == .held || ($0.state == .waiting && $0.attemptCount > 0) }
+            .map { "\($0.state): \($0.lastError ?? "-")" }
+        #expect(!writes.value.isEmpty)
+        #expect(parked.isEmpty, "\(parked)")
     }
 }
