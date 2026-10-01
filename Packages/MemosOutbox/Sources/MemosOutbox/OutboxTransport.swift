@@ -106,6 +106,18 @@ public protocol OutboxChunkHandling: Sendable {
 /// background session cannot be driven from a unit test at all.
 public protocol OutboxChunkScheduling: Sendable {
     /// The tasks the session is carrying right now, whatever launched this process.
+    ///
+    /// A finished task's answer stays listed until its handling has returned, not only until the
+    /// session lets go of the task. The engine relies on this: it does not keep a pass away from a
+    /// row whose answer is being handled, so a pass that read a list without that answer would plan
+    /// the row as idle and hand its chunk over beside the answer (MEMNG-302).
+    ///
+    /// What is tested: the engine under the production listing, where such a pass adopts the row
+    /// and hands over nothing (`HandleDrainOverlapTests`, red with `inFlight()` reduced to the
+    /// session's tasks), and the delegate's counting of an answer from `deliver` until its handling
+    /// returns (`PendingDeliveryInFlightTests`, `ListedAnswerStallTests`). What is not: that the
+    /// background session keeps a task in `allTasks` until `didCompleteWithError` has reached
+    /// `deliver`. A gap there is a window this listing does not cover.
     func inFlight() async -> [OutboxTaskIdentity]
     /// - Parameter epoch: the credential generation this chunk goes out under, kept so the
     ///   answer can be classified against the credential that earned it.
