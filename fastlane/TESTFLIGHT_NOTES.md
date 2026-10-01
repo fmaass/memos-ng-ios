@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (30)
+
+- Nothing on screen changes.
+- Live updates keep the reconnect delay the server last asked for until it sends a new one, instead of falling back to about a second.
+- If the server says "slow down" with a very long wait, the app waits at most its longest reconnect delay.
+- Use the app over a longer stretch, ideally while the server restarts or is busy; it should keep working and catch up on new items. Nothing to click.
+- Upload a few photos and a video; they should finish and appear in the Library as in 2.2.0 (29).
+
 ## 2.2.0 (29)
 
 - The tab bar reads Library, Timeline, Places, and the app opens on Timeline. Scroll the Library and the bar turns into the Library icon plus Years, Months and All; back at the top, or with a tap on the Library icon, the tabs return.
