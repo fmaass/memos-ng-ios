@@ -37,6 +37,101 @@ private actor DelayedEntry: WholeAnswerHandling {
     func adoptionReplayed() async { await engine.adoptionReplayed() }
 }
 
+/// The engine behind a counter: a task's end reaches the engine from the session's callback on a
+/// task of its own, and this says when the engine has taken it. Only then can the engine's own
+/// `untilQuiescent` speak for the pass that end asked for — before, it may not have been asked.
+private actor AnnouncingEntry: WholeAnswerHandling {
+    private let engine: OutboxEngine
+    private var arrived = 0
+    private var waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    init(_ engine: OutboxEngine) { self.engine = engine }
+
+    func handle(_ answer: WholeAnswer) async {
+        await engine.handle(answer)
+        announce()
+    }
+
+    func unreadableTaskEnded() async {
+        await engine.unreadableTaskEnded()
+        announce()
+    }
+
+    func adoptionReplayed() async { await engine.adoptionReplayed() }
+
+    /// Returns once the engine has taken this many ends in all, counted from the attach.
+    func untilArrived(_ count: Int) async {
+        guard arrived < count else { return }
+        await withCheckedContinuation { waiters.append((count, $0)) }
+    }
+
+    private func announce() {
+        arrived += 1
+        let due = waiters.filter { $0.count <= arrived }
+        waiters.removeAll { $0.count <= arrived }
+        for waiter in due { waiter.continuation.resume() }
+    }
+}
+
+/// Raised when a bounded wait reaches its deadline first; the runner records it as the issue.
+private struct WaitExpired: Error, CustomStringConvertible {
+    let description: String
+}
+
+/// One answer, taken once, synchronously, by whichever side gets there first.
+private final class OneAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            guard !taken else { return false }
+            taken = true
+            return true
+        }
+    }
+}
+
+/// Returns when `operation` finishes, and throws once `deadline` passes first.
+///
+/// Neither `.timeLimit` nor a task-group race can end a wait on a continuation that ignores
+/// cancellation: both wait for the child they cancelled. So the operation and the deadline each
+/// run unstructured, the first to finish claims the one answer before resuming, and an operation
+/// that never finishes is left behind — the test has already failed and the runner moves on.
+private func bounded(
+    _ what: String,
+    within deadline: Duration = .seconds(30),
+    _ operation: @escaping @Sendable () async -> Void
+) async throws {
+    let answer = OneAnswer()
+    let finished: Bool = await withCheckedContinuation { continuation in
+        let timer = Task {
+            try? await Task.sleep(for: deadline)
+            if answer.claim() { continuation.resume(returning: false) }
+        }
+        Task {
+            await operation()
+            if answer.claim() {
+                timer.cancel()
+                continuation.resume(returning: true)
+            }
+        }
+    }
+    guard finished else {
+        throw WaitExpired(description: "\(what) did not happen within \(deadline)")
+    }
+}
+
+/// The engine is quiet, within the deadline.
+private func settled(_ engine: OutboxEngine) async throws {
+    try await bounded("the engine going quiet") { await engine.untilQuiescent() }
+}
+
+/// The engine has taken this many ends through the entry, within the deadline.
+private func arrived(_ count: Int, at entry: AnnouncingEntry) async throws {
+    try await bounded("the engine taking end \(count)") { await entry.untilArrived(count) }
+}
+
 /// The real repository behind a gate that, once armed, stops the next write an ANSWER makes —
 /// whether that write is the per-file rebase or a fenced save — so a race test holds one answer
 /// open however the engine chooses to write it.
@@ -576,6 +671,9 @@ struct WholeLaneEngineTests {
         await rig.engine.handle(videoAnswer)
         await parked.open()
         await first.value
+        // The video's end gave its place back and asked for a pass, which can claim the memo
+        // create from under the picture's answer: the create is awaited wherever it ran.
+        try await settled(rig.engine)
 
         let saved = try await rig.reload()
         #expect(saved.files.allSatisfy { $0.isComplete })
@@ -612,6 +710,9 @@ struct WholeLaneEngineTests {
         #expect(rig.attemptedUploadPosts == postsBefore)
         await parked.open()
         await first.value
+        // The video's end gave its place back and asked for a pass, which can claim the memo
+        // create from under the picture's answer: the create is awaited wherever it ran.
+        try await settled(rig.engine)
 
         let saved = try await rig.reload()
         #expect(saved.files.allSatisfy { $0.isComplete })
@@ -705,6 +806,9 @@ struct WholeLaneEngineTests {
         #expect(rig.completion.idempotencyKeys.isEmpty)
 
         await rig.engine.handle(try rig.answer(newPicture, status: 200, received: 1000))
+        // The video's end gave its place back and asked for a pass, which can claim the memo
+        // create from under the picture's answer: the create is awaited wherever it ran.
+        try await settled(rig.engine)
         #expect(rig.completion.idempotencyKeys.count == 1)
         #expect(await rig.repository.job(rig.job.id) == nil)
     }
@@ -720,7 +824,9 @@ struct WholeLaneEngineTests {
         #expect(rig.session.cancelledIdentifiers.isEmpty)
     }
 
-    @Test("matrix: a task for no row, and one for a row off the whole lane, are cancelled")
+    @Test(
+        "matrix: a task for no row, and one for a row off the whole lane, are cancelled",
+        .timeLimit(.minutes(1)))
     func cancelsTasksNoRowNeeds() async throws {
         let stale = WholeBox<String?>(nil)
         let orphan = WholeBox<String?>(nil)
@@ -739,9 +845,12 @@ struct WholeLaneEngineTests {
                     WholeTaskListing(taskIdentifier: 7, taskDescription: orphan.value),
                     WholeTaskListing(taskIdentifier: 8, taskDescription: description),
                 ]
-            }
+            },
+            attached: false
         )
         defer { rig.cleanUp() }
+        let entry = AnnouncingEntry(rig.engine)
+        await rig.delegate.attach(entry)
         await rig.engine.drain()
         #expect(Set(rig.session.cancelledIdentifiers) == [7, 8])
         // A cancelled task keeps its place until it has ended, so the two stale tasks hold both
@@ -752,9 +861,11 @@ struct WholeLaneEngineTests {
             taskIdentifier: 8, taskDescription: stale.value, statusCode: nil,
             errorDescription: "cancelled"
         )
-        // One place came free, and it goes to the first file in capture order.
-        #expect(try await rig.eventually { rig.attempts(of: rig.picture.id).count == 1 })
-        await rig.engine.untilQuiescent()
+        // One place came free, and it goes to the first file in capture order — once the engine
+        // has the end and every pass it asked for has run.
+        try await arrived(1, at: entry)
+        try await settled(rig.engine)
+        #expect(rig.attempts(of: rig.picture.id).count == 1)
         #expect(rig.attempts(of: rig.video.id).isEmpty)
 
         // A task whose row is gone leaves the list with its end: nothing keeps its record.
@@ -763,17 +874,25 @@ struct WholeLaneEngineTests {
             taskIdentifier: 7, taskDescription: orphan.value, statusCode: nil,
             errorDescription: "cancelled"
         )
-        #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0] })
-        await rig.engine.untilQuiescent()
+        try await arrived(2, at: entry)
+        try await settled(rig.engine)
+        #expect(rig.attempts(of: rig.video.id) == [0])
         #expect(rig.session.createdTasks.count == 2)
     }
 
-    @Test("matrix: an unreadable task is cancelled, its answer applies nowhere, the row completes")
+    @Test(
+        "matrix: an unreadable task is cancelled, its answer applies nowhere, the row completes",
+        .timeLimit(.minutes(1)))
     func unreadableTaskEndToEnd() async throws {
-        let rig = try await WholeRig.make(listing: { _ in
-            [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
-        })
+        let rig = try await WholeRig.make(
+            listing: { _ in
+                [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
+            },
+            attached: false
+        )
         defer { rig.cleanUp() }
+        let entry = AnnouncingEntry(rig.engine)
+        await rig.delegate.attach(entry)
         await rig.engine.drain()
         #expect(rig.session.cancelledIdentifiers == [7])
         // Its cancellation still ends it, through the one claim every terminal callback takes.
@@ -783,15 +902,24 @@ struct WholeLaneEngineTests {
                 errorDescription: "cancelled"
             )
         )
-        // Ended, it leaves the session's list, and only then are the files sent.
+        // Ended, it leaves the session's list, and only then are the files sent. The end reaches
+        // the engine on a task of its own and asks for a pass there: a drain begun before it
+        // arrives can meet that pass running and return at once, and one begun after can run
+        // beside the answers below. So the end is awaited, then every pass, before anything is
+        // read.
         rig.session.forget(7)
+        try await arrived(1, at: entry)
         await rig.engine.drain()
+        try await settled(rig.engine)
         await rig.engine.handle(
             try rig.answer(rig.task(for: rig.picture.id), status: 200, received: 1000)
         )
         await rig.engine.handle(
             try rig.answer(rig.task(for: rig.video.id), status: 200, received: 3000)
         )
+        // The picture's end gave its place back and asked for a pass, which can claim the memo
+        // create from under the video's answer: the create is awaited wherever it ran.
+        try await settled(rig.engine)
         #expect(rig.completion.idempotencyKeys.count == 1)
         #expect(await rig.repository.job(rig.job.id) == nil)
     }
@@ -946,26 +1074,34 @@ struct WholeLaneEngineTests {
         #expect(!successor.request.allowsExpensiveNetworkAccess)
     }
 
-    @Test("a task nobody can read ending is itself what sends the files it held back")
+    @Test(
+        "a task nobody can read ending is itself what sends the files it held back",
+        .timeLimit(.minutes(1)))
     func unreadableEndReleasesTheBarrier() async throws {
         let rig = try await WholeRig.make(
             listing: { _ in
                 [WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task")]
             },
-            onCancel: .staysListed
+            onCancel: .staysListed,
+            attached: false
         )
         defer { rig.cleanUp() }
+        let entry = AnnouncingEntry(rig.engine)
+        await rig.delegate.attach(entry)
         await rig.engine.drain()
         #expect(rig.session.createdTasks.isEmpty, "the premise: the barrier held")
 
         // It ends and leaves the list. Nobody drains: no network change, no foreground, no tap.
+        // The end reaches the engine on a task of its own; once it has, the pass it asked for is
+        // the engine's own work, and quiescence covers it.
         rig.session.forget(7)
         rig.delegate.complete(
             taskIdentifier: 7, taskDescription: "not|a|whole|task", statusCode: nil,
             errorDescription: "cancelled"
         )
-        #expect(try await rig.eventually { rig.session.createdTasks.count == 2 })
-        await rig.engine.untilQuiescent()
+        try await arrived(1, at: entry)
+        try await settled(rig.engine)
+        #expect(rig.session.createdTasks.count == 2)
     }
 
     @Test("mobile data turned off, then the app backgrounded before the drain: the task stops")
