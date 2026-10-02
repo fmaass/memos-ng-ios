@@ -406,8 +406,8 @@ extension MediaImageLoaderTests {
         return found
     }
 
-    /// Signs in, hosts the app on the Library under the real tab bar and switches it to Years
-    /// through the scope control in the bar's accessory.
+    /// Signs in, hosts the app on the Library under the real tab bar, presses the Library's item
+    /// for its scope toolbar and switches it to Years through the control there.
     private func hostYears(
         _ wire: SegmentTransport,
         atRest: (UIWindow) -> Void = { _ in }
@@ -422,18 +422,24 @@ extension MediaImageLoaderTests {
             rootView: MainTabView(opening: .library).environment(session))
         window.makeKeyAndVisible()
 
-        // At rest the system tab bar is up and Years | Months | All stands in its accessory, on
-        // All (MEMNG-604).
-        var control: UISegmentedControl?
-        for _ in 0..<200 where control == nil || Self.systemTabBarOnScreen(in: window) == nil {
+        // At rest the system tab bar is up and no scope is drawn; a press on the Library's item
+        // puts the scope toolbar in the bar's place, Years | Months | All on All (MEMNG-604).
+        for _ in 0..<200 where Self.systemTabBarOnScreen(in: window) == nil {
             await segmentSettle(window, turns: 1)
-            control = ScopeAccessoryProbe.control(in: window)
         }
-        let seen = ScopeAccessoryProbe.describe(window)
         #expect(Self.systemTabBarOnScreen(in: window) != nil, "the Library at rest: no tab bar")
-        #expect(control != nil, "the Library at rest: no scope control: \(seen)")
-        #expect(control.flatMap { ScopeAccessoryProbe.chosen(in: $0) } == "All", "All not chosen")
-        // The navigation bar carries no segmented control: the picker left it for the accessory.
+        let resting = ScopeBarProbe.describe(window)
+        #expect(ScopeBarProbe.control(in: window) == nil, "a scope at rest: \(resting)")
+        #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
+        var control: UISegmentedControl?
+        for _ in 0..<200 where control == nil {
+            await segmentSettle(window, turns: 1)
+            control = ScopeBarProbe.control(in: window)
+        }
+        let seen = ScopeBarProbe.describe(window)
+        #expect(control != nil, "the Library pressed: no scope control: \(seen)")
+        #expect(control.flatMap { ScopeBarProbe.chosen(in: $0) } == "All", "All not chosen")
+        // The navigation bar carries no segmented control: the picker is the bottom toolbar's.
         #expect(Self.navigationBarSegmentedControls(in: window) == 0)
         var years: [NSObject] = []
         Self.elements(labelled: "Years", in: window, into: &years)
@@ -446,11 +452,11 @@ extension MediaImageLoaderTests {
         #expect(!Self.labels(in: window).contains("12 items"), "a year card drawn under All")
         atRest(window)
 
-        let live = await ScopeAccessoryProbe.settledControl(in: window) {
+        let live = await ScopeBarProbe.settledControl(in: window) {
             await segmentSettle(window, turns: 1)
         }
-        let before = ScopeAccessoryProbe.describe(window)
-        if let live { ScopeAccessoryProbe.choose(.years, in: live) }
+        let before = ScopeBarProbe.describe(window)
+        if let live { ScopeBarProbe.choose(.years, in: live) }
         await segmentSettle(window)
         #expect(
             wire.sizesAsked.first { $0 != "day" } == "year", "Years read no year buckets: \(before)"
@@ -661,9 +667,9 @@ extension MediaImageLoaderTests {
             // All reads day buckets too (MEMNG-597), so Months' read is the one AFTER the choice.
             let dayReads = { wire.sizesAsked.filter { $0 == "day" }.count }
             let before = dayReads()
-            let control = ScopeAccessoryProbe.control(in: window)
+            let control = ScopeBarProbe.control(in: window)
             #expect(control != nil, "precondition: the scope control stands over Years")
-            if let control { ScopeAccessoryProbe.choose(.months, in: control) }
+            if let control { ScopeBarProbe.choose(.months, in: control) }
             for _ in 0..<80 where dayReads() <= before {
                 await segmentSettle(window, turns: 1)
             }

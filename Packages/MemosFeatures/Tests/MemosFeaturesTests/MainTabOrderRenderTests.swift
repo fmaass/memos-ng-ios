@@ -119,64 +119,89 @@ struct MainTabOrderRenderTests {
     }
 
     /// What `.tabBarMinimizeBehavior` handed UIKit, read off the controller the system bar
-    /// belongs to: the bar folds on scroll down on every tab alike, the Library included, where
-    /// it used to stand aside for chrome of the app's own (MEMNG-604).
+    /// belongs to: the bar folds on scroll down on Timeline and Places, and never on the Library,
+    /// whose scope toolbar is reached by a press instead (MEMNG-604) — and the setting follows the
+    /// selection, not the tab the app opened on.
     @Test(
-        "the hosted tab controller minimises on scroll down on every tab",
+        "the hosted tab controller minimises on scroll down off the Library, never on it",
         arguments: [MainTab.library, MainTab.timeline, MainTab.places]
     )
     func minimiseBehaviourReachesUIKit(tab: MainTab) async {
-        let session = SessionStore(
-            credentials: TabOrderCredentials(),
-            makeClient: { configuration, credential in
-                APIClientFactory.make(
-                    configuration: configuration,
-                    credential: credential,
-                    transport: TabOrderTransport()
-                )
-            },
-            sleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
-            noticeSleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
-            identity: MediaIdentity()
-        )
-        await session.enteredForeground()
-        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_taborder")
-        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
-
-        let window = Self.window()
-        window.rootViewController = UIHostingController(
-            rootView: MainTabView(opening: tab).environment(session))
-        window.makeKeyAndVisible()
+        let window = await Self.signedInWindow(opening: tab)
         defer {
             window.isHidden = true
             window.rootViewController = nil
         }
-
-        for _ in 0..<120 where Self.chosenTitle(in: window) != tab.title {
-            await Self.settle(window)
-        }
-        #expect(Self.chosenTitle(in: window) == tab.title, "precondition: on \(tab)")
-        await Self.settle(window)
 
         let controller = Self.tabController(in: window.rootViewController)
         #expect(controller != nil, "no UITabBarController hosts the bar")
         let behaviour = controller?.tabBarMinimizeBehavior
+        let expected: UITabBarController.MinimizeBehavior =
+            tab == .library ? .never : .onScrollDown
         #expect(
-            behaviour == .onScrollDown,
-            "\(tab.title)'s bar: \(String(describing: behaviour)), not on scroll down"
+            behaviour == expected,
+            "\(tab.title)'s bar: \(String(describing: behaviour)), not \(String(describing: expected))"
+        )
+
+        // Off the Library and back: the setting moves with the selection.
+        let away: MainTab = tab == .library ? .places : .library
+        #expect(ScopeBarProbe.pressTab(away, in: window), "the bar's \(away.title) took no press")
+        for _ in 0..<120 where Self.chosenTitle(in: window) != away.title {
+            await Self.settle(window)
+        }
+        await Self.settle(window)
+        let after = controller?.tabBarMinimizeBehavior
+        let expectedAway: UITabBarController.MinimizeBehavior =
+            away == .library ? .never : .onScrollDown
+        #expect(
+            after == expectedAway,
+            "\(away.title)'s bar: \(String(describing: after)), not \(String(describing: expectedAway))"
         )
     }
 
-    /// Years | Months | All is the Library's alone (plan page 3929 decision 8: "On Timeline and
-    /// Places the dock never shows the Years | Months | All segment"), and it is the SYSTEM's
-    /// control in the SYSTEM's slot (MEMNG-604): a segmented control inside the content view of
-    /// the bottom accessory UIKit's tab controller carries, with the tab bar on screen beside it.
-    /// The Library case is the control for the other two: the same probe finds it there.
+    /// At launch every tab stands over the system bar and nothing of the Library's scope is drawn
+    /// (MEMNG-604). A press on the tab already showing is then the Library's way to its scope
+    /// toolbar — the bar steps aside for the Library icon beside Years | Months | All, on All —
+    /// and on Timeline and Places it changes nothing the app draws.
     @Test(
-        "the scope control stands in the tab bar's accessory on the Library and nowhere else",
+        "a press on the chosen tab gives the Library its scope toolbar and leaves the others be",
         arguments: [MainTab.library, MainTab.timeline, MainTab.places]
     )
-    func accessoryIsTheLibrarysAlone(tab: MainTab) async {
+    func pressOnTheChosenTab(tab: MainTab) async {
+        let window = await Self.signedInWindow(opening: tab)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
+        await Self.settle(window)
+        let atLaunch = ScopeBarProbe.describe(window)
+        #expect(Self.systemTabBarShows(in: window), "\(tab.title): no system tab bar at launch")
+        #expect(ScopeBarProbe.control(in: window) == nil, "\(tab.title) at launch: \(atLaunch)")
+        #expect(!ScopeBarProbe.libraryIconShows(in: window), "an icon at launch: \(atLaunch)")
+
+        #expect(ScopeBarProbe.pressTab(tab, in: window), "the bar's \(tab.title) took no press")
+        var control: UISegmentedControl?
+        for _ in 0..<80 {
+            await Self.settle(window)
+            control = ScopeBarProbe.control(in: window)
+            if tab == .library, control != nil, !Self.systemTabBarShows(in: window) { break }
+        }
+        let pressed = ScopeBarProbe.describe(window)
+        if tab == .library {
+            #expect(control != nil, "the Library pressed: no scope control: \(pressed)")
+            #expect(control?.numberOfSegments == 3, "segments: \(pressed)")
+            #expect(control.flatMap { ScopeBarProbe.chosen(in: $0) } == "All", "\(pressed)")
+            #expect(ScopeBarProbe.libraryIconShows(in: window), "no Library icon: \(pressed)")
+            #expect(!Self.systemTabBarShows(in: window), "the bar beside the scope: \(pressed)")
+        } else {
+            #expect(control == nil, "a press on \(tab.title) drew the scope: \(pressed)")
+            #expect(Self.systemTabBarShows(in: window), "a press on \(tab.title) took the bar")
+        }
+    }
+
+    /// Signs in over the tab-order wire and hosts the app on `tab`, chosen.
+    private static func signedInWindow(opening tab: MainTab) async -> UIWindow {
         let session = SessionStore(
             credentials: TabOrderCredentials(),
             makeClient: { configuration, credential in
@@ -198,39 +223,11 @@ struct MainTabOrderRenderTests {
         window.rootViewController = UIHostingController(
             rootView: MainTabView(opening: tab).environment(session))
         window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-        }
-
         for _ in 0..<120 where Self.chosenTitle(in: window) != tab.title {
             await Self.settle(window)
         }
         #expect(Self.chosenTitle(in: window) == tab.title, "precondition: on \(tab)")
-        var control: UISegmentedControl?
-        for _ in 0..<40 {
-            await Self.settle(window)
-            control = ScopeAccessoryProbe.control(in: window)
-            if tab == .library, control != nil { break }
-        }
-        let seen = ScopeAccessoryProbe.describe(window)
-        #expect(Self.systemTabBarShows(in: window), "\(tab.title): no system tab bar on screen")
-        if tab == .library {
-            #expect(control != nil, "the Library shows no scope control: \(seen)")
-            if let control {
-                #expect(
-                    ScopeAccessoryProbe.isInAccessory(control, window: window),
-                    "the scope control is not in the tab bar's accessory: \(seen)"
-                )
-                #expect(ScopeAccessoryProbe.chosen(in: control) == "All", "All is not chosen")
-            }
-        } else {
-            #expect(control == nil, "\(tab.title) shows the Library's scope control: \(seen)")
-        }
-        // The press on the tab showing is the system's again, and draws nothing of the app's.
-        #expect(Self.press(tab, in: window), "the bar's \(tab.title) took no press")
-        await Self.settle(window)
-        #expect(Self.systemTabBarShows(in: window), "a press on \(tab.title) took the bar away")
+        return window
     }
 
     /// Built on the test host's own window scene, for the reason `StackChromeTests` gives: a
@@ -320,25 +317,6 @@ struct MainTabOrderRenderTests {
             position[title] = low
         }
         return titles.sorted { (position[$0] ?? 0) < (position[$1] ?? 0) }
-    }
-
-    /// Presses `tab` through the controller UIKit built for the bar, the way a tap on its item
-    /// does — which, on the tab already showing, is a re-selection the `TabView` hears.
-    private static func press(_ tab: MainTab, in window: UIWindow) -> Bool {
-        guard
-            let controller = tabController(in: window.rootViewController),
-            let index = controller.tabBar.items?.firstIndex(where: { $0.title == tab.title }),
-            let controllers = controller.viewControllers,
-            controllers.indices.contains(index)
-        else { return false }
-        let target = controllers[index]
-        let delegate = controller.delegate
-        guard delegate?.tabBarController?(controller, shouldSelect: target) ?? true else {
-            return false
-        }
-        controller.selectedViewController = target
-        delegate?.tabBarController?(controller, didSelect: target)
-        return true
     }
 
     private static func tabController(in controller: UIViewController?) -> UITabBarController? {

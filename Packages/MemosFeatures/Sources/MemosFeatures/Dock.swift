@@ -1,15 +1,18 @@
 import MemosCore
 import SwiftUI
 
-/// Whether a screen has taken the app's bottom chrome away, for every tab at once.
+/// The app's bottom chrome: which of the Library's two bars stands there, and whether a screen
+/// has taken the chrome away for every tab at once (MEMNG-604).
 ///
-/// A claim takes the system tab bar and the Library's scope control in its accessory away
-/// together, on every tab root (MEMNG-604). Two parties claim it: select mode, whose toolbar is
-/// then the only bottom chrome, as in Photos, and a pushed screen that stands for the whole app
-/// (`StackChrome`), which also hides the bar on itself.
+/// The bars are `DockMode`'s: the system tab bar, or the Library's scope toolbar in its place,
+/// moved only by presses. A claim takes both away, on every tab root, and leaves the mode as it
+/// was, so ending it brings back whichever bar was there. Two parties claim it: select mode, whose
+/// toolbar is then the only bottom chrome, as in Photos, and a pushed screen that stands for the
+/// whole app (`StackChrome`), which also hides the bar on itself.
 @MainActor
 @Observable
 final class AppDock {
+    private(set) var mode: DockMode = .initial
     /// Screens on top of a stack that take the chrome away while they are up, one claim each.
     private var takeovers: Set<UUID> = []
 
@@ -20,14 +23,29 @@ final class AppDock {
     func claim(_ id: UUID) { takeovers.insert(id) }
 
     func release(_ id: UUID) { takeovers.remove(id) }
+
+    func send(_ event: DockEvent) {
+        let next = mode.after(event)
+        if next != mode { mode = next }
+    }
+
+    /// Whether `tab`'s root stands over the system tab bar: not while a claim holds the chrome,
+    /// and not on the Library while its scope toolbar has the bar's place.
+    func showsSystemBar(on tab: MainTab) -> Bool {
+        !isTakenOver && !(tab == .library && mode == .scope)
+    }
+
+    /// Whether the Library draws its scope toolbar. The mode is the tabs on every other tab, so
+    /// this is the Library's alone.
+    var showsScopeBar: Bool { mode == .scope && !isTakenOver }
 }
 
 /// Which of Years, Months and All the Library shows, and the year a Years card narrowed Months to.
 ///
-/// Out of the Library's own state because the control that picks it is drawn in the tab bar's
-/// accessory, not by the Library (plan page 3929 decision 11: "the Library-only segment is
-/// injected by the view"), and both must read one answer: a day tile's jump or a year card's tap
-/// moves the scope from inside the Library, and the control has to show where it went.
+/// Shared rather than the Library's own (plan page 3929 decision 11: "the Library-only segment is
+/// injected by the view"): the control in the scope toolbar and the Library's views must read one
+/// answer, because a day tile's jump or a year card's tap moves the scope from inside the
+/// Library, and the control has to show where it went.
 @MainActor
 @Observable
 final class LibraryScopeChoice {
@@ -90,16 +108,10 @@ final class LibraryScopeChoice {
     }
 }
 
-/// Years | Months | All, as the system's segmented control in the tab bar's bottom accessory
-/// (MEMNG-604).
-///
-/// iOS draws the accessory's glass, stands it above the bar while the bar is expanded and beside
-/// the bar once a scroll has minimised it, and animates the selection; the app hands it a picker
-/// bound to the Library's scope and nothing drawn by hand. Its only adaptation is its side
-/// margin, read from the placement the system reports, because the inline slot is narrow.
+/// Years | Months | All, as the system's segmented control in the Library's scope toolbar
+/// (MEMNG-604): a picker bound to the Library's scope, whose glass and selection iOS draws.
 struct LibraryScopePicker: View {
     let scope: LibraryScopeChoice
-    @Environment(\.tabViewBottomAccessoryPlacement) private var placement
 
     var body: some View {
         Picker(
@@ -112,10 +124,6 @@ struct LibraryScopePicker: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .padding(
-            .horizontal,
-            placement == .inline ? DesignTokens.Space.tight : DesignTokens.Space.roomy
-        )
         .accessibilityIdentifier(Self.identifier)
     }
 
@@ -124,11 +132,11 @@ struct LibraryScopePicker: View {
 }
 
 /// The three tabs, each with its own navigation stack and scroll position, under the SYSTEM tab
-/// bar (MEMNG-666), with the Library's scope in the bar's bottom accessory (MEMNG-604).
+/// bar (MEMNG-666), which steps aside on the Library for its scope toolbar (MEMNG-604).
 ///
 /// The bar is the `TabView`'s own, so iOS draws its Liquid Glass, the selection's morph between
-/// tabs and its minimising on scroll itself — on every tab alike, the Library included. Only a
-/// claim on the dock hides it: select mode, or a screen that takes the whole app over.
+/// tabs and its minimising on scroll on Timeline and Places. The app decides only WHEN it stands
+/// aside: on the Library while `AppDock`'s mode is the scope, and under a claim.
 struct MainTabs<Screen: View>: View {
     @Binding var selection: MainTab
     @ViewBuilder let screen: (MainTab) -> Screen
@@ -136,49 +144,47 @@ struct MainTabs<Screen: View>: View {
     @State private var scope = LibraryScopeChoice()
 
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: Self.pressing(selection: $selection, dock: dock)) {
             ForEach(MainTab.allCases) { tab in
                 Tab(tab.title, systemImage: tab.symbol, value: tab) {
                     screen(tab)
                         // A condition, never a constant: at rest the bar is the system's to
                         // draw, and a root that said `.automatic` while a takeover's destination
                         // said `.hidden` would bring the bar back under it.
-                        .toolbarVisibility(dock.isTakenOver ? .hidden : .automatic, for: .tabBar)
+                        .toolbarVisibility(
+                            dock.showsSystemBar(on: tab) ? .automatic : .hidden,
+                            for: .tabBar
+                        )
                 }
             }
         }
-        .tabBarMinimizeBehavior(.onScrollDown)
-        .libraryScopeAccessory(shown: Self.showsScope(on: selection, dock: dock), scope: scope)
+        .tabBarMinimizeBehavior(Self.minimizesOnScroll(on: selection) ? .onScrollDown : .never)
         .environment(dock)
         .environment(scope)
+        // Every way off the Library — a press in the bar or a jump to a memo — gives the tabs
+        // back, so coming back finds them.
+        .onChange(of: selection) { _, now in dock.send(.selected(now)) }
     }
 
-    /// Whether the accessory carries the scope control: on the Library alone, and not while select
-    /// mode or a screen that takes the app over has claimed the chrome.
-    static func showsScope(on tab: MainTab, dock: AppDock) -> Bool {
-        tab == .library && !dock.isTakenOver
+    /// Whether the system bar folds to its selected tab while `tab` scrolls down. Not on the
+    /// Library: a bar shrunk there to a lone icon with no control beside it would be a third
+    /// state, and its scope toolbar is reached by a press instead.
+    static func minimizesOnScroll(on tab: MainTab) -> Bool {
+        tab != .library
     }
-}
 
-extension View {
-    /// The scope control in the tab bar's bottom accessory while `shown`, and no accessory at all
-    /// otherwise.
-    ///
-    /// `isEnabled` is iOS 26.1's: it takes the accessory away without changing the view it is
-    /// declared on, so the tabs keep their state. iOS 26.0, the deployment target, has only the
-    /// unconditional accessory; there the content empties instead, which can leave the system's
-    /// empty accessory standing on Timeline and Places.
-    @ViewBuilder
-    fileprivate func libraryScopeAccessory(shown: Bool, scope: LibraryScopeChoice) -> some View {
-        if #available(iOS 26.1, *) {
-            tabViewBottomAccessory(isEnabled: shown) {
-                LibraryScopePicker(scope: scope)
+    /// The selection the `TabView` is handed, which only the system bar writes: a press on
+    /// another tab sets that tab, and a press on the tab already showing sets the value the
+    /// selection already holds. Each press is told to the dock BEFORE the selection moves, so
+    /// the one place that decides what a press does is `DockMode.after(_:)`.
+    static func pressing(selection: Binding<MainTab>, dock: AppDock) -> Binding<MainTab> {
+        Binding(
+            get: { selection.wrappedValue },
+            set: { tab in
+                dock.send(.pressedTab(tab, showing: selection.wrappedValue))
+                if tab != selection.wrappedValue { selection.wrappedValue = tab }
             }
-        } else {
-            tabViewBottomAccessory {
-                if shown { LibraryScopePicker(scope: scope) }
-            }
-        }
+        )
     }
 }
 

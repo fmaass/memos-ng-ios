@@ -21,12 +21,12 @@ struct MediaLibraryView: View {
     /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
     @State private var buckets: LibraryBucketStore?
     /// Which of Years, Months and All is on screen, and the year a Years card narrowed Months to.
-    /// Shared with the tab bar's accessory, whose segmented control picks it (MEMNG-604); a
+    /// Shared with the scope toolbar, whose segmented control picks it (MEMNG-604); a
     /// Library hosted with no tabs above it keeps its own, at All.
     @Environment(LibraryScopeChoice.self) private var sharedChoice: LibraryScopeChoice?
     @State private var ownChoice = LibraryScopeChoice()
-    /// The dock select mode claims, so the scope control in the tab bar's accessory steps aside
-    /// for its toolbar.
+    /// The dock: whether the scope toolbar stands in the tab bar's place, and the claim select
+    /// mode takes so that its toolbar is the only bottom chrome.
     @Environment(AppDock.self) private var dock: AppDock?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
@@ -49,6 +49,9 @@ struct MediaLibraryView: View {
     /// the current direction FROM, so there is only ever one answer on screen.
     private let preferences = LibraryPreferences.shared
 
+    /// The scope toolbar's Library icon, which gives the system tab bar back.
+    static let tabsButton = "library-show-tabs"
+
     var body: some View {
         NavigationStack {
             Group {
@@ -66,8 +69,8 @@ struct MediaLibraryView: View {
             .safeAreaBar(edge: .top) {
                 if let library { header(library) }
             }
-            // Select mode's toolbar, in the scope control's place: the accessory is claimed away
-            // while it is up (`dockClaim`), so the two are never drawn together.
+            // Select mode's toolbar, in the dock's place: the tab bar and the scope toolbar are
+            // claimed away while it is up (`dockClaim`), so none of them is drawn beside it.
             .safeAreaBar(edge: .bottom) {
                 if selection.isActive {
                     VStack(spacing: DesignTokens.Space.tight) {
@@ -99,6 +102,24 @@ struct MediaLibraryView: View {
                 }
             }
             .toolbarVisibility(.hidden, for: .navigationBar)
+            // The scope toolbar, in the system tab bar's place once the Library's item is
+            // pressed (MEMNG-604): the system's own bottom bar, so iOS draws its glass.
+            .toolbar {
+                if let dock, dock.showsScopeBar {
+                    ToolbarItem(placement: .bottomBar) {
+                        Button {
+                            dock.send(.pressedLibraryIcon)
+                        } label: {
+                            Label(MainTab.library.title, systemImage: MainTab.library.symbol)
+                        }
+                        .accessibilityIdentifier(Self.tabsButton)
+                    }
+                    ToolbarSpacer(.fixed, placement: .bottomBar)
+                    ToolbarItem(placement: .bottomBar) {
+                        LibraryScopePicker(scope: choice)
+                    }
+                }
+            }
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
             // on one view is how one of them silently stops appearing, and this screen now has
             // both a cover and a sheet.

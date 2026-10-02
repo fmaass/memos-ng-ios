@@ -179,9 +179,10 @@ private actor PaintedMedia: MediaTransport {
     }
 }
 
-/// The Library's bottom chrome is the system's (MEMNG-604): the tab bar is never taken away on
-/// the Library, Years | Months | All is a system segmented control in the bar's bottom accessory,
-/// and the two agree with the Library's scope both ways. Hosted in the real `MainTabView` over a
+/// The Library's bottom chrome is the system's (MEMNG-604): the tab bar at launch, and after a
+/// press on the Library's item the Library's own system toolbar in its place — its icon beside
+/// Years | Months | All, a system segmented control that agrees with the Library's scope both
+/// ways — until the icon gives the bar back. Hosted in the real `MainTabView` over a
 /// real `SessionStore`, the real generated client and a populated server, and photographed along
 /// the way (`drawHierarchy`, attached to the result bundle) so a person can look at what ran.
 ///
@@ -327,16 +328,52 @@ extension MediaImageLoaderTests {
         var control: UISegmentedControl?
         for _ in 0..<200 {
             await chromeSettle(window)
-            control = ScopeAccessoryProbe.control(in: window)
-            if let control, title == nil || ScopeAccessoryProbe.chosen(in: control) == title {
+            control = ScopeBarProbe.control(in: window)
+            if let control, title == nil || ScopeBarProbe.chosen(in: control) == title {
                 break
             }
         }
         return control
     }
 
-    @Test("the Library keeps the system tab bar in every scope and after a scroll")
-    func libraryKeepsTheSystemBar() async {
+    /// Waits until the Library has served its first screen of pictures and settled.
+    private func libraryServed(_ media: PaintedMedia, _ window: UIWindow) async {
+        var waited = 0
+        while await media.served < 12, waited < 200 {
+            await chromeSettle(window)
+            waited += 1
+        }
+        await chromeSettle(window, turns: 20)
+    }
+
+    /// Presses the Library's item in the system bar and waits for the scope toolbar to stand in
+    /// the bar's place; returns its control.
+    private func pressIntoScope(_ window: UIWindow) async -> UISegmentedControl? {
+        #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
+        var control: UISegmentedControl?
+        for _ in 0..<200 where control == nil || Self.barShows(in: window) {
+            await chromeSettle(window)
+            control = ScopeBarProbe.control(in: window)
+        }
+        await chromeSettle(window, turns: 20)
+        return ScopeBarProbe.control(in: window)
+    }
+
+    /// Scrolls the main scroll view down in steps, the way a drag moves it.
+    private func scrollDown(_ window: UIWindow) async {
+        guard let scroller = Self.mainScroll(in: window) else { return }
+        let top = -scroller.adjustedContentInset.top
+        for step in 1...24 {
+            scroller.setContentOffset(CGPoint(x: 0, y: top + CGFloat(step) * 40), animated: false)
+            await chromeSettle(window, turns: 2)
+        }
+        await chromeSettle(window, turns: 20)
+    }
+
+    /// The Library at launch: the system tab bar and nothing of its scope, and a scroll changes
+    /// neither (MEMNG-604) — the scope toolbar is reached by a press, never by a scroll.
+    @Test("the Library opens on the system tab bar with no scope, and a scroll changes nothing")
+    func libraryOpensOnTheTabs() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
             let window = await chromeHost(opening: .library)
@@ -344,73 +381,107 @@ extension MediaImageLoaderTests {
                 window.isHidden = true
                 window.rootViewController = nil
             }
-            let first = await controlShowing("All", in: window)
-            var waited = 0
-            while await media.served < 12, waited < 200 {
-                await chromeSettle(window)
-                waited += 1
-            }
-            await chromeSettle(window, turns: 20)
-            let seen = ScopeAccessoryProbe.describe(window)
-            #expect(Self.barShows(in: window), "the Library at rest: no system tab bar")
-            #expect(first != nil, "the Library at rest: no scope control: \(seen)")
-            Self.shoot("library-expanded", window)
+            await libraryServed(media, window)
+            let seen = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "the Library at launch: no system tab bar")
+            #expect(ScopeBarProbe.control(in: window) == nil, "a scope at launch: \(seen)")
+            #expect(!ScopeBarProbe.libraryIconShows(in: window), "an icon at launch: \(seen)")
+            Self.shoot("library-tabs", window)
 
-            for scope in [LibraryScope.years, .months, .all] {
-                if let control = ScopeAccessoryProbe.control(in: window) {
-                    ScopeAccessoryProbe.choose(scope, in: control)
-                }
-                // The Library itself moved, not only the control: a Years card reads its count,
-                // and nothing else draws one.
-                var shown: [String] = []
-                for _ in 0..<200 {
+            await scrollDown(window)
+            let scrolled = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "All scrolled: the system tab bar is gone")
+            #expect(ScopeBarProbe.control(in: window) == nil, "a scope after a scroll: \(scrolled)")
+        }
+    }
+
+    /// A press on the Library's item swaps the system bar for the Library's scope toolbar — its
+    /// icon, then Years | Months | All — whose control moves the Library in every scope; a scroll
+    /// keeps it, and only the icon gives the bar back (MEMNG-604).
+    @Test("a press on the Library swaps the tab bar for its scope toolbar until the icon")
+    func pressSwapsTheBars() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+
+            let control = await pressIntoScope(window)
+            let seen = ScopeBarProbe.describe(window)
+            Attachment.record(seen, named: "chrome-library-scope")
+            #expect(control != nil, "the Library pressed: no scope control: \(seen)")
+            #expect(control?.numberOfSegments == 3, "segments: \(seen)")
+            #expect(control.flatMap { ScopeBarProbe.chosen(in: $0) } == "All", "\(seen)")
+            #expect(ScopeBarProbe.libraryIconShows(in: window), "no Library icon: \(seen)")
+            #expect(!Self.barShows(in: window), "the system tab bar beside the scope: \(seen)")
+            Self.shoot("library-scope-all", window)
+
+            // Each scope by hand, and the Library itself moves, not only the control: a Years card
+            // reads its count, and Months heads a month "Sep 2026", which All does not draw.
+            let marks: [(LibraryScope, String)] = [(.months, "Sep 2026"), (.years, "48 items")]
+            for (scope, mark) in marks {
+                let live = await ScopeBarProbe.settledControl(in: window) {
                     await chromeSettle(window)
-                    shown = Self.labels(in: window)
-                    if shown.contains("48 items") == (scope == .years) { break }
+                }
+                if let live { ScopeBarProbe.choose(scope, in: live) }
+                var drawn: [NSObject] = []
+                for _ in 0..<200 where drawn.isEmpty {
+                    await chromeSettle(window)
+                    drawn = Self.elements(labelled: mark, in: window)
                 }
                 await chromeSettle(window, turns: 20)
-                let card = shown.contains("48 items")
-                #expect(card == (scope == .years), "\(scope.label): the Library reads \(shown)")
-                let control = ScopeAccessoryProbe.control(in: window)
-                let chosen = control.flatMap { ScopeAccessoryProbe.chosen(in: $0) }
-                #expect(chosen == scope.label, "\(scope.label) not chosen: \(chosen ?? "-")")
-                #expect(Self.barShows(in: window), "\(scope.label): the system tab bar is gone")
-                if scope == .months { Self.shoot("library-months", window) }
-            }
-
-            // All, scrolled down in steps the way a drag moves it.
-            let scroller = Self.mainScroll(in: window)
-            #expect(scroller != nil, "no scroll view under All")
-            if let scroller {
-                let top = -scroller.adjustedContentInset.top
-                for step in 1...24 {
-                    let offset = CGPoint(x: 0, y: top + CGFloat(step) * 40)
-                    scroller.setContentOffset(offset, animated: false)
-                    await chromeSettle(window, turns: 2)
+                #expect(!drawn.isEmpty, "\(scope.label) not drawn: \(Self.labels(in: window))")
+                let chosen = ScopeBarProbe.control(in: window).flatMap {
+                    ScopeBarProbe.chosen(in: $0)
                 }
+                #expect(chosen == scope.label, "\(scope.label) not chosen: \(chosen ?? "-")")
+                #expect(!Self.barShows(in: window), "\(scope.label): the tab bar came back")
+                Self.shoot("library-scope-\(scope.rawValue)", window)
             }
-            await chromeSettle(window, turns: 40)
-            let after = ScopeAccessoryProbe.control(in: window)
-            let placement = after.map { ScopeAccessoryProbe.placement(of: $0).rawValue }
-            #expect(Self.barShows(in: window), "All scrolled: the system tab bar is gone")
-            let placed = String(describing: placement)
-            #expect(after != nil, "All scrolled: no scope control (placement \(placed))")
-            Self.shoot("library-scrolled", window)
 
-            // At the foot of All the last row stands clear of the accessory.
-            if let scroller, let after {
+            // All again, scrolled to its foot: the toolbar stays, and the last row clears it.
+            if let live = await ScopeBarProbe.settledControl(
+                in: window,
+                settle: {
+                    await chromeSettle(window)
+                })
+            {
+                ScopeBarProbe.choose(.all, in: live)
+            }
+            for _ in 0..<200 where Self.labels(in: window).contains("48 items") {
+                await chromeSettle(window)
+            }
+            await scrollDown(window)
+            let scrolled = ScopeBarProbe.control(in: window)
+            #expect(scrolled != nil, "All scrolled: the scope toolbar went")
+            #expect(!Self.barShows(in: window), "All scrolled: the tab bar came back")
+            if let scroller = Self.mainScroll(in: window), let scrolled {
                 let inset = scroller.adjustedContentInset.bottom
                 let bottom = scroller.contentSize.height - scroller.bounds.height + inset
                 scroller.setContentOffset(CGPoint(x: 0, y: max(bottom, 0)), animated: false)
                 await chromeSettle(window, turns: 20)
                 let drawn = scroller.convert(scroller.bounds, to: window)
                 let visible = drawn.maxY - scroller.adjustedContentInset.bottom
-                let control = after.convert(after.bounds, to: window)
-                #expect(
-                    visible <= control.minY + 1,
-                    "the content ends at \(visible), under the control at \(control.minY)"
-                )
+                let top = scrolled.convert(scrolled.bounds, to: window).minY
+                #expect(visible <= top + 1, "the content ends at \(visible), the control at \(top)")
             }
+
+            // The icon gives the bar back, still on the Library.
+            let how = ScopeBarProbe.pressLibraryIcon(in: window)
+            #expect(how != nil, "no Library icon took a press: \(ScopeBarProbe.describe(window))")
+            for _ in 0..<200 where !Self.barShows(in: window) {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let after = ScopeBarProbe.describe(window)
+            Attachment.record("icon pressed by \(how ?? "nothing"); \(after)", named: "chrome-icon")
+            #expect(Self.barShows(in: window), "the icon did not give the bar back: \(after)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "the scope stayed: \(after)")
+            let selected = Self.tabBar(in: window)?.selectedItem?.title
+            #expect(selected == MainTab.library.title, "the bar came back on \(selected ?? "-")")
         }
     }
 
@@ -418,22 +489,26 @@ extension MediaImageLoaderTests {
     func scopeControlAndTheLibraryAgree() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
-            let window = await chromeHost(opening: .library)
+            let window = await chromeHost(opening: .timeline)
             defer {
                 window.isHidden = true
                 window.rootViewController = nil
             }
-            _ = await controlShowing("All", in: window)
-            var waited = 0
-            while await media.served < 12, waited < 200 {
+            let timeline = MainTab.timeline.title
+            for _ in 0..<200 where Self.tabBar(in: window)?.selectedItem?.title != timeline {
                 await chromeSettle(window)
-                waited += 1
             }
+            // The Library pressed from the Timeline and then again where it shows: either press
+            // alone gives the scope toolbar, so the pair reaches it whichever one a broken rule
+            // lost, and what this test can fail on is the control's binding alone.
+            #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
             await chromeSettle(window, turns: 20)
+            _ = await pressIntoScope(window)
+            await libraryServed(media, window)
 
             // From inside the Library, before any choice by hand, so a control that only
-            // remembered its own taps would still read All: a drag down All raises the date pill,
-            // whose tap opens Months, and the control follows.
+            // remembered its own taps would still read All: a scroll down All raises the date
+            // pill, whose tap opens Months, and the control follows.
             let pillLabels = Set(
                 ChromeWire.days.map { dayPillLabel(String(format: "2026-09-%02d", $0)) })
             var pills: [NSObject] = []
@@ -449,7 +524,7 @@ extension MediaImageLoaderTests {
             #expect(!pills.isEmpty, "no date pill while All scrolled: \(Self.labels(in: window))")
             #expect(pills.contains { $0.accessibilityActivate() }, "the date pill took no press")
             let opened = await controlShowing("Months", in: window)
-            let onPill = opened.flatMap { ScopeAccessoryProbe.chosen(in: $0) }
+            let onPill = opened.flatMap { ScopeBarProbe.chosen(in: $0) }
             #expect(onPill == "Months", "the pill left the control on \(onPill ?? "nothing")")
 
             // Months draws a tile per day — the newest six, the 12th among them — and a day tile
@@ -463,26 +538,12 @@ extension MediaImageLoaderTests {
             }
             #expect(tiles.contains { $0.accessibilityActivate() }, "no day tile took a press")
             let followed = await controlShowing("All", in: window)
-            let chosen = followed.flatMap { ScopeAccessoryProbe.chosen(in: $0) }
+            let chosen = followed.flatMap { ScopeBarProbe.chosen(in: $0) }
             #expect(chosen == "All", "the day's jump left the control on \(chosen ?? "nothing")")
-
-            // By hand: Months again, and the Library draws it — the month's own title, which All
-            // does not draw (All heads its months "September 2026").
-            let control = await ScopeAccessoryProbe.settledControl(in: window) {
-                await chromeSettle(window)
-            }
-            #expect(control != nil, "no scope control: \(ScopeAccessoryProbe.describe(window))")
-            if let control { ScopeAccessoryProbe.choose(.months, in: control) }
-            var drawn: [NSObject] = []
-            for _ in 0..<200 where drawn.isEmpty {
-                await chromeSettle(window)
-                drawn = Self.elements(labelled: "Sep 2026", in: window)
-            }
-            #expect(!drawn.isEmpty, "Months is not drawn after the control chose it")
         }
     }
 
-    @Test("select mode hides the system tab bar and the scope control; Close brings both back")
+    @Test("select mode hides the tab bar and the scope toolbar; Close restores the bar it hid")
     func selectModeHidesTheBar() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
@@ -491,43 +552,70 @@ extension MediaImageLoaderTests {
                 window.isHidden = true
                 window.rootViewController = nil
             }
-            _ = await controlShowing("All", in: window)
-            var waited = 0
-            while await media.served < 12, waited < 200 {
-                await chromeSettle(window)
-                waited += 1
-            }
-            #expect(Self.barShows(in: window), "precondition: the system tab bar at rest")
+            await libraryServed(media, window)
+            _ = await pressIntoScope(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "precondition: the scope toolbar")
 
             // In select mode its toolbar is the only bottom chrome, as in Photos.
             let select = Self.elements(labelled: "Select", in: window)
             #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
             var share: [NSObject] = []
-            for _ in 0..<200 where share.isEmpty || Self.barShows(in: window) {
+            for _ in 0..<200 where share.isEmpty || ScopeBarProbe.control(in: window) != nil {
                 await chromeSettle(window)
                 share = Self.elements(labelled: "Share", in: window)
             }
             await chromeSettle(window, turns: 20)
-            let seen = ScopeAccessoryProbe.describe(window)
+            let seen = ScopeBarProbe.describe(window)
             #expect(!share.isEmpty, "select mode drew no toolbar")
-            #expect(!Self.barShows(in: window), "the system tab bar stayed under select mode")
-            #expect(ScopeAccessoryProbe.control(in: window) == nil, "the scope control: \(seen)")
+            #expect(!Self.barShows(in: window), "the system tab bar under select mode: \(seen)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "the scope under select: \(seen)")
+            #expect(!ScopeBarProbe.libraryIconShows(in: window), "the icon under select: \(seen)")
             Self.shoot("library-select", window)
 
-            // Leaving it gives the bar and the control back.
-            let close = Self.elements(labelled: "Close", in: window)
-            #expect(close.contains { $0.accessibilityActivate() }, "Close took no press")
+            // Close: the scope toolbar it hid, not the tab bar.
+            await closeSelect(window)
+            for _ in 0..<200 where ScopeBarProbe.control(in: window) == nil {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let scope = ScopeBarProbe.describe(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "Close lost the scope: \(scope)")
+            #expect(!Self.barShows(in: window), "Close brought the tab bar back: \(scope)")
+
+            // From the tabs, the tabs: the icon first, then select mode in and out.
+            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "no icon took a press")
             for _ in 0..<200 where !Self.barShows(in: window) {
                 await chromeSettle(window)
             }
-            #expect(Self.barShows(in: window), "the system tab bar did not come back after Close")
-            let back = await controlShowing("All", in: window)
-            let after = ScopeAccessoryProbe.describe(window)
-            #expect(back != nil, "no scope control after Close: \(after)")
+            let again = Self.elements(labelled: "Select", in: window)
+            #expect(again.contains { $0.accessibilityActivate() }, "Select took no press")
+            for _ in 0..<200 where Self.barShows(in: window) {
+                await chromeSettle(window)
+            }
+            #expect(!Self.barShows(in: window), "the system tab bar stayed under select mode")
+            await closeSelect(window)
+            for _ in 0..<200 where !Self.barShows(in: window) {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let tabs = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "Close did not bring the tab bar back: \(tabs)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "Close drew the scope: \(tabs)")
         }
     }
 
-    @Test("Timeline and Places stand over the system tab bar, with no scope control")
+    private func closeSelect(_ window: UIWindow) async {
+        let close = Self.elements(labelled: "Close", in: window)
+        #expect(close.contains { $0.accessibilityActivate() }, "Close took no press")
+        for _ in 0..<200 where !Self.elements(labelled: "Share", in: window).isEmpty {
+            await chromeSettle(window)
+        }
+    }
+
+    /// Timeline and Places stand over the system bar with nothing of the Library's, and the
+    /// Library's item pressed from either opens the Library on its scope toolbar; a press back
+    /// on the tab left gives that tab its bar (MEMNG-604).
+    @Test("Timeline and Places keep the tab bar; the Library pressed from them opens on its scope")
     func otherRootsHaveNoScope() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
@@ -537,10 +625,25 @@ extension MediaImageLoaderTests {
                     await chromeSettle(window)
                 }
                 await chromeSettle(window, turns: 80)
+                let seen = ScopeBarProbe.describe(window)
                 #expect(Self.barShows(in: window), "\(tab.title): no system tab bar")
-                let control = ScopeAccessoryProbe.control(in: window)
-                #expect(control == nil, "\(tab.title) shows the Library's scope control")
+                #expect(ScopeBarProbe.control(in: window) == nil, "\(tab.title): \(seen)")
+                #expect(!ScopeBarProbe.libraryIconShows(in: window), "\(tab.title): \(seen)")
                 Self.shoot(tab.rawValue, window)
+
+                let control = await pressIntoScope(window)
+                let pressed = ScopeBarProbe.describe(window)
+                #expect(control != nil, "the Library from \(tab.title): no scope: \(pressed)")
+                #expect(!Self.barShows(in: window), "the Library from \(tab.title): \(pressed)")
+
+                #expect(ScopeBarProbe.pressTab(tab, in: window), "\(tab.title) took no press")
+                for _ in 0..<200 where !Self.barShows(in: window) {
+                    await chromeSettle(window)
+                }
+                await chromeSettle(window, turns: 20)
+                let back = ScopeBarProbe.describe(window)
+                #expect(Self.barShows(in: window), "back on \(tab.title): no tab bar: \(back)")
+                #expect(ScopeBarProbe.control(in: window) == nil, "back on \(tab.title): \(back)")
                 window.isHidden = true
                 window.rootViewController = nil
             }
