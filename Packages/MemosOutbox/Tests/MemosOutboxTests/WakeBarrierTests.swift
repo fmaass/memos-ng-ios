@@ -681,3 +681,422 @@ struct WithdrawalRecordTests {
         )
     }
 }
+
+/// The app came to the foreground and the drain that started is over, within the deadline.
+@MainActor
+func becameActive(_ outbox: Outbox) async throws {
+    let drain = outbox.appBecameActive()
+    try await bounded("the foreground drain") { await drain.value }
+}
+
+/// Returns once the outbox's engine is quiescent, within the deadline: `wake` leaves only then.
+@MainActor
+func outboxQuiet(_ outbox: Outbox) async throws {
+    try await bounded("the outbox going quiet") { @MainActor in
+        await outbox.wake(holding: OutboxBackgroundCompletion().enterWake()) {}
+    }
+}
+
+/// Runs `deliver` inside one wake of the upload session, and returns once the system's handler is
+/// called — every answer the session delivered applied, the wake left — and the engine is quiet
+/// after them. Each step is a handshake the code under test makes, and each is bounded.
+@MainActor
+func answersSettled(
+    _ outbox: Outbox,
+    box: OutboxBackgroundCompletion,
+    delegate: UploadSessionDelegate,
+    _ deliver: () throws -> Void
+) async throws {
+    let (called, call) = AsyncStream.makeStream(of: Void.self)
+    let work = try #require(box.beginWake(for: OutboxUploadSession.identifier) { call.yield() })
+    try deliver()
+    delegate.urlSessionDidFinishEvents(
+        forBackgroundURLSession: URLSession(configuration: .ephemeral)
+    )
+    try await bounded("the wake leaving") { @MainActor in await outbox.wake(holding: work) {} }
+    try await bounded("the system's handler") { for await _ in called { return } }
+    try await outboxQuiet(outbox)
+}
+
+/// The facade-level half of the whole-file pilot checklist (page 4065): each test names the line
+/// it holds. The outbox is composed over a scripted upload session whose delegate the test keeps.
+@MainActor
+@Suite("Wake and withdrawal: the pilot checklist")
+struct WakePilotChecklistTests {
+    private struct Composed {
+        let outbox: Outbox
+        let session: ScriptedUploadTaskSession
+        let delegate: UploadSessionDelegate
+    }
+
+    /// Reachable, hands out upload sessions, says where one stands, and creates memos.
+    private static func server() -> ScriptedHTTP {
+        ScriptedHTTP { request in
+            switch (request.httpMethod ?? "", request.url?.path() ?? "") {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("POST", "/api/uploads"):
+                return ScriptedHTTP.session(uid: "u1", chunkSize: 5 * 1024 * 1024, received: 0)
+            case ("HEAD", _):
+                return OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": "0"])
+            case ("POST", "/api/memos"):
+                return ScriptedHTTP.json(["uid": "m1"], status: 201)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+    }
+
+    /// The outbox `live` composes, as the process `launch`, with the real memo create.
+    private func compose(
+        _ harness: Harness,
+        listing: [WholeTaskListing] = [],
+        launch: UUID = UUID(),
+        box: OutboxBackgroundCompletion = OutboxBackgroundCompletion(),
+        onCancel: ScriptedUploadTaskSession.OnCancel = .leavesListing(after: 1)
+    ) -> Composed {
+        let session = ScriptedUploadTaskSession(listing: listing, onCancel: onCancel)
+        let delegate = UploadSessionDelegate(completion: box)
+        // The replace barrier's bound is spent on this clock, one pause at a time, never slept.
+        let barrier = MutableClock(harness.now)
+        let outbox = Outbox.composed(
+            repository: harness.repository,
+            credentials: harness.credentials,
+            http: harness.http,
+            chunks: harness.scheduler,
+            attachChunks: { _ in },
+            uploads: BackgroundUploadScheduler(
+                session: session, delegate: delegate, launch: launch,
+                now: { barrier.now }, pause: { barrier.advance(11) }
+            ),
+            network: harness.network,
+            preferences: UploadPreferences(
+                defaults: UserDefaults(suiteName: harness.preferencesName)!
+            )
+        )
+        return Composed(outbox: outbox, session: session, delegate: delegate)
+    }
+
+    private func listing(
+        _ id: Int, _ job: UploadJob, launch: UUID, epoch: Int
+    ) -> WholeTaskListing {
+        WholeTaskListing(
+            taskIdentifier: id,
+            taskDescription: WholeTaskIdentity(
+                jobID: job.id, fileID: job.files[0].id, attempt: 0, launch: launch, epoch: epoch
+            ).taskDescription
+        )
+    }
+
+    /// What the system hands the delegate when this task's whole file has arrived.
+    private func success(_ created: ScriptedUploadTaskSession.Created, of job: UploadJob) throws
+        -> WholeAnswer
+    {
+        let identity = try #require(WholeTaskIdentity(taskDescription: created.description))
+        let file = try #require(job.files.first { $0.id == identity.fileID })
+        return WholeAnswer(
+            taskIdentifier: created.taskIdentifier, identity: identity, statusCode: 200,
+            body: ScriptedHTTP.session(uid: "x", chunkSize: 1, received: Int(file.byteSize)).body
+        )
+    }
+
+    private func memoCreates(_ harness: Harness) -> Int {
+        harness.http.requests(method: "POST").filter { $0.url?.path() == "/api/memos" }.count
+    }
+
+    /// Line 1: a picture and a video handed off, the phone locked, both transfers finished in
+    /// one wake of the upload session: one memo, the row gone, and the handler called once.
+    @Test("line 1: a backgrounded picture and video end in one memo, no row, and one handler")
+    func backgroundedPairEndsInOneMemo() async throws {
+        let harness = try await Harness.make(bytes: 0, http: Self.server())
+        defer { harness.cleanUp() }
+        await harness.repository.delete(harness.job)
+        let job = try await harness.repository.enqueue(
+            content: "a picture and a video", visibility: "PRIVATE", capturedAt: harness.now,
+            binding: Fixture.binding(),
+            sources: [
+                StagedSource(
+                    url: try Fixture.file(in: harness.root, named: "picture.heic", bytes: 1000),
+                    filename: "picture.heic", mime: "image/heic"
+                ),
+                StagedSource(
+                    url: try Fixture.file(in: harness.root, named: "video.mov", bytes: 3000),
+                    filename: "video.mov", mime: "video/quicktime"
+                ),
+            ]
+        )
+        let never = TestGate()
+        let box = OutboxBackgroundCompletion(fallback: { await never.pass() })
+        let composed = compose(harness, box: box)
+        try await becameActive(composed.outbox)
+        #expect(composed.session.createdTasks.count == 2, "the premise: both files are handed off")
+        composed.outbox.appEnteredBackground()
+
+        var fired = 0
+        let work = try #require(
+            box.beginWake(for: OutboxUploadSession.identifier) { fired += 1 }
+        )
+        for created in composed.session.createdTasks {
+            composed.delegate.deliver(try success(created, of: job))
+        }
+        composed.delegate.urlSessionDidFinishEvents(
+            forBackgroundURLSession: URLSession(configuration: .ephemeral)
+        )
+        let outbox = composed.outbox
+        try await bounded("the wake") { @MainActor in
+            await outbox.wake(holding: work) { await outbox.start() }
+        }
+
+        #expect(memoCreates(harness) == 1)
+        #expect(await harness.repository.job(job.id) == nil, "the row outlived its memo")
+        #expect(fired == 1)
+        box.sessionFinished(for: OutboxUploadSession.identifier)
+        #expect(fired == 1, "one wake called its handler twice")
+    }
+
+    /// Line 9: the restore takes longer than the fallback. The handler is called once, by the
+    /// fallback; the restore then lands and the memo is created under the capture's own key.
+    @Test("line 9: a restore past the fallback: one handler, then the memo under the same key")
+    func lateRestoreRecoversUnderTheSameKey() async throws {
+        let completion = ScriptedCompletion([.created(uid: "m1")])
+        let harness = try await Harness.make(bytes: 0, http: .standard())
+        defer { harness.cleanUp() }
+        let credentials = RestoringCredentials()
+        let outbox = Wake.outbox(harness, credentials: credentials, completion: completion)
+        let deadline = TestGate()
+        let box = OutboxBackgroundCompletion(fallback: { await deadline.pass() })
+        var fired = 0
+        let (handled, handler) = AsyncStream.makeStream(of: Void.self)
+        let work = try #require(
+            box.beginWake(for: OutboxUploadSession.identifier) {
+                fired += 1
+                handler.yield()
+            }
+        )
+        box.sessionFinished(for: OutboxUploadSession.identifier)
+        let wake = Task { await outbox.wake(holding: work) { await outbox.start() } }
+        let restore = credentials.restored
+        try await bounded("the restore parking") { await restore.waitUntilParked() }
+        try await bounded("the fallback parking") { await deadline.waitUntilParked() }
+        await deadline.open()
+        try await bounded("the fallback calling the handler") { for await _ in handled { return } }
+        #expect(fired == 1, "the fallback never fired the handler")
+        #expect(completion.idempotencyKeys.isEmpty, "the premise: nothing was created yet")
+
+        await credentials.restored.open()
+        try await bounded("the wake") { await wake.value }
+        #expect(completion.idempotencyKeys == [harness.job.idempotencyKey])
+        #expect(await harness.reload() == nil, "the capture was not recovered")
+        #expect(fired == 1)
+    }
+
+    /// Line 13: A signs out, and before the cancel it owes is issued B signs in and captures. The
+    /// cancel, issued late, reaches A's upload only; B's capture goes and becomes a memo.
+    @Test(
+        "line 13: a capture made while the last account's cancel is delayed still goes",
+        .disabled(
+            "MEMNG-673: a delayed cancel for the signed-out account also cancels the new account's capture task"
+        )
+    )
+    func captureDuringDelayedCancelRecovers() async throws {
+        let harness = try await Harness.make(http: Self.server())
+        defer { harness.cleanUp() }
+        let launch = UUID()
+        let never = TestGate()
+        let box = OutboxBackgroundCompletion(fallback: { await never.pass() })
+        let composed = compose(
+            harness, listing: [listing(7, harness.job, launch: launch, epoch: 2)], launch: launch,
+            box: box
+        )
+        try await becameActive(composed.outbox)
+        // A's sign-out: recorded at the epoch it moved to, its cancel not yet issued.
+        composed.outbox.recordWithdrawal(at: 3)
+        harness.credentials.set(Fixture.credentials(owner: "brenda", token: "pat-b"))
+        for _ in 0..<3 { harness.credentials.supersede() }
+        let capture = try await harness.repository.enqueue(
+            content: "brenda's", visibility: "PRIVATE", capturedAt: harness.now,
+            binding: Fixture.binding(owner: "brenda"),
+            sources: [
+                StagedSource(
+                    url: try Fixture.file(in: harness.root, named: "b.heic", bytes: 500),
+                    filename: "b.heic", mime: "image/heic"
+                )
+            ]
+        )
+        await composed.outbox.drain()
+        let sent = try #require(
+            composed.session.createdTasks.first {
+                WholeTaskIdentity(taskDescription: $0.description)?.jobID == capture.id
+            },
+            "B's capture was never handed off"
+        )
+
+        // The delayed cancel is issued now, with B's upload already listed beside A's.
+        await composed.outbox.finishWithdrawal()
+
+        #expect(composed.session.cancelledIdentifiers == [7], "B's upload was cancelled with A's")
+        try await answersSettled(composed.outbox, box: box, delegate: composed.delegate) {
+            composed.delegate.deliver(try success(sent, of: capture))
+        }
+        #expect(
+            await harness.repository.job(capture.id) == nil, "B's capture never became a memo"
+        )
+    }
+
+    /// Line 19: three tasks under a choice that no longer stands, each slow to cancel, while the
+    /// gate is closed and another capture only needs its memo. The wake calls its handler once,
+    /// after that memo; the three files go again once the app is active and the tasks have ended
+    /// — two first, within the upload budget, the third once one of them is done — and make the
+    /// memo.
+    @Test("line 19: three slow cancels under a closed gate: one handler, then the files recover")
+    func slowCancelsUnderAClosedGate() async throws {
+        let harness = try await Harness.make(
+            bytes: 0, http: Self.server(), allowsMobileData: true
+        )
+        defer { harness.cleanUp() }
+        await harness.repository.delete(harness.job)
+        let sources = try (0..<3).map { index in
+            StagedSource(
+                url: try Fixture.file(in: harness.root, named: "p\(index).heic", bytes: 400),
+                filename: "p\(index).heic", mime: "image/heic"
+            )
+        }
+        var row = try await harness.repository.enqueue(
+            content: "three", visibility: "PRIVATE", capturedAt: harness.now,
+            binding: Fixture.binding(), sources: sources
+        )
+        row.transport = .whole
+        row.state = .uploading
+        for index in row.files.indices { row.files[index].uploadUID = "u\(index)" }
+        try await harness.repository.save(row)
+        let finished = try await Wake.completeRow(in: harness)
+        let launch = UUID()
+        // Each handed off before mobile data was allowed.
+        let listed = row.files.enumerated().map { index, file in
+            WholeTaskListing(
+                taskIdentifier: 70 + index,
+                taskDescription: WholeTaskIdentity(
+                    jobID: row.id, fileID: file.id, attempt: 0, launch: launch, epoch: 0
+                ).taskDescription,
+                access: WholeTaskNetworkAccess.policy(allowsMobileData: false),
+                state: .running
+            )
+        }
+        let never = TestGate()
+        let box = OutboxBackgroundCompletion(fallback: { await never.pass() })
+        let composed = compose(
+            harness, listing: listed, launch: launch, box: box, onCancel: .staysListed
+        )
+        var fired = 0
+        let work = try #require(
+            box.beginWake(for: OutboxUploadSession.identifier) { fired += 1 }
+        )
+        box.sessionFinished(for: OutboxUploadSession.identifier)
+
+        let outbox = composed.outbox
+        try await bounded("the wake") { @MainActor in
+            await outbox.wake(holding: work) { await outbox.start() }
+        }
+
+        #expect(fired == 1, "the wake never called its handler")
+        #expect(await harness.repository.job(finished.id) == nil, "the ready memo was not made")
+        #expect(Set(composed.session.cancelledIdentifiers) == [70, 71, 72])
+        #expect(composed.session.createdTasks.isEmpty, "a closed gate handed a file off")
+
+        try await becameActive(composed.outbox)
+        try await answersSettled(composed.outbox, box: box, delegate: composed.delegate) {
+            for index in 0..<3 {
+                composed.session.forget(70 + index)
+                composed.delegate.complete(
+                    taskIdentifier: 70 + index, taskDescription: listed[index].taskDescription,
+                    statusCode: nil, errorDescription: "cancelled"
+                )
+            }
+        }
+        // Recovered within the upload budget: two places, so two of the three go first. Each
+        // successor is sent once its old task has ended, on the scheduler's own time.
+        let session = composed.session
+        try await bounded("two files going again") { await session.untilCreated(2) }
+        let first = composed.session.createdTasks
+        #expect(first.count == 2, "more files went than the budget has places")
+
+        try await answersSettled(composed.outbox, box: box, delegate: composed.delegate) {
+            for created in first {
+                composed.session.forget(created.taskIdentifier)
+                composed.delegate.deliver(try success(created, of: row))
+            }
+        }
+        try await bounded("the third file going") { await session.untilCreated(3) }
+        let all = composed.session.createdTasks
+        #expect(all.count == 3, "a file went more than once")
+        let carried = all.compactMap { WholeTaskIdentity(taskDescription: $0.description)?.fileID }
+        #expect(Set(carried) == Set(row.files.map(\.id)), "a file went twice, or one never went")
+        let third = try #require(all.dropFirst(2).first)
+        try await answersSettled(composed.outbox, box: box, delegate: composed.delegate) {
+            composed.session.forget(third.taskIdentifier)
+            composed.delegate.deliver(try success(third, of: row))
+        }
+        #expect(await harness.repository.job(row.id) == nil, "the three files never made a memo")
+        #expect(fired == 1)
+    }
+
+    /// Line 25: A's upload parked on a network it may not use, a sign-out whose cancel the dying
+    /// process never issued, a relaunch signed out, then the network A may use comes back.
+    @Test("line 25: a signed-out relaunch cancels A's parked upload; reconnecting sends nothing")
+    func signedOutRelaunchSendsNothingOnReconnect() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000, http: Self.server(), credentials: nil,
+            network: StubNetworkPath(.cellular)
+        )
+        defer { harness.cleanUp() }
+        let dead = UUID()
+        compose(harness, launch: dead).outbox.recordWithdrawal(at: 3)
+        let relaunched = compose(
+            harness, listing: [listing(7, harness.job, launch: dead, epoch: 2)]
+        )
+        await relaunched.outbox.adopt()
+        try await becameActive(relaunched.outbox)
+        await harness.network.move(to: .wifi)
+        await relaunched.outbox.drain()
+
+        #expect(relaunched.session.cancelledIdentifiers == [7], "A's upload was left to send")
+        #expect(harness.http.requests.isEmpty, "something went out with nobody signed in")
+        #expect(relaunched.session.createdTasks.isEmpty)
+        #expect(await harness.reload() != nil, "A's capture was lost")
+    }
+
+    /// Line 28: a withdrawal record outlives a launch that put B's capture on the whole lane. The
+    /// next launch's cancel reaches B's upload as well; B's file goes again and makes one memo.
+    @Test("line 28: an older record's extra cancel of B's upload recovers into one memo")
+    func extraCancellationRecovers() async throws {
+        let harness = try await Harness.make(bytes: 1000, http: Self.server())
+        defer { harness.cleanUp() }
+        try #require(
+            harness.repository.withdrawals.record(OutboxWithdrawal(launch: UUID(), epoch: 3))
+        )
+        var row = try #require(await harness.reload())
+        row.transport = .whole
+        row.state = .uploading
+        row.files[0].uploadUID = "u1"
+        try await harness.repository.save(row)
+        let never = TestGate()
+        let box = OutboxBackgroundCompletion(fallback: { await never.pass() })
+        let relaunched = compose(
+            harness, listing: [listing(8, harness.job, launch: UUID(), epoch: 1)], box: box
+        )
+
+        await relaunched.outbox.adopt()
+        #expect(
+            relaunched.session.cancelledIdentifiers == [8], "the premise: B's upload was cancelled"
+        )
+        #expect(harness.repository.withdrawals.pending() == nil)
+        try await becameActive(relaunched.outbox)
+        let sent = try #require(relaunched.session.createdTasks.first, "B's file never went again")
+        try await answersSettled(relaunched.outbox, box: box, delegate: relaunched.delegate) {
+            relaunched.delegate.deliver(try success(sent, of: row))
+        }
+
+        #expect(await harness.reload() == nil, "no memo")
+        #expect(memoCreates(harness) == 1)
+    }
+}

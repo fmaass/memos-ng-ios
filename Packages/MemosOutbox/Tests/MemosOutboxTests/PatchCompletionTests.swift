@@ -207,7 +207,8 @@ struct PatchCompletionTests {
         server: MemoServer = MemoServer(),
         clock: MutableClock? = nil,
         completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil,
-        uploads: (any OutboxUploadScheduling)? = nil
+        uploads: (any OutboxUploadScheduling)? = nil,
+        sessionUID: (@Sendable (URLRequest) -> String)? = nil
     ) throws -> Patching {
         let root = try existing ?? Fixture.temporaryDirectory()
         let provider = StaticCredentials(credentials: Fixture.credentials())
@@ -223,7 +224,9 @@ struct PatchCompletionTests {
             case ("POST", "/api/memos"):
                 return server.answerCreate(to: request)
             case ("POST", "/api/uploads"):
-                return ScriptedHTTP.session(uid: "uC", chunkSize: 5 * 1024 * 1024, received: 0)
+                return ScriptedHTTP.session(
+                    uid: sessionUID?(request) ?? "uC", chunkSize: 5 * 1024 * 1024, received: 0
+                )
             case ("PATCH", _) where path.hasPrefix("/api/memos/"):
                 return server.answerPatch(
                     to: request, uid: String(path.dropFirst("/api/memos/".count)))
@@ -346,6 +349,74 @@ struct PatchCompletionTests {
         let uid = try #require(harness.server.memoUIDs.first)
         #expect(harness.server.memo(uid)?.content == "the pier, the day after")
         #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    /// Pilot checklist (page 4065) line 7: the whole capture is taken back, and the draft comes
+    /// back with a new visibility and one more picture. One memo carries all of it: the original
+    /// picture and the added one, each exactly once, under the uploads the server issued for them.
+    @Test("line 7: a whole capture sent again with a new visibility and an added picture")
+    func wholeLaneResubmitCarriesVisibilityAndPicture() async throws {
+        let session = ScriptedUploadTaskSession(onCancel: .leavesListing(after: 1))
+        let never = TestGate()
+        let box = OutboxBackgroundCompletion(fallback: { await never.pass() })
+        let delegate = UploadSessionDelegate(completion: box)
+        let issued = IssuedUploads()
+        let harness = try harness(
+            uploads: BackgroundUploadScheduler(session: session, delegate: delegate),
+            sessionUID: { issued.issue(for: $0) }
+        )
+        defer { harness.cleanUp() }
+        let job = try await capture(harness, files: [(name: "pier.heic", bytes: 1000)])
+        await harness.outbox.drain()
+        #expect(session.createdTasks.count == 1)
+
+        var edited = try #require(await harness.outbox.cancel(job.id))
+        edited.content = "the pier, the day after"
+        edited.visibility = "PUBLIC"
+        edited.pictures.append(try newPicture(harness))
+        #expect(await harness.outbox.resubmit(job.id, draft: edited) == .accepted)
+        try await outboxQuiet(harness.outbox)
+
+        // Every live task's whole file arrives, once, under the upload its request names, until
+        // the capture has left the outbox. A round ends on the engine's own handshakes.
+        var answered: Set<Int> = []
+        for _ in 0..<4 {
+            guard await harness.repository.job(job.id) != nil else { break }
+            let live = session.createdTasks.filter {
+                !answered.contains($0.taskIdentifier)
+                    && !session.cancelledIdentifiers.contains($0.taskIdentifier)
+            }
+            try await answersSettled(harness.outbox, box: box, delegate: delegate) {
+                for created in live {
+                    answered.insert(created.taskIdentifier)
+                    delegate.deliver(try wholeArrival(of: created))
+                }
+            }
+        }
+
+        #expect(await harness.repository.job(job.id) == nil)
+        #expect(harness.memoPosts.count == 1)
+        let uid = try #require(harness.server.memoUIDs.first)
+        let memo = try #require(harness.server.memo(uid))
+        #expect(memo.content == "the pier, the day after")
+        #expect(memo.visibility == "PUBLIC")
+        let carried = memo.attachmentUIDs.map { issued.filename(of: $0) ?? "unissued \($0)" }
+        #expect(
+            carried.sorted() == ["picked.heic", "pier.heic"],
+            "the memo does not carry the original and the added picture once each"
+        )
+    }
+
+    /// The whole file the task carries has arrived: the server's answer for its own upload.
+    private func wholeArrival(of created: ScriptedUploadTaskSession.Created) throws -> WholeAnswer {
+        let identity = try #require(WholeTaskIdentity(taskDescription: created.description))
+        let upload = try #require(created.request.url?.lastPathComponent)
+        let attributes = try FileManager.default.attributesOfItem(atPath: created.file.path)
+        let size = (attributes[.size] as? Int) ?? 0
+        return WholeAnswer(
+            taskIdentifier: created.taskIdentifier, identity: identity, statusCode: 200,
+            body: ScriptedHTTP.session(uid: upload, chunkSize: 1, received: size).body
+        )
     }
 
     /// Drains until the job is gone or the passes run out: the create's resolution and the edit
@@ -1428,5 +1499,28 @@ struct PatchCompletionTests {
         #expect(
             await harness.outbox.cancel(job.id) != nil,
             "a change that was never sent could not be taken back")
+    }
+}
+
+/// The upload sessions the server opened: a distinct uid for each, and the file each was for.
+private final class IssuedUploads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var files: [String: String] = [:]
+
+    func issue(for request: URLRequest) -> String {
+        let start = request.httpBody.flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        let filename = start?["filename"] as? String ?? "unnamed"
+        return lock.withLock {
+            let uid = "up\(files.count + 1)"
+            files[uid] = filename
+            return uid
+        }
+    }
+
+    /// The file an attachment the memo carries was uploaded from, nil for one never issued.
+    func filename(of attachment: String) -> String? {
+        lock.withLock { files[String(attachment.dropFirst("att-".count))] }
     }
 }

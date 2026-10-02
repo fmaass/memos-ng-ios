@@ -360,3 +360,246 @@ private final class Withdrawals {
     var read: [Int] = []
     weak var session: SessionStore?
 }
+
+/// The whole-file pilot checklist (page 4065), line 16, end to end: the session store and the real
+/// outbox, composed as the app composes them, over scripted sessions of both lanes.
+@MainActor
+@Suite("A failed replacement sign-in stops the outgoing account's uploads")
+struct FailedReplacementStopsUploadsTests {
+    @Test("line 16: a replacement sign-in that fails cancels the outgoing account's tasks")
+    func failedReplacementCancelsBothLanes() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let failing = Failing()
+        let holder = OutboxHolder()
+        let whoami = OutboxAccountTests.whoami
+        let session = SessionStore(
+            credentials: InMemoryCredentials(),
+            makeClient: { _, token in
+                Stub.client(token: token) { request, body, operation in
+                    let bearer = request.headerFields[.authorization] ?? ""
+                    if failing.fails(bearer) { throw URLError(.timedOut) }
+                    return try await whoami(request, body, operation)
+                }
+            },
+            onAccountWithdrawn: { epoch in
+                guard let outbox = holder.outbox else { return nil }
+                outbox.recordWithdrawal(at: epoch)
+                return Task { @MainActor in await outbox.finishWithdrawal() }
+            }
+        )
+        await session.signIn(serverAddress: signInServer, token: "pat-a")
+        let granted = try #require(
+            await DeviceOutboxCredentials(epoch: { session.epoch.current }) {
+                await MainActor.run { session.credentialGrant() }
+            }.currentCredentials()
+        )
+
+        // A's uploads are out on both lanes: a whole-file task minted under A's grant, and a chunk
+        // handed over and still listed in flight.
+        let launch = UUID()
+        let uploads = ListedUploads(
+            WholeTaskListing(
+                taskIdentifier: 7,
+                taskDescription: WholeTaskIdentity(
+                    jobID: UUID(), fileID: UUID(), attempt: 0, launch: launch,
+                    epoch: granted.epoch
+                ).taskDescription
+            )
+        )
+        let chunk = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 0)
+        let chunks = ActiveChunks(handedOver: chunk)
+        let preferences = "pilot-16-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: preferences) }
+        let credentials = DeviceOutboxCredentials(epoch: { session.epoch.current }) {
+            await MainActor.run { session.credentialGrant() }
+        }
+        holder.outbox = Outbox.composed(
+            repository: try OutboxRepository(
+                root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) }
+            ),
+            credentials: credentials,
+            http: RefusingHTTP(),
+            chunks: chunks,
+            attachChunks: { _ in },
+            uploads: BackgroundUploadScheduler(session: uploads, launch: launch),
+            network: WifiPath(),
+            preferences: UploadPreferences(defaults: UserDefaults(suiteName: preferences)!)
+        )
+
+        failing.fail("pat-b")
+        await session.signIn(serverAddress: signInServer, token: "pat-b")
+        #expect(session.state.user == nil, "the premise: the failure left nobody signed in")
+
+        // Each lane says when its cancel has landed; seeing one says nothing about the other.
+        try await bounded("the whole-file task's cancel") { await uploads.untilCancelled() }
+        try await bounded("the chunks' cancel") { await chunks.untilSwept() }
+        #expect(uploads.cancelled == [7], "the outgoing account's whole-file upload still sends")
+        #expect(chunks.swept == [chunk], "the outgoing account's chunk still sends")
+        #expect(await chunks.inFlight().isEmpty, "a chunk is still in flight")
+        #expect(chunks.sweeps == 1)
+    }
+}
+
+extension OutboxAccountTests {
+    /// The per-token whoami the suite above answers with, for the pilot suite beside it.
+    fileprivate static var whoami: StubTransport.Handler { whoamiPerToken }
+}
+
+@MainActor
+private final class OutboxHolder {
+    var outbox: Outbox?
+}
+
+/// An upload session that lists what it was given and records what it is told to cancel.
+private final class ListedUploads: UploadTaskSession, @unchecked Sendable {
+    private let lock = NSLock()
+    private let listing: [WholeTaskListing]
+    private var cancels: [Int] = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(_ listing: WholeTaskListing...) { self.listing = listing }
+
+    var cancelled: [Int] { lock.withLock { cancels } }
+
+    /// Returns once a cancel has reached this session.
+    func untilCancelled() async {
+        await withCheckedContinuation { continuation in
+            let now = lock.withLock {
+                guard cancels.isEmpty else { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if now { continuation.resume() }
+        }
+    }
+
+    func allTasks() async -> [WholeTaskListing] { listing }
+
+    func uploadTask(with request: URLRequest, fromFile file: URL, description: String) -> Int {
+        0
+    }
+
+    func cancel(taskIdentifier: Int) async {
+        let due = lock.withLock {
+            cancels.append(taskIdentifier)
+            defer { waiters = [] }
+            return waiters
+        }
+        for waiter in due { waiter.resume() }
+    }
+}
+
+/// A chunk session with one chunk handed over: it lists it in flight until a cancel reaches it,
+/// and records which of its cancels did.
+private final class ActiveChunks: OutboxChunkScheduling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var active: [OutboxTaskIdentity]
+    private var sweptChunks: [OutboxTaskIdentity] = []
+    private var sweepCount = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(handedOver chunk: OutboxTaskIdentity) { active = [chunk] }
+
+    /// The chunks the sweeping cancel found in flight and stopped.
+    var swept: [OutboxTaskIdentity] { lock.withLock { sweptChunks } }
+    var sweeps: Int { lock.withLock { sweepCount } }
+
+    /// Returns once a sweeping cancel has run to its end.
+    func untilSwept() async {
+        await withCheckedContinuation { continuation in
+            let now = lock.withLock {
+                guard sweepCount == 0 else { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if now { continuation.resume() }
+        }
+    }
+
+    func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { active } }
+
+    func upload(
+        _ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity,
+        under authority: SendAuthority, issuedUnder epoch: Int
+    ) async {
+        lock.withLock { active.append(identity) }
+    }
+
+    func cancel(_ identities: [OutboxTaskIdentity]) async {
+        lock.withLock { active.removeAll { identities.contains($0) } }
+    }
+
+    func cancelEveryTask() async {
+        let due = lock.withLock {
+            sweptChunks += active
+            active = []
+            sweepCount += 1
+            defer { waiters = [] }
+            return waiters
+        }
+        for waiter in due { waiter.resume() }
+    }
+}
+
+/// Raised when a bounded wait reaches its deadline first; the runner records it as the issue.
+private struct WaitExpired: Error, CustomStringConvertible {
+    let description: String
+}
+
+/// One answer, taken once, synchronously, by whichever side gets there first.
+private final class FirstAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            guard !taken else { return false }
+            taken = true
+            return true
+        }
+    }
+}
+
+/// Returns when `operation` finishes, and throws once 30 s pass first. Both run unstructured, as
+/// `bounded` in MemosOutboxTests does: a wait that ignores cancellation cannot hold the test.
+private func bounded(
+    _ what: String,
+    _ operation: @escaping @Sendable () async -> Void
+) async throws {
+    let deadline: Duration = .seconds(30)
+    let answer = FirstAnswer()
+    let finished: Bool = await withCheckedContinuation { continuation in
+        let timer = Task {
+            try? await Task.sleep(for: deadline)
+            if answer.claim() { continuation.resume(returning: false) }
+        }
+        Task {
+            await operation()
+            if answer.claim() {
+                timer.cancel()
+                continuation.resume(returning: true)
+            }
+        }
+    }
+    guard finished else {
+        throw WaitExpired(description: "\(what) did not happen within \(deadline)")
+    }
+}
+
+/// A server nothing should reach in this test: every request is answered 500.
+private struct RefusingHTTP: OutboxHTTPPerforming {
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        OutboxHTTPResponse(statusCode: 500)
+    }
+}
+
+private struct WifiPath: NetworkPathProviding {
+    func currentPath() -> NetworkPath {
+        NetworkPath(usesCellular: false, isExpensive: false, isConstrained: false)
+    }
+
+    func onPathChange(_ handler: @escaping OutboxTrigger) {}
+}

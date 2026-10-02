@@ -74,12 +74,12 @@ private actor AnnouncingEntry: WholeAnswerHandling {
 }
 
 /// Raised when a bounded wait reaches its deadline first; the runner records it as the issue.
-private struct WaitExpired: Error, CustomStringConvertible {
+struct WaitExpired: Error, CustomStringConvertible {
     let description: String
 }
 
 /// One answer, taken once, synchronously, by whichever side gets there first.
-private final class OneAnswer: @unchecked Sendable {
+final class OneAnswer: @unchecked Sendable {
     private let lock = NSLock()
     private var taken = false
 
@@ -98,7 +98,8 @@ private final class OneAnswer: @unchecked Sendable {
 /// cancellation: both wait for the child they cancelled. So the operation and the deadline each
 /// run unstructured, the first to finish claims the one answer before resuming, and an operation
 /// that never finishes is left behind — the test has already failed and the runner moves on.
-private func bounded(
+/// Internal: the pilot checklist's suites in other files bound their waits with it too.
+func bounded(
     _ what: String,
     within deadline: Duration = .seconds(30),
     _ operation: @escaping @Sendable () async -> Void
@@ -3511,4 +3512,329 @@ struct WholeBodyLimitTests {
         #expect(!writes.value.isEmpty)
         #expect(parked.isEmpty, "\(parked)")
     }
+}
+
+/// The engine-reachable half of the whole-file pilot checklist (page 4065): each test names the
+/// checklist line it holds, so the line's device pass and its unit witness are found together.
+@Suite("Whole lane: the pilot checklist")
+struct WholePilotChecklistTests {
+    /// A whole row both of whose files another launch handed off, as a relaunch finds it.
+    private static func handedOff(launch: UUID, carrying carried: Int) -> WholeRigSetup {
+        WholeRigSetup(
+            listing: { job in
+                job.files.prefix(carried).enumerated().map { index, file in
+                    WholeTaskListing(
+                        taskIdentifier: 70 + index,
+                        taskDescription: WholeTaskIdentity(
+                            jobID: job.id, fileID: file.id, attempt: 0, launch: launch, epoch: 0
+                        ).taskDescription,
+                        access: WholeTaskNetworkAccess(
+                            request: OutboxRequests.wholeUpload(
+                                baseURL: Fixture.server, token: "t", uploadUID: "u\(index)",
+                                allowsMobileData: false
+                            )
+                        ),
+                        state: .running
+                    )
+                }
+            },
+            prepare: { job in
+                var sent = job
+                sent.transport = .whole
+                sent.state = .uploading
+                for index in sent.files.indices { sent.files[index].uploadUID = "u\(index)" }
+                return sent
+            }
+        )
+    }
+
+    /// Line 2: a system kill after both hand-offs. The relaunch's delegate is handed both answers
+    /// before anything is attached; adoption lands both, and the memo is created once.
+    @Test("line 2: a relaunch lands both buffered answers as one memo and sends nothing again")
+    func relaunchLandsBothAnswers() async throws {
+        let dead = UUID()
+        let setup = Self.handedOff(launch: dead, carrying: 2)
+        let rig = try await WholeRig.make(
+            listing: setup.listing, prepare: setup.prepare, attached: false
+        )
+        defer { rig.cleanUp() }
+        rig.session.forget(70)
+        rig.session.forget(71)
+        for (index, file) in rig.job.files.enumerated() {
+            rig.delegate.deliver(
+                WholeAnswer(
+                    taskIdentifier: 70 + index,
+                    identity: WholeTaskIdentity(
+                        jobID: rig.job.id, fileID: file.id, attempt: 0, launch: dead, epoch: 0
+                    ),
+                    statusCode: 200,
+                    body: ScriptedHTTP.session(
+                        uid: "x", chunkSize: 1, received: Int(file.byteSize)
+                    ).body
+                )
+            )
+        }
+
+        await rig.delegate.attach(rig.engine)
+        try await settled(rig.engine)
+
+        #expect(rig.completion.idempotencyKeys == [rig.job.idempotencyKey])
+        #expect(await rig.repository.job(rig.job.id) == nil, "the row outlived its memo")
+        #expect(rig.attemptedUploadPosts == 0)
+        #expect(rig.session.createdTasks.isEmpty, "a recovered file was handed off again")
+    }
+
+    /// Line 3: a kill between the two hand-offs leaves one file carried and one a bare record. The
+    /// foreground sends only the record's file, once; the carried one gets no second task.
+    @Test("line 3: after a kill between hand-offs the foreground sends only the uncarried file")
+    func killBetweenHandOffs() async throws {
+        let setup = Self.handedOff(launch: UUID(), carrying: 1)
+        let rig = try await WholeRig.make(
+            listing: setup.listing, prepare: setup.prepare,
+            answerHead: { _ in
+                OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": "0"])
+            }
+        )
+        defer { rig.cleanUp() }
+        rig.gate.close()
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.isEmpty, "a closed gate handed a file off")
+
+        rig.gate.open()
+        await rig.engine.drain()
+        try await settled(rig.engine)
+
+        #expect(rig.attempts(of: rig.picture.id).isEmpty, "the carried file got a second task")
+        #expect(rig.attempts(of: rig.video.id) == [1])
+        #expect(rig.session.cancelledIdentifiers.isEmpty)
+        #expect(rig.http.requests(method: "HEAD").count == 1)
+    }
+
+    /// Line 4: the picture fails while the video is still out. The picture goes again under a
+    /// fresh upload, from byte 0, not before its deadline; the video's task is left alone.
+    @Test("line 4: a failed picture goes again fresh from 0 at its deadline; the video lands")
+    func failedPictureGoesFreshAtItsDeadline() async throws {
+        let rig = try await WholeRig.make()
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let oldPicture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        let oldUID = try #require(try await rig.reload().file(rig.picture.id)?.uploadUID)
+
+        await rig.engine.handle(try rig.answer(oldPicture, status: 503))
+        rig.session.forget(oldPicture.taskIdentifier)
+        let deadline = try #require(try await rig.reload().file(rig.picture.id)?.nextAttemptAt)
+        #expect(deadline > rig.clock.now)
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(rig.attempts(of: rig.picture.id) == [0], "the picture went before its deadline")
+
+        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        let retried = try rig.task(for: rig.picture.id, attempt: 1)
+        #expect(try await rig.reload().file(rig.picture.id)?.uploadUID != oldUID)
+        #expect(retried.request.value(forHTTPHeaderField: "Upload-Offset") == "0")
+        #expect(!rig.session.cancelledIdentifiers.contains(video.taskIdentifier))
+
+        await rig.engine.handle(try rig.answer(video, status: 200, received: 3000))
+        #expect(try await rig.reload().file(rig.video.id)?.isComplete == true)
+    }
+
+    /// Line 6: a sign-out while one task runs and a refused one has parked its row, then the row
+    /// is thrown away and both late answers arrive. Nothing is sent and the row stays gone.
+    @Test("line 6: sign-out over running and parked tasks, then late answers after discard")
+    func signOutThenLateAnswersAfterDiscard() async throws {
+        let rig = try await WholeRig.make()
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        await rig.engine.handle(try rig.answer(picture, status: 401))
+        #expect(try await rig.reload().state == .held, "the premise: the row is parked")
+
+        rig.credentials.set(nil)
+        await rig.engine.abandonAllTasks(withdrawnAt: 1)
+        #expect(rig.session.cancelledIdentifiers.contains(video.taskIdentifier))
+        let parkedRow = try await rig.reload()
+        await rig.repository.delete(parkedRow)
+
+        await rig.engine.handle(try rig.answer(video, status: 200, received: 3000))
+        await rig.engine.handle(try rig.answer(picture, status: 401))
+        await rig.engine.drain()
+        try await settled(rig.engine)
+
+        #expect(await rig.repository.job(rig.job.id) == nil, "a late answer resurrected the row")
+        #expect(rig.session.createdTasks.count == 2)
+        #expect(rig.attemptedUploadPosts == 2)
+        #expect(rig.completion.idempotencyKeys.isEmpty)
+    }
+
+    /// Line 18: a task nobody can read ends while adoption is replaying a buffered success. The
+    /// file that success confirmed is never handed off again; the uncarried one is resumed.
+    ///
+    /// A regression test only: it is not proven to reach that window. It stayed green with the
+    /// adoption fence removed (mutations L18 and L18b), so what protects the line is still open
+    /// (MEMNG-674).
+    @Test("line 18: an unreadable task ending mid-adoption never resends a buffered success's file")
+    func unreadableEndDuringAdoptionKeepsTheBufferedFile() async throws {
+        let dead = UUID()
+        let rig = try await WholeRig.make(
+            listing: { job in
+                [
+                    WholeTaskListing(taskIdentifier: 7, taskDescription: "not|a|whole|task"),
+                    WholeTaskListing(
+                        taskIdentifier: 71,
+                        taskDescription: WholeTaskIdentity(
+                            jobID: job.id, fileID: job.files[1].id, attempt: 0, launch: dead,
+                            epoch: 0
+                        ).taskDescription
+                    ),
+                ]
+            },
+            prepare: Self.handedOff(launch: dead, carrying: 0).prepare,
+            attached: false,
+            answerHead: { _ in
+                OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": "0"])
+            }
+        )
+        defer { rig.cleanUp() }
+        rig.session.forget(71)
+        rig.delegate.deliver(
+            WholeAnswer(
+                taskIdentifier: 71,
+                identity: WholeTaskIdentity(
+                    jobID: rig.job.id, fileID: rig.video.id, attempt: 0, launch: dead, epoch: 0
+                ),
+                statusCode: 200,
+                body: ScriptedHTTP.session(uid: "x", chunkSize: 1, received: 3000).body
+            )
+        )
+        let entry = TestGate()
+        let attaching = Task { await rig.delegate.attach(DelayedEntry(rig.engine, gate: entry)) }
+        try await bounded("the replay reaching the entry") { await entry.waitUntilParked() }
+        // The replay holds the video's success; the unreadable task ends now. Whether that end
+        // waits for the replay is decided inside `complete`, synchronously: nothing to wait for.
+        rig.session.forget(7)
+        rig.delegate.complete(
+            taskIdentifier: 7, taskDescription: "not|a|whole|task", statusCode: nil,
+            errorDescription: "cancelled"
+        )
+        await entry.open()
+        // The attach returns once the replay AND the end it held back have reached the engine.
+        try await bounded("the adoption") { await attaching.value }
+        try await settled(rig.engine)
+        #expect(rig.attempts(of: rig.picture.id) == [1])
+
+        #expect(rig.attempts(of: rig.video.id).isEmpty, "the buffered success's file went again")
+        #expect(try await rig.reload().file(rig.video.id)?.isComplete == true)
+    }
+
+    /// Line 20: the mobile-data choice changes while a deferred successor is being handed to the
+    /// scheduler. The task left carrying the file runs under the choice that stands.
+    @Test(
+        "line 20: a choice changed mid-hand-off of a deferred successor leaves its task in step",
+        .disabled(
+            "MEMNG-669: a mobile-data change during a deferred successor's hand-off leaves the task on the old setting"
+        )
+    )
+    func choiceChangedDuringDeferredHandOff() async throws {
+        let parked = TestGate()
+        let rig = try await WholeRig.make(
+            onCancel: .staysListed,
+            completion: [.retry("later")],
+            wrapUploads: { PausingUploads($0, holdingFirstSuccessor: parked) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        await rig.preferences.set(true)
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == 2, "the premise: the successor is deferred")
+
+        rig.session.forget(picture.taskIdentifier)
+        rig.delegate.complete(
+            taskIdentifier: picture.taskIdentifier, taskDescription: picture.description,
+            statusCode: nil, errorDescription: "cancelled"
+        )
+        try await bounded("the successor's hand-off parking") { await parked.waitUntilParked() }
+        // Built under "on"; switched off before its task exists, and the switch's own pass runs
+        // while the hand-off is still under way.
+        await rig.preferences.set(false)
+        await rig.engine.drain()
+        await parked.open()
+        try await settled(rig.engine)
+
+        let running = rig.session.createdTasks.last {
+            WholeTaskIdentity(taskDescription: $0.description)?.fileID == rig.picture.id
+                && !rig.session.cancelledIdentifiers.contains($0.taskIdentifier)
+        }
+        #expect(
+            running.map { !$0.request.allowsCellularAccess } ?? false,
+            "the picture's live task still runs under the choice it was built with"
+        )
+        let live = rig.session.createdTasks.last {
+            WholeTaskIdentity(taskDescription: $0.description)?.fileID == rig.picture.id
+        }
+        #expect(live?.request.allowsCellularAccess == false)
+    }
+
+    /// Line 24: a task finishes while a drain pass holds the listing it plans the row against —
+    /// the one `passWhole` takes after it has read the row. Its success is applied meanwhile, and
+    /// the file is given nothing more: no session, no new term.
+    ///
+    /// A regression test only: it is not proven to reach that window, nor that the pass plans
+    /// again. It stayed green with the pass's replan guard removed (mutations L24 and L24r),
+    /// before and after its rework (MEMNG-675).
+    @Test("line 24: a task finishing while a drain holds its listing gets no second session")
+    func finishDuringDrainListing() async throws {
+        let rig = try await WholeRig.make(completion: [.retry("later")])
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        rig.session.forget(picture.taskIdentifier)
+        // A drain lists three times before the pass: the unreadable sweep and the reconciliation
+        // (`reconcileWhole`), then the mobile-data check (`replaceMismatched`). The fourth listing
+        // is the pass's own (`carriedFiles`), taken after it read the row.
+        var gate = TestGate()
+        rig.session.holdNextListing(on: gate)
+        let drain = Task { await rig.engine.drain() }
+        for step in 1...3 {
+            let held = gate
+            try await bounded("listing \(step) of the drain") { await held.waitUntilParked() }
+            let next = TestGate()
+            rig.session.holdNextListing(on: next)
+            await gate.open()
+            gate = next
+        }
+        let pass = gate
+        try await bounded("the pass's listing") { await pass.waitUntilParked() }
+
+        // A burst: the picture's success, and the video's, while the pass holds its listing.
+        let pictureAnswer = try rig.answer(picture, status: 200, received: 1000)
+        let videoAnswer = try rig.answer(video, status: 200, received: 3000)
+        let engine = rig.engine
+        try await bounded("both answers applied") {
+            await engine.handle(pictureAnswer)
+            await engine.handle(videoAnswer)
+        }
+        #expect(
+            try await rig.reload().files.allSatisfy { $0.isComplete },
+            "the premise: both answers landed while the pass held its listing"
+        )
+        await pass.open()
+        try await bounded("the drain") { await drain.value }
+        try await bounded("quiescence") { await engine.untilQuiescent() }
+
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.attemptedUploadPosts == 2, "a finished file was given a second session")
+        #expect(try await rig.reload().files.allSatisfy { $0.isComplete })
+    }
+}
+
+/// The two relaunch shapes a pilot line starts from, handed to `WholeRig.make`.
+private struct WholeRigSetup {
+    var listing: @Sendable (UploadJob) -> [WholeTaskListing]
+    var prepare: @Sendable (UploadJob) -> UploadJob?
 }

@@ -1023,6 +1023,7 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
     private var nextIdentifier: Int
     private let onCancel: OnCancel
     private var heldListing: TestGate?
+    private var creationWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
 
     init(
         listing: [WholeTaskListing] = [],
@@ -1037,6 +1038,18 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
     var createdTasks: [Created] { lock.withLock { created } }
     var cancelledIdentifiers: [Int] { lock.withLock { cancelled } }
     var listingCount: Int { lock.withLock { listings } }
+
+    /// Returns once this many tasks have been created in all — told by the creation itself.
+    func untilCreated(_ count: Int) async {
+        await withCheckedContinuation { continuation in
+            let now = lock.withLock {
+                guard created.count < count else { return true }
+                creationWaiters.append((count, continuation))
+                return false
+            }
+            if now { continuation.resume() }
+        }
+    }
 
     /// The task leaves the listing now, as a task the system has finished with does.
     func forget(_ taskIdentifier: Int) {
@@ -1078,7 +1091,7 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
     }
 
     func uploadTask(with request: URLRequest, fromFile file: URL, description: String) -> Int {
-        lock.withLock {
+        let (id, due) = lock.withLock {
             let id = nextIdentifier
             nextIdentifier += 1
             created.append(
@@ -1092,8 +1105,13 @@ final class ScriptedUploadTaskSession: UploadTaskSession, @unchecked Sendable {
                     state: .running
                 )
             )
-            return id
+            let reached = created.count
+            let due = creationWaiters.filter { $0.count <= reached }.map(\.continuation)
+            creationWaiters.removeAll { $0.count <= reached }
+            return (id, due)
         }
+        for waiter in due { waiter.resume() }
+        return id
     }
 
     func cancel(taskIdentifier: Int) async {
