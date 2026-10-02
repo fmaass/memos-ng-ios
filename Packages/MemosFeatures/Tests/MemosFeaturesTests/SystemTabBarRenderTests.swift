@@ -126,50 +126,6 @@ struct SystemTabBarRenderTests {
         )
     }
 
-    /// The Library's chrome (plan page 3929 decision 8): a press on the Library while it is the
-    /// tab showing hands the bar's place to the Library icon beside Years | Months | All, and the
-    /// icon is what gives the bar back. The segment and the bar are never drawn together.
-    @Test("the Library's chrome stands in the bar's place until its own icon is pressed")
-    func libraryChromeHoldsUntilItsIcon() async {
-        let window = await Self.host(opening: .library)
-        defer { Self.tearDown(window) }
-        let segment = Set(LibraryScope.allCases.map(\.label) + [MainTab.library.title])
-
-        for _ in 0..<160 where !Self.arrived(on: .library, in: window) {
-            await Self.settle(window)
-        }
-        #expect(Self.barShows(in: window), "the Library at rest: no system tab bar on screen")
-        let atRest = Self.chromeLabels(segment, in: window)
-        #expect(atRest.isEmpty, "the Library at rest draws its chrome: \(atRest)")
-
-        // The Library pressed again, the way the system bar presses the tab already showing.
-        #expect(Self.press(.library, in: window), "no bar item reads Library")
-        for _ in 0..<80 where Self.chromeLabels(segment, in: window) != segment {
-            await Self.settle(window)
-        }
-        let collapsed = Self.chromeLabels(segment, in: window)
-        #expect(collapsed == segment, "the Library pressed again: the chrome reads \(collapsed)")
-        for _ in 0..<80 where Self.barShows(in: window) {
-            await Self.settle(window)
-        }
-        #expect(!Self.barShows(in: window), "the system tab bar is drawn beside the chrome")
-
-        // The icon, and only the icon, gives the bar back.
-        let took = Self.activate(MainTab.library.title, in: window)
-        #expect(took, "the chrome's Library icon took no press")
-        for _ in 0..<80 where !Self.barShows(in: window) {
-            await Self.settle(window)
-        }
-        #expect(Self.barShows(in: window), "the icon did not give the system tab bar back")
-        let selected = Self.systemTabBar(in: window)?.selectedItem?.title
-        #expect(selected == MainTab.library.title, "the bar came back on \(selected ?? "nothing")")
-        for _ in 0..<80 where !Self.chromeLabels(segment, in: window).isEmpty {
-            await Self.settle(window)
-        }
-        let after = Self.chromeLabels(segment, in: window)
-        #expect(after.isEmpty, "the chrome stayed beside the bar: \(after)")
-    }
-
     /// MEMNG-605: while Places loads, its root already fills the screen, so nothing laid out
     /// against it — the bar included — moves when the map arrives. Read with every read stalled,
     /// so what is measured is the loading state, not the map that replaces it.
@@ -280,34 +236,6 @@ struct SystemTabBarRenderTests {
         return !frame.isNull && !frame.isEmpty && frame.intersects(window.bounds)
     }
 
-    /// Presses `tab` through the controller UIKit built for the bar, the way a tap on its item
-    /// does: the delegate is asked, the controller selects, the delegate is told.
-    private static func press(_ tab: MainTab, in window: UIWindow) -> Bool {
-        guard
-            let controller = tabController(in: window.rootViewController),
-            let index = controller.tabBar.items?.firstIndex(where: { $0.title == tab.title }),
-            let controllers = controller.viewControllers,
-            controllers.indices.contains(index)
-        else { return false }
-        let target = controllers[index]
-        let delegate = controller.delegate
-        guard delegate?.tabBarController?(controller, shouldSelect: target) ?? true else {
-            return false
-        }
-        controller.selectedViewController = target
-        delegate?.tabBarController?(controller, didSelect: target)
-        return true
-    }
-
-    private static func tabController(in controller: UIViewController?) -> UITabBarController? {
-        guard let controller else { return nil }
-        if let found = controller as? UITabBarController { return found }
-        for child in controller.children {
-            if let found = tabController(in: child) { return found }
-        }
-        return tabController(in: controller.presentedViewController)
-    }
-
     // MARK: - what the screen reads
 
     /// One element the screen reads out, where it is drawn in the window.
@@ -355,27 +283,6 @@ struct SystemTabBarRenderTests {
             tallest = max(tallest, reading.frame.height)
         }
         return tallest
-    }
-
-    /// Which of `labels` the bottom fifth of the window reads out, outside the system tab bar —
-    /// where the Library's chrome is drawn.
-    private static func chromeLabels(_ labels: Set<String>, in window: UIWindow) -> Set<String> {
-        Set(chrome(in: window).map(\.label).filter(labels.contains))
-    }
-
-    private static func chrome(in window: UIWindow) -> [Reading] {
-        let band = window.bounds.height * 0.8
-        return readings(in: window).filter { reading in
-            guard !reading.frame.isEmpty, reading.frame.midY > band else { return false }
-            return reading.frame.intersects(window.bounds)
-        }
-    }
-
-    /// Activates the chrome's control labelled `label` the way VoiceOver does.
-    private static func activate(_ label: String, in window: UIWindow) -> Bool {
-        chrome(in: window)
-            .filter { $0.label == label && $0.element.accessibilityTraits.contains(.button) }
-            .contains { $0.element.accessibilityActivate() }
     }
 
     /// Where the element `identifier` names is drawn, or nil when nothing on screen carries it.

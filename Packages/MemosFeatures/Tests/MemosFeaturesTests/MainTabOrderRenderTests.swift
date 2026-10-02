@@ -118,16 +118,11 @@ struct MainTabOrderRenderTests {
         #expect(Self.systemTabBarShows(in: window), "the system tab bar is not on screen")
     }
 
-    /// The Library's segment is the Library's alone (plan page 3929 decision 8: "On Timeline and
-    /// Places the dock never shows the Years | Months | All segment"). The Library case is the
-    /// control: the same press on the chosen tab DOES bring the segment there, in the system
-    /// bar's place, so the other two cases' silence is about the tab, not about a probe that
-    /// cannot see it.
     /// What `.tabBarMinimizeBehavior` handed UIKit, read off the controller the system bar
-    /// belongs to: the bar folds on scroll down on the Timeline and Places, and never on the
-    /// Library, which collapses to its own chrome (MEMNG-666, MEMNG-653).
+    /// belongs to: the bar folds on scroll down on every tab alike, the Library included, where
+    /// it used to stand aside for chrome of the app's own (MEMNG-604).
     @Test(
-        "the hosted tab controller minimises on scroll down off the Library, and never on it",
+        "the hosted tab controller minimises on scroll down on every tab",
         arguments: [MainTab.library, MainTab.timeline, MainTab.places]
     )
     func minimiseBehaviourReachesUIKit(tab: MainTab) async {
@@ -166,24 +161,22 @@ struct MainTabOrderRenderTests {
         let controller = Self.tabController(in: window.rootViewController)
         #expect(controller != nil, "no UITabBarController hosts the bar")
         let behaviour = controller?.tabBarMinimizeBehavior
-        if tab == .library {
-            #expect(
-                behaviour == .never,
-                "the Library's bar minimises: \(String(describing: behaviour))"
-            )
-        } else {
-            #expect(
-                behaviour == .onScrollDown,
-                "\(tab.title)'s bar: \(String(describing: behaviour)), not on scroll down"
-            )
-        }
+        #expect(
+            behaviour == .onScrollDown,
+            "\(tab.title)'s bar: \(String(describing: behaviour)), not on scroll down"
+        )
     }
 
+    /// Years | Months | All is the Library's alone (plan page 3929 decision 8: "On Timeline and
+    /// Places the dock never shows the Years | Months | All segment"), and it is the SYSTEM's
+    /// control in the SYSTEM's slot (MEMNG-604): a segmented control inside the content view of
+    /// the bottom accessory UIKit's tab controller carries, with the tab bar on screen beside it.
+    /// The Library case is the control for the other two: the same probe finds it there.
     @Test(
-        "a tap on the chosen tab brings the segment on the Library and nowhere else",
+        "the scope control stands in the tab bar's accessory on the Library and nowhere else",
         arguments: [MainTab.library, MainTab.timeline, MainTab.places]
     )
-    func segmentIsTheLibrarysAlone(tab: MainTab) async {
+    func accessoryIsTheLibrarysAlone(tab: MainTab) async {
         let session = SessionStore(
             credentials: TabOrderCredentials(),
             makeClient: { configuration, credential in
@@ -210,30 +203,34 @@ struct MainTabOrderRenderTests {
             window.rootViewController = nil
         }
 
-        let tabs = MainTab.allCases.map(\.title)
-        let segment = LibraryScope.allCases.map(\.label)
         for _ in 0..<120 where Self.chosenTitle(in: window) != tab.title {
             await Self.settle(window)
         }
         #expect(Self.chosenTitle(in: window) == tab.title, "precondition: on \(tab)")
-
-        // A press on the chosen tab: on the Library it toggles to the segment.
-        let took = Self.press(tab, in: window)
-        var shown: [String] = []
+        var control: UISegmentedControl?
         for _ in 0..<40 {
             await Self.settle(window)
-            shown = Self.dockTitlesLeftToRight(in: window, of: tabs + segment)
-            if tab == .library, shown.contains("Years") { break }
+            control = ScopeAccessoryProbe.control(in: window)
+            if tab == .library, control != nil { break }
         }
-        #expect(took, "the bar's \(tab.title) took no press")
+        let seen = ScopeAccessoryProbe.describe(window)
+        #expect(Self.systemTabBarShows(in: window), "\(tab.title): no system tab bar on screen")
         if tab == .library {
-            #expect(Set(shown) == Set(segment + [MainTab.library.title]), "chrome: \(shown)")
-            #expect(!Self.systemTabBarShows(in: window), "the bar is drawn beside the segment")
+            #expect(control != nil, "the Library shows no scope control: \(seen)")
+            if let control {
+                #expect(
+                    ScopeAccessoryProbe.isInAccessory(control, window: window),
+                    "the scope control is not in the tab bar's accessory: \(seen)"
+                )
+                #expect(ScopeAccessoryProbe.chosen(in: control) == "All", "All is not chosen")
+            }
         } else {
-            #expect(shown.isEmpty, "a press on the chosen \(tab.title) drew \(shown)")
-            let still = Self.barTitlesLeftToRight(in: window)
-            #expect(still == tabs, "a press on the chosen \(tab.title) left the bar \(still)")
+            #expect(control == nil, "\(tab.title) shows the Library's scope control: \(seen)")
         }
+        // The press on the tab showing is the system's again, and draws nothing of the app's.
+        #expect(Self.press(tab, in: window), "the bar's \(tab.title) took no press")
+        await Self.settle(window)
+        #expect(Self.systemTabBarShows(in: window), "a press on \(tab.title) took the bar away")
     }
 
     /// Built on the test host's own window scene, for the reason `StackChromeTests` gives: a
@@ -271,34 +268,6 @@ struct MainTabOrderRenderTests {
             stack.append(contentsOf: view.subviews)
         }
         return false
-    }
-
-    /// The dock's elements: labelled exactly with one of `titles`, drawn in the bottom fifth of
-    /// the window, where the dock sits.
-    private static func dockElements(in window: UIWindow, of titles: [String]) -> [NSObject] {
-        var elements: [NSObject] = []
-        collect(window, into: &elements)
-        let band = window.bounds.height * 0.8
-        return elements.filter { element in
-            guard let label = element.accessibilityLabel, titles.contains(label) else {
-                return false
-            }
-            let frame = element.accessibilityFrame
-            return !frame.isEmpty && frame.midY > band && frame.intersects(window.bounds)
-        }
-    }
-
-    /// The titles as the dock lays them out, left to right, by the on-screen frame of the
-    /// accessibility element that reads each one out; leftmost copy wins.
-    private static func dockTitlesLeftToRight(
-        in window: UIWindow, of titles: [String]
-    ) -> [String] {
-        var leftmost: [String: CGFloat] = [:]
-        for element in dockElements(in: window, of: titles) {
-            guard let label = element.accessibilityLabel else { continue }
-            leftmost[label] = min(leftmost[label] ?? .infinity, element.accessibilityFrame.midX)
-        }
-        return leftmost.sorted { $0.value < $1.value }.map(\.key)
     }
 
     /// The one tab the system bar marks selected, or nil when it is not on screen.
@@ -379,16 +348,5 @@ struct MainTabOrderRenderTests {
             if let found = tabController(in: child) { return found }
         }
         return tabController(in: controller.presentedViewController)
-    }
-
-    private static func collect(_ node: Any, into found: inout [NSObject]) {
-        guard let object = node as? NSObject else { return }
-        // The system tab bar's items are read off the bar; they must not answer for the chrome.
-        if object is UITabBar { return }
-        found.append(object)
-        for child in object.accessibilityElements ?? [] { collect(child, into: &found) }
-        if let view = object as? UIView {
-            for subview in view.subviews { collect(subview, into: &found) }
-        }
     }
 }

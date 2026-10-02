@@ -21,11 +21,12 @@ struct MediaLibraryView: View {
     /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
     @State private var buckets: LibraryBucketStore?
     /// Which of Years, Months and All is on screen, and the year a Years card narrowed Months to.
-    /// Shared with the dock, whose segment picks it (plan page 3929 decision 11); a Library hosted
-    /// with no dock above it keeps its own, at All.
+    /// Shared with the tab bar's accessory, whose segmented control picks it (MEMNG-604); a
+    /// Library hosted with no tabs above it keeps its own, at All.
     @Environment(LibraryScopeChoice.self) private var sharedChoice: LibraryScopeChoice?
     @State private var ownChoice = LibraryScopeChoice()
-    /// The dock this Library's scrolling collapses to its segment, when there is one above it.
+    /// The dock select mode claims, so the scope control in the tab bar's accessory steps aside
+    /// for its toolbar.
     @Environment(AppDock.self) private var dock: AppDock?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
@@ -65,8 +66,8 @@ struct MediaLibraryView: View {
             .safeAreaBar(edge: .top) {
                 if let library { header(library) }
             }
-            // Select mode's toolbar, in the dock's place: the dock is claimed away while it is up
-            // (`dockClaim`), so the two are never drawn together.
+            // Select mode's toolbar, in the scope control's place: the accessory is claimed away
+            // while it is up (`dockClaim`), so the two are never drawn together.
             .safeAreaBar(edge: .bottom) {
                 if selection.isActive {
                     VStack(spacing: DesignTokens.Space.tight) {
@@ -137,7 +138,7 @@ struct MediaLibraryView: View {
                     }
                 )
             }
-            // A choice made in the dock's segment abandons a jump still reading, synchronously, on
+            // A choice made in the scope control abandons a jump still reading, synchronously, on
             // the store it is reading on.
             if let library {
                 choice.whenChosenByHand { [weak library] in library?.abandonJump() }
@@ -279,7 +280,6 @@ struct MediaLibraryView: View {
                     errorText: store.lastError,
                     chooseYear: { chooseYear($0) }
                 )
-                .feedsDock(dock, on: .library)
             } else {
                 LibraryMonthsMosaic(
                     months: mosaicMonths(year.map { dayBuckets(shown, inYear: $0) } ?? shown),
@@ -290,7 +290,6 @@ struct MediaLibraryView: View {
                     target: answered == nil ? nil : choice.monthTarget,
                     reachedTarget: { choice.consumeMonthTarget() }
                 )
-                .feedsDock(dock, on: .library)
             }
         }
         // Nearer than the grid's refresher, so it is the one a cover's tile reads.
@@ -360,7 +359,6 @@ struct MediaLibraryView: View {
             },
             showMonth: { choice.showMonth($0) }
         )
-        .feedsDock(dock, on: .library)
         .overlay {
             if library.isJumping {
                 ProgressView()

@@ -339,30 +339,6 @@ extension MediaImageLoaderTests {
         return element.accessibilityFrame
     }
 
-    /// Whether an element is drawn in the dock: the bottom fifth of the window, where it sits.
-    private static func isInDock(_ element: NSObject, window: UIWindow) -> Bool {
-        let frame = frame(of: element)
-        return !frame.isEmpty && frame.midY > window.bounds.height * 0.8
-            && frame.intersects(window.bounds)
-    }
-
-    /// The labels among `titles` the foot of the window reads out right now: the system tab
-    /// bar's items while it is on screen (MEMNG-666), and the Library's segment drawn in its place.
-    private static func dockLabels(_ titles: [String], in window: UIWindow) -> Set<String> {
-        var shown: Set<String> = []
-        for title in titles {
-            var found: [NSObject] = []
-            elements(labelled: title, in: window, into: &found)
-            if found.contains(where: { isInDock($0, window: window) }) { shown.insert(title) }
-        }
-        if let bar = systemTabBarOnScreen(in: window) {
-            for title in bar.items?.compactMap(\.title) ?? [] where titles.contains(title) {
-                shown.insert(title)
-            }
-        }
-        return shown
-    }
-
     /// The system tab bar, when it is on screen: nothing up its chain of superviews hiding it,
     /// and some part of it inside the window.
     private static func systemTabBarOnScreen(in window: UIWindow) -> UITabBar? {
@@ -380,29 +356,6 @@ extension MediaImageLoaderTests {
             stack.append(contentsOf: view.subviews)
         }
         return nil
-    }
-
-    /// Presses `tab` through the controller UIKit built for the system bar, the way a tap on its
-    /// item does — on the tab already showing, a re-selection the `TabView` hears.
-    private static func pressTab(_ tab: MainTab, in window: UIWindow) -> Bool {
-        var stack: [UIViewController] = window.rootViewController.map { [$0] } ?? []
-        while let controller = stack.popLast() {
-            if let tabs = controller as? UITabBarController,
-                let index = tabs.tabBar.items?.firstIndex(where: { $0.title == tab.title }),
-                let controllers = tabs.viewControllers, controllers.indices.contains(index)
-            {
-                let target = controllers[index]
-                let delegate = tabs.delegate
-                guard delegate?.tabBarController?(tabs, shouldSelect: target) ?? true else {
-                    return false
-                }
-                tabs.selectedViewController = target
-                delegate?.tabBarController?(tabs, didSelect: target)
-                return true
-            }
-            stack.append(contentsOf: controller.children)
-        }
-        return false
     }
 
     /// On the test host's own window scene: a window belonging to no scene never completes the
@@ -434,44 +387,6 @@ extension MediaImageLoaderTests {
         return count
     }
 
-    /// Scrolls every tall scroll view on screen `distance` points below the top of its content,
-    /// the way a drag leaves it: the offset moves and the scroll view tells its delegate.
-    private static func scroll(_ window: UIWindow, by distance: CGFloat) -> Int {
-        var moved = 0
-        var stack: [UIView] = [window]
-        while let view = stack.popLast() {
-            if let scroller = view as? UIScrollView, scroller.window != nil,
-                scroller.bounds.height > window.bounds.height / 2,
-                !(scroller is UITextView)
-            {
-                let top = -scroller.adjustedContentInset.top
-                scroller.setContentOffset(CGPoint(x: 0, y: top + distance), animated: false)
-                moved += 1
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-        return moved
-    }
-
-    /// The dock's element that reads out `label`, if the dock draws one.
-    private static func dockElement(_ label: String, in window: UIWindow) -> NSObject? {
-        var found: [NSObject] = []
-        elements(labelled: label, in: window, into: &found)
-        return found.first { isInDock($0, window: window) }
-    }
-
-    /// Picks the dock's "Years" segment the way VoiceOver presses it. Returns what it found, for
-    /// the message of a case that then sees no change.
-    private static func chooseYears(in window: UIWindow) -> String {
-        guard let years = dockElement("Years", in: window) else {
-            var found: [NSObject] = []
-            elements(labelled: "Years", in: window, into: &found)
-            let kinds = found.map { "\(type(of: $0))@\(Int(frame(of: $0).midY))" }
-            return "the dock draws no Years: \(kinds)"
-        }
-        return years.accessibilityActivate() ? "pressed Years" : "Years took no press"
-    }
-
     /// Every label the hosted hierarchy reads out.
     private static func labels(in node: Any, into found: inout [String]) {
         guard let object = node as? NSObject else { return }
@@ -491,8 +406,8 @@ extension MediaImageLoaderTests {
         return found
     }
 
-    /// Signs in, hosts the app on the Library under the real dock, scrolls it past the dock's
-    /// threshold and switches it to Years through the segment the dock turns into.
+    /// Signs in, hosts the app on the Library under the real tab bar and switches it to Years
+    /// through the scope control in the bar's accessory.
     private func hostYears(
         _ wire: SegmentTransport,
         atRest: (UIWindow) -> Void = { _ in }
@@ -507,16 +422,18 @@ extension MediaImageLoaderTests {
             rootView: MainTabView(opening: .library).environment(session))
         window.makeKeyAndVisible()
 
-        let tabs = MainTab.allCases.map(\.title)
-        let segment = LibraryScope.allCases.map(\.label)
-        var inDock: Set<String> = []
-        for _ in 0..<200 where inDock != Set(tabs) {
+        // At rest the system tab bar is up and Years | Months | All stands in its accessory, on
+        // All (MEMNG-604).
+        var control: UISegmentedControl?
+        for _ in 0..<200 where control == nil || Self.systemTabBarOnScreen(in: window) == nil {
             await segmentSettle(window, turns: 1)
-            inDock = Self.dockLabels(tabs + segment, in: window)
+            control = ScopeAccessoryProbe.control(in: window)
         }
-        // At rest the dock is the three tabs and nothing else (plan page 3929 decision 8).
-        #expect(inDock == Set(tabs), "the Library at rest: the dock reads \(inDock)")
-        // The navigation bar carries no segmented control: the picker left it for the dock.
+        let seen = ScopeAccessoryProbe.describe(window)
+        #expect(Self.systemTabBarOnScreen(in: window) != nil, "the Library at rest: no tab bar")
+        #expect(control != nil, "the Library at rest: no scope control: \(seen)")
+        #expect(control.flatMap { ScopeAccessoryProbe.chosen(in: $0) } == "All", "All not chosen")
+        // The navigation bar carries no segmented control: the picker left it for the accessory.
         #expect(Self.navigationBarSegmentedControls(in: window) == 0)
         var years: [NSObject] = []
         Self.elements(labelled: "Years", in: window, into: &years)
@@ -529,29 +446,14 @@ extension MediaImageLoaderTests {
         #expect(!Self.labels(in: window).contains("12 items"), "a year card drawn under All")
         atRest(window)
 
-        // Past the threshold the dock collapses to the Library icon beside Years | Months | All.
-        var moved = 0
-        for _ in 0..<100 where !inDock.isSuperset(of: segment) {
-            moved = Self.scroll(window, by: DockMode.segmentThreshold * 8)
+        let live = await ScopeAccessoryProbe.settledControl(in: window) {
             await segmentSettle(window, turns: 1)
-            inDock = Self.dockLabels(tabs + segment, in: window)
         }
-        #expect(moved > 0, "no scroll view to scroll")
-        #expect(
-            inDock == Set(segment + [MainTab.library.title]),
-            "the Library scrolled: the dock reads \(inDock)"
-        )
-        #expect(Self.navigationBarSegmentedControls(in: window) == 0)
-        // All is the segment's default, as it is the Library's.
-        #expect(
-            Self.dockElement("All", in: window)?.accessibilityTraits.contains(.selected) == true,
-            "All is not the chosen segment"
-        )
-
-        let chosen = Self.chooseYears(in: window)
+        let before = ScopeAccessoryProbe.describe(window)
+        if let live { ScopeAccessoryProbe.choose(.years, in: live) }
         await segmentSettle(window)
         #expect(
-            wire.sizesAsked.first { $0 != "day" } == "year", "Years read no year buckets: \(chosen)"
+            wire.sizesAsked.first { $0 != "day" } == "year", "Years read no year buckets: \(before)"
         )
         return (session, window)
     }
@@ -584,7 +486,7 @@ extension MediaImageLoaderTests {
         }
     }
 
-    @Test("the dock's segment switches the Library to Years, which draws a card per year")
+    @Test("the scope control switches the Library to Years, which draws a card per year")
     func segmentSwitchesToYears() async {
         let wire = SegmentTransport()
         let probe = CoverProbe()
@@ -620,80 +522,6 @@ extension MediaImageLoaderTests {
             #expect(await probe.requests(for: "\(SegmentWire.coverPrefix)2019") == 0)
             let paths = await probe.paths
             #expect(!paths.contains { $0.isEmpty || $0 == "/" }, "a cover fetched \(paths)")
-        }
-    }
-
-    /// MEMNG-653, as Photos does it: once the Library has collapsed to its icon beside
-    /// Years | Months | All, neither a segment's tap nor the page's top hands the bar back to the
-    /// tabs. The Library icon is the one gesture that does, and the Library pressed again on the
-    /// bar collapses it once more, on the segment that was chosen.
-    @Test("the Library's collapsed chrome stays through segment taps until its icon is tapped")
-    func collapsedChromeStaysUntilTheIcon() async {
-        let wire = SegmentTransport()
-        await withTransport(CoverProbe()) {
-            // Scrolled past the threshold and switched to Years in the collapsed chrome.
-            let (_, window) = await hostYears(wire)
-            defer {
-                wire.release()
-                window.isHidden = true
-                window.rootViewController = nil
-            }
-            let tabs = MainTab.allCases.map(\.title)
-            let segment = LibraryScope.allCases.map(\.label)
-            let collapsed = Set(segment + [MainTab.library.title])
-
-            // Years, then All, each in a scroll view of its own standing at its top.
-            var afterYears: Set<String> = []
-            for _ in 0..<40 {
-                await segmentSettle(window, turns: 1)
-                afterYears = Self.dockLabels(tabs + segment, in: window)
-            }
-            #expect(afterYears == collapsed, "Years handed the bar back: it reads \(afterYears)")
-            #expect(Self.systemTabBarOnScreen(in: window) == nil, "the tab bar is up over Years")
-
-            let all = Self.dockElement("All", in: window)?.accessibilityActivate() == true
-            #expect(all, "the chrome's All took no press")
-            var afterAll: Set<String> = []
-            for _ in 0..<40 {
-                await segmentSettle(window, turns: 1)
-                afterAll = Self.dockLabels(tabs + segment, in: window)
-            }
-            #expect(afterAll == collapsed, "All handed the bar back: it reads \(afterAll)")
-
-            // Down and back to the very top of All: the top is no gesture either.
-            _ = Self.scroll(window, by: DockMode.segmentThreshold * 8)
-            await segmentSettle(window, turns: 5)
-            let moved = Self.scroll(window, by: 0)
-            #expect(moved > 0, "no scroll view to bring back to its top")
-            var atTop: Set<String> = []
-            for _ in 0..<40 {
-                await segmentSettle(window, turns: 1)
-                atTop = Self.dockLabels(tabs + segment, in: window)
-            }
-            #expect(atTop == collapsed, "the top of All handed the bar back: it reads \(atTop)")
-
-            // The Library icon, and only it, gives the tabs back.
-            let icon = Self.dockElement(MainTab.library.title, in: window)
-            let pressed = icon?.accessibilityActivate() == true
-            #expect(pressed, "the chrome's Library icon took no press")
-            var expanded: Set<String> = []
-            for _ in 0..<80 where expanded != Set(tabs) {
-                await segmentSettle(window, turns: 1)
-                expanded = Self.dockLabels(tabs + segment, in: window)
-            }
-            #expect(expanded == Set(tabs), "the icon left the foot reading \(expanded)")
-            #expect(Self.systemTabBarOnScreen(in: window) != nil, "the icon gave no tab bar back")
-
-            // The Library pressed again on the bar: collapsed once more, on All.
-            #expect(Self.pressTab(.library, in: window), "the bar has no Library to press")
-            var again: Set<String> = []
-            for _ in 0..<80 where again != collapsed {
-                await segmentSettle(window, turns: 1)
-                again = Self.dockLabels(tabs + segment, in: window)
-            }
-            #expect(again == collapsed, "the Library pressed again left \(again)")
-            let chosen = Self.dockElement("All", in: window)?.accessibilityTraits
-            #expect(chosen?.contains(.selected) == true, "the chrome came back off All")
         }
     }
 
@@ -830,13 +658,12 @@ extension MediaImageLoaderTests {
             let inert = selectOverYears.allSatisfy { $0.accessibilityTraits.contains(.notEnabled) }
             #expect(!selectOverYears.isEmpty && inert, "Select is missing or live over Years")
 
-            // Years opens at its top and the segment stays where it was (MEMNG-653): Months is
-            // pressed in the same chrome Years was.
-            // All reads day buckets too (MEMNG-597), so Months' read is the one AFTER the press.
+            // All reads day buckets too (MEMNG-597), so Months' read is the one AFTER the choice.
             let dayReads = { wire.sizesAsked.filter { $0 == "day" }.count }
             let before = dayReads()
-            let months = Self.dockElement("Months", in: window)?.accessibilityActivate() == true
-            #expect(months, "precondition: the dock's Months took the press")
+            let control = ScopeAccessoryProbe.control(in: window)
+            #expect(control != nil, "precondition: the scope control stands over Years")
+            if let control { ScopeAccessoryProbe.choose(.months, in: control) }
             for _ in 0..<80 where dayReads() <= before {
                 await segmentSettle(window, turns: 1)
             }
