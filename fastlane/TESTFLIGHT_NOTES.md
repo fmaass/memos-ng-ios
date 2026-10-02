@@ -5,6 +5,19 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (32)
+
+- The bar the app drew itself in the Library is gone: the Library icon plus Years, Months and All that took the tab bar's place once you scrolled, or on a second tap on the Library tab.
+- Tap the Library tab, coming from Timeline or Places or again while you are already in the Library: the tab bar steps aside for a toolbar that iOS draws, with the Library icon at the left and Years, Months and All beside it as the standard iOS segmented control.
+- Tap the Library icon in that toolbar and the tab bar with Library, Timeline and Places comes back. You stay in the Library.
+- Scrolling in the Library no longer changes the bar, whichever of the two is showing. Timeline and Places are unchanged from build 31.
+- When the app opens on the Library, the tab bar shows first; Years, Months and All appear after a tap on the Library tab.
+- In Select mode only the Select toolbar shows at the bottom. Closing Select brings back whichever bar was there before.
+- I could not check this on a phone: switch between the tab bar and the Library toolbar a few times and tell me how the change animates.
+- I could not check this on a phone either: the toolbar with the Library icon and Years, Months and All is wider than the tab bar, so the change does not happen in place. Tell me whether that looks right.
+- One more I could not check on a phone: open Select in All and look whether the Select toolbar shows as a dark band with a hard upper edge.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.2.1 (31)
 
 - The bar with Library, Timeline and Places is now the standard iOS tab bar instead of one the app drew itself, so iOS draws its glass and the selection glides from tab to tab, as in other apps on the phone. Switch between the three tabs and watch the selection move.
