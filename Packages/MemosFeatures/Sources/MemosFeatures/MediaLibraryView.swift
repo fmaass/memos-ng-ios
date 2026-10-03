@@ -119,6 +119,9 @@ struct MediaLibraryView: View {
                     ToolbarItem(placement: .bottomBar) {
                         LibraryScopePicker(scope: choice)
                     }
+                    // The trailing space stays empty, as in Photos (MEMNG-680): the picker's own
+                    // width narrows it, and this keeps the narrowed capsule against the icon.
+                    ToolbarSpacer(.flexible, placement: .bottomBar)
                 }
             }
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared

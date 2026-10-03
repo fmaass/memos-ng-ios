@@ -131,6 +131,54 @@ enum ScopeBarProbe {
             || !drawnIcons(in: window).isEmpty
     }
 
+    /// Where the scope toolbar's Library icon is drawn, in the window's coordinates (MEMNG-680):
+    /// the widest of what the press finds for it, so the glass around the glyph rather than the
+    /// glyph alone. An accessibility element's frame is in screen coordinates and is converted, so
+    /// every frame a probe compares stands in one space. Nil when no icon is drawn.
+    static func libraryIconFrame(in window: UIWindow) -> CGRect? {
+        drawnIcons(in: window)
+            .map { windowFrame(of: $0, in: window) }
+            .filter { !$0.isEmpty }
+            .max { $0.width < $1.width }
+    }
+
+    /// Every frame drawn for the Library icon, in the window's coordinates, for a message.
+    static func libraryIconFrames(in window: UIWindow) -> [CGRect] {
+        drawnIcons(in: window).map { windowFrame(of: $0, in: window) }
+    }
+
+    /// The segment titles UIKit laid out inside `control` and shows, each with the width its text
+    /// needs in its own font on one line and the width it was given. A label given less than its
+    /// text needs is drawn truncated, or shrunk to fit.
+    static func segmentLabels(
+        of control: UISegmentedControl, in window: UIWindow
+    ) -> [(text: String, needs: CGFloat, has: CGFloat)] {
+        var found: [(text: String, needs: CGFloat, has: CGFloat)] = []
+        var stack: [UIView] = [control]
+        while let view = stack.popLast() {
+            if let label = view as? UILabel, let text = label.text, titles.contains(text),
+                isOnScreen(label, in: window)
+            {
+                let unbounded = CGRect(
+                    x: 0, y: 0, width: CGFloat.greatestFiniteMagnitude,
+                    height: CGFloat.greatestFiniteMagnitude)
+                let needs = label.textRect(forBounds: unbounded, limitedToNumberOfLines: 1).width
+                found.append((text: text, needs: needs, has: label.bounds.width))
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return found
+    }
+
+    private static func windowFrame(of object: NSObject, in window: UIWindow) -> CGRect {
+        if let view = object as? UIView, view.window != nil {
+            return view.convert(view.bounds, to: window)
+        }
+        // A window without a scene stands at the screen's origin: the two spaces are one.
+        guard let screen = window.windowScene?.screen else { return object.accessibilityFrame }
+        return screen.coordinateSpace.convert(object.accessibilityFrame, to: window)
+    }
+
     /// The window's bottom chrome as UIKit holds it, for a message and an attachment: each shown
     /// navigation toolbar's items, what is drawn for the Library icon, the tab controller's
     /// accessory, and every segmented control with where it stands.

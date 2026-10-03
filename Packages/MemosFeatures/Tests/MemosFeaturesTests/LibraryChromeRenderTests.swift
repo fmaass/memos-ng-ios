@@ -822,6 +822,73 @@ extension MediaImageLoaderTests {
         }
     }
 
+    /// The widest gap allowed between the Library icon and the scope control (MEMNG-680). Photos
+    /// leaves about 9 pt between the two glasses (28 px at @3x, the owner's references); the frames
+    /// read here are the glyph's and the control's, each about 5 pt inside its glass, so Photos'
+    /// gap reads about 19 pt, and the bound is that with 5 pt of slack.
+    private static let capsuleGapLimit: CGFloat = 24
+
+    /// The capsule hugs the icon and stops short of the trailing edge, as Photos' does, in every
+    /// scope (MEMNG-680): after the icon with no overlap and a bounded gap, its end at most 82 % of
+    /// the window's width, and no segment's title given less width than its text needs. Every frame
+    /// is read in the window's coordinates, and each scope is photographed.
+    @Test("the scope capsule hugs the Library icon and ends short of the trailing edge")
+    func scopeCapsuleHugsTheIcon() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "precondition: a scroll, no scope")
+
+            let width = window.bounds.width
+            for scope in [LibraryScope.years, .months, .all] {
+                let live = await ScopeBarProbe.settledControl(in: window) {
+                    await chromeSettle(window)
+                }
+                if let live { ScopeBarProbe.choose(scope, in: live) }
+                _ = await controlShowing(scope.label, in: window)
+                await chromeSettle(window, turns: 40)
+
+                let seen = ScopeBarProbe.describe(window)
+                Self.shoot("scope-capsule-\(scope.label.lowercased())", window)
+                let control = ScopeBarProbe.control(in: window)
+                let icon = ScopeBarProbe.libraryIconFrame(in: window)
+                guard let control, let icon else {
+                    Issue.record("\(scope.label): no capsule or no icon drawn: \(seen)")
+                    continue
+                }
+                let chosen = ScopeBarProbe.chosen(in: control)
+                #expect(chosen == scope.label, "\(scope.label) picked, \(chosen ?? "-") shows")
+
+                let picker = control.convert(control.bounds, to: window)
+                let gap = picker.minX - icon.maxX
+                let labels = ScopeBarProbe.segmentLabels(of: control, in: window)
+                let measured =
+                    "\(scope.label): icon \(icon) of \(ScopeBarProbe.libraryIconFrames(in: window))"
+                    + " capsule \(picker) gap \(gap) window \(width)"
+                    + " end \(picker.maxX / width) labels \(labels)"
+                print("MEMNG-680 measured \(measured)")
+                Attachment.record(measured, named: "capsule-\(scope.label.lowercased())")
+
+                #expect(icon.minX < picker.minX, "the capsule before the icon: \(measured)")
+                #expect(icon.maxX <= picker.minX, "the capsule over the icon: \(measured)")
+                #expect(gap <= Self.capsuleGapLimit, "the capsule left the icon: \(measured)")
+                #expect(picker.maxX <= 0.82 * width, "the capsule runs on: \(measured)")
+                let shown = Set(labels.map { $0.text })
+                #expect(shown == Set(ScopeBarProbe.titles), "titles laid out: \(measured)")
+                for label in labels {
+                    #expect(label.needs <= label.has + 0.5, "\(label.text) cut: \(measured)")
+                }
+            }
+        }
+    }
+
     /// The Library icon gives the tab bar back where the Library stands, and the bar stays through
     /// the layout its return sets off; the next scroll down swaps them again (MEMNG-679).
     @Test("the icon gives the tab bar back until the next scroll down")

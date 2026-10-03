@@ -167,8 +167,15 @@ struct LibraryScopePicker: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        .frame(width: Self.width)
         .accessibilityIdentifier(Self.identifier)
     }
+
+    /// How wide the control is drawn (MEMNG-680): left to itself it stretches to the bar's
+    /// trailing edge; at this width its glass hugs the Library icon and ends near 79 % of a 402 pt
+    /// window, as Photos' does. A trailing spacer alone left it full width, and a cap alone
+    /// (`maxWidth`) let the bar shrink it until its titles were cut.
+    static let width: CGFloat = 220
 
     /// What the control is found by, in a test and by VoiceOver's rotor alike.
     static let identifier = "library-scope"
