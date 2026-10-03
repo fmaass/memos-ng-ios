@@ -1,7 +1,7 @@
 import Foundation
 import HTTPTypes
 import MemosAPI
-import MemosCore
+@testable import MemosCore
 import OpenAPIRuntime
 import Testing
 
@@ -638,6 +638,423 @@ struct LibraryBucketStoreTests {
         #expect(store.buckets.isEmpty, "a signed-out session's list was applied")
         #expect(store.loadedRequest == nil)
         #expect(!store.isLoading)
+    }
+
+    // MARK: - Which session a read belongs to (MEMNG-631)
+
+    @Test(
+        "a refresh parked by a session that has since been replaced sends no read of its own",
+        .timeLimit(.minutes(1))
+    )
+    func anObsoleteRefreshSendsNoChainedRead() async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        let refreshing = Task { await Self.years(store, h1, refreshing: true) }
+        await Self.settle()
+        session.activeHandle = h2
+        release.signal()
+        await initial.value
+        await refreshing.value
+
+        #expect(sent.get() == ["h1"], "the replaced session's refresh chained a read of its own")
+        #expect(store.buckets.isEmpty, "control: the replaced session's held answer was dropped")
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "two lapsed covers across a session change end in one read for the session now current",
+        .timeLimit(.minutes(1))
+    )
+    func lapsedCoversAcrossASessionChangeShareOneCurrentRead() async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 2 {
+                held.signal()
+                await release.wait()
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+        await Self.years(store, h1, refreshing: false)
+        guard let shown = store.loadedRequest else {
+            Issue.record("control: the covers A and B were never on screen")
+            return
+        }
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        let coverA = Task {
+            await store.rereadCovers(of: shown, holding: "a", using: h1, baseURL: Stub.baseURL)
+        }
+        await Self.settle()
+        session.activeHandle = h2
+        let coverB = Task {
+            await store.rereadCovers(of: shown, holding: "b", using: h2, baseURL: Stub.baseURL)
+        }
+        await Self.settle()
+        #expect(sent.get() == ["h1", "h1"], "a parked refresh sent beside the held read")
+        release.signal()
+        await initial.value
+        await coverA.value
+        await coverB.value
+
+        // Whichever waiter resumes first, the replaced session sends nothing and the current one
+        // sends exactly one read.
+        #expect(sent.get() == ["h1", "h1", "h2"], "the reads after the held one were not one H2")
+        #expect(
+            store.buckets.first { $0.coverUID == "b" }?.coverThumbnailURL?.query == "sig=call-3",
+            "cover B was not re-signed by the current session's read"
+        )
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a load behind the same request from a replaced session recovers with one read",
+        .timeLimit(.minutes(1)),
+        arguments: [false, true]
+    )
+    func aCurrentLoadBehindObsoleteWorkRecoversOnce(heldReadFails: Bool) async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+                if heldReadFails { return Stub.json(#"{"not":"a list"}"#) }
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        session.activeHandle = h2
+        let current = Task { await Self.years(store, h2, refreshing: false) }
+        await Self.settle()
+        #expect(sent.get() == ["h1"], "the current load went out beside the held one")
+        release.signal()
+        await initial.value
+        await current.value
+
+        #expect(sent.get() == ["h1", "h2"], "the current load was not answered by one read")
+        #expect(
+            store.buckets.first?.coverThumbnailURL?.query == "sig=call-2",
+            "the current session's buckets never landed"
+        )
+        #expect(store.lastError == nil, "the replaced session's failure was said to this one")
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a load or refresh from a replaced session, with nothing in flight, sends nothing",
+        arguments: [false, true]
+    )
+    func anObsoleteIdleCallSendsNothing(refreshing: Bool) async {
+        let (h1, h2, sent) = Self.incarnations { call in
+            Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h2)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        await Self.years(store, h1, refreshing: refreshing)
+        #expect(sent.get().isEmpty, "a replaced session's call went on the wire")
+        #expect(!store.isLoading)
+
+        await Self.years(store, h2, refreshing: refreshing)
+        #expect(sent.get() == ["h2"], "control: the current session's call was not one read")
+        #expect(store.buckets.count == 2, "control: the current session's buckets landed")
+    }
+
+    @Test(
+        "a replaced session's call for another request leaves the current read standing",
+        .timeLimit(.minutes(1)),
+        arguments: [false, true]
+    )
+    func anObsoleteCallForAnotherRequestSupersedesNothing(refreshing: Bool) async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h2)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let current = Task { await Self.years(store, h2, refreshing: false) }
+        await held.wait()
+        await Self.years(store, h1, size: .month, refreshing: refreshing)
+        #expect(sent.get() == ["h2"], "a replaced session's call for another request was sent")
+        release.signal()
+        await current.value
+
+        #expect(store.loadedRequest?.size == .year, "the current session's read was superseded")
+        #expect(store.buckets.count == 2, "the current session's answer was dropped")
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "every current waiter behind a replaced session's read shares one fast recovery read",
+        .timeLimit(.minutes(1))
+    )
+    func manyCurrentWaitersShareOneRecoveryRead() async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        session.activeHandle = h2
+        let waiters = [true, false, true, false].map { refreshing in
+            Task { await Self.years(store, h2, refreshing: refreshing) }
+        }
+        await Self.settle()
+        #expect(sent.get() == ["h1"], "a current waiter went out beside the held read")
+        release.signal()
+        await initial.value
+        for waiter in waiters { await waiter.value }
+
+        #expect(sent.get() == ["h1", "h2"], "the current waiters were not one recovery read")
+        #expect(
+            store.buckets.first?.coverThumbnailURL?.query == "sig=call-2",
+            "the recovery read's buckets never landed"
+        )
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a waiter cancelled before it resumes leaves the recovery read to the live one",
+        .timeLimit(.minutes(1)),
+        arguments: [0, 1]
+    )
+    func aWaiterCancelledBeforeItResumesLeavesTheRecovery(cancelled: Int) async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        session.activeHandle = h2
+        let waiters = [
+            Task { await Self.years(store, h2, refreshing: true) },
+            Task { await Self.years(store, h2, refreshing: true) },
+        ]
+        #expect(await Self.parked(store, 2), "control: both waiters parked behind the held read")
+        waiters[cancelled].cancel()
+        release.signal()
+        await initial.value
+        for waiter in waiters { await waiter.value }
+
+        #expect(sent.get() == ["h1", "h2"], "the live waiter was not answered by one H2 read")
+        #expect(
+            store.buckets.first?.coverThumbnailURL?.query == "sig=call-2",
+            "the live waiter's buckets never landed"
+        )
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a recovery read whose issuer is cancelled after the claim answers nobody",
+        .timeLimit(.minutes(1))
+    )
+    func aRecoveryCancelledAfterItsClaimIsReplacedOnce() async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let claimed = BucketSignal()
+        let abandon = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+            }
+            if call == 2 {
+                // Whichever waiter claimed the recovery, ITS task is cancelled once the other one
+                // has joined, and the transport honours that before any answer arrives.
+                claimed.signal()
+                await abandon.wait()
+                withUnsafeCurrentTask { $0?.cancel() }
+                try Task.checkCancellation()
+            }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        session.activeHandle = h2
+        let waiters = [
+            Task { await Self.years(store, h2, refreshing: true) },
+            Task { await Self.years(store, h2, refreshing: true) },
+        ]
+        #expect(await Self.parked(store, 2), "control: both waiters parked behind the held read")
+        release.signal()
+        await claimed.wait()
+        #expect(await Self.parked(store, 1), "control: the other waiter joined the claimed read")
+        abandon.signal()
+        await initial.value
+        for waiter in waiters { await waiter.value }
+
+        #expect(
+            sent.get() == ["h1", "h2", "h2"],
+            "the abandoned recovery was not replaced by exactly one H2 read"
+        )
+        #expect(
+            store.buckets.first?.coverThumbnailURL?.query == "sig=call-3",
+            "the live waiter's buckets never landed"
+        )
+        #expect(store.lastError == nil, "the abandoned read's cancellation was said as a failure")
+        #expect(!store.isLoading)
+    }
+
+    @Test(
+        "a recovery read that fails answers every waiter on it, and nothing is sent again",
+        .timeLimit(.minutes(1))
+    )
+    func aFailedRecoveryAnswersEveryWaiter() async {
+        let held = BucketSignal()
+        let release = BucketSignal()
+        let (h1, h2, sent) = Self.incarnations { call in
+            if call == 1 {
+                held.signal()
+                await release.wait()
+            }
+            if call == 2 { return Stub.json(#"{"not":"a list"}"#) }
+            return Self.years(signedBy: "call-\(call)")
+        }
+        let session = SwitchableSession(for: h1)
+        let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
+        store.reports(to: session)
+
+        let initial = Task { await Self.years(store, h1, refreshing: false) }
+        await held.wait()
+        session.activeHandle = h2
+        let waiters = [
+            Task { await Self.years(store, h2, refreshing: true) },
+            Task { await Self.years(store, h2, refreshing: true) },
+        ]
+        #expect(await Self.parked(store, 2), "control: both waiters parked behind the held read")
+        release.signal()
+        await initial.value
+        for waiter in waiters { await waiter.value }
+
+        #expect(sent.get() == ["h1", "h2"], "a failed recovery was retried by its other waiter")
+        #expect(store.lastError != nil, "control: the recovery's failure was said once")
+        #expect(!store.isLoading)
+    }
+
+    /// Whether `count` callers are parked on a read's end, given a bounded number of turns to get
+    /// there — the registration itself, not a guess at how many yields it takes.
+    private static func parked(_ store: LibraryBucketStore, _ count: Int) async -> Bool {
+        for _ in 0..<1_000 where store.parkedReaders != count { await Task.yield() }
+        return store.parkedReaders == count
+    }
+
+    /// What the scripted server answers to its `call`-th request, counted from one.
+    private typealias BucketAnswer =
+        @Sendable (_ call: Int) async throws -> (HTTPResponse, HTTPBody?)
+
+    /// Two incarnations of one session, H1 then H2, with DISTINCT session generations — two
+    /// clients alone would both be generation zero — over one scripted server that logs which
+    /// incarnation sent each request and numbers the calls from one. Like a real transport it
+    /// honours cancellation: a request from a cancelled task throws before anything is sent.
+    private static func incarnations(
+        _ answer: @escaping BucketAnswer
+    ) -> (h1: SessionHandle, h2: SessionHandle, sent: LockedValue<[String]>) {
+        let sent = LockedValue<[String]>([])
+        let client = { (sender: String) in
+            Stub.client { _, _, _ in
+                try Task.checkCancellation()
+                sent.set(sent.get() + [sender])
+                let call = sent.get().count
+                return try await answer(call)
+            }
+        }
+        return (
+            SessionHandle(client: client("h1"), generation: 1),
+            SessionHandle(client: client("h2"), generation: 2),
+            sent
+        )
+    }
+
+    /// Two year buckets whose covers are A and B, each signed with `signature`.
+    nonisolated private static func years(
+        signedBy signature: String
+    ) -> (HTTPResponse, HTTPBody?) {
+        Stub.json(
+            #"[{"key":"2026","count":2,"coverUid":"b","#
+                + #""coverThumbnailUrl":"/api/attachments/b/thumbnail?sig=\#(signature)"},"#
+                + #"{"key":"2025","count":1,"coverUid":"a","#
+                + #""coverThumbnailUrl":"/api/attachments/a/thumbnail?sig=\#(signature)"}]"#
+        )
+    }
+
+    /// All's year buckets (or `size`'s), through `load` or `refresh`, under `handle` itself rather
+    /// than a generation-zero one.
+    private static func years(
+        _ store: LibraryBucketStore,
+        _ handle: SessionHandle,
+        size: LibraryBucketSize = .year,
+        refreshing: Bool
+    ) async {
+        if refreshing {
+            await store.refresh(
+                size: size,
+                filter: .all,
+                tag: nil,
+                using: handle,
+                baseURL: Stub.baseURL
+            )
+        } else {
+            await store.load(
+                size: size,
+                filter: .all,
+                tag: nil,
+                using: handle,
+                baseURL: Stub.baseURL
+            )
+        }
     }
 
     /// The query as the server would read it: decoded name/value pairs, never a substring of the

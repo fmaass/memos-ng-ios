@@ -57,10 +57,13 @@ public struct LibraryBucketRequest: Sendable, Equatable {
 ///
 /// Its fences are `LibraryTagStore`'s, for the same reasons:
 ///
-/// * one read per request at a time — a second `load` for the request already in flight is
-///   REFUSED, not joined and not issued: it returns at once, and the answer already on its way is
-///   the one that lands, so two appearances in a row are one request on the wire. `refresh` is the
-///   one exception, and it CHAINS rather than overlaps: see there;
+/// * one read per request at a time — a second `load` for the request already in flight for the
+///   same session is REFUSED, not joined and not issued: it returns at once, and the answer already
+///   on its way is the one that lands, so two appearances in a row are one request on the wire.
+///   `refresh` is the one exception, and it CHAINS rather than overlaps: see there;
+/// * a caller whose session has been replaced is refused and sends nothing, and a read in flight
+///   for a replaced session answers nobody current: whoever still wants its request waits for it
+///   to end and then shares ONE read for the session now current (MEMNG-631);
 /// * a read for a different request supersedes the one in flight, whose answer is then dropped (a
 ///   generation bumped by every read and by `sessionIdentityChanged`, plus the request itself);
 /// * an answer for a session that has ended is dropped, so a stale list cannot repopulate a list
@@ -81,6 +84,12 @@ public final class LibraryBucketStore {
 
     private var generation = 0
     private var loadingLineage: Lineage?
+    /// The newest read claimed, kept after it ends: a waiter that resumes late must still be able
+    /// to tell that a read it can stand on was issued — and has perhaps already answered.
+    private var latestLineage: Lineage?
+    /// Whether `latestLineage`'s read ended cancelled — its issuer's task, or a cancellation coming
+    /// back from the transport — and so answered nobody. False while it is on its way.
+    private var latestAbandoned = false
     /// Refreshes waiting for the read of one generation to end, however it ends.
     private var readEndWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
@@ -101,6 +110,9 @@ public final class LibraryBucketStore {
     private struct Lineage: Equatable {
         var generation: Int
         var request: LibraryBucketRequest
+        /// The session generation of the handle that issued the read. A newer store generation is
+        /// no evidence of whom a read was for; this is.
+        var session: Int
     }
 
     /// Reads the buckets of one size, under one kind and optionally one tag.
@@ -117,8 +129,26 @@ public final class LibraryBucketStore {
             tag: tag,
             timeZoneIdentifier: timeZoneIdentifier
         )
-        guard loadingLineage?.request != request else { return }
-        await read(request, using: handle, baseURL: baseURL)
+        // Join or refuse (MEMNG-631). A caller whose session has been replaced is REFUSED and
+        // sends nothing. A duplicate of the read in flight for the SAME session is REFUSED at once,
+        // as before: that read answers it. A load that finds its request in flight for a REPLACED
+        // session waits for that read to drain and then JOINS one shared read for the current
+        // session — the first current waiter to resume sends it, every other one stands on it.
+        // A waiter cancelled while it waited leaves without sending or standing. A shared read
+        // that ends CANCELLED (its issuer's task was, before or after the claim) answered nobody:
+        // the next live waiter sends ONE fresh read and the rest stand on that one. A shared read
+        // that FAILS any other way is an answer: the failure is reported once through the usual
+        // funnel and stands for every waiter on it, and nothing is sent again — a second request
+        // for one ask is a retry nobody asked for, and the next pull is that retry. (A read issued
+        // before a refresh began answers it in no outcome, so a refresh still reads after a
+        // pending read that failed.)
+        guard sessionStillCurrent(handle) else { return }
+        if let pending = loadingLineage, pending.request == request,
+            pending.session == handle.generation
+        {
+            return
+        }
+        await readAfterEarlierReads(request, began: generation, using: handle, baseURL: baseURL)
     }
 
     /// A pull-to-refresh's read. It differs from `load` only when the same request is already in
@@ -131,6 +161,8 @@ public final class LibraryBucketStore {
     ///
     /// It sends nothing if, while it waited, the device changed account or a read for another
     /// request was issued: the screen has moved on, and its buckets are not to be read back over it.
+    /// Nor if its session has been replaced, at entry or while it waited: it is refused, and a read
+    /// still in flight for a replaced session is waited out but never stood on (MEMNG-631).
     public func refresh(
         size: LibraryBucketSize,
         filter: MediaLibraryFilter,
@@ -145,17 +177,61 @@ public final class LibraryBucketStore {
             timeZoneIdentifier: timeZoneIdentifier
         )
         let began = generation
+        guard sessionStillCurrent(handle) else { return }
+        await readAfterEarlierReads(request, began: began, using: handle, baseURL: baseURL)
+    }
+
+    /// Sends ONE read of `request` for `handle`'s session once the read of it already in flight
+    /// when the caller `began` has ended, however it ended — unless a read it can stand on was
+    /// issued meanwhile, which it joins, or the screen moved on, when it sends nothing.
+    ///
+    /// Standing on a read takes all three: the same request, the same session, issued after the
+    /// caller began. Nothing in flight, or a newer generation, proves none of them — the read that
+    /// ended may have been a replaced session's, dropped at its fence. And it must have ANSWERED: a
+    /// read that ended cancelled is a turn that passes to the next live waiter, never an answer.
+    private func readAfterEarlierReads(
+        _ request: LibraryBucketRequest,
+        began: Int,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
         while let pending = loadingLineage, pending.request == request {
             await readEnds(pending.generation)
-            // A read issued after the refresh began is one it can stand on.
-            guard pending.generation <= began else { return }
-            if generation == pending.generation { break }
-            // Something else was issued while it waited. Another refresh's read of this request is
-            // joined on the next pass; anything else — a read for another request, or the account
-            // changing, which moves the generation too — means the screen has moved on.
+            // The caller may have been cancelled, or its session replaced, while it waited: then
+            // it is refused, and neither sends a read nor stands on one.
+            guard !Task.isCancelled, sessionStillCurrent(handle) else { return }
+            // Another waiter of the same session got there first: join its read if it is still on
+            // its way — waited out on the next pass, where how it ended is judged — and stand on
+            // it if it has answered.
+            if let shared = latestLineage, shared.generation > began, shared.request == request,
+                shared.session == handle.generation, !latestAbandoned
+            {
+                if loadingLineage == shared { continue }
+                return
+            }
+            // Nothing was issued, and the account did not change, while it waited — or the newest
+            // read, of this request for this session, ended cancelled and answered nobody: its
+            // turn, and its read is the one the other live waiters stand on.
+            if generation == pending.generation || abandonedTurn(of: request, for: handle) {
+                break
+            }
+            // Something else was. A read of this request that it cannot stand on is waited out on
+            // the next pass; anything else — a read for another request, or the account changing,
+            // which moves the generation too — means the screen has moved on.
             guard loadingLineage?.request == request else { return }
         }
         await read(request, using: handle, baseURL: baseURL)
+    }
+
+    /// Whether the newest thing this store did is a read of `request` for `handle`'s session that
+    /// ended cancelled — a turn nobody took.
+    private func abandonedTurn(
+        of request: LibraryBucketRequest,
+        for handle: SessionHandle
+    ) -> Bool {
+        guard latestAbandoned, let latest = latestLineage else { return false }
+        return latest.generation == generation && latest.request == request
+            && latest.session == handle.generation
     }
 
     /// A lapsed cover's read: the list the cover was drawn from, read again for fresh signatures.
@@ -185,6 +261,10 @@ public final class LibraryBucketStore {
         )
     }
 
+    /// How many callers are parked until some read ends. A test seam, read-only: it lets a test
+    /// know a waiter has registered before it lets the read that waiter is parked on end.
+    var parkedReaders: Int { readEndWaiters.values.reduce(0) { $0 + $1.count } }
+
     private func readEnds(_ generation: Int) async {
         await withCheckedContinuation { waiter in
             readEndWaiters[generation, default: []].append(waiter)
@@ -196,14 +276,25 @@ public final class LibraryBucketStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async {
+        // A replaced session claims nothing: its read would supersede the current session's and
+        // could only be dropped itself. Asked here, with nothing awaited between the question and
+        // the claim below, so no path into this function gets past it.
+        guard sessionStillCurrent(handle) else {
+            MemosLog.api.info("a bucket read for a session that has ended is not sent")
+            return
+        }
         let client = handle.client
         // A read for another request supersedes whatever is in flight: that answer is for buckets
         // nobody is showing any more.
         generation += 1
-        let lineage = Lineage(generation: generation, request: request)
+        let lineage = Lineage(generation: generation, request: request, session: handle.generation)
         loadingLineage = lineage
+        latestLineage = lineage
+        latestAbandoned = false
         isLoading = true
+        var abandoned = false
         defer {
+            if latestLineage == lineage { latestAbandoned = abandoned }
             if loadingLineage == lineage {
                 loadingLineage = nil
                 isLoading = false
@@ -214,7 +305,7 @@ public final class LibraryBucketStore {
         }
         do {
             let rows = try await Self.buckets(client, request: request, baseURL: baseURL)
-            guard lineage == currentLineage(for: request) else {
+            guard isCurrent(lineage) else {
                 MemosLog.api.info("GET /api/attachments/buckets answered a request that moved on")
                 return
             }
@@ -227,7 +318,9 @@ public final class LibraryBucketStore {
             lastError = nil
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
-            guard lineage == currentLineage(for: request) else {
+            // Cancelled before an answer arrived, whichever side noticed: an answer for nobody.
+            abandoned = Task.isCancelled || StoreFailure.isCancellation(error)
+            guard isCurrent(lineage) else {
                 MemosLog.api.info("GET /api/attachments/buckets failed for a request that moved on")
                 return
             }
@@ -242,13 +335,14 @@ public final class LibraryBucketStore {
         loadedRequest = nil
         lastError = nil
         loadingLineage = nil
+        latestLineage = nil
+        latestAbandoned = false
         isLoading = false
         generation += 1
     }
 
-    private func currentLineage(for request: LibraryBucketRequest) -> Lineage {
-        Lineage(generation: generation, request: request)
-    }
+    /// Whether nothing — no other read, no change of account — has been issued since `lineage`'s.
+    private func isCurrent(_ lineage: Lineage) -> Bool { lineage.generation == generation }
 
     /// The same funnel, in the same order, as `LibraryTagStore.report`.
     private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
