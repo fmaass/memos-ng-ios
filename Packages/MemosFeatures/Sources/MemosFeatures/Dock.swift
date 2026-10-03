@@ -75,12 +75,13 @@ final class AppDock {
     /// Whether `tab`'s root stands over the system tab bar: not while a claim holds the chrome,
     /// and not on the Library while its scope toolbar has the bar's place.
     func showsSystemBar(on tab: MainTab) -> Bool {
-        !isTakenOver && !(tab == .library && mode == .scope)
+        // SPIKE MEMNG-682: the system bar stays on the Library; the scope rides in its accessory.
+        !isTakenOver
     }
 
     /// Whether the Library draws its scope toolbar. The mode is the tabs on every other tab, so
     /// this is the Library's alone.
-    var showsScopeBar: Bool { mode == .scope && !isTakenOver }
+    var showsScopeBar: Bool { false }  // SPIKE MEMNG-682: the app-drawn swap is off.
 }
 
 /// Which of Years, Months and All the Library shows, and the year a Years card narrowed Months to.
@@ -208,7 +209,11 @@ struct MainTabs<Screen: View>: View {
                 }
             }
         }
-        .tabBarMinimizeBehavior(Self.minimizesOnScroll(on: selection) ? .onScrollDown : .never)
+        .tabBarMinimizeBehavior(.onScrollDown)  // SPIKE MEMNG-682: on the Library too.
+        .spikeScopeAccessory(
+            shown: selection == .library && dock.mode == .scope && !dock.isTakenOver,
+            scope: scope
+        )
         .environment(dock)
         .environment(scope)
         // Every way off the Library — a press in the bar or a jump to a memo — gives the tabs
@@ -305,5 +310,49 @@ private struct DockFeed: ViewModifier {
             dock?.scrolled(to: y)
         }
         .onScrollPhaseChange { _, phase in fence.moving = phase.isScrolling }
+    }
+}
+
+// MARK: - SPIKE MEMNG-682 (throwaway, never merged)
+
+/// Every placement the accessory's content was handed, in order, as the test reads it.
+@MainActor
+enum SpikeAccessoryLog {
+    static var placements: [String] = []
+}
+
+/// The scope control in the tab bar's bottom accessory, enabled only once the Library has been
+/// scrolled past `DockMode.scopeThreshold` (the dock's mode turning `.scope`).
+struct SpikeAccessoryContent: View {
+    let scope: LibraryScopeChoice
+    @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+
+    var name: String {
+        if placement == .inline { return "inline" }
+        if placement == .expanded { return "expanded" }
+        return "other: \(String(describing: placement))"
+    }
+
+    var body: some View {
+        LibraryScopePicker(scope: scope)
+            .accessibilityValue(name)
+            .onChange(of: name, initial: true) { _, now in
+                SpikeAccessoryLog.placements.append(now)
+            }
+    }
+}
+
+extension View {
+    @ViewBuilder
+    fileprivate func spikeScopeAccessory(shown: Bool, scope: LibraryScopeChoice) -> some View {
+        if #available(iOS 26.1, *) {
+            tabViewBottomAccessory(isEnabled: shown) {
+                SpikeAccessoryContent(scope: scope)
+            }
+        } else {
+            tabViewBottomAccessory {
+                if shown { SpikeAccessoryContent(scope: scope) }
+            }
+        }
     }
 }

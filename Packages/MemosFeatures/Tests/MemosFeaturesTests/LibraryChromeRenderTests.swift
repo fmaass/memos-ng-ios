@@ -1067,6 +1067,89 @@ extension MediaImageLoaderTests {
             Self.shoot("library-return", window)
         }
     }
+
+    // MARK: - SPIKE MEMNG-682 (throwaway, never merged)
+
+    /// What the window shows at one stage of the spike: the scroll offset, the placements the
+    /// accessory's content has recorded so far, every scope control (on screen or not) and the
+    /// tab items the bar shows, with their frames.
+    private static func spikeState(_ stage: String, _ window: UIWindow) -> String {
+        var lines = ["== \(stage)"]
+        lines.append("scrolledBy=\(scrolledBy(in: window).map { "\($0)" } ?? "nil")")
+        lines.append("placements=\(SpikeAccessoryLog.placements)")
+        lines.append("barShows=\(barShows(in: window))")
+        if let bar = tabBar(in: window) {
+            lines.append("tabBar.frame=\(bar.convert(bar.bounds, to: window))")
+        }
+        let titles = Set(MainTab.allCases.map(\.title))
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            let frame = view.convert(view.bounds, to: window)
+            var shown = true
+            var node: UIView? = view
+            while let current = node {
+                if current.isHidden || current.alpha < 0.01 { shown = false }
+                node = current.superview
+            }
+            if let control = view as? UISegmentedControl {
+                let names = (0..<control.numberOfSegments).map {
+                    control.titleForSegment(at: $0) ?? "?"
+                }
+                let value = control.accessibilityValue ?? "nil"
+                lines.append("segmented \(names) shown=\(shown) frame=\(frame) value=\(value)")
+            }
+            if let label = view.accessibilityLabel, titles.contains(label), shown {
+                lines.append("tab-item '\(label)' \(type(of: view)) frame=\(frame)")
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// SPIKE MEMNG-682: the Library on the system bar with `.onScrollDown`, the scope control in
+    /// the bar's bottom accessory enabled only once a scroll has passed 24 pt. Records what the
+    /// system draws and which placement the accessory's content is handed at rest, after a
+    /// finger-style drag down, after a further programmatic scroll down, and after a drag back
+    /// up. Asserts nothing about the placement: the pictures and the log are the result.
+    @Test("spike: the scope accessory enabled after the fold, as the system places it")
+    func spikeAccessoryAfterTheFold() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            SpikeAccessoryLog.placements = []
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            var notes = ["iOS \(UIDevice.current.systemVersion)"]
+            notes.append(Self.spikeState("1-rest", window))
+            Self.shoot("682-1-rest", window)
+
+            for _ in 0..<4 { await drag(window, by: 120) }
+            await chromeSettle(window, turns: 60)
+            notes.append(Self.spikeState("2-dragged-down", window))
+            Self.shoot("682-2-dragged-down", window)
+
+            if let scroller = Self.mainScroll(in: window) {
+                let further = CGPoint(x: 0, y: scroller.contentOffset.y + 600)
+                scroller.setContentOffset(further, animated: true)
+            }
+            await chromeSettle(window, turns: 80)
+            notes.append(Self.spikeState("3-scrolled-further", window))
+            Self.shoot("682-3-scrolled-further", window)
+
+            let down = Self.scrolledBy(in: window) ?? 0
+            await drag(window, by: -down)
+            await chromeSettle(window, turns: 80)
+            notes.append(Self.spikeState("4-dragged-up", window))
+            Self.shoot("682-4-dragged-up", window)
+
+            let log = notes.joined(separator: "\n\n")
+            Attachment.record(log, named: "placements-682")
+            #expect(notes.count == 5, "captures: \(log)")
+        }
+    }
 }
 
 /// The keychain, in memory.
