@@ -305,7 +305,8 @@ extension MediaImageLoaderTests {
 
     /// The margin is written out here rather than asked of `PlacePinGeometry`, which is the thing
     /// under test: on a roomy pane, half a square of air on every side, and above it the square
-    /// itself and its badge, because a pin is drawn wholly above the coordinate it marks.
+    /// itself, the pointer it stands on and its badge, because a pin is drawn wholly above the
+    /// coordinate it marks.
     @Test("the map opens with the outermost pins inside the margin their drawing needs")
     func theOpeningViewLeavesAirAroundTheOutermostPins() {
         let fixtures: [(String, MKCoordinateRegion)] = [
@@ -342,7 +343,7 @@ extension MediaImageLoaderTests {
                     point.x <= mapView.bounds.width - 52 + slack,
                     "\(fixture): a pin is cut off on the right"
                 )
-                #expect(point.y >= 84 - slack, "\(fixture): a pin is cut off at the top")
+                #expect(point.y >= 92 - slack, "\(fixture): a pin is cut off at the top")
                 #expect(
                     point.y <= mapView.bounds.height - 26 + slack,
                     "\(fixture): a pin is cut off at the bottom"
@@ -357,7 +358,7 @@ extension MediaImageLoaderTests {
             let down = points.map(\.y)
             let reach = max(
                 ((across.max() ?? 0) - (across.min() ?? 0)) / (mapView.bounds.width - 52 - 52),
-                ((down.max() ?? 0) - (down.min() ?? 0)) / (mapView.bounds.height - 84 - 26)
+                ((down.max() ?? 0) - (down.min() ?? 0)) / (mapView.bounds.height - 92 - 26)
             )
             #expect(reach >= 0.5, "\(fixture): the map opened far wider than its pins need")
             window.isHidden = true

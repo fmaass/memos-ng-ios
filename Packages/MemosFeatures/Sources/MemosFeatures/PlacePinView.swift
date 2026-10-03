@@ -5,11 +5,20 @@ import UIKit
 /// The geometry a pin and a cluster are drawn with, and what the opening view owes it.
 ///
 /// Written once because the margin follows the drawing: the square stands wholly ABOVE the
-/// coordinate it marks and its badge overhangs the top, so a coordinate on the pane's edge is a
-/// pin half off the screen — and a photograph of another size would be cut differently.
+/// coordinate it marks, on a pointer whose tip IS the coordinate, and its badge overhangs the
+/// top, so a coordinate on the pane's edge is a pin half off the screen — and a photograph of
+/// another size would be cut differently.
 nonisolated enum PlacePinGeometry {
     /// The side of the square photograph a pin wears.
     static let side: CGFloat = 52
+    /// How far the pointer under the square reaches below its bottom edge. Its tip is the point
+    /// the pin marks, so the whole drawing is `side + pointerHeight` tall.
+    static let pointerHeight: CGFloat = 8
+    /// How wide the pointer is where it meets the square.
+    static let pointerBase: CGFloat = 18
+    /// The white frame round the photograph — white in either appearance, as the photograph's
+    /// mount rather than the screen's background.
+    static let borderWidth: CGFloat = 3
     /// How far the count badge reaches above the square's top edge.
     static let badgeOverhang: CGFloat = 6
     /// The air left around the outermost pins, so the map does not open with a pin touching its
@@ -21,9 +30,10 @@ nonisolated enum PlacePinGeometry {
 
     /// What the opening fit keeps free on each side of a pane of this size, in points.
     static func openingInsets(in pane: CGSize) -> UIEdgeInsets {
-        // Above the coordinate: the whole square and the badge, then the air. Below it: air alone.
+        // Above the coordinate: the pointer, the whole square and the badge, then the air. Below
+        // it: air alone.
         let (top, bottom) = shrunk(
-            side + badgeOverhang + breathingSpace,
+            side + pointerHeight + badgeOverhang + breathingSpace,
             breathingSpace,
             toFit: pane.height
         )
@@ -61,6 +71,9 @@ class PlaceAnnotationView: MKAnnotationView {
     private static let side = PlacePinGeometry.side
 
     private let photo = UIImageView()
+    /// The triangle under the photograph. A layer of this view rather than of the photograph,
+    /// which clips to its own bounds and would cut the pointer off.
+    private let pointer = CAShapeLayer()
     private let badge = UILabel()
     /// Which image this view last ASKED for. The one thing a late answer is judged against.
     private var requested: MediaImageKey?
@@ -83,16 +96,28 @@ class PlaceAnnotationView: MKAnnotationView {
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
-        frame = CGRect(x: 0, y: 0, width: Self.side, height: Self.side)
-        centerOffset = CGPoint(x: 0, y: -Self.side / 2)
+        // The square on top, the pointer below it, and the view's centre lifted by half of that
+        // whole height: MapKit puts the centre on the coordinate, so the TIP lands there.
+        let height = Self.side + PlacePinGeometry.pointerHeight
+        frame = CGRect(x: 0, y: 0, width: Self.side, height: height)
+        centerOffset = CGPoint(x: 0, y: -height / 2)
 
-        photo.frame = bounds
+        // Drawn first, so the photograph's frame covers the pointer's base: the two whites meet
+        // without a seam where the square's edge is antialiased.
+        pointer.path = Self.pointerPath()
+        pointer.fillColor = UIColor.white.cgColor
+        layer.addSublayer(pointer)
+
+        // The top square only — the view is taller than the photograph by the pointer.
+        photo.frame = CGRect(x: 0, y: 0, width: Self.side, height: Self.side)
         photo.contentMode = .scaleAspectFill
         photo.clipsToBounds = true
         photo.backgroundColor = .secondarySystemBackground
         photo.layer.cornerRadius = 8
-        photo.layer.borderWidth = 2
-        photo.layer.borderColor = UIColor.systemBackground.cgColor
+        photo.layer.borderWidth = PlacePinGeometry.borderWidth
+        // White, not a system colour: a CGColor is resolved once, so a dynamic colour would be
+        // frozen in whichever appearance was current when the view was built.
+        photo.layer.borderColor = UIColor.white.cgColor
         addSubview(photo)
 
         badge.frame = CGRect(
@@ -116,6 +141,22 @@ class PlaceAnnotationView: MKAnnotationView {
         fatalError("PlaceAnnotationView is built in code, never from a nib")
     }
 
+    /// A triangle `pointerBase` wide where it leaves the square's bottom edge, its tip
+    /// `pointerHeight` below it on the centre line. The base continues up through the frame's
+    /// width as a band the photograph covers, so no hairline shows between frame and pointer.
+    private static func pointerPath() -> CGPath {
+        let middle = side / 2
+        let halfBase = PlacePinGeometry.pointerBase / 2
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: middle - halfBase, y: side - PlacePinGeometry.borderWidth))
+        path.addLine(to: CGPoint(x: middle + halfBase, y: side - PlacePinGeometry.borderWidth))
+        path.addLine(to: CGPoint(x: middle + halfBase, y: side))
+        path.addLine(to: CGPoint(x: middle, y: side + PlacePinGeometry.pointerHeight))
+        path.addLine(to: CGPoint(x: middle - halfBase, y: side))
+        path.closeSubpath()
+        return path
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         loading?.cancel()
@@ -133,6 +174,13 @@ class PlaceAnnotationView: MKAnnotationView {
     /// What the view is showing, for the assertions a headless run can make about it.
     var shownImage: UIImage? { photo.image }
     var badgeText: String? { badge.isHidden ? nil : badge.text }
+    /// Where the photograph sits inside the view, and the frame it wears.
+    var photoFrame: CGRect { photo.frame }
+    var photoBorderWidth: CGFloat { photo.layer.borderWidth }
+    var photoBorderColor: CGColor? { photo.layer.borderColor }
+    /// The pointer as drawn: its outline in this view's coordinates, and its fill.
+    var pointerPath: CGPath? { pointer.path }
+    var pointerFill: CGColor? { pointer.fillColor }
 
     /// Whether this pin is still owed its photograph: nothing painted and nothing on the wire.
     ///

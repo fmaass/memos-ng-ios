@@ -785,6 +785,172 @@ extension MediaImageLoaderTests {
             "a cluster counted the pins it swallowed instead of the photographs behind them"
         )
     }
+
+    /// What a pin is drawn as, for a lone pin, a pin holding several photographs and a cluster.
+    /// The numbers are written out rather than asked of `PlacePinGeometry`, which is the thing
+    /// under test: a 52-point square on an 8-point pointer, the view lifted by half its height so
+    /// the pointer's TIP is the point MapKit puts on the coordinate.
+    @Test("a pin and a cluster stand on a pointer whose tip is the place they mark")
+    func pinViewsStandOnAPointerTippedOnTheirPlace() throws {
+        for (kind, view, badge) in pinViewsOfEveryKind() {
+            #expect(
+                view.bounds.size == CGSize(width: 52, height: 60),
+                "\(kind): the view is not the square plus its pointer"
+            )
+            #expect(
+                view.photoFrame == CGRect(x: 0, y: 0, width: 52, height: 52),
+                "\(kind): the photograph left the top square"
+            )
+            #expect(view.centerOffset == CGPoint(x: 0, y: -30), "\(kind): the view is not lifted")
+            #expect(
+                view.centerOffset.y == -view.bounds.height / 2,
+                "\(kind): the coordinate is not at the bottom of the drawing"
+            )
+
+            let corners = try outline(of: #require(view.pointerPath, "\(kind): no pointer"))
+            let tip = corners.max { $0.y < $1.y }
+            #expect(
+                tip == CGPoint(x: view.bounds.midX, y: view.bounds.maxY),
+                "\(kind): the pointer's tip is not where the coordinate is"
+            )
+            #expect(
+                corners.filter { $0.y == 52 }.map(\.x).sorted() == [17, 35],
+                "\(kind): the pointer does not leave the square 18 points wide, centred"
+            )
+            #expect(view.badgeText == badge, "\(kind): the badge changed with the drawing")
+        }
+    }
+
+    /// The frame and the pointer are the photograph's white mount in either appearance — a
+    /// CGColor taken from a dynamic colour is frozen in the appearance current when the view was
+    /// built, which is how the frame used to be black in dark mode. Each kind is built under each
+    /// appearance, captured inside a padded window of that appearance (the badge reaches 6 points
+    /// above the view), and then the window's appearance is flipped under it.
+    @Test("a pin's frame and pointer are white in light and dark, and stay white when it flips")
+    func pinViewsWearAWhiteFrameInEitherAppearance() {
+        let pictures: [(String, UIColor)] = [
+            ("pin-single", .systemOrange), ("pin-counted", .systemTeal),
+            ("pin-older", .systemPink), ("pin-newer", .systemIndigo),
+        ]
+        for (uid, color) in pictures {
+            MediaImageLoader.store.store(
+                UIImage(data: MediaFixture.png(color, side: 52))!,
+                forKey: MediaImageKey(uid: uid, tier: MediaTier.thumb.rawValue),
+                generation: MediaImageLoader.store.generation
+            )
+        }
+
+        let appearances: [(UIUserInterfaceStyle, String)] = [(.light, "light"), (.dark, "dark")]
+        for (style, name) in appearances {
+            var views: [(String, PlaceAnnotationView, String?)] = []
+            UITraitCollection(userInterfaceStyle: style).performAsCurrent {
+                views = pinViewsOfEveryKind()
+            }
+            let pad: CGFloat = 24
+            let cell = CGSize(width: 52 + 2 * pad, height: 60 + 2 * pad)
+            let window = UIWindow(
+                frame: CGRect(x: 0, y: 0, width: cell.width * 3, height: cell.height)
+            )
+            window.overrideUserInterfaceStyle = style
+            var containers: [UIView] = []
+            for (index, (_, view, _)) in views.enumerated() {
+                let container = UIView(
+                    frame: CGRect(
+                        origin: CGPoint(x: CGFloat(index) * cell.width, y: 0),
+                        size: cell
+                    )
+                )
+                container.backgroundColor = .systemGray4
+                view.frame.origin = CGPoint(x: pad, y: pad)
+                container.addSubview(view)
+                window.addSubview(container)
+                containers.append(container)
+            }
+            window.isHidden = false
+            window.layoutIfNeeded()
+
+            for ((kind, view, _), container) in zip(views, containers) {
+                #expect(view.shownImage != nil, "\(kind): captured without its photograph")
+                #expect(view.photoBorderWidth == 3, "\(kind) (\(name)): the frame is not 3 points")
+                #expect(isWhite(view.photoBorderColor), "\(kind) built \(name): frame not white")
+                #expect(isWhite(view.pointerFill), "\(kind) built \(name): pointer not white")
+                let picture = UIGraphicsImageRenderer(bounds: container.bounds).image { context in
+                    container.layer.render(in: context.cgContext)
+                }
+                if let png = picture.pngData() {
+                    Attachment.record(png, named: "places-\(kind)-\(name).png")
+                }
+            }
+
+            // The appearance changes under views that already exist.
+            let flipped: UIUserInterfaceStyle = style == .light ? .dark : .light
+            window.overrideUserInterfaceStyle = flipped
+            window.layoutIfNeeded()
+            for (kind, view, _) in views {
+                #expect(view.traitCollection.userInterfaceStyle == flipped, "\(kind): no flip")
+                #expect(isWhite(view.photoBorderColor), "\(kind) flipped from \(name): not white")
+                #expect(isWhite(view.pointerFill), "\(kind) flipped from \(name): not white")
+            }
+            window.isHidden = true
+        }
+    }
+}
+
+/// One view of each kind a map draws, with the badge each one has always carried: a lone pin
+/// none, a pin of three photographs "3", a cluster of pins of three and four photographs "7".
+/// Without thumbnail URLs, so a view paints only what the loader's cache already holds.
+@MainActor
+private func pinViewsOfEveryKind() -> [(String, PlaceAnnotationView, String?)] {
+    let single = PlacePinView(
+        annotation: PlaceAnnotation(pin: placePin(key: "single", uid: "pin-single")),
+        reuseIdentifier: "place"
+    )
+    let counted = PlacePinView(
+        annotation: PlaceAnnotation(pin: placePin(key: "counted", uid: "pin-counted", count: 3)),
+        reuseIdentifier: "place"
+    )
+    let cluster = PlaceClusterView(
+        annotation: MKClusterAnnotation(memberAnnotations: [
+            PlaceAnnotation(
+                pin: placePin(
+                    key: "older", uid: "pin-older", count: 3, takenAt: "2026-09-10T10:00:00Z"
+                )
+            ),
+            PlaceAnnotation(
+                pin: placePin(
+                    key: "newer", uid: "pin-newer", count: 4, takenAt: "2026-09-12T10:00:00Z"
+                )
+            ),
+        ]),
+        reuseIdentifier: "cluster"
+    )
+    return [("single", single, nil), ("counted", counted, "3"), ("cluster", cluster, "7")]
+}
+
+/// The corners an outline passes through, in order.
+private func outline(of path: CGPath) -> [CGPoint] {
+    var corners: [CGPoint] = []
+    path.applyWithBlock { element in
+        switch element.pointee.type {
+        case .moveToPoint, .addLineToPoint: corners.append(element.pointee.points[0])
+        default: break
+        }
+    }
+    return corners
+}
+
+/// Whether a colour is opaque white, whatever colour space it was written in.
+@MainActor
+private func isWhite(_ color: CGColor?) -> Bool {
+    guard let color else { return false }
+    var red: CGFloat = 0
+    var green: CGFloat = 0
+    var blue: CGFloat = 0
+    var alpha: CGFloat = 0
+    guard UIColor(cgColor: color).getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+        return false
+    }
+    return [red, green, blue, alpha].allSatisfy { abs($0 - 1) < 0.001 }
 }
 
 /// What the opening view has to keep free, from the pin's drawn geometry alone.
@@ -793,9 +959,10 @@ struct PlacePinGeometryTests {
     @Test("a roomy pane keeps the pin's drawing free on every side, plus its air")
     func openingInsetsOnARoomyPane() {
         let insets = PlacePinGeometry.openingInsets(in: CGSize(width: 390, height: 500))
-        // Half a square of air all round (26), and above the coordinate the square itself (52)
-        // and its badge (6) as well, because a pin is drawn entirely above the point it marks.
-        #expect(insets.top == 84)
+        // Half a square of air all round (26), and above the coordinate the square itself (52),
+        // the pointer it stands on (8) and its badge (6) as well, because a pin is drawn entirely
+        // above the point it marks.
+        #expect(insets.top == 92)
         #expect(insets.bottom == 26)
         #expect(insets.left == 52)
         #expect(insets.right == 52)
@@ -803,10 +970,10 @@ struct PlacePinGeometryTests {
 
     @Test("a pane with less to spare than the margin asks keeps both sides in proportion")
     func openingInsetsShrinkInProportion() {
-        // 120 points high, of which 40 stay the map's own: 80 to spend against the 110 asked.
+        // 120 points high, of which 40 stay the map's own: 80 to spend against the 118 asked.
         let insets = PlacePinGeometry.openingInsets(in: CGSize(width: 390, height: 120))
-        #expect(abs(insets.top - 84 * 80 / 110) < 1e-9)
-        #expect(abs(insets.bottom - 26 * 80 / 110) < 1e-9)
+        #expect(abs(insets.top - 92 * 80 / 118) < 1e-9)
+        #expect(abs(insets.bottom - 26 * 80 / 118) < 1e-9)
         #expect(insets.top > insets.bottom, "the shrunk margin stopped telling up from down")
         #expect(insets.left == 52, "a roomy axis lost its margin to a cramped one")
         #expect(insets.right == 52)
