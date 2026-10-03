@@ -5,6 +5,16 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (33)
+
+- Scroll a few millimetres down in the Library and the tab bar steps aside for the Library icon plus Years, Months and All, the same toolbar as in build 32. Before, only a tap did this.
+- Tap the Library tab from Timeline or Places and the Library now opens with the tab bar. Tap it again while you are in the Library and the toolbar comes at once, also on a page too short to scroll.
+- Only the Library icon brings the tab bar back. Scrolling back to the top keeps the toolbar.
+- For half a second after the bars swap, the Library ignores the list shifting by itself as the screen settles, so tapping the Library icon at the bottom of All should not bring the toolbar straight back. Your own scrolling, and the Library jumping to a month or a day, still count in that half second.
+- Scrolling while Select is open does not change which bar comes back when you close Select. Timeline and Places are unchanged.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+- I could not check this on a phone: tell me how the swap animates, and whether it starts at the right point of your scroll or too early or too late.
+
 ## 2.2.1 (32)
 
 - The bar the app drew itself in the Library is gone: the Library icon plus Years, Months and All that took the tab bar's place once you scrolled, or on a second tap on the Library tab.
