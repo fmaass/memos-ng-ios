@@ -200,4 +200,133 @@ struct DockModeTests {
         let further = reading(y: 1400, insetBottom: 34)
         #expect(fence.scrolled(from: landed, to: further, at: soon) == 1400, "just after one")
     }
+
+    /// MEMNG-684: a claim or a release the scroll view lived through holds its idle moves past the
+    /// settling — the swing a lazy stack makes at the foot a second later is no scroll — until it
+    /// next moves; a moving reading counts at once and ends the hold. Lived through: the fence
+    /// took a reading before the hold was made (review round 2), and heard it within the settling.
+    @Test("a claim or release holds idle moves until the scroll view moves; a moving one counts")
+    func holdLastsUntilAMove() {
+        let held = ContinuousClock.now
+        var fence = DockScrollFence()
+        let before = fence.scrolled(
+            from: reading(y: 4000), to: reading(y: 5027), at: held.advanced(by: .seconds(-1)),
+            moving: true)
+        #expect(before == 5027, "the drag that brought the scroll view to the foot")
+        func idle(_ from: Double, _ to: Double, after: Duration) -> Double? {
+            fence.scrolled(
+                from: reading(y: from), to: reading(y: to), at: held.advanced(by: after),
+                heldAt: held)
+        }
+        #expect(idle(5027, 4967, after: .milliseconds(50)) == nil, "the release's own move")
+        #expect(idle(4967, 5379, after: .milliseconds(800)) == nil, "a swing past the settling")
+        #expect(idle(5379, 4954, after: .seconds(3)) == nil, "a swing seconds later")
+        let dragged = fence.scrolled(
+            from: reading(y: 4954), to: reading(y: 4000), at: held.advanced(by: .seconds(3)),
+            heldAt: held, moving: true)
+        #expect(dragged == 4000, "a moving reading under the hold was dropped")
+        #expect(idle(4000, 4100, after: .seconds(4)) == 4100, "the hold outlived the move")
+
+        var stranger = DockScrollFence()
+        let warm = stranger.scrolled(
+            from: reading(y: 0), to: reading(y: 10), at: held.advanced(by: .seconds(-1)),
+            moving: true)
+        #expect(warm == 10)
+        let stale = stranger.scrolled(
+            from: reading(y: 10), to: reading(y: 300), at: held.advanced(by: .milliseconds(800)),
+            heldAt: held)
+        #expect(stale == 300, "a hold first heard after the settling held this scroll view")
+    }
+
+    /// Review round 2: a scroll view that came after the claim or release — the one a scope pick
+    /// puts on screen as Close is pressed — did not live through it. Its fence, first called
+    /// 100 ms after the release, holds nothing: its idle first landing, once the settling of the
+    /// release has passed, counts, as a new scroll view's first landing always has.
+    @Test("a fence whose first reading comes after the claim or release holds nothing")
+    func freshFenceHoldsNothing() {
+        let held = ContinuousClock.now
+        var fresh = DockScrollFence()
+        let framed = fresh.scrolled(
+            from: reading(y: 0, insetBottom: 83), to: reading(y: 0, insetBottom: 34),
+            at: held.advanced(by: .milliseconds(100)), swappedAt: held, heldAt: held)
+        #expect(framed == nil, "a reframe that keeps the offset")
+        let landed = fresh.scrolled(
+            from: reading(y: 0, insetBottom: 34), to: reading(y: 300, insetBottom: 34),
+            at: held.advanced(by: .milliseconds(800)), swappedAt: held, heldAt: held)
+        #expect(landed == 300, "a new scroll view's idle first landing was held")
+
+        // The boundary: a first reading taken at the very instant of the release did not precede
+        // it, and holds nothing either.
+        var same = DockScrollFence()
+        let shown = reading(y: 0, insetBottom: 34)
+        _ = same.scrolled(from: reading(y: 0), to: shown, at: held, heldAt: held)
+        let later = same.scrolled(
+            from: shown, to: reading(y: 300, insetBottom: 34),
+            at: held.advanced(by: .milliseconds(800)), heldAt: held)
+        #expect(later == 300, "a fence first read at the release's own instant held")
+    }
+
+    /// A second claim or release re-arms the hold of a fence whose first hold a move ended, and a
+    /// hold the fence has already heard is not taken again by a later reading.
+    @Test("a later claim or release holds again once a move ended the first hold")
+    func secondReleaseHoldsAgain() {
+        let first = ContinuousClock.now
+        var fence = DockScrollFence()
+        _ = fence.scrolled(
+            from: reading(y: 0), to: reading(y: 10), at: first.advanced(by: .seconds(-1)),
+            moving: true)
+        func idle(_ to: Double, _ held: ContinuousClock.Instant, after: Duration) -> Double? {
+            fence.scrolled(
+                from: reading(y: to - 50), to: reading(y: to), at: held.advanced(by: after),
+                heldAt: held)
+        }
+        #expect(idle(550, first, after: .milliseconds(50)) == nil, "the first release's move")
+        #expect(idle(600, first, after: .milliseconds(800)) == nil, "the first release's swing")
+        let moved = fence.scrolled(
+            from: reading(y: 600), to: reading(y: 700), at: first.advanced(by: .seconds(1)),
+            heldAt: first, moving: true)
+        #expect(moved == 700, "the move that ends the first hold")
+        #expect(idle(900, first, after: .seconds(2)) == 900, "the first hold, heard again, held")
+        let second = first.advanced(by: .seconds(3))
+        #expect(idle(1200, second, after: .milliseconds(50)) == nil, "the second release's move")
+        #expect(
+            idle(1500, second, after: .milliseconds(800)) == nil,
+            "a swing past the second release's settling counted")
+    }
+
+    /// The one bottom bar (MEMNG-684), for every mode x tab x claim: 2 x 3 x 3 rows, written out.
+    /// A takeover leaves nothing anywhere; select mode its toolbar on the Library and nothing
+    /// elsewhere; with no claim the scope stands on the Library in `scope`, the tabs otherwise.
+    @Test("one bottom bar for every mode, tab and claim")
+    func oneBarStands() {
+        let table: [(DockMode, MainTab, DockClaim?, DockBar)] = [
+            (.tabs, .timeline, nil, .tabs),
+            (.tabs, .timeline, .select, .none),
+            (.tabs, .timeline, .takeover, .none),
+            (.tabs, .places, nil, .tabs),
+            (.tabs, .places, .select, .none),
+            (.tabs, .places, .takeover, .none),
+            (.tabs, .library, nil, .tabs),
+            (.tabs, .library, .select, .select),
+            (.tabs, .library, .takeover, .none),
+            (.scope, .timeline, nil, .tabs),
+            (.scope, .timeline, .select, .none),
+            (.scope, .timeline, .takeover, .none),
+            (.scope, .places, nil, .tabs),
+            (.scope, .places, .select, .none),
+            (.scope, .places, .takeover, .none),
+            (.scope, .library, nil, .scope),
+            (.scope, .library, .select, .select),
+            (.scope, .library, .takeover, .none),
+        ]
+        #expect(table.count == DockMode.allCases.count * MainTab.allCases.count * 3)
+        for (mode, tab, claim, bar) in table {
+            let standing = DockBar.standing(mode: mode, on: tab, claim: claim)
+            let held = claim.map(\.rawValue) ?? "no claim"
+            #expect(standing == bar, "\(mode) on \(tab) under \(held)")
+        }
+        // Every combination is a row: none is left to a default.
+        let rows = Set(table.map { "\($0.0)-\($0.1)-\($0.2.map(\.rawValue) ?? "-")" })
+        #expect(rows.count == table.count, "a combination written twice")
+    }
 }

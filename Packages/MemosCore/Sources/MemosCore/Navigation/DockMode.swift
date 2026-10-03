@@ -43,6 +43,44 @@ nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
     }
 }
 
+/// What holds the dock's claim on the bottom chrome, which says what stands in the bars' place
+/// (MEMNG-684).
+nonisolated public enum DockClaim: String, Sendable, Equatable, CaseIterable {
+    /// The Library's select mode: its own toolbar stands where the bars stood, as in Photos.
+    case select
+    /// A pushed screen that stands for the whole app (`StackChrome`): nothing stands there.
+    case takeover
+}
+
+/// The one bottom bar that stands under a tab's root (MEMNG-684): the system tab bar, the
+/// Library's scope toolbar, select mode's toolbar, or none of them.
+///
+/// Every bar is drawn from this one value and from nothing else, so no two of them can be asked
+/// to stand at once: the tab bar stands only on `tabs`, the scope toolbar only on `scope`, select
+/// mode's toolbar only on `select`.
+nonisolated public enum DockBar: String, Sendable, Equatable, CaseIterable {
+    case tabs
+    case scope
+    case select
+    case none
+
+    /// The bar under `tab`'s root while the dock is in `mode` and `claim` holds the chrome, nil
+    /// when nothing does. A claim decides alone — a takeover leaves nothing, select mode its
+    /// toolbar on the Library, whose mode alone it is — and leaves the mode as it was, so its end
+    /// brings back the bar the mode names. With no claim the scope toolbar stands on the Library
+    /// in `scope`, and the tab bar everywhere else.
+    public static func standing(mode: DockMode, on tab: MainTab, claim: DockClaim?) -> DockBar {
+        switch claim {
+        case .takeover:
+            return .none
+        case .select:
+            return tab == .library ? .select : .none
+        case nil:
+            return tab == .library && mode == .scope ? .scope : .tabs
+        }
+    }
+}
+
 /// What the dock hears.
 nonisolated public enum DockEvent: Sendable, Equatable {
     /// A press on `tab`'s item in the system tab bar while `showing` was the tab on screen —
@@ -101,7 +139,8 @@ nonisolated public struct DockScrollReading: Sendable, Equatable {
 /// swapped its bars (MEMNG-679).
 ///
 /// When the dock changes what stands at the bottom — the scope toolbar swapped for the tab bar or
-/// back, a tab shown again — the scroll view's frame and insets change, the lazy grid inside it
+/// back, a tab shown again, a claim taking the bars away or giving them back (MEMNG-684) — the
+/// scroll view's frame and insets change, the lazy grid inside it
 /// measures its rows anew, and the system moves the offset to keep what is on screen in place: in
 /// a report of its own, AFTER the one that carried the new frame (the render test that presses
 /// the icon at the foot of All saw a jump of several hundred points there, and the scope come
@@ -114,31 +153,60 @@ nonisolated public struct DockScrollReading: Sendable, Equatable {
 /// it extends: that is the system keeping rows in place. A reframe with no swap opens no window,
 /// so a jump the app makes — Months opening at a month, a new scroll view's first landing —
 /// counts, with the reframe or after it. A kept offset is no scroll.
+///
+/// A claim or a release (select mode's toolbar coming or going, MEMNG-684) holds the scroll view
+/// longer than a swap: at the foot of a long grid the lazy stack measures its rows again on every
+/// layout after the bars change, and the offset swings back and forth for a second or more, well
+/// past `settling`. So once a scroll view lives through a claim or a release, its idle moves are
+/// no scroll until it next moves: the reader's next drag, its deceleration or an animated scroll
+/// counts at once and ends the hold, and so does a jump the Library asked for, which the caller
+/// reports as moving. Lived through is the witness rule (review round 2): the fence had taken a
+/// reading before the claim or release was made — its scroll view was there for it — and is
+/// handed it within `settling` of it. A scroll view that came after it, the one a scope pick puts
+/// on screen as Select ends, holds nothing however soon it is first heard, so its first landing
+/// counts once the settling has passed, as any new scroll view's does.
 nonisolated public struct DockScrollFence: Sendable {
     /// How long after a swap, or a reframe that follows it, the layout is given to settle.
     public static let settling: Duration = .milliseconds(500)
 
     /// When the layout last changed inside a swap's window: the swap, or a reframe after it.
     private var settledFrom: ContinuousClock.Instant?
+    /// When this fence took its first reading: from then on its scroll view was there.
+    private var firstRead: ContinuousClock.Instant?
+    /// The last claim or release this fence was handed, and whether it holds idle moves now.
+    private var heardHold: ContinuousClock.Instant?
+    private var holding = false
 
     public init() {}
 
     /// The offset the scroll moved to between `previous` and `now`, read at `instant`, or nil when
     /// the reading is no scroll. `swappedAt` is when the dock last swapped its bars, nil if it
-    /// never did; `moving` is whether the scroll view was moving rather than idle.
+    /// never did; `heldAt` is when a claim was last made or ended, nil if none ever was;
+    /// `moving` is whether the scroll view was moving rather than idle.
     public mutating func scrolled(
         from previous: DockScrollReading,
         to now: DockScrollReading,
         at instant: ContinuousClock.Instant,
         swappedAt: ContinuousClock.Instant? = nil,
+        heldAt: ContinuousClock.Instant? = nil,
         moving: Bool = false
     ) -> Double? {
         if let swappedAt, settledFrom.map({ $0 < swappedAt }) ?? true {
             settledFrom = swappedAt
         }
+        let firstRead = self.firstRead ?? instant
+        self.firstRead = firstRead
+        // The witness rule: a claim or release holds this fence only if the fence had read before
+        // it was made and is handed it within the settling. One made before the first reading,
+        // or first handed later, holds nothing.
+        if let heldAt, heardHold.map({ $0 < heldAt }) ?? true {
+            heardHold = heldAt
+            holding = firstRead < heldAt && instant < heldAt.advanced(by: Self.settling)
+        }
+        if moving { holding = false }
         let settling = settledFrom.map { instant < $0.advanced(by: Self.settling) } ?? false
         if settling, now.reframed(from: previous) { settledFrom = instant }
         guard now.y != previous.y else { return nil }
-        return settling && !moving ? nil : now.y
+        return (settling || holding) && !moving ? nil : now.y
     }
 }

@@ -54,6 +54,15 @@ struct MediaLibraryView: View {
     /// The scope toolbar's Library icon, which gives the system tab bar back.
     static let tabsButton = "library-show-tabs"
 
+    /// The one bar at the foot of the Library (`AppDock.bar(on:)`). Hosted with no dock — a test
+    /// that shows the Library alone — there is no tab bar or scope toolbar to stand, and the same
+    /// rule is asked of select mode's claim alone.
+    private var bottomBar: DockBar {
+        if let dock { return dock.bar(on: .library) }
+        return DockBar.standing(
+            mode: .initial, on: .library, claim: selection.isActive ? .select : nil)
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -71,10 +80,11 @@ struct MediaLibraryView: View {
             .safeAreaBar(edge: .top) {
                 if let library { header(library) }
             }
-            // Select mode's toolbar, in the dock's place: the tab bar and the scope toolbar are
-            // claimed away while it is up (`dockClaim`), so none of them is drawn beside it.
+            // Select mode's toolbar, in the dock's place. It stands when the dock's one bottom
+            // bar is `select` — select mode's claim (`dockClaim`) — the same value the tab bar and
+            // the scope toolbar are drawn from, so none of them is drawn beside it.
             .safeAreaBar(edge: .bottom) {
-                if selection.isActive {
+                if bottomBar == .select {
                     VStack(spacing: DesignTokens.Space.tight) {
                         if let message = deleting.message {
                             LibraryDeleteToast(text: message) { deleting.dismissMessage() }
@@ -108,7 +118,7 @@ struct MediaLibraryView: View {
             // its item pressed where it shows (MEMNG-604, MEMNG-679): the system's own bottom
             // bar, so iOS draws its glass.
             .toolbar {
-                if let dock, dock.showsScopeBar {
+                if let dock, dock.bar(on: .library) == .scope {
                     ToolbarItem(placement: .bottomBar) {
                         Button {
                             dock.send(.pressedLibraryIcon)
@@ -227,7 +237,7 @@ struct MediaLibraryView: View {
         // and each one abandons a share still fetching, so it can never offer its files later.
         .onChange(of: selection.isActive) { _, active in
             if active {
-                dock?.claim(dockClaim)
+                dock?.claim(dockClaim, for: .select)
             } else {
                 abandonShare()
                 deleting.abandon()
@@ -990,18 +1000,25 @@ struct LibraryGrid: View {
         let state = LibrarySelectionPresentation.tile(for: row, in: selection)
         let hint = LibrarySelectionPresentation.tileHint(for: kind, selecting: state != .browsing)
         if MediaLibraryPresentation.isOpenable(kind) {
-            AttachmentThumbnail(
-                attachment: attachment,
-                tier: .thumb,
-                // The picture fills its frame, a square or a 16:9 band, as a Months tile does; the
-                // block's corners are the block's, so the tile's own are square.
-                slot: AttachmentSlot(aspectRatio: slot == .wide ? 16 / 9 : 1, contentMode: .fill),
-                cornerRadius: 0
-            )
-            .mediaTransitionSource(id: attachment.uid, in: zoom)
-            .contentShape(.rect)
-            .onTapGesture { tapped(attachment, row: row) }
-            .accessibilityAddTraits(.isButton)
+            // A button, not a bare tap gesture (MEMNG-684): the one action a finger's tap and an
+            // accessibility activation both run — open while browsing, choose in select mode — and
+            // the control the system arbitrates against the context menu's long press.
+            Button {
+                tapped(attachment, row: row)
+            } label: {
+                AttachmentThumbnail(
+                    attachment: attachment,
+                    tier: .thumb,
+                    // The picture fills its frame, a square or a 16:9 band, as a Months tile does;
+                    // the block's corners are the block's, so the tile's own are square.
+                    slot: AttachmentSlot(
+                        aspectRatio: slot == .wide ? 16 / 9 : 1, contentMode: .fill),
+                    cornerRadius: 0
+                )
+                .mediaTransitionSource(id: attachment.uid, in: zoom)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
             .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: kind))
             .accessibilityHint(hint)
             .contextMenu {

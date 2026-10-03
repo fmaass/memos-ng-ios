@@ -17,33 +17,42 @@ struct DockTests {
         init(_ value: Value) { self.value = value }
     }
 
+    /// Rewritten for MEMNG-684: every bar is read from the one value, `bar(on:)`.
     @Test("the scope toolbar takes the bar's place on the Library alone, and a claim takes both")
     func barsFollowTheMode() {
         let dock = AppDock()
         #expect(dock.mode == .tabs)
-        #expect(MainTab.allCases.allSatisfy { dock.showsSystemBar(on: $0) }, "a bar missing")
-        #expect(!dock.showsScopeBar, "the scope toolbar at launch")
+        #expect(MainTab.allCases.allSatisfy { dock.bar(on: $0) == .tabs }, "a bar missing")
 
         dock.send(.pressedTab(.library, showing: .library))
-        #expect(!dock.showsSystemBar(on: .library), "the bar beside the scope toolbar")
-        #expect(dock.showsScopeBar)
+        #expect(dock.bar(on: .library) == .scope, "the scope toolbar did not take the bar's place")
+        #expect(dock.bar(on: .timeline) == .tabs, "the scope toolbar off the Library")
 
         // Select mode's toolbar is then the only bottom chrome, and ending it restores the scope.
         let select = UUID()
-        dock.claim(select)
-        #expect(!dock.showsSystemBar(on: .library), "the bar drawn beside Select")
-        #expect(!dock.showsScopeBar, "the scope toolbar drawn beside Select")
+        dock.claim(select, for: .select)
+        #expect(dock.bar(on: .library) == .select, "select mode's toolbar did not stand")
+        #expect(dock.bar(on: .timeline) == .none, "a tab bar on another root under Select")
         dock.release(select)
-        #expect(dock.showsScopeBar, "Select did not hand the scope toolbar back")
-        #expect(!dock.showsSystemBar(on: .library))
+        #expect(dock.bar(on: .library) == .scope, "Select did not hand the scope toolbar back")
 
         dock.send(.pressedLibraryIcon)
-        #expect(dock.showsSystemBar(on: .library), "the icon did not give the bar back")
-        #expect(!dock.showsScopeBar)
-        dock.claim(select)
-        #expect(!dock.showsSystemBar(on: .library), "the bar drawn beside Select")
+        #expect(dock.bar(on: .library) == .tabs, "the icon did not give the bar back")
+        dock.claim(select, for: .select)
+        #expect(dock.bar(on: .library) == .select, "the bar drawn beside Select")
         dock.release(select)
-        #expect(dock.showsSystemBar(on: .library), "Select did not hand the bar back")
+        #expect(dock.bar(on: .library) == .tabs, "Select did not hand the bar back")
+
+        // A takeover leaves no bar at all, and outranks select mode while both hold.
+        let settings = UUID()
+        dock.claim(select, for: .select)
+        dock.claim(settings, for: .takeover)
+        #expect(dock.claimant == .takeover)
+        #expect(MainTab.allCases.allSatisfy { dock.bar(on: $0) == .none }, "a bar under Settings")
+        dock.release(settings)
+        #expect(dock.bar(on: .library) == .select, "the takeover's end lost select mode's toolbar")
+        dock.release(select)
+        #expect(dock.claimant == nil)
     }
 
     /// Rewritten for MEMNG-679: the Library pressed from the Timeline is selected on the TABS,
@@ -69,7 +78,7 @@ struct DockTests {
         pressing.wrappedValue = .library
         #expect(held.value == .library)
         #expect(dock.mode == .tabs, "a press on the Library from the Timeline left \(dock.mode)")
-        #expect(dock.showsSystemBar(on: .library), "the Library from the Timeline: no tab bar")
+        #expect(dock.bar(on: .library) == .tabs, "the Library from the Timeline: no tab bar")
         #expect(dock.showing == .library)
 
         pressing.wrappedValue = .library
@@ -98,6 +107,22 @@ struct DockTests {
         dock.send(.pressedLibraryIcon)
         let restored = try #require(dock.swappedAt)
         #expect(restored > collapsed, "the icon's swap to the tabs was not stamped")
+
+        // MEMNG-684: a claim takes the bars away and its release gives them back, each a swap.
+        let select = UUID()
+        try await Task.sleep(for: apart)
+        dock.claim(select, for: .select)
+        let claimed = try #require(dock.swappedAt)
+        #expect(claimed > restored, "select mode's claim was not stamped")
+        try await Task.sleep(for: apart)
+        dock.claim(select, for: .select)
+        #expect(dock.swappedAt == claimed, "a claim delivered twice was stamped twice")
+        dock.release(select)
+        let released = try #require(dock.swappedAt)
+        #expect(released > claimed, "the release was not stamped")
+        try await Task.sleep(for: apart)
+        dock.release(select)
+        #expect(dock.swappedAt == released, "a release with nothing claimed was stamped")
     }
 
     /// A jump the Library asks for explains the first move after it, once, and only while fresh:
@@ -117,23 +142,117 @@ struct DockTests {
 
     /// A Library scroll under select mode or Settings is dropped, so ending the claim brings back
     /// the bar it hid — the tab bar, not a scope the hidden scroll would have swapped in.
+    /// Extended for MEMNG-684: the offset the layout moves as the release gives the bars back,
+    /// idle and inside the window the release opened, is no scroll either. It is fed the way a
+    /// Library scroll view feeds the dock (`AppDock.scrolled(from:to:judgedBy:moving:at:)`, the
+    /// whole of `DockFeed`), with the dock's last swap long past before Select began, so only the
+    /// release's own stamp can hold it — and the swing the lazy stack makes 800 ms later, past
+    /// the window, is held too until the scroll view moves (review round 1).
     @Test("a scroll under a claim leaves the mode alone, and ending the claim restores the bar")
-    func scrollUnderAClaimIsDropped() {
+    func scrollUnderAClaimIsDropped() async throws {
         let dock = AppDock()
         dock.send(.selected(.library))
+        try await Task.sleep(for: DockScrollFence.settling + .milliseconds(100))
+        var fence = DockScrollFence()
+        let top = Self.reading(y: 0, insetBottom: 83)
+        // The scroll view is on screen before Select: a reading of its own, a nudge short of the
+        // threshold, so it lives through the claim and the release (review round 2).
+        let before = ContinuousClock.now.advanced(by: .milliseconds(-1))
+        dock.scrolled(from: top, to: top, judgedBy: &fence, moving: true, at: before)
         let select = UUID()
-        dock.claim(select)
+        dock.claim(select, for: .select)
         dock.scrolled(to: 300)
         #expect(dock.mode == .tabs, "a scroll under a claim swapped the bars: \(dock.mode)")
-        #expect(!dock.showsSystemBar(on: .library), "the tab bar drawn under a claim")
+        #expect(dock.bar(on: .library) == .select, "the tab bar drawn under a claim")
         dock.release(select)
-        #expect(dock.showsSystemBar(on: .library), "ending the claim did not restore the tab bar")
-        #expect(!dock.showsScopeBar, "ending the claim drew the scope")
+        #expect(dock.bar(on: .library) == .tabs, "ending the claim did not restore the tab bar")
 
-        // The same scroll with no claim is a scroll.
-        dock.scrolled(to: 300)
+        // The release's settling: the tab bar back, the frame changes and the offset shifts.
+        let reframed = Self.reading(y: 0, insetBottom: 34)
+        dock.scrolled(from: top, to: reframed, judgedBy: &fence, moving: false)
+        let shifted = Self.reading(y: 300, insetBottom: 34)
+        dock.scrolled(from: reframed, to: shifted, judgedBy: &fence, moving: false)
+        #expect(dock.mode == .tabs, "the release's own settling swapped the bars: \(dock.mode)")
+        #expect(dock.bar(on: .library) == .tabs, "the release's settling drew the scope")
+        // The lazy stack's swing at the foot, past the settling: held until the scroll moves.
+        let late = ContinuousClock.now.advanced(by: .milliseconds(800))
+        let swung = Self.reading(y: 700, insetBottom: 34)
+        dock.scrolled(from: shifted, to: swung, judgedBy: &fence, moving: false, at: late)
+        #expect(dock.mode == .tabs, "an idle swing 800 ms after the release swapped the bars")
+
+        // The same scroll with no claim, made while the scroll view moves, is a scroll.
+        let dragged = Self.reading(y: 320, insetBottom: 34)
+        dock.scrolled(from: swung, to: dragged, judgedBy: &fence, moving: true, at: late)
         #expect(dock.mode == .scope, "a scroll with no claim left \(dock.mode)")
-        #expect(dock.showsScopeBar)
+        #expect(dock.bar(on: .library) == .scope)
+    }
+
+    /// MEMNG-684: the window a claim or a release opens is the one a swap opens. The stamp the
+    /// dock wrote is what the fence is handed: an idle move inside 500 ms of it is no scroll, the
+    /// same move made while the scroll view moves is one.
+    @Test("an idle move within the settling of a claim or a release is none; a moving one counts")
+    func claimAndReleaseSettle() throws {
+        let dock = AppDock()
+        let select = UUID()
+        for step in ["claim", "release"] {
+            if step == "claim" { dock.claim(select, for: .select) } else { dock.release(select) }
+            let stamp = try #require(dock.swappedAt, "the \(step) was not stamped")
+            let soon = stamp.advanced(by: .milliseconds(200))
+            let late = stamp.advanced(by: DockScrollFence.settling)
+            var idle = DockScrollFence()
+            let still = idle.scrolled(
+                from: Self.reading(y: 0), to: Self.reading(y: 300), at: soon, swappedAt: stamp)
+            #expect(still == nil, "an idle move 200 ms after the \(step) counted")
+            var moving = DockScrollFence()
+            let moved = moving.scrolled(
+                from: Self.reading(y: 0), to: Self.reading(y: 300), at: soon, swappedAt: stamp,
+                moving: true)
+            #expect(moved == 300, "a moving scroll 200 ms after the \(step) was dropped")
+            var after = DockScrollFence()
+            let past = after.scrolled(
+                from: Self.reading(y: 0), to: Self.reading(y: 300), at: late, swappedAt: stamp)
+            #expect(past == 300, "an idle move once the \(step)'s settling had passed was dropped")
+        }
+    }
+
+    /// A jump the Library asked for is a move of its own, under a hold as anywhere: it counts at
+    /// once and ends the hold, so the idle move after it counts too (review round 2).
+    @Test("an asked jump under a claim's hold counts, and ends the hold")
+    func askedJumpEndsTheHold() async throws {
+        let dock = AppDock()
+        dock.send(.selected(.library))
+        var fence = DockScrollFence()
+        let before = ContinuousClock.now.advanced(by: .milliseconds(-1))
+        let nudged = Self.reading(y: 10, insetBottom: 83)
+        dock.scrolled(
+            from: Self.reading(y: 0, insetBottom: 83), to: nudged, judgedBy: &fence, moving: true,
+            at: before)
+        let select = UUID()
+        dock.claim(select, for: .select)
+        dock.release(select)
+        let held = try #require(dock.heldAt, "the release was not stamped")
+        let reframed = Self.reading(y: 10)
+        dock.scrolled(from: nudged, to: reframed, judgedBy: &fence, moving: false)
+        try await Task.sleep(for: DockScrollFence.settling + .milliseconds(100))
+        let swung = Self.reading(y: 400)
+        dock.scrolled(from: reframed, to: swung, judgedBy: &fence, moving: false)
+        #expect(dock.mode == .tabs, "precondition: an idle swing under the hold counted")
+
+        dock.askedToJump()
+        let landed = Self.reading(y: 2000)
+        dock.scrolled(from: swung, to: landed, judgedBy: &fence, moving: false)
+        #expect(dock.mode == .scope, "the asked jump under the hold was dropped: \(dock.mode)")
+        let after = ContinuousClock.now.advanced(by: DockScrollFence.settling * 2)
+        let next = fence.scrolled(
+            from: landed, to: Self.reading(y: 2100), at: after, swappedAt: dock.swappedAt,
+            heldAt: held)
+        #expect(next == 2100, "the hold outlived the asked jump")
+    }
+
+    private static func reading(y: Double, insetBottom: Double = 34) -> DockScrollReading {
+        DockScrollReading(
+            y: y, width: 402, height: 701, insetTop: 0, insetLeading: 0,
+            insetBottom: insetBottom, insetTrailing: 0)
     }
 
     /// The dock judges a scroll against the tab it was last told is on screen: a Library scroll
@@ -171,21 +290,21 @@ struct DockTests {
         let another = UUID()
         #expect(!dock.isTakenOver)
 
-        dock.claim(settings)
-        dock.claim(settings)
+        dock.claim(settings, for: .takeover)
+        dock.claim(settings, for: .takeover)
         #expect(dock.isTakenOver)
         dock.release(settings)
         #expect(!dock.isTakenOver, "an appearance delivered twice left the dock away")
 
-        dock.claim(settings)
-        dock.claim(another)
+        dock.claim(settings, for: .takeover)
+        dock.claim(another, for: .takeover)
         dock.release(settings)
         #expect(dock.isTakenOver, "one release gave the dock back under another claim")
         dock.release(another)
         #expect(!dock.isTakenOver)
         // A release with nothing claimed is no claim at all, not a debt the next claim pays off.
         dock.release(another)
-        dock.claim(settings)
+        dock.claim(settings, for: .takeover)
         #expect(dock.isTakenOver)
     }
 

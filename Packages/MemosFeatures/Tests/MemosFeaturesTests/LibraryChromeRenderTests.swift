@@ -710,6 +710,277 @@ extension MediaImageLoaderTests {
             let tabs = ScopeBarProbe.describe(window)
             #expect(Self.barShows(in: window), "Close did not bring the tab bar back: \(tabs)")
             #expect(ScopeBarProbe.control(in: window) == nil, "Close drew the scope: \(tabs)")
+
+            // MEMNG-684: the same from a grid that scrolled. Scrolled down, the scope stands;
+            // Select and Close must bring back the scope, and no two bars may stand at any
+            // sampled turn on the way.
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(Self.scopeShows(in: window), "precondition: the scroll gave the scope")
+            Self.shoot("684-scrolled-scope", window)
+            let fromScope = await selectThenClose(window, pass: "scrolled-scope")
+            #expect(fromScope.last?.scope == true, "Close lost the scope: \(fromScope.last!)")
+            #expect(fromScope.last?.tabs == false, "Close brought the tabs: \(fromScope.last!)")
+
+            // At the foot of All the lazy stack measures its rows again on every layout after
+            // the bars change, and the offset swings for a second or more (the swing below is
+            // that move, made idle): none of it is a scroll. Reached by a drag straight from the
+            // scope above, onto the foot the lazy stack estimates; watched for 1.5 s after Close.
+            if let scroller = Self.mainScroll(in: window) {
+                let inset = scroller.adjustedContentInset.bottom
+                let foot = scroller.contentSize.height - scroller.bounds.height + inset
+                await drag(window, by: foot - scroller.contentOffset.y)
+            }
+            await scopeStands(window)
+            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "no icon took a press")
+            await tabsStand(window)
+            #expect(Self.tabsShow(in: window), "precondition: the icon gave the tabs at the foot")
+            Self.shoot("684-foot-tabs", window)
+            let atFoot = await selectThenClose(
+                window, pass: "foot-tabs", observe: .seconds(1.5), swing: 60)
+            let end = atFoot.last!
+            #expect(end.tabs, "Close at the foot lost the tabs: \(end)")
+            #expect(!end.scope, "Close at the foot drew the scope: \(end)")
+            // Every sample from the first layout turn after Close on — through the swing and the
+            // 1.5 s after it — shows the tabs alone. The first is read before any turn, while the
+            // press has not yet been drawn, and shows Select's toolbar.
+            let notTabs = atFoot.enumerated().dropFirst().filter {
+                $0.element != BottomBars(tabs: true, scope: false, select: false)
+            }
+            let first = notTabs.first.map { "\($0)" } ?? "-"
+            #expect(
+                notTabs.isEmpty,
+                "after Close at the foot \(notTabs.count) of \(atFoot.count) not tabs: \(first)")
+
+            // Back up the page, the icon gives the tabs while the grid stands scrolled: Select and
+            // Close must bring back the TABS, the bar Select hid there. Reached by a drag, which
+            // ends idle as a reader's does (a bare offset jump leaves the scroll phase non-idle,
+            // under which every later move counts as a scroll).
+            await drag(window, by: -1500)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "no icon took a press")
+            await tabsStand(window)
+            #expect(Self.tabsShow(in: window), "precondition: the icon gave the tabs")
+            Self.shoot("684-scrolled-tabs", window)
+            let fromTabs = await selectThenClose(window, pass: "scrolled-tabs")
+            #expect(fromTabs.last?.tabs == true, "Close lost the tabs: \(fromTabs.last!)")
+            #expect(fromTabs.last?.scope == false, "Close drew the scope: \(fromTabs.last!)")
+        }
+    }
+
+    /// Which of the three bottom bars stand at one instant: the system tab bar, the scope
+    /// control, and select mode's toolbar (its Share button).
+    private struct BottomBars: Equatable, CustomStringConvertible {
+        let tabs: Bool
+        let scope: Bool
+        let select: Bool
+
+        var description: String { "tabs=\(tabs) scope=\(scope) select=\(select)" }
+        /// Two bars at once: the tabs with the scope, or Select's toolbar with either.
+        var clash: Bool { (tabs && scope) || (select && (tabs || scope)) }
+    }
+
+    private static func bottomBars(in window: UIWindow) -> BottomBars {
+        BottomBars(
+            tabs: barShows(in: window),
+            scope: ScopeBarProbe.control(in: window) != nil,
+            select: !elements(labelled: "Share", in: window).isEmpty)
+    }
+
+    /// The bottom bars sampled once per settle turn — one layout pass of the window and 25 ms —
+    /// starting with a reading taken before the first turn, until the reading has stayed the
+    /// same for `steady` turns in a row (at most 300 turns). Exclusivity is proven at these
+    /// sample points, not between them.
+    private func barsUntilSettled(_ window: UIWindow, steady: Int = 20) async -> [BottomBars] {
+        var samples = [Self.bottomBars(in: window)]
+        var held = 0
+        for _ in 0..<300 where held < steady {
+            await chromeSettle(window)
+            let now = Self.bottomBars(in: window)
+            held = now == samples.last ? held + 1 : 0
+            samples.append(now)
+        }
+        return samples
+    }
+
+    /// Select pressed, then Close; photographed at each step. Returns the samples from the Close
+    /// on, having checked that no two bars stood together at any of them.
+    private func selectThenClose(
+        _ window: UIWindow, pass: String, observe: Duration? = nil, swing: CGFloat? = nil
+    ) async -> [BottomBars] {
+        let before = await barsUntilSettled(window)
+        let offsetBefore = Self.scrolledBy(in: window) ?? -1
+        let select = Self.elements(labelled: "Select", in: window)
+        #expect(select.contains { $0.accessibilityActivate() }, "Select took no press (\(pass))")
+        let entering = await barsUntilSettled(window)
+        let offsetSelecting = Self.scrolledBy(in: window) ?? -1
+        #expect(entering.last?.select == true, "select mode drew no toolbar (\(pass))")
+        Self.shoot("684-\(pass)-select", window)
+        let close = Self.elements(labelled: "Close", in: window)
+        #expect(close.contains { $0.accessibilityActivate() }, "Close took no press (\(pass))")
+        let closed = ContinuousClock.now
+        var closing = await barsUntilSettled(window)
+        Self.shoot("684-\(pass)-closed", window)
+        // Observed on for `observe` after the Close, a reading per settle turn as above, the
+        // window drawn again at the end: a layout the drawing forces is one the system makes too.
+        // With `swing`, the offset is moved by that much 800 ms after the Close, idle — no drag
+        // around it — as the lazy stack moved it at the foot in the trace of run-684-10
+        // (5379 -> 4954, idle, 797 ms after the release): past the settling window.
+        // The swing is checked to be what it models: made while the scroll view neither tracks,
+        // drags nor decelerates (the states SwiftUI's scroll phase reads as moving), and still
+        // standing a layout turn later, so the dock was handed it as an idle move.
+        if let observe {
+            var swung = swing == nil
+            while ContinuousClock.now < closed.advanced(by: observe) {
+                if !swung, ContinuousClock.now >= closed.advanced(by: .milliseconds(800)),
+                    let scroller = Self.mainScroll(in: window), let swing
+                {
+                    let from = scroller.contentOffset.y
+                    let still = !scroller.isTracking && !scroller.isDragging
+                    #expect(still && !scroller.isDecelerating, "the swing was not idle (\(pass))")
+                    scroller.contentOffset.y -= swing
+                    swung = true
+                    await chromeSettle(window)
+                    let moved = from - scroller.contentOffset.y
+                    #expect(abs(moved - swing) < 1, "the swing moved \(moved) pt (\(pass))")
+                    print("MEMNG684 swing \(pass): \(from) -> \(scroller.contentOffset.y), idle")
+                    closing.append(Self.bottomBars(in: window))
+                    continue
+                }
+                await chromeSettle(window)
+                closing.append(Self.bottomBars(in: window))
+            }
+            #expect(swung, "the swing was never made (\(pass))")
+            Self.shoot("684-\(pass)-late", window)
+            closing.append(contentsOf: await barsUntilSettled(window))
+        }
+        let offsetClosed = Self.scrolledBy(in: window) ?? -1
+        let clashes = closing.enumerated().filter { $0.element.clash }
+        let evidence =
+            "\(pass): entering \(entering.count) samples, clashes "
+            + "\(entering.filter(\.clash).count), last \(entering.last!); closing "
+            + "\(closing.count) samples, clashes at \(clashes.map(\.offset)) "
+            + "\(clashes.first.map { "\($0.element)" } ?? ""), last \(closing.last!); "
+            + "before Select \(before.first!) -> \(before.last!) over \(before.count); "
+            + "entering first \(entering.first!), closing first \(closing.first!), "
+            + "closing second \(closing.dropFirst().first.map { "\($0)" } ?? "-"); offsets "
+            + "\(offsetBefore) / \(offsetSelecting) / \(offsetClosed)"
+        print("MEMNG684 bars \(evidence)")
+        Attachment.record(evidence, named: "684-\(pass)-bars")
+        #expect(clashes.isEmpty, "two bars stood together after Close: \(evidence)")
+        return closing
+    }
+
+    /// The tile whose centre is nearest `point` among those reading out "Photo" — or, with no
+    /// point, the first whole one below the header and above the bottom bars.
+    private static func photoTile(near point: CGPoint? = nil, in window: UIWindow) -> NSObject? {
+        let tiles = elements(labelled: "Photo", in: window)
+        if let point {
+            return tiles.min {
+                hypot(frame(of: $0).midX - point.x, frame(of: $0).midY - point.y)
+                    < hypot(frame(of: $1).midX - point.x, frame(of: $1).midY - point.y)
+            }
+        }
+        let whole = tiles.filter { frame(of: $0).minY > 250 && frame(of: $0).maxY < 650 }
+        return whole.min { frame(of: $0).minY < frame(of: $1).minY }
+    }
+
+    /// The colour of the window as drawn at `point`, red, green and blue from 0 to 1.
+    private static func pixel(at point: CGPoint, in window: UIWindow) -> [Double] {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let spot = CGRect(origin: point, size: CGSize(width: 1, height: 1))
+        let image = UIGraphicsImageRenderer(bounds: spot, format: format).image { _ in
+            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        guard let drawn = image.cgImage else { return [] }
+        var bytes = [UInt8](repeating: 0, count: 4)
+        bytes.withUnsafeMutableBytes { raw in
+            let context = CGContext(
+                data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
+                bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            context?.draw(drawn, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return bytes.prefix(3).map { Double($0) / 255 }
+    }
+
+    /// MEMNG-684, the owner's first sentence: in select mode a tap on one of my own pictures
+    /// chooses it — "1 Item Selected" — and a second tap lets it go again. The fixture's pictures
+    /// are all the signed-in account's (`mine`), across twelve day bands.
+    ///
+    /// The tap goes through the tile's own accessibility activation, which SwiftUI answers with
+    /// the tile's button action — the same closure a finger's tap runs (`tapped`), never `toggle`
+    /// called from here. Before the fix the tile's tap was a bare `.onTapGesture`, and its
+    /// activation answered false and chose nothing (the reproduction, run-684-2). Whether a tile
+    /// is dimmed is read from the drawing: the colour at its centre before select mode and in it
+    /// (an inert tile is drawn at 0.4 opacity).
+    @Test("in select mode a tap on my picture chooses it, and a second tap lets it go")
+    func selectTapChoosesATile() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            guard let first = Self.photoTile(in: window) else {
+                Issue.record("no picture on screen: \(Self.labels(in: window))")
+                return
+            }
+            let centre = CGPoint(x: Self.frame(of: first).midX, y: Self.frame(of: first).midY)
+            let browsing = Self.pixel(at: centre, in: window)
+
+            let select = Self.elements(labelled: "Select", in: window)
+            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
+            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let selecting = Self.pixel(at: centre, in: window)
+            let dimmed = zip(browsing, selecting).contains { abs($0 - $1) > 0.08 }
+            Self.shoot("684-tap-select", window)
+
+            let tile = Self.photoTile(near: centre, in: window)
+            let took = tile?.accessibilityActivate() ?? false
+            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 5)
+            let chosen = !Self.elements(labelled: "1 Item Selected", in: window).isEmpty
+            let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
+            let marked = traits.contains(.selected)
+            Self.shoot("684-tap-selected", window)
+            let evidence =
+                "dimmed=\(dimmed) browsing=\(browsing) selecting=\(selecting) "
+                + "tile=\(tile != nil) activated=\(took) oneSelected=\(chosen) "
+                + "markedSelected=\(marked) counts="
+                + "\(Self.labels(in: window).filter { $0.hasSuffix("Selected") })"
+            print("MEMNG684 tap \(evidence)")
+            Attachment.record(evidence, named: "684-tap-evidence")
+            #expect(!dimmed, "my picture was dimmed in select mode: \(evidence)")
+            #expect(chosen, "the tap chose nothing: \(evidence)")
+            #expect(marked, "the chosen tile is not marked selected: \(evidence)")
+
+            let again = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
+            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            #expect(again, "the second tap reached no tile")
+            #expect(
+                !Self.elements(labelled: "0 Items Selected", in: window).isEmpty,
+                "the second tap kept the picture: \(Self.labels(in: window))")
+
+            // Chosen again, then Close: nothing stays chosen and select mode's toolbar goes.
+            _ = Self.photoTile(near: centre, in: window)?.accessibilityActivate()
+            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await closeSelect(window)
+            await chromeSettle(window, turns: 20)
+            #expect(Self.elements(labelled: "Share", in: window).isEmpty, "Close kept the toolbar")
+            Self.shoot("684-tap-closed", window)
         }
     }
 
