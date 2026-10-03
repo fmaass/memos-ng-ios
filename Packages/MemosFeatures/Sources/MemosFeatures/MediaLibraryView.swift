@@ -16,6 +16,8 @@ import SwiftUI
 struct MediaLibraryView: View {
     @Environment(SessionStore.self) private var session
     @State private var library: MediaLibraryStore?
+    /// The account the grid's rows were read as (MEMNG-591).
+    @State private var gridAccount = GridAccount()
     /// The tags the options menu offers, with picture counts for the kind on screen (MEMNG-513).
     @State private var tags: LibraryTagStore?
     /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
@@ -140,7 +142,10 @@ struct MediaLibraryView: View {
                 .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
-        .task {
+        // Keyed on the account, as the tag and bucket lists below are: when the session becomes
+        // somebody else's, this reads the incoming account's first page (MEMNG-591). Everything
+        // before the read is idempotent on a second pass.
+        .task(id: session.state.user?.subject) {
             if library == nil {
                 library = MediaLibraryStore(
                     order: preferences.order,
@@ -173,6 +178,10 @@ struct MediaLibraryView: View {
             library?.reports(to: session)
             tags?.reports(to: session)
             buckets?.reports(to: session)
+            // The outgoing rows go BEFORE the read is issued, whichever of this and the
+            // `onChange` below heard of the new account first: a read issued first would be
+            // answered for a generation the emptying has already moved past, and dropped.
+            rowsBelong(to: session.state.user?.subject)
             await load()
         }
         // The buckets are read when Years or Months comes on screen, again whenever the kind or
@@ -195,9 +204,9 @@ struct MediaLibraryView: View {
         }
         // The rows on this grid belong to the account they were read as. If the session becomes
         // somebody else's — or nobody's — while the tab is up, they go, the way the timeline's do.
-        .onChange(of: session.state.user?.subject) {
+        .onChange(of: session.state.user?.subject) { _, subject in
             selection.close()
-            library?.sessionIdentityChanged()
+            rowsBelong(to: subject)
             tags?.sessionIdentityChanged()
             buckets?.sessionIdentityChanged()
         }
@@ -569,6 +578,14 @@ struct MediaLibraryView: View {
         }
     }
 
+    /// Empties the grid when the account its rows were read as is no longer `subject` — once per
+    /// change of account, whether the read keyed on the account or the `onChange` gets here
+    /// first, so the generation the incoming read is issued under is never moved again after it.
+    private func rowsBelong(to subject: String?) {
+        guard let library, gridAccount.claim(subject) else { return }
+        library.sessionIdentityChanged()
+    }
+
     private func load() async {
         guard let library, let handle = session.activeHandle,
             let baseURL = session.serverBaseURL
@@ -652,6 +669,21 @@ private struct LandingReadiness: Equatable {
     let width: CGFloat
     let laidOut: CGFloat
     let built: Int
+}
+
+/// The account the Library grid's rows were read as, kept out of SwiftUI's observation: the two
+/// places that hear of a new account in one update read it straight after each other.
+final class GridAccount {
+    /// Nil until the grid's first read records an account; `.some(nil)` is nobody signed in.
+    private var subject: String??
+
+    /// Records `new` as the account the rows are read as. True when that moves it off another
+    /// account — the one moment the rows must go. The first record moves nothing.
+    func claim(_ new: String?) -> Bool {
+        defer { subject = .some(new) }
+        guard let recorded = subject else { return false }
+        return recorded != new
+    }
 }
 
 /// The rows a grid's lazy stack has built now, kept out of SwiftUI's observation (`LibraryGrid`).

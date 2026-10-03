@@ -20,6 +20,8 @@ private enum SwapWire {
     /// What every one of the outgoing account's files is named after, so a picture request can be
     /// told apart as one of THEIRS.
     nonisolated static let outgoingPrefix = "outgoing-"
+    /// The same for the incoming account's files.
+    nonisolated static let incomingPrefix = "incoming-"
 }
 
 /// A server whose answer to "who is this" changes under a credential the device keeps presenting,
@@ -32,6 +34,13 @@ private final class SubjectSwapTransport: ClientTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var swapped = false
     private var released = false
+    private var incoming = 0
+
+    /// How many library reads reached the server after it began naming the incoming account —
+    /// each one a read made as B, held or answered (MEMNG-591).
+    var incomingReads: Int {
+        lock.withLock { incoming }
+    }
 
     /// From now on the server says the credential belongs to somebody else.
     func swapSubject() {
@@ -64,10 +73,11 @@ private final class SubjectSwapTransport: ClientTransport, @unchecked Sendable {
                 let rows = (1...6).map { Self.row("\(SwapWire.outgoingPrefix)\($0)") }
                 return Self.json("[\(rows.joined(separator: ","))]")
             }
+            lock.withLock { incoming += 1 }
             while !lock.withLock({ released }) {
                 try await Task.sleep(for: .milliseconds(20))
             }
-            return Self.json("[\(Self.row("incoming-1"))]")
+            return Self.json("[\(Self.row("\(SwapWire.incomingPrefix)1"))]")
         case SwapWire.attachmentTags:
             return Self.json("[]")
         default:
@@ -113,6 +123,12 @@ private actor MountedTileProbe: MediaTransport {
     /// How many picture requests so far were for one of the outgoing account's files.
     var outgoingFetches: Int {
         requested.count(where: { $0.contains("/\(SwapWire.outgoingPrefix)") })
+    }
+
+    /// How many picture requests so far were for one of the incoming account's files: a tile of
+    /// B's that came on screen.
+    var incomingFetches: Int {
+        requested.count(where: { $0.contains("/\(SwapWire.incomingPrefix)") })
     }
 
     func fetch(_ request: URLRequest, under authority: SendAuthority) async throws
@@ -246,12 +262,97 @@ extension MediaImageLoaderTests {
             let askedAgain = await eventually { await probe.outgoingFetches > beforeSignal }
             let asks = await probe.outgoingFetches - beforeSignal
             guard stillObserved(signal, "while the swap was probed") else { return }
-            // No page for B has been answered, so no page of B's is what took A's tiles off. That
-            // the screen does not ask for B's first page at all is MEMNG-591, not this case.
+            // No page for B has been answered — the read the screen makes as B is still held on
+            // the wire — so no page of B's is what took A's tiles off. That the screen does read
+            // B's first page is the case below (MEMNG-591).
             #expect(
                 !askedAgain,
                 "A's tiles are still on screen after B was established: \(asks) asked again"
             )
         }
+    }
+
+    @Test("a revalidation that names another account reads B's first page, once, onto the grid")
+    func subjectChangeReadsTheIncomingFirstPage() async {
+        let wire = SubjectSwapTransport()
+        let probe = MountedTileProbe()
+        await withTransport(probe) {
+            let session = swapSession(wire)
+            await session.enteredForeground()
+            await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_swap")
+            #expect(session.state.user?.subject == SwapWire.outgoing, "precondition: signed in")
+
+            let host = UIHostingController(rootView: MediaLibraryView().environment(session))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            defer {
+                wire.release()
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+
+            #expect(
+                await eventually(tries: 200) { await probe.outgoingFetches >= 1 },
+                "precondition: A's library was read and its tiles put on screen"
+            )
+            await swapSettle(window)
+            #expect(wire.incomingReads == 0, "precondition: nothing was read as B before the swap")
+
+            wire.swapSubject()
+            await session.retryNow()
+            #expect(
+                session.state.user?.subject == SwapWire.incoming,
+                "precondition: the revalidation established B"
+            )
+
+            // Nobody pulls: the screen alone has to ask for B's first page. The read is held, so
+            // one that went out twice would be two on the wire here, not one joined answer.
+            let asked = await eventually(tries: 200) { wire.incomingReads >= 1 }
+            #expect(asked, "no library read was made as B after the revalidation established B")
+            await swapSettle(window)
+            #expect(wire.incomingReads == 1, "B's first page was read \(wire.incomingReads) times")
+
+            // Its answer is what the grid draws: a read issued under A's generation, or absorbed
+            // into a page of A's, would be dropped on arrival and leave the grid empty.
+            wire.release()
+            #expect(
+                await eventually(tries: 200) { await probe.incomingFetches >= 1 },
+                "B's first page was answered but none of its tiles came on screen"
+            )
+            await swapSettle(window)
+            #expect(
+                wire.incomingReads == 1,
+                "B's first page was read \(wire.incomingReads) times once it had landed"
+            )
+        }
+    }
+}
+
+/// Which change of account empties the Library grid: the screen asks from two places that hear of
+/// one change in a single update, and the grid may be emptied for it once (MEMNG-591).
+struct GridAccountTests {
+    @Test("the first account recorded moves nothing")
+    func firstRecordMovesNothing() {
+        #expect(!GridAccount().claim("a"))
+        #expect(!GridAccount().claim(nil))
+    }
+
+    @Test("the same account again moves nothing, however often it is heard")
+    func sameAccountIsOneChange() {
+        let account = GridAccount()
+        _ = account.claim("a")
+        #expect(account.claim("b"), "a to b is a change")
+        #expect(!account.claim("b"), "b heard a second time is the same change")
+        #expect(!account.claim("b"))
+    }
+
+    @Test("signing out and signing in are each a change")
+    func nobodyIsAnAccount() {
+        let account = GridAccount()
+        _ = account.claim("a")
+        #expect(account.claim(nil), "a to nobody")
+        #expect(!account.claim(nil), "nobody heard twice")
+        #expect(account.claim("a"), "nobody to a")
     }
 }
