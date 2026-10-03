@@ -102,8 +102,9 @@ struct MediaLibraryView: View {
                 }
             }
             .toolbarVisibility(.hidden, for: .navigationBar)
-            // The scope toolbar, in the system tab bar's place once the Library's item is
-            // pressed (MEMNG-604): the system's own bottom bar, so iOS draws its glass.
+            // The scope toolbar, in the system tab bar's place once the Library is scrolled or
+            // its item pressed where it shows (MEMNG-604, MEMNG-679): the system's own bottom
+            // bar, so iOS draws its glass.
             .toolbar {
                 if let dock, dock.showsScopeBar {
                     ToolbarItem(placement: .bottomBar) {
@@ -301,6 +302,7 @@ struct MediaLibraryView: View {
                     errorText: store.lastError,
                     chooseYear: { chooseYear($0) }
                 )
+                .feedsDock(dock)
             } else {
                 LibraryMonthsMosaic(
                     months: mosaicMonths(year.map { dayBuckets(shown, inYear: $0) } ?? shown),
@@ -311,6 +313,7 @@ struct MediaLibraryView: View {
                     target: answered == nil ? nil : choice.monthTarget,
                     reachedTarget: { choice.consumeMonthTarget() }
                 )
+                .feedsDock(dock)
             }
         }
         // Nearer than the grid's refresher, so it is the one a cover's tile reads.
@@ -380,6 +383,9 @@ struct MediaLibraryView: View {
             },
             showMonth: { choice.showMonth($0) }
         )
+        // The Library's scroll is what swaps the tab bar for the scope toolbar (MEMNG-679), on
+        // each of its three scroll views.
+        .feedsDock(dock)
         .overlay {
             if library.isJumping {
                 ProgressView()
@@ -688,6 +694,8 @@ struct LibraryGrid: View {
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
+    /// Told before each scroll to a landing, so the move it makes counts as a scroll (MEMNG-679).
+    @Environment(AppDock.self) private var dock: AppDock?
     /// How wide the rows are solved for — the scroll's own width, less the padding. Measured
     /// rather than assumed, so a rotation or a split view re-packs the library rather than
     /// running it off the edge.
@@ -775,6 +783,9 @@ struct LibraryGrid: View {
         else { return }
         // A new landing takes over from the one held before it.
         holding = nil
+        // The app's own jump, not the layout's: the dock counts the move it makes. `hold` below
+        // does not tell it, because it only answers a layout that moved the scroll.
+        dock?.askedToJump()
         proxy.scrollTo(heading, anchor: .top)
         // Built AND at the line — or the scroll at its end, when too little follows the heading
         // for it to rise that far. A heading built on the first screen is built before the scroll

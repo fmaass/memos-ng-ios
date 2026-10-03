@@ -71,6 +71,8 @@ struct LibraryMonthsMosaic: View {
     var target: String?
     /// Told once the target is scrolled to, or once the months are read without it.
     var reachedTarget: () -> Void = {}
+    /// Told before the scroll to the target, so the move it makes counts as a scroll (MEMNG-679).
+    @Environment(AppDock.self) private var dock: AppDock?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -88,6 +90,7 @@ struct LibraryMonthsMosaic: View {
     private func bring(_ proxy: ScrollViewProxy) {
         guard let target, !months.isEmpty else { return }
         if months.contains(where: { $0.key == target }) {
+            dock?.askedToJump()
             proxy.scrollTo(target, anchor: .top)
         }
         reachedTarget()

@@ -2,11 +2,12 @@ import MemosCore
 import SwiftUI
 
 /// The app's bottom chrome: which of the Library's two bars stands there, and whether a screen
-/// has taken the chrome away for every tab at once (MEMNG-604).
+/// has taken the chrome away for every tab at once (MEMNG-604, MEMNG-679).
 ///
 /// The bars are `DockMode`'s: the system tab bar, or the Library's scope toolbar in its place,
-/// moved only by presses. A claim takes both away, on every tab root, and leaves the mode as it
-/// was, so ending it brings back whichever bar was there. Two parties claim it: select mode, whose
+/// moved by presses and by the Library's own scroll. A claim takes both away, on every tab root,
+/// and leaves the mode as it was, so ending it brings back whichever bar was there — a scroll
+/// that arrives under a claim is dropped for that reason. Two parties claim it: select mode, whose
 /// toolbar is then the only bottom chrome, as in Photos, and a pushed screen that stands for the
 /// whole app (`StackChrome`), which also hides the bar on itself.
 @MainActor
@@ -15,6 +16,17 @@ final class AppDock {
     private(set) var mode: DockMode = .initial
     /// Screens on top of a stack that take the chrome away while they are up, one claim each.
     private var takeovers: Set<UUID> = []
+    /// The tab on screen, as the presses and selections the dock hears tell it; nil until the
+    /// first of them. What a scroll is judged against: a Library scroll view that reports while
+    /// another tab shows changes nothing. Not observed: nothing is drawn from it.
+    @ObservationIgnored private(set) var showing: MainTab?
+    /// When the bars last swapped — the mode changed, or another tab came on screen — nil until
+    /// they first do. What a Library scroll view's layout settles from (`DockScrollFence`). Not
+    /// observed: nothing is drawn from it.
+    @ObservationIgnored private(set) var swappedAt: ContinuousClock.Instant?
+    /// When a Library scroll view last asked to be scrolled to a place of the app's choosing, until
+    /// the move it explains claims it. Not observed: nothing is drawn from it.
+    @ObservationIgnored private var jumpAskedAt: ContinuousClock.Instant?
 
     init() {}
 
@@ -25,8 +37,39 @@ final class AppDock {
     func release(_ id: UUID) { takeovers.remove(id) }
 
     func send(_ event: DockEvent) {
+        let shown = showing
+        switch event {
+        // A press moves the selection to the tab pressed, the tab showing pressed again included.
+        case .pressedTab(let tab, _), .selected(let tab):
+            showing = tab
+        case .pressedLibraryIcon, .scrolled:
+            break
+        }
         let next = mode.after(event)
+        if next != mode || showing != shown { swappedAt = .now }
         if next != mode { mode = next }
+    }
+
+    /// A Library scroll view is about to scroll itself to a place of the app's choosing — a day's
+    /// landing, a month: the next move of an offset is that jump, not the layout settling, and
+    /// counts inside a swap's window too. Asked on the main actor right before the scroll.
+    func askedToJump() { jumpAskedAt = .now }
+
+    /// Whether a jump asked for within `DockScrollFence.settling` before `instant` explains an
+    /// offset that moved at `instant`. Claims it: one ask explains one move, and an ask nothing
+    /// followed lapses rather than letting a later echo through.
+    func claimJump(at instant: ContinuousClock.Instant) -> Bool {
+        guard let asked = jumpAskedAt else { return false }
+        jumpAskedAt = nil
+        return instant < asked.advanced(by: DockScrollFence.settling)
+    }
+
+    /// One of the Library's scroll views now stands `y` points from the top of its content.
+    /// Dropped while a claim holds the chrome, so ending the claim brings back the bar it hid, and
+    /// before any tab is known to be on screen.
+    func scrolled(to y: Double) {
+        guard !isTakenOver, let showing else { return }
+        send(.scrolled(y: y, showing: showing))
     }
 
     /// Whether `tab`'s root stands over the system tab bar: not while a claim holds the chrome,
@@ -132,7 +175,7 @@ struct LibraryScopePicker: View {
 }
 
 /// The three tabs, each with its own navigation stack and scroll position, under the SYSTEM tab
-/// bar (MEMNG-666), which steps aside on the Library for its scope toolbar (MEMNG-604).
+/// bar (MEMNG-666), which steps aside on the Library for its scope toolbar (MEMNG-604, MEMNG-679).
 ///
 /// The bar is the `TabView`'s own, so iOS draws its Liquid Glass, the selection's morph between
 /// tabs and its minimising on scroll on Timeline and Places. The app decides only WHEN it stands
@@ -162,13 +205,13 @@ struct MainTabs<Screen: View>: View {
         .environment(dock)
         .environment(scope)
         // Every way off the Library — a press in the bar or a jump to a memo — gives the tabs
-        // back, so coming back finds them.
-        .onChange(of: selection) { _, now in dock.send(.selected(now)) }
+        // back, so coming back finds them. Initially too, so the dock knows the tab it opens on.
+        .onChange(of: selection, initial: true) { _, now in dock.send(.selected(now)) }
     }
 
     /// Whether the system bar folds to its selected tab while `tab` scrolls down. Not on the
     /// Library: a bar shrunk there to a lone icon with no control beside it would be a third
-    /// state, and its scope toolbar is reached by a press instead.
+    /// state, and its scroll swaps the bar for its scope toolbar instead.
     static func minimizesOnScroll(on tab: MainTab) -> Bool {
         tab != .library
     }
@@ -203,5 +246,57 @@ struct DockTakeover: ViewModifier {
             .onDisappear {
                 dock?.release(claim)
             }
+    }
+}
+
+extension View {
+    /// Tells the dock each time the Library scroll view inside this view is scrolled: how far it
+    /// then stands from the top of its content, 0 at rest, negative while rubber-banding. Only the
+    /// Library's scroll views feed it.
+    func feedsDock(_ dock: AppDock?) -> some View {
+        modifier(DockFeed(dock: dock))
+    }
+}
+
+/// A Library scroll view's feed to the dock. What the layout does on its own as a bar comes or
+/// goes — a new frame, and the offset the system moves to keep the rows on screen in place — is
+/// not told (`DockScrollFence`), so a bar's coming or going cannot swap the bars straight back;
+/// a move made while the scroll view is moving always is, and so is the first move after the
+/// Library asked to jump (`AppDock.askedToJump`).
+private struct DockFeed: ViewModifier {
+    let dock: AppDock?
+    /// Per scroll view: each of the Library's three has its own layout to settle. A reference
+    /// rather than observed state, for the reason `LibraryGrid`'s `onScreen` is one: it is asked
+    /// on every reading, and nothing is drawn from it.
+    @State private var fence = Fence()
+
+    private final class Fence {
+        var judge = DockScrollFence()
+        /// Whether the scroll view is moving: a drag, its deceleration, an animated scroll.
+        var moving = false
+    }
+
+    func body(content: Content) -> some View {
+        content.onScrollGeometryChange(for: DockScrollReading.self) { geometry in
+            DockScrollReading(
+                y: Double(geometry.contentOffset.y + geometry.contentInsets.top),
+                width: Double(geometry.containerSize.width),
+                height: Double(geometry.containerSize.height),
+                insetTop: Double(geometry.contentInsets.top),
+                insetLeading: Double(geometry.contentInsets.leading),
+                insetBottom: Double(geometry.contentInsets.bottom),
+                insetTrailing: Double(geometry.contentInsets.trailing)
+            )
+        } action: { previous, now in
+            let instant = ContinuousClock.now
+            let asked = now.y != previous.y && dock?.claimJump(at: instant) == true
+            let swappedAt = dock?.swappedAt
+            let y = fence.judge.scrolled(
+                from: previous, to: now, at: instant, swappedAt: swappedAt,
+                moving: fence.moving || asked)
+            guard let y else { return }
+            dock?.scrolled(to: y)
+        }
+        .onScrollPhaseChange { _, phase in fence.moving = phase.isScrolling }
     }
 }

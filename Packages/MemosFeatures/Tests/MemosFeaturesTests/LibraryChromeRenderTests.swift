@@ -25,7 +25,19 @@ private enum ChromeWire {
 
 /// A populated server: one account's pictures, their day and year buckets, and a page of memos.
 /// A read that asks for a further page gets an empty one, so the grid ends where the fixture does.
+/// `days` is which days of September 2026 hold pictures: every scope scrolls over the default,
+/// and a single day is a grid too short to scroll.
 private final class ChromeTransport: ClientTransport, @unchecked Sendable {
+    private let rows: [String]
+    private let dayBuckets: [String]
+    private let markers: [String]
+
+    init(days: ClosedRange<Int> = ChromeWire.days) {
+        rows = Self.rows(days)
+        dayBuckets = Self.dayBuckets(days)
+        markers = Self.markers(days)
+    }
+
     func send(
         _ request: HTTPRequest,
         body: HTTPBody?,
@@ -43,17 +55,17 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
                 """
             )
         case ChromeWire.listAttachments:
-            return Self.json(later ? "[]" : "[\(Self.rows.joined(separator: ","))]")
+            return Self.json(later ? "[]" : "[\(rows.joined(separator: ","))]")
         case ChromeWire.buckets:
             switch query.first(where: { $0.name == "size" })?.value {
-            case "day": return Self.json("[\(Self.dayBuckets.joined(separator: ","))]")
+            case "day": return Self.json("[\(dayBuckets.joined(separator: ","))]")
             case "year": return Self.json(Self.years)
             default: return Self.json("[]")
             }
         case ChromeWire.attachmentTags:
             return Self.json("[]")
         case ChromeWire.markers:
-            return Self.json(#"{"markers":[\#(Self.markers.joined(separator: ","))]}"#)
+            return Self.json(#"{"markers":[\#(markers.joined(separator: ","))]}"#)
         case ChromeWire.listMemos:
             let items = later ? "" : Self.memos.joined(separator: ",")
             return Self.json(#"{"items":[\#(items)],"nextCursor":null,"totalCount":null}"#)
@@ -65,21 +77,24 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
     private static func uid(day: Int, index: Int) -> String { "shot-\(day)-\(index)" }
 
     /// One located picture a day, strung along the lake, so Places opens on pins.
-    private static let markers: [String] = ChromeWire.days.map { day in
-        let name = uid(day: day, index: 0)
-        let latitude = 47.30 + Double(day) * 0.01
-        return """
-            {"uid":"\(name)","mime":"image/jpeg","status":"ready","blurhash":null,"width":1200,\
-            "height":800,"duration":null,"sha256":null,"capture_instant":null,\
-            "capture_civil":null,"capture_source":null,"mine":true,"hasPrint":false,\
-            "hasLegacyPrint":false,"renditions":[],"position":null,\
-            "thumbnailUrl":"/api/attachments/\(name)/thumb",\
-            "previewUrl":"/api/attachments/\(name)/mobile","webUrl":"/api/attachments/\(name)/web",\
-            "posterUrl":"/api/attachments/\(name)/poster",\
-            "downloadUrl":"/api/attachments/\(name)/download",\
-            "printUrl":"/api/attachments/\(name)/print","memo_uid":"memo-\(day)",\
-            "latitude":\(latitude),"longitude":8.55,"taken_at":"\(dayKey(day))T10:00:00Z"}
-            """
+    private static func markers(_ days: ClosedRange<Int>) -> [String] {
+        days.map { day in
+            let name = uid(day: day, index: 0)
+            let latitude = 47.30 + Double(day) * 0.01
+            return """
+                {"uid":"\(name)","mime":"image/jpeg","status":"ready","blurhash":null,"width":1200,\
+                "height":800,"duration":null,"sha256":null,"capture_instant":null,\
+                "capture_civil":null,"capture_source":null,"mine":true,"hasPrint":false,\
+                "hasLegacyPrint":false,"renditions":[],"position":null,\
+                "thumbnailUrl":"/api/attachments/\(name)/thumb",\
+                "previewUrl":"/api/attachments/\(name)/mobile",\
+                "webUrl":"/api/attachments/\(name)/web",\
+                "posterUrl":"/api/attachments/\(name)/poster",\
+                "downloadUrl":"/api/attachments/\(name)/download",\
+                "printUrl":"/api/attachments/\(name)/print","memo_uid":"memo-\(day)",\
+                "latitude":\(latitude),"longitude":8.55,"taken_at":"\(dayKey(day))T10:00:00Z"}
+                """
+        }
     }
 
     private static func dayKey(_ day: Int) -> String { String(format: "2026-09-%02d", day) }
@@ -101,16 +116,20 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
     }
 
     /// Newest first, as the server lists them.
-    private static let rows: [String] = ChromeWire.days.reversed().flatMap { day in
-        (0..<ChromeWire.perDay).reversed().map { row(day: day, index: $0) }
+    private static func rows(_ days: ClosedRange<Int>) -> [String] {
+        days.reversed().flatMap { day in
+            (0..<ChromeWire.perDay).reversed().map { row(day: day, index: $0) }
+        }
     }
 
-    private static let dayBuckets: [String] = ChromeWire.days.reversed().map { day in
-        let cover = uid(day: day, index: 0)
-        return """
-            {"key":"\(dayKey(day))","count":\(ChromeWire.perDay),"coverUid":"\(cover)",\
-            "coverThumbnailUrl":"/api/attachments/\(cover)/thumb"}
-            """
+    private static func dayBuckets(_ days: ClosedRange<Int>) -> [String] {
+        days.reversed().map { day in
+            let cover = uid(day: day, index: 0)
+            return """
+                {"key":"\(dayKey(day))","count":\(ChromeWire.perDay),"coverUid":"\(cover)",\
+                "coverThumbnailUrl":"/api/attachments/\(cover)/thumb"}
+                """
+        }
     }
 
     private static let years = """
@@ -179,18 +198,20 @@ private actor PaintedMedia: MediaTransport {
     }
 }
 
-/// The Library's bottom chrome is the system's (MEMNG-604): the tab bar at launch, and after a
-/// press on the Library's item the Library's own system toolbar in its place — its icon beside
-/// Years | Months | All, a system segmented control that agrees with the Library's scope both
-/// ways — until the icon gives the bar back. Hosted in the real `MainTabView` over a
+/// The Library's bottom chrome is the system's (MEMNG-604, MEMNG-679): the tab bar at launch, and
+/// once the Library is scrolled, or its item pressed where it shows, the Library's own system
+/// toolbar in its place — its icon beside Years | Months | All, a system segmented control that
+/// agrees with the Library's scope both ways — until the icon gives the bar back. Hosted in the real `MainTabView` over a
 /// real `SessionStore`, the real generated client and a populated server, and photographed along
 /// the way (`drawHierarchy`, attached to the result bundle) so a person can look at what ran.
 ///
 /// In this suite for the reason `MediaLibrarySegmentTests` is: it installs the loader's
 /// transport, which is process-wide, and the suite is serialized.
 extension MediaImageLoaderTests {
-    private func chromeHost(opening tab: MainTab) async -> UIWindow {
-        let transport = ChromeTransport()
+    private func chromeHost(
+        opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days
+    ) async -> UIWindow {
+        let transport = ChromeTransport(days: days)
         let session = SessionStore(
             credentials: ChromeCredentials(),
             makeClient: { configuration, credential in
@@ -336,10 +357,13 @@ extension MediaImageLoaderTests {
         return control
     }
 
-    /// Waits until the Library has served its first screen of pictures and settled.
-    private func libraryServed(_ media: PaintedMedia, _ window: UIWindow) async {
+    /// Waits until the Library has served its first screen of pictures — `pictures` of them —
+    /// and settled.
+    private func libraryServed(
+        _ media: PaintedMedia, _ window: UIWindow, pictures: Int = 12
+    ) async {
         var waited = 0
-        while await media.served < 12, waited < 200 {
+        while await media.served < pictures, waited < 200 {
             await chromeSettle(window)
             waited += 1
         }
@@ -370,9 +394,88 @@ extension MediaImageLoaderTests {
         await chromeSettle(window, turns: 20)
     }
 
-    /// The Library at launch: the system tab bar and nothing of its scope, and a scroll changes
-    /// neither (MEMNG-604) — the scope toolbar is reached by a press, never by a scroll.
-    @Test("the Library opens on the system tab bar with no scope, and a scroll changes nothing")
+    /// How far the main scroll view stands from the top of its content, the dock's own measure:
+    /// 0 at rest, whatever bars stand over it.
+    private static func scrolledBy(in window: UIWindow) -> CGFloat? {
+        guard let scroller = mainScroll(in: window) else { return nil }
+        return scroller.contentOffset.y + scroller.adjustedContentInset.top
+    }
+
+    /// Scrolls the main scroll view on down from where it stands, in steps, the way a drag does.
+    private func scrollFurther(_ window: UIWindow, by distance: CGFloat) async {
+        guard let scroller = Self.mainScroll(in: window) else { return }
+        let from = scroller.contentOffset.y
+        for step in 1...5 {
+            let offset = CGPoint(x: 0, y: from + distance * CGFloat(step) / 5)
+            scroller.setContentOffset(offset, animated: false)
+            await chromeSettle(window, turns: 2)
+        }
+        await chromeSettle(window, turns: 20)
+    }
+
+    /// Drags the main scroll view on down from where it stands: the moves a finger makes, told to
+    /// the scroll view's delegate as a drag that begins and ends around them, so the scroll phase
+    /// is the reader's and not the layout's.
+    private func drag(_ window: UIWindow, by distance: CGFloat) async {
+        guard let scroller = Self.mainScroll(in: window) else { return }
+        let from = scroller.contentOffset.y
+        scroller.delegate?.scrollViewWillBeginDragging?(scroller)
+        for step in 1...5 {
+            let offset = CGPoint(x: 0, y: from + distance * CGFloat(step) / 5)
+            scroller.setContentOffset(offset, animated: false)
+            await chromeSettle(window, turns: 1)
+        }
+        var target = scroller.contentOffset
+        scroller.delegate?.scrollViewWillEndDragging?(
+            scroller, withVelocity: .zero, targetContentOffset: &target)
+        scroller.delegate?.scrollViewDidEndDragging?(scroller, willDecelerate: false)
+        await chromeSettle(window, turns: 20)
+    }
+
+    /// Scrolls the main scroll view to its foot, the last row clear of the bottom bar.
+    private func scrollToFoot(_ window: UIWindow) async {
+        guard let scroller = Self.mainScroll(in: window) else { return }
+        let inset = scroller.adjustedContentInset.bottom
+        let bottom = scroller.contentSize.height - scroller.bounds.height + inset
+        scroller.setContentOffset(CGPoint(x: 0, y: max(bottom, 0)), animated: false)
+        await chromeSettle(window, turns: 20)
+    }
+
+    /// Waits until the scope toolbar stands in the tab bar's place.
+    private func scopeStands(_ window: UIWindow) async {
+        for _ in 0..<200 where !Self.scopeShows(in: window) {
+            await chromeSettle(window)
+        }
+        await chromeSettle(window, turns: 20)
+    }
+
+    /// Waits until the system tab bar stands again and no scope is drawn.
+    private func tabsStand(_ window: UIWindow) async {
+        for _ in 0..<200 where !Self.tabsShow(in: window) {
+            await chromeSettle(window)
+        }
+        await chromeSettle(window, turns: 20)
+    }
+
+    private static func scopeShows(in window: UIWindow) -> Bool {
+        ScopeBarProbe.control(in: window) != nil && !barShows(in: window)
+    }
+
+    private static func tabsShow(in window: UIWindow) -> Bool {
+        ScopeBarProbe.control(in: window) == nil && barShows(in: window)
+    }
+
+    /// Waits until the system bar has `tab` chosen.
+    private func tabChosen(_ tab: MainTab, _ window: UIWindow) async {
+        for _ in 0..<200 where Self.tabBar(in: window)?.selectedItem?.title != tab.title {
+            await chromeSettle(window)
+        }
+    }
+
+    /// The Library at launch: the system tab bar and nothing of its scope. A scroll down past the
+    /// threshold swaps the bar for the scope toolbar — the Library icon beside Years | Months |
+    /// All, on All — the way the Timeline's bar minimises once it scrolls (MEMNG-679).
+    @Test("the Library opens on the tab bar, and a scroll down swaps it for the scope toolbar")
     func libraryOpensOnTheTabs() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
@@ -389,9 +492,15 @@ extension MediaImageLoaderTests {
             Self.shoot("library-tabs", window)
 
             await scrollDown(window)
+            await scopeStands(window)
             let scrolled = ScopeBarProbe.describe(window)
-            #expect(Self.barShows(in: window), "All scrolled: the system tab bar is gone")
-            #expect(ScopeBarProbe.control(in: window) == nil, "a scope after a scroll: \(scrolled)")
+            let control = ScopeBarProbe.control(in: window)
+            #expect(control != nil, "All scrolled: no scope control: \(scrolled)")
+            #expect(control?.numberOfSegments == 3, "segments: \(scrolled)")
+            #expect(control.flatMap { ScopeBarProbe.chosen(in: $0) } == "All", "\(scrolled)")
+            #expect(ScopeBarProbe.libraryIconShows(in: window), "no Library icon: \(scrolled)")
+            #expect(!Self.barShows(in: window), "All scrolled: the tab bar stayed: \(scrolled)")
+            Self.shoot("library-scrolled", window)
         }
     }
 
@@ -498,9 +607,9 @@ extension MediaImageLoaderTests {
             for _ in 0..<200 where Self.tabBar(in: window)?.selectedItem?.title != timeline {
                 await chromeSettle(window)
             }
-            // The Library pressed from the Timeline and then again where it shows: either press
-            // alone gives the scope toolbar, so the pair reaches it whichever one a broken rule
-            // lost, and what this test can fail on is the control's binding alone.
+            // The Library pressed from the Timeline, which opens it on the tabs, and then again
+            // where it shows, which gives the scope toolbar (MEMNG-679): what this test can fail
+            // on is the control's binding alone.
             #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
             await chromeSettle(window, turns: 20)
             _ = await pressIntoScope(window)
@@ -613,17 +722,16 @@ extension MediaImageLoaderTests {
     }
 
     /// Timeline and Places stand over the system bar with nothing of the Library's, and the
-    /// Library's item pressed from either opens the Library on its scope toolbar; a press back
-    /// on the tab left gives that tab its bar (MEMNG-604).
-    @Test("Timeline and Places keep the tab bar; the Library pressed from them opens on its scope")
+    /// Library's item pressed from either opens the Library on the tabs (MEMNG-679): a press from
+    /// another tab is the way back to the Library, not into its scope. Pressed again where it
+    /// shows, it gives the scope toolbar; a press back on the tab left gives that tab its bar.
+    @Test("Timeline and Places keep the tab bar; the Library pressed from them opens on the tabs")
     func otherRootsHaveNoScope() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
             for tab in [MainTab.timeline, .places] {
                 let window = await chromeHost(opening: tab)
-                for _ in 0..<200 where Self.tabBar(in: window)?.selectedItem?.title != tab.title {
-                    await chromeSettle(window)
-                }
+                await tabChosen(tab, window)
                 await chromeSettle(window, turns: 80)
                 let seen = ScopeBarProbe.describe(window)
                 #expect(Self.barShows(in: window), "\(tab.title): no system tab bar")
@@ -631,10 +739,20 @@ extension MediaImageLoaderTests {
                 #expect(!ScopeBarProbe.libraryIconShows(in: window), "\(tab.title): \(seen)")
                 Self.shoot(tab.rawValue, window)
 
-                let control = await pressIntoScope(window)
+                #expect(ScopeBarProbe.pressTab(.library, in: window), "Library took no press")
+                await tabChosen(.library, window)
+                await chromeSettle(window, turns: 40)
                 let pressed = ScopeBarProbe.describe(window)
-                #expect(control != nil, "the Library from \(tab.title): no scope: \(pressed)")
-                #expect(!Self.barShows(in: window), "the Library from \(tab.title): \(pressed)")
+                #expect(Self.barShows(in: window), "the Library from \(tab.title): \(pressed)")
+                #expect(
+                    ScopeBarProbe.control(in: window) == nil,
+                    "the Library from \(tab.title) opened on its scope: \(pressed)")
+                #expect(!ScopeBarProbe.libraryIconShows(in: window), "\(tab.title): \(pressed)")
+
+                let control = await pressIntoScope(window)
+                let again = ScopeBarProbe.describe(window)
+                #expect(control != nil, "the Library pressed where it shows: no scope: \(again)")
+                #expect(!Self.barShows(in: window), "the bar beside the scope: \(again)")
 
                 #expect(ScopeBarProbe.pressTab(tab, in: window), "\(tab.title) took no press")
                 for _ in 0..<200 where !Self.barShows(in: window) {
@@ -647,6 +765,239 @@ extension MediaImageLoaderTests {
                 window.isHidden = true
                 window.rootViewController = nil
             }
+        }
+    }
+
+    /// A scope picked in the scope toolbar keeps it (MEMNG-679): the pick swaps the scroll view for
+    /// one standing at its top, and no scroll gives the tabs back, the top of a page included.
+    @Test("a scope picked after a scroll keeps the scope toolbar, in every scope")
+    func scopePickKeepsTheScopeBar() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "precondition: a scroll, no scope")
+
+            let marks: [(LibraryScope, String)] = [(.months, "Sep 2026"), (.years, "48 items")]
+            for (scope, mark) in marks {
+                let live = await ScopeBarProbe.settledControl(in: window) {
+                    await chromeSettle(window)
+                }
+                if let live { ScopeBarProbe.choose(scope, in: live) }
+                for _ in 0..<200 where Self.elements(labelled: mark, in: window).isEmpty {
+                    await chromeSettle(window)
+                }
+                await chromeSettle(window, turns: 40)
+                let seen = ScopeBarProbe.describe(window)
+                let chosen = ScopeBarProbe.control(in: window).flatMap {
+                    ScopeBarProbe.chosen(in: $0)
+                }
+                #expect(chosen == scope.label, "\(scope.label) picked: the scope went: \(seen)")
+                #expect(!Self.barShows(in: window), "\(scope.label) picked: the tab bar: \(seen)")
+                #expect(ScopeBarProbe.libraryIconShows(in: window), "\(scope.label): \(seen)")
+            }
+
+            if let live = await ScopeBarProbe.settledControl(
+                in: window,
+                settle: {
+                    await chromeSettle(window)
+                })
+            {
+                ScopeBarProbe.choose(.all, in: live)
+            }
+            for _ in 0..<200 where Self.labels(in: window).contains("48 items") {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 40)
+            let all = ScopeBarProbe.describe(window)
+            let chosen = ScopeBarProbe.control(in: window).flatMap { ScopeBarProbe.chosen(in: $0) }
+            #expect(chosen == "All", "All picked: the scope went: \(all)")
+            #expect(!Self.barShows(in: window), "All picked: the tab bar came back: \(all)")
+        }
+    }
+
+    /// The Library icon gives the tab bar back where the Library stands, and the bar stays through
+    /// the layout its return sets off; the next scroll down swaps them again (MEMNG-679).
+    @Test("the icon gives the tab bar back until the next scroll down")
+    func iconThenScrollCollapsesAgain() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "precondition: a scroll, no scope")
+
+            let how = ScopeBarProbe.pressLibraryIcon(in: window)
+            #expect(how != nil, "no Library icon took a press: \(ScopeBarProbe.describe(window))")
+            await tabsStand(window)
+            await chromeSettle(window, turns: 60)
+            let after = ScopeBarProbe.describe(window)
+            let at = Self.scrolledBy(in: window) ?? 0
+            #expect(at > 24, "precondition: the icon pressed at \(at), not below the threshold")
+            #expect(Self.barShows(in: window), "the icon did not give the bar back: \(after)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "the scope came back: \(after)")
+            Self.shoot("library-icon", window)
+
+            await scrollFurther(window, by: 200)
+            await scopeStands(window)
+            let again = ScopeBarProbe.describe(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "a scroll after the icon: \(again)")
+            #expect(!Self.barShows(in: window), "a scroll after the icon: the tab bar: \(again)")
+        }
+    }
+
+    /// A drag the reader starts while the layout is still settling from the icon's press is a
+    /// scroll all the same: the bars swap on it, and do not wait for a further one (MEMNG-679).
+    @Test("a drag straight after the icon swaps the bars again")
+    func dragRightAfterTheIconCollapses() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "precondition: a scroll, no scope")
+
+            let how = ScopeBarProbe.pressLibraryIcon(in: window)
+            #expect(how != nil, "no Library icon took a press: \(ScopeBarProbe.describe(window))")
+            await chromeSettle(window, turns: 2)
+            await drag(window, by: 200)
+            await scopeStands(window)
+            let after = ScopeBarProbe.describe(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "a drag after the icon: \(after)")
+            #expect(!Self.barShows(in: window), "a drag after the icon: the tab bar: \(after)")
+        }
+    }
+
+    /// A jump the Library makes on its own — a day tile in Months opening All at that day — is a
+    /// scroll even when it lands while the layout is still settling from the icon's press: the
+    /// bars swap on it (MEMNG-679 round 3).
+    @Test("a day's jump straight after the icon swaps the bars again")
+    func jumpRightAfterTheIconCollapses() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            let live = await ScopeBarProbe.settledControl(in: window) {
+                await chromeSettle(window)
+            }
+            #expect(live != nil, "precondition: no scope control to pick Months in")
+            if let live { ScopeBarProbe.choose(.months, in: live) }
+            _ = await controlShowing("Months", in: window)
+            var tiles: [NSObject] = []
+            for _ in 0..<200 where tiles.isEmpty {
+                await chromeSettle(window)
+                tiles = Self.elements(labelled: "7", in: window).filter {
+                    $0.accessibilityTraits.contains(.button)
+                }
+            }
+            #expect(!tiles.isEmpty, "no tile for the 7th: \(Self.labels(in: window))")
+
+            let how = ScopeBarProbe.pressLibraryIcon(in: window)
+            #expect(how != nil, "no Library icon took a press: \(ScopeBarProbe.describe(window))")
+            await chromeSettle(window, turns: 2)
+            #expect(tiles.contains { $0.accessibilityActivate() }, "no day tile took a press")
+            await scopeStands(window)
+            let after = ScopeBarProbe.describe(window)
+            let at = Self.scrolledBy(in: window) ?? 0
+            #expect(at > 24, "precondition: the day's jump landed at \(at)")
+            #expect(ScopeBarProbe.control(in: window) != nil, "a jump after the icon: \(after)")
+            #expect(!Self.barShows(in: window), "a jump after the icon: the tab bar: \(after)")
+        }
+    }
+
+    /// A grid too short to scroll has no scroll to swap the bars on: it stays on the tabs whatever
+    /// a drag does to it, and the Library's item pressed where it shows is its way to the scope.
+    @Test("a grid too short to scroll stays on the tabs; a press on the Library reaches the scope")
+    func shortGridStaysOnTheTabs() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library, days: 1...1)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window, pictures: ChromeWire.perDay)
+            if let scroller = Self.mainScroll(in: window) {
+                let top = -scroller.adjustedContentInset.top
+                let inset = scroller.adjustedContentInset.bottom
+                let end = max(top, scroller.contentSize.height - scroller.bounds.height + inset)
+                #expect(end - top <= 24, "precondition: the grid scrolls \(end - top) points")
+                // Pulled past its top and let go, then pushed to its end: all a drag can do.
+                for y in [top - 10, top, end, top] {
+                    scroller.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+                    await chromeSettle(window, turns: 2)
+                }
+            } else {
+                Issue.record("no scroll view on the Library")
+            }
+            await chromeSettle(window, turns: 40)
+            let seen = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "a short grid lost the tab bar: \(seen)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "a short grid's scope: \(seen)")
+
+            let control = await pressIntoScope(window)
+            let pressed = ScopeBarProbe.describe(window)
+            #expect(control != nil, "the Library pressed where it shows: no scope: \(pressed)")
+            #expect(!Self.barShows(in: window), "the bar beside the scope: \(pressed)")
+        }
+    }
+
+    /// The Library left on its scope toolbar at the foot of All — the way a jump to a memo leaves
+    /// it — and pressed again from the Timeline comes back on the tabs, its scroll where it was,
+    /// and stays on them through the layout of its return: an offset kept is no scroll
+    /// (MEMNG-679).
+    @Test("the Library left scrolled comes back from the Timeline on the tabs, and stays on them")
+    func returnFromTimelineKeepsTheTabs() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "precondition: a scroll, no scope")
+            await scrollToFoot(window)
+            let left = Self.scrolledBy(in: window) ?? 0
+
+            #expect(ScopeBarProbe.pressTab(.timeline, in: window), "Timeline took no press")
+            await tabChosen(.timeline, window)
+            await chromeSettle(window, turns: 40)
+            #expect(ScopeBarProbe.pressTab(.library, in: window), "Library took no press")
+            await tabChosen(.library, window)
+            await chromeSettle(window, turns: 80)
+
+            let back = ScopeBarProbe.describe(window)
+            let kept = Self.scrolledBy(in: window) ?? 0
+            #expect(kept > 24, "precondition: left at \(left), back at \(kept)")
+            #expect(Self.barShows(in: window), "back from the Timeline: no tab bar: \(back)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "the scope flapped in: \(back)")
+            #expect(!ScopeBarProbe.libraryIconShows(in: window), "an icon on return: \(back)")
+            Self.shoot("library-return", window)
         }
     }
 }
