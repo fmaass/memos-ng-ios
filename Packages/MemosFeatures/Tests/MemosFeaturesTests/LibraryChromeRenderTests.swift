@@ -209,8 +209,11 @@ private actor PaintedMedia: MediaTransport {
 /// In this suite for the reason `MediaLibrarySegmentTests` is: it installs the loader's
 /// transport, which is process-wide, and the suite is serialized.
 extension MediaImageLoaderTests {
+    /// With a `witness`, the tabs are `DockWitnessTabs` — `MainTabView`'s tree with each screen
+    /// reporting the dock — so the test can ask the dock which bar it says stands.
     private func chromeHost(
-        opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true
+        opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true,
+        witness: DockWitness? = nil
     ) async -> UIWindow {
         let transport = ChromeTransport(days: days, mine: mine)
         let session = SessionStore(
@@ -240,8 +243,13 @@ extension MediaImageLoaderTests {
             window = UIWindow(frame: frame)
         }
         window.overrideUserInterfaceStyle = .light
-        window.rootViewController = UIHostingController(
-            rootView: MainTabView(opening: tab).environment(session))
+        if let witness {
+            window.rootViewController = UIHostingController(
+                rootView: DockWitnessTabs(opening: tab, witness: witness).environment(session))
+        } else {
+            window.rootViewController = UIHostingController(
+                rootView: MainTabView(opening: tab).environment(session))
+        }
         window.makeKeyAndVisible()
         return window
     }
@@ -1460,6 +1468,362 @@ extension MediaImageLoaderTests {
             #expect(ScopeBarProbe.control(in: window) == nil, "the scope flapped in: \(back)")
             #expect(!ScopeBarProbe.libraryIconShows(in: window), "an icon on return: \(back)")
             Self.shoot("library-return", window)
+        }
+    }
+
+    // The owner's device report of 2026-10-04: after Close on the Library's Select, BOTH bottom
+    // bars showed — the system tab bar and the scope toolbar with Years | Months | All. The tests
+    // above prove the two exclusive only from a settled, idle grid on a Library opened directly;
+    // the four below each drive one sequence they never run, and are allowed to fail: a failure
+    // is the reproduction.
+
+    /// One sample of the bottom bars after a Close: how long after it, which bars stand, what the
+    /// dock says stands on the Library and its mode, the grid's offset, and each bar's own state.
+    private struct BarSample: CustomStringConvertible {
+        let ms: Int
+        let tabs: Bool
+        let scope: Bool
+        let select: Bool
+        let said: DockBar?
+        let mode: DockMode?
+        let y: CGFloat?
+        let tabBar: String
+        let scopeBar: String
+
+        /// The owner's report: the system tab bar and the scope toolbar on screen together.
+        var clash: Bool { tabs && scope }
+        var standing: Int { [tabs, scope, select].filter { $0 }.count }
+        var bars: String { "tabs=\(tabs) scope=\(scope) select=\(select)" }
+
+        /// Whether `bar` stands, and nothing beside it.
+        func shows(_ bar: DockBar) -> Bool {
+            switch bar {
+            case .tabs: return tabs && !scope && !select
+            case .scope: return scope && !tabs && !select
+            case .select: return select && !tabs && !scope
+            case .none: return !tabs && !scope && !select
+            }
+        }
+
+        var description: String {
+            let offset = y.map { "\(Int($0))" } ?? "-"
+            let dock = "\(said?.rawValue ?? "-")/\(mode?.rawValue ?? "-")"
+            return "t=\(ms)ms \(bars) dock=\(dock) y=\(offset) | tabBar \(tabBar)"
+                + " | scope \(scopeBar)"
+        }
+    }
+
+    private static func barSample(
+        _ window: UIWindow, _ witness: DockWitness, since start: ContinuousClock.Instant
+    ) -> BarSample {
+        BarSample(
+            ms: Int(((ContinuousClock.now - start) / .milliseconds(1)).rounded()),
+            tabs: barShows(in: window),
+            scope: ScopeBarProbe.control(in: window) != nil,
+            select: !elements(labelled: "Share", in: window).isEmpty,
+            said: witness.dock?.bar(on: .library),
+            mode: witness.dock?.mode,
+            y: scrolledBy(in: window),
+            tabBar: DoubleBarProbe.tabBarDetail(in: window),
+            scopeBar: DoubleBarProbe.scopeDetail(in: window))
+    }
+
+    /// The bars sampled once per settle turn — one layout pass of the window and 25 ms — from
+    /// `start` for `span`, the first sample read before any turn. `turn` runs before each layout,
+    /// handed the time since `start`: what keeps a scroll view moving, or hands the dock a
+    /// reading, while the bars are watched.
+    private func sampleBars(
+        _ window: UIWindow, _ witness: DockWitness, from start: ContinuousClock.Instant,
+        for span: Duration, turn: (Duration) -> Void = { _ in }
+    ) async -> [BarSample] {
+        var samples = [Self.barSample(window, witness, since: start)]
+        while ContinuousClock.now < start.advanced(by: span) {
+            turn(ContinuousClock.now - start)
+            await chromeSettle(window)
+            samples.append(Self.barSample(window, witness, since: start))
+        }
+        return samples
+    }
+
+    /// The verdict on one sequence: at no sample the tab bar and the scope toolbar together, and
+    /// at the end one bar alone, the one the dock says stands on the Library. Printed for the gate
+    /// log, prefixed `DOUBLEBAR <name>`: a head line, then every sample whose bars or whose dock
+    /// changed from the one before and every clash, each with the bars' hidden flag, alpha, the
+    /// view that hides them and their frames. Every sample goes to the result bundle.
+    private func judgeDoubleBar(
+        _ name: String, _ samples: [BarSample], _ witness: DockWitness, in window: UIWindow,
+        context: String
+    ) {
+        let clashes = samples.enumerated().filter { $0.element.clash }
+        let last = samples.last!
+        let said = witness.dock?.bar(on: .library)
+        let head =
+            "DOUBLEBAR \(name): \(samples.count) samples over \(last.ms) ms, clashes at "
+            + "\(clashes.map(\.offset)); the dock says \(said?.rawValue ?? "nothing"); end "
+            + "\(last.bars); \(context)"
+        print(head)
+        var previous: BarSample?
+        for (index, sample) in samples.enumerated() {
+            let changed = previous.map { $0.bars != sample.bars || $0.said != sample.said } ?? true
+            if changed || sample.clash { print("DOUBLEBAR \(name) #\(index) \(sample)") }
+            previous = sample
+        }
+        let every = samples.enumerated().map { "#\($0.offset) \($0.element)" }
+        Attachment.record(([head] + every).joined(separator: "\n"), named: "doublebar-\(name)")
+        Self.shoot("doublebar-\(name)-end", window)
+        let first = clashes.first.map { "#\($0.offset) \($0.element)" } ?? "-"
+        let together =
+            "\(name): the tab bar and the scope toolbar together at samples "
+            + "\(clashes.map(\.offset)) of \(samples.count); first \(first)"
+        #expect(clashes.isEmpty, "\(together)")
+        #expect(last.standing == 1, "\(name): \(last.standing) bars stand at the end: \(last)")
+        let says = said?.rawValue ?? "nothing"
+        #expect(
+            said.map { last.shows($0) } == true,
+            "\(name): the end shows \(last.bars), the dock says \(says)")
+    }
+
+    /// Select pressed, and select mode's toolbar waited for.
+    private func enterSelect(_ window: UIWindow, pass: String) async {
+        let select = Self.elements(labelled: "Select", in: window)
+        #expect(select.contains { $0.accessibilityActivate() }, "Select took no press (\(pass))")
+        let entering = await barsUntilSettled(window)
+        #expect(entering.last?.select == true, "select mode drew no toolbar (\(pass))")
+    }
+
+    /// The header's Close pressed; answers the instant of the press.
+    private func pressClose(_ window: UIWindow, pass: String) -> ContinuousClock.Instant {
+        let close = Self.elements(labelled: "Close", in: window)
+        #expect(close.contains { $0.accessibilityActivate() }, "Close took no press (\(pass))")
+        return .now
+    }
+
+    /// The main scroll view's reading as `DockFeed` builds one from its scroll geometry, at its
+    /// own offset or at `y`.
+    private static func dockReading(
+        of scroller: UIScrollView, y: Double? = nil
+    ) -> DockScrollReading {
+        let inset = scroller.adjustedContentInset
+        return DockScrollReading(
+            y: y ?? Double(scroller.contentOffset.y + inset.top),
+            width: Double(scroller.bounds.width),
+            height: Double(scroller.bounds.height),
+            insetTop: Double(inset.top),
+            insetLeading: Double(inset.left),
+            insetBottom: Double(inset.bottom),
+            insetTrailing: Double(inset.right))
+    }
+
+    /// Sequence A: the scope stands on a grid a scroll moved; Select; a fling under select mode;
+    /// Close while the fling still moves the grid, so its readings — each made while the scroll
+    /// view moves — arrive through the release and after it. Watched 2 s from the press.
+    @Test("double bar A: Close while a fling moves the grid, from the scope")
+    func doubleBar_A_closeDuringScopeMotion() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await chromeHost(opening: .library, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            let start = ScopeBarProbe.describe(window)
+            let dockSays = witness.dock?.bar(on: .library)
+            #expect(Self.scopeShows(in: window), "precondition A: no scope: \(start)")
+            let said = String(describing: dockSays)
+            #expect(dockSays == .scope, "precondition A: the dock says \(said)")
+            await enterSelect(window, pass: "A")
+            guard let scroller = Self.mainScroll(in: window) else {
+                Issue.record("A: no scroll view on the Library")
+                return
+            }
+            // Kept past the threshold, so every reading of the fling says the scope.
+            let threshold = CGFloat(DockMode.scopeThreshold)
+            let floor = -scroller.adjustedContentInset.top + threshold + 40
+            let fling = Fling(scroller, by: 900, floor: floor)
+            let before = 8
+            for _ in 0..<before {
+                fling.step()
+                await chromeSettle(window)
+            }
+            let closed = pressClose(window, pass: "A")
+            let samples = await sampleBars(window, witness, from: closed, for: .seconds(2)) { _ in
+                fling.step()
+            }
+            judgeDoubleBar(
+                "A", samples, witness, in: window,
+                context: "\(fling.summary), \(before) before Close")
+        }
+    }
+
+    /// Sequence B: the Library at its top on the tabs; Select; a fling down under select mode,
+    /// whose readings the dock drops while the claim holds; Close mid-fling, after which the
+    /// fling's next readings are past the threshold — the tab bar hidden under Select, shown on
+    /// the release, hidden again for the scope. Never two bars in one sample, and one at the end.
+    @Test("double bar B: Close while a fling from the top moves the grid, from the tabs")
+    func doubleBar_B_closeDuringTabsMotion() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await chromeHost(opening: .library, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            let at = Self.scrolledBy(in: window) ?? 1
+            let start = ScopeBarProbe.describe(window)
+            let dockSays = witness.dock?.bar(on: .library)
+            #expect(Self.tabsShow(in: window), "precondition B: no tabs at the top: \(start)")
+            #expect(at <= 0, "precondition B: the grid stands \(at) points from its top")
+            let said = String(describing: dockSays)
+            #expect(dockSays == .tabs, "precondition B: the dock says \(said)")
+            await enterSelect(window, pass: "B")
+            guard let scroller = Self.mainScroll(in: window) else {
+                Issue.record("B: no scroll view on the Library")
+                return
+            }
+            let fling = Fling(scroller, by: 900)
+            let before = 8
+            for _ in 0..<before {
+                fling.step()
+                await chromeSettle(window)
+            }
+            let closed = pressClose(window, pass: "B")
+            let samples = await sampleBars(window, witness, from: closed, for: .seconds(2)) { _ in
+                fling.step()
+            }
+            judgeDoubleBar(
+                "B", samples, witness, in: window,
+                context: "\(fling.summary), \(before) before Close")
+        }
+    }
+
+    /// Sequence C: at the foot of All, the tabs given back by the Library icon; Select; Close; and
+    /// the first reading after the release comes 600 ms after it — past the 500 ms in which a
+    /// release holds a scroll view that lived through it (`DockScrollFence`) — an idle reflow of
+    /// 425 points, still past the threshold. The real grid's readings arrive when the layout makes
+    /// them, so that late one is handed to the dock through the path `DockFeed` hands it
+    /// (`AppDock.scrolled(from:to:judgedBy:moving:at:)`), by a fence of its own that read once
+    /// before Select. Watched 3 s from the press.
+    @Test("double bar C: at the foot on the tabs, the first reading after Close comes at 600 ms")
+    func doubleBar_C_lateFirstReadingAfterRelease() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await chromeHost(opening: .library, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            if let scroller = Self.mainScroll(in: window) {
+                let inset = scroller.adjustedContentInset.bottom
+                let foot = scroller.contentSize.height - scroller.bounds.height + inset
+                await drag(window, by: foot - scroller.contentOffset.y)
+            }
+            await scopeStands(window)
+            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "C: no icon took a press")
+            await tabsStand(window)
+            let atFoot = Self.scrolledBy(in: window) ?? 0
+            let start = ScopeBarProbe.describe(window)
+            #expect(Self.tabsShow(in: window), "precondition C: no tabs at the foot: \(start)")
+            #expect(atFoot > 500, "precondition C: the foot stands \(atFoot) from the top")
+            guard let dock = witness.dock, let scroller = Self.mainScroll(in: window) else {
+                Issue.record("C: no dock witnessed, or no scroll view on the Library")
+                return
+            }
+            #expect(dock.bar(on: .library) == .tabs, "precondition C: \(dock.bar(on: .library))")
+            // The late reading's fence reads once now, before Select, so the claim and the release
+            // find it already reading, as the grid's own fence is (the witness rule).
+            var fence = DockScrollFence()
+            let resting = Self.dockReading(of: scroller)
+            dock.scrolled(from: resting, to: resting, judgedBy: &fence, moving: false)
+            await enterSelect(window, pass: "C")
+            let claimed = dock.heldAt
+            let closed = pressClose(window, pass: "C")
+            var releasedAt: ContinuousClock.Instant?
+            var fed = "never"
+            let samples = await sampleBars(window, witness, from: closed, for: .seconds(3)) { _ in
+                if releasedAt == nil, dock.heldAt != claimed { releasedAt = dock.heldAt }
+                guard fed == "never", let release = releasedAt,
+                    ContinuousClock.now >= release.advanced(by: .milliseconds(600))
+                else { return }
+                let now = Self.dockReading(of: scroller)
+                let late = Self.dockReading(of: scroller, y: resting.y - 425)
+                let modeBefore = dock.mode
+                dock.scrolled(from: now, to: late, judgedBy: &fence, moving: false)
+                let after = (ContinuousClock.now - release) / .milliseconds(1)
+                fed =
+                    "at \(Int(after)) ms after the release, idle, y \(Int(now.y)) -> "
+                    + "\(Int(late.y)), mode \(modeBefore.rawValue) -> \(dock.mode.rawValue)"
+            }
+            let released = releasedAt.map { "\(Int(($0 - closed) / .milliseconds(1))) ms" }
+            judgeDoubleBar(
+                "C", samples, witness, in: window,
+                context: "foot at \(Int(atFoot)); release stamped \(released ?? "never") after "
+                    + "the press; late reading \(fed)")
+        }
+    }
+
+    /// Sequence D: the app as it opens, on the Timeline (`MainTabView`'s default); the Timeline
+    /// dragged down, which minimises its tab bar on a device
+    /// (`tabBarMinimizeBehavior(.onScrollDown)` there) — the simulator does not minimise on these
+    /// synthetic drags, so whether it did is logged, not asserted; the Library pressed, scrolled
+    /// down to its scope; Select; Close. Watched 2 s from the press. What A, B and C lack is the
+    /// Timeline's screen, built before the Library: every built screen states the tab bar's
+    /// visibility, and keyed on its own tab the Timeline's said `.automatic` here (MEMNG-684).
+    @Test("double bar D: arriving from the Timeline, Select and Close")
+    func doubleBar_D_arrivingFromTimeline() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await chromeHost(opening: .timeline, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await tabChosen(.timeline, window)
+            await chromeSettle(window, turns: 80)
+            // Minimised, the bar draws its selected tab alone: what it draws narrows.
+            let wide = DoubleBarProbe.tabBarDrawnWidth(in: window) ?? 0
+            var narrow = wide
+            for _ in 0..<6 where narrow > wide - 40 {
+                await drag(window, by: 200)
+                narrow = DoubleBarProbe.tabBarDrawnWidth(in: window) ?? 0
+            }
+            let timelineBar = DoubleBarProbe.tabBarDetail(in: window)
+            print("DOUBLEBAR D timeline tab bar drawn \(wide) -> \(narrow) pt: \(timelineBar)")
+            Self.shoot("doublebar-D-timeline", window)
+            let minimised = narrow <= wide - 40
+            print("DOUBLEBAR D observation: the Timeline's tab bar minimised: \(minimised)")
+
+            #expect(ScopeBarProbe.pressTab(.library, in: window), "D: Library took no press")
+            await tabChosen(.library, window)
+            for _ in 0..<200 where Self.elements(labelled: "Photo", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let arrived = ScopeBarProbe.describe(window)
+            #expect(Self.tabsShow(in: window), "precondition D: the Library arrived: \(arrived)")
+            await scrollDown(window)
+            await scopeStands(window)
+            let scrolled = ScopeBarProbe.describe(window)
+            #expect(Self.scopeShows(in: window), "precondition D: no scope: \(scrolled)")
+            await enterSelect(window, pass: "D")
+            let closed = pressClose(window, pass: "D")
+            let samples = await sampleBars(window, witness, from: closed, for: .seconds(2))
+            let timeline = witness.dock?.bar(on: .timeline).rawValue ?? "nothing"
+            let library = witness.dock?.bar(on: .library).rawValue ?? "nothing"
+            print("DOUBLEBAR D after Close, dock per tab: timeline \(timeline), library \(library)")
+            judgeDoubleBar(
+                "D", samples, witness, in: window,
+                context: "the Timeline's tab bar drawn \(wide) -> \(narrow) pt before the Library")
         }
     }
 }

@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (37)
+
+- After Close in the Library's Select mode, the tab bar no longer comes back on top of the Years | Months | All bar when you had come to the Library from the Timeline. One bar at the bottom, the one the screen is in.
+- I reproduced this one in a test before changing anything, with the app started on the Timeline as yours is: before the change the two bars stood together for the whole two seconds the test watched; after it, one bar. The one thing the test cannot do is shrink the tab bar the way a real finger does on the Timeline, so please try that path too: scroll the Timeline until the bar shrinks, open the Library, Select, Close.
+- Everything from build 36 is in here too: in Select every picture can be picked, Share works on any of them, Delete removes only your own and says how many it skips. Please tap a picture in Select if you have not yet.
+- Nothing else changed in this build.
+
 ## 2.2.1 (36)
 
 - In Select, every picture in the Library can now be picked, including the ones another member added. Before, those tiles were dimmed and a tap on them did nothing.

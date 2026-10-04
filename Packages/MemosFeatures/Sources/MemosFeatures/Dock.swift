@@ -274,9 +274,13 @@ struct MainTabs<Screen: View>: View {
                     screen(tab)
                         // A condition, never a constant: at rest the bar is the system's to
                         // draw, and a root that said `.automatic` while a takeover's destination
-                        // said `.hidden` would bring the bar back under it.
+                        // said `.hidden` would bring the bar back under it. Keyed on the SELECTED
+                        // tab, not this screen's: there is one tab bar and every screen built so
+                        // far keeps saying its value. Keyed per screen, a Timeline built before
+                        // the Library said `.automatic` once Select's claim ended while the
+                        // Library said `.hidden`, and the bar stood beside the scope toolbar.
                         .toolbarVisibility(
-                            dock.bar(on: tab) == .tabs ? .automatic : .hidden,
+                            dock.bar(on: selection) == .tabs ? .automatic : .hidden,
                             for: .tabBar
                         )
                 }
