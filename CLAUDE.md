@@ -155,7 +155,12 @@ passed keeps them for the next incremental build.
 copied, run admission (`bin/mac-gate.sh:1129`, `scripts/gate-admission.sh:636`) requires the host's
 free space plus this lane's own trees to cover a run's peak (12 GiB) and a 3 GiB reserve, polling
 every 60 s up to a 6 h ceiling; it refuses with exit 12 at the ceiling and 13 after three
-consecutive polls it could not measure. The old load gate is gone, and with it the «proceeding
+consecutive polls it could not measure. The 12 GiB is a provisional allowance rounded up from a measurement:
+one cold-lane full gate on 2026-09-27 (`MAC_GATE_HOST=merkur.local bin/mac-gate.sh` at 6d6bf81),
+sampled every ~16 s with `df -Pk /` and `du -sk` of the lane's trees and its simulator device —
+9.4G the largest sampled sum, 11.2G the recorded bound, though the record's own parts do not add
+up to them and its raw samples were not kept (the detail is the comment above
+`GATE_ADMISSION_NEED_KB` in `bin/mac-gate.sh`). The old load gate is gone, and with it the «proceeding
 anyway» after its wait: an unmeasured reading is a refusal, never an admission. The simulator span
 is the host-wide slot `~/build/.gate-slots/sim`, shared by every repo's gate: a run claims it by
 rename(2) (`scripts/gate-admission.sh:378`) just before it creates its device and releases it just

@@ -1123,6 +1123,17 @@ fi
 # never a timer: the wait ends in admission, or in a refusal with admit=12 (the ceiling) or admit=13
 # (three polls that could not read the disk). The load of the host is the simulator admission's
 # question, asked where the simulator runs; the load gate that let a run in on a timer is gone.
+# The peak allowance (GATE_RUN_PEAK_KB, 12 GiB) rests on a measurement, recorded in 31a04cc: on
+# 2026-09-27, 00:51 to 01:24 CEST, one full gate from a lane never built before
+# (`MAC_GATE_HOST=merkur.local bin/mac-gate.sh` at 6d6bf81 on fix/wp349-admission, exit 0) was
+# sampled from the controller every ~16 s with `df -Pk /` and `du -sk` of
+# ~/build/memos-ng-ios/gate/<lane>, ~/build/memos-ng-ios/work/<lane> and the run's simulator device
+# directory. As recorded: the largest sampled sum 9.4G, and a bound on the true peak of 11.2G (the
+# work tree's final 8.3G, the device's 2.7G and the mirror's 0.1G). The record does not reconcile:
+# its parts for the sampled sum (work 7.0G, device 2.7G, mirror 0.1G) add to 9.8G, not 9.4G, and
+# the raw samples were not kept. So 12 GiB is a provisional allowance rounded up from the larger
+# recorded figure, to be replaced by a re-measurement that keeps its samples. Free space could not
+# give the peak: four other lanes moved it during the run.
 GATE_ADMISSION_SELF="$GATE_RUN_COPY/scripts/gate-admission.sh"
 # shellcheck source=scripts/gate-admission.sh
 . "$GATE_ADMISSION_SELF" 2>/dev/null \
