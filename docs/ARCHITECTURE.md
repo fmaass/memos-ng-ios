@@ -104,9 +104,18 @@ so the code is not on it. That delegate is log-only.
 - The API layer surfaces a typed **`APIError`** — never an untyped `Error` at a package boundary.
 - **`401` → signed out.** There is no refresh lifecycle to fall back on: the token IS the
   credential. There is no silent retry, because retrying a revoked token only produces a spinner.
-  The one exception is the step-up management lane: its credential is a short-lived grant rather
-  than the device's token, so a refusal there lapses the grant and the token screen asks for the
-  password again, and the device's session is not touched.
+  Three refusals do not sign the device out:
+  - **the step-up management lane**, because its credential is a short-lived grant rather than the
+    device's token, so a refusal there lapses the grant and the token screen asks for the password
+    again, and the device's session is not touched;
+  - **a refusal of a credential the device has already replaced**, because it is about a token
+    nobody presents any more: `SessionStore.handle` answers it `.superseded` without wiping, and a
+    store that asked acts on an ended session only when nothing was established since its request
+    was issued (`nothingEstablishedSince`);
+  - **a 401 or 403 for a derived picture**, because a thumbnail or preview is fetched from a SIGNED
+    url with no device credential on it, so the refusal is about the signature: a 403 for a
+    signature that has expired asks for a fresh link (`.signatureExpired`), every other 401 or 403
+    leaves the tile `.unavailable` (`MediaImageLoader`), and none becomes a `CredentialRefusal`.
 - Sign-out revokes the presenting token (`POST /api/auth/native/logout`) and wipes the stored
   credential only once the server has said it is dead — a 204, or a 401 meaning it already was.
   **A failed revoke KEEPS the credential** and reports `revokeFailed`: a device that believes it
