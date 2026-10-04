@@ -138,13 +138,13 @@ public final class SessionStore {
     /// A healthy launch and a brief drop-out both pass through `.unverified` in less than this, and
     /// a notice that appeared for either would be a flicker somebody has to read to dismiss.
     public static let bannerDelay = Duration.seconds(2)
-    public private(set) var lastError: String?
+    public private(set) var lastError: String? { didSet { sentenceWrites += 1 } }
     /// The same failure as a VALUE, beside the sentence `lastError` carries.
     ///
     /// A screen can act on one of these and only one — the Local Network denial, which has a
     /// switch behind it — and matching on a sentence to find out which failure it is would make
     /// the wording of an error message load-bearing.
-    public private(set) var lastFailure: NativeLoginError?
+    public private(set) var lastFailure: NativeLoginError? { didSet { sentenceWrites += 1 } }
     /// Why `restore()` parked, as a VALUE beside the sentence `state` carries — `nil` unless the
     /// state is `.unreachable`.
     ///
@@ -521,6 +521,12 @@ public final class SessionStore {
     ) async -> Bool {
         defer { pkce.zeroize() }
 
+        // FIRST, before anything that writes: a call refused as busy changes nothing but its
+        // sentence, so the running sign-in's session and generation are exactly as it left them.
+        guard !signingIn else {
+            lastError = Self.signInAlreadyRunning
+            return false
+        }
         guard let configuration = ServerConfiguration(serverAddress: serverAddress) else {
             failSignIn(.invalidServer)
             return false
@@ -535,10 +541,6 @@ public final class SessionStore {
             return false
         }
 
-        guard !signingIn else {
-            lastError = Self.signInAlreadyRunning
-            return false
-        }
         signingIn = true
         defer { signingIn = false }
 
@@ -551,6 +553,8 @@ public final class SessionStore {
         // another installation completing inside it owns the session by the time the code comes
         // back. See the pasted leg for why `persist`'s own generation cannot answer this.
         let issued = sessionGeneration
+        let establishedAtStart = establishedGeneration
+        let sentencesAtStart = sentenceMark
         do {
             let callbackURL = try await presenter.authenticate(
                 authorizeURL: authorizeURL,
@@ -567,7 +571,10 @@ public final class SessionStore {
             let token = exchanged.token
             guard owns(issued) else {
                 MemosLog.session.info("a sign-in was overtaken before its credential was stored")
-                return false
+                return overtakenSignIn(
+                    nil, establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
             }
             let persistence = await persist(token: token, configuration: configuration)
             guard persistence.outcome != .licenceNotRevoked else {
@@ -602,7 +609,12 @@ public final class SessionStore {
             }
             return true
         } catch NativeLoginError.alreadySigningIn {
-            guard owns(issued) else { return supersededSignIn() }
+            guard owns(issued) else {
+                return overtakenSignIn(
+                    .alreadySigningIn, establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
+            }
             // A second tap on a sign-in that is already on screen. The state this method set on
             // its way in is put back rather than torn down: the FIRST attempt is still running,
             // still showing its browser view, and `failSignIn` here would sign its screen out
@@ -610,11 +622,22 @@ public final class SessionStore {
             abandonSignIn(restoring: previous)
             return false
         } catch let error as NativeLoginError {
-            guard owns(issued) else { return supersededSignIn() }
+            guard owns(issued) else {
+                return overtakenSignIn(
+                    error, establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
+            }
             failSignIn(error)
             return false
         } catch {
-            guard owns(issued) else { return supersededSignIn() }
+            guard owns(issued) else {
+                return overtakenSignIn(
+                    .transport(NativeLoginTransportFailure.classify(error)),
+                    establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
+            }
             // Named by domain and code, never by its own description. Anything that reaches here
             // from the exchange describes the request it was making, and this request's body is
             // the handoff code and the PKCE verifier.
@@ -694,6 +717,12 @@ public final class SessionStore {
     /// Validates a pasted token against `GET /api/auth/user` before storing it: a credential that
     /// is only checked at first use fails later, in the middle of something else.
     public func signIn(serverAddress: String, token candidate: String) async {
+        // FIRST, before anything that writes: a call refused as busy changes nothing but its
+        // sentence, so the running sign-in's session and generation are exactly as it left them.
+        guard !signingIn else {
+            lastError = Self.signInAlreadyRunning
+            return
+        }
         guard let configuration = ServerConfiguration(serverAddress: serverAddress) else {
             lastError = "That does not look like an https server address."
             return
@@ -704,10 +733,6 @@ public final class SessionStore {
             return
         }
 
-        guard !signingIn else {
-            lastError = Self.signInAlreadyRunning
-            return
-        }
         signingIn = true
         defer { signingIn = false }
 
@@ -724,10 +749,17 @@ public final class SessionStore {
         // STARTED in, and a sign-out completing while `whoami` was on the wire is exactly the
         // answer no.
         let issued = sessionGeneration
+        // Which establishment the session was in when this sign-in started — see `overtakenSignIn`.
+        let establishedAtStart = establishedGeneration
+        let sentencesAtStart = sentenceMark
         do {
             let user = try await Self.whoami(client)
             guard owns(issued) else {
                 MemosLog.session.info("a sign-in was overtaken before its credential was stored")
+                overtakenSignIn(
+                    nil, establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
                 return
             }
             let persistence = await persist(token: trimmed, configuration: configuration)
@@ -776,7 +808,10 @@ public final class SessionStore {
             }
         } catch let error as APIError {
             guard owns(issued) else {
-                supersededSignIn()
+                overtakenSignIn(
+                    .api(error), establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
                 return
             }
             // The server answered and refused. Its sentence is built from a status code and
@@ -784,7 +819,11 @@ public final class SessionStore {
             failSignIn(.api(error))
         } catch {
             guard owns(issued) else {
-                supersededSignIn()
+                overtakenSignIn(
+                    .transport(NativeLoginTransportFailure.classify(error)),
+                    establishedAtStart: establishedAtStart,
+                    sentencesAtStart: sentencesAtStart
+                )
                 return
             }
             // The same classification the NATIVE leg already applies to its own transport failures
@@ -1098,7 +1137,7 @@ public final class SessionStore {
                 // it. The sentence it leaves behind is one more write and follows the same rule —
                 // judged against the generation the WIPE installed, because that is the only
                 // number that can still be current when nothing overtook it.
-                if owns(wiped) { lastError = refusal.errorDescription }
+                if owns(wiped) { sayRefused(refusal) }
                 return
             }
             // Neither outcome. A cancellation is this app's own doing — a suspension, a screen
@@ -1415,7 +1454,7 @@ public final class SessionStore {
         // The refusal keeps the headline: a dead token is what the person needs to hear. A wipe
         // that also failed is on the log and in `credentialWipeFailed`, and the next sign-out or
         // restore says so.
-        if owns(wiped) { lastError = refusal.errorDescription }
+        if owns(wiped) { sayRefused(refusal) }
         return .endedSession
     }
 
@@ -1720,6 +1759,57 @@ public final class SessionStore {
     private func supersededSignIn() -> Bool {
         MemosLog.session.info("a sign-in failed for a session that has been replaced")
         return false
+    }
+
+    /// What a sign-in says when a withdrawal overtook it before it stored anything.
+    public static let signInInterrupted =
+        "Signing in was interrupted: the account already on this device was signed out while it "
+        + "ran. Sign in again."
+
+    /// A sign-in that something overtook before it stored anything.
+    ///
+    /// Which something decides it, and the one question is whether a session was ESTABLISHED
+    /// since the sign-in started (`nothingEstablishedSince`). If one was — a launch admitted, a
+    /// put-back reinstalled a client — the screen belongs to that session and this attempt says
+    /// nothing (`supersededSignIn`). If none was, what overtook it was a withdrawal: a sign-out, or
+    /// the refusal rule wiping the credential this sign-in was replacing. That withdrawal owns
+    /// the session's state and installs nothing, so the sign-in still installs nothing either —
+    /// but the screen is the sign-in's, and leaving it to a withdrawal's sentence (or to none)
+    /// tells the person about a token they were replacing rather than the one they just entered.
+    /// So it writes its own outcome, and only that: no state, no client, no generation, so a
+    /// withdrawal still in flight finishes exactly as it would have.
+    ///
+    /// And the sentence must still be its to write. Every write of `lastError` or `lastFailure`
+    /// since the sign-in started is counted; the only ones it may write over are the refusal
+    /// rule's own, which can only be about the credential it was replacing. Anything else — a
+    /// sign-out's warning that the credential would not delete, another sign-in's refusal — was
+    /// written by somebody later, and this sign-in says nothing over it.
+    @discardableResult
+    private func overtakenSignIn(
+        _ failure: NativeLoginError?, establishedAtStart: Int,
+        sentencesAtStart: (all: Int, refusals: Int)
+    ) -> Bool {
+        guard nothingEstablishedSince(establishedAtStart) else { return supersededSignIn() }
+        let written = sentenceWrites - sentencesAtStart.all
+        guard written == refusalSentenceWrites - sentencesAtStart.refusals else {
+            return supersededSignIn()
+        }
+        MemosLog.session.info("a sign-in was overtaken by a withdrawal; it says so")
+        lastError = failure?.message ?? Self.signInInterrupted
+        lastFailure = failure
+        return false
+    }
+
+    /// Writes of `lastError` and `lastFailure`, and how many of them were the refusal rule's own
+    /// sentence — what an overtaken sign-in asks before it writes (`overtakenSignIn`).
+    @ObservationIgnored private var sentenceWrites = 0
+    @ObservationIgnored private var refusalSentenceWrites = 0
+    private var sentenceMark: (all: Int, refusals: Int) { (sentenceWrites, refusalSentenceWrites) }
+
+    /// The refusal rule's sentence, after a wipe it caused.
+    private func sayRefused(_ refusal: CredentialRefusal) {
+        lastError = refusal.errorDescription
+        refusalSentenceWrites += 1
     }
 
     private func failSignIn(_ error: NativeLoginError) {

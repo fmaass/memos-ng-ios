@@ -15,6 +15,12 @@ private let tokenRowOperation = "native_token_api_auth_native_token_get"
 private let storedToken = "memos_pat_stored_secret"
 private let storedAddress = "https://memos.example.invalid"
 private let storedHost = "memos.example.invalid"
+/// The account a switch signs in as, so the screen can be seen to name it rather than the one it
+/// replaced.
+private let switchedUser = """
+    {"subject":"b-account","display_name":"B","email":null,\
+    "role":"user","auth_kind":"oidc"}
+    """
 
 /// SHA-256 of the tokens these suites use, computed OUTSIDE this app.
 ///
@@ -1190,6 +1196,469 @@ struct OfflineSessionTests {
         #expect(ended, "the re-ask never left `.signingIn`")
         #expect(session.state == .signedOut, "the re-ask left the screen on a spinner nothing ends")
         #expect(session.lastError == SessionStore.storageUnreadable)
+    }
+
+    // MARK: - a refusal of the credential a sign-in is replacing (MEMNG-576)
+
+    /// A launch admitted as the stored account, whose check is held until `checkMayAnswer` opens
+    /// and is then REFUSED; every other request goes to `rest`.
+    private func refusedLaunch(
+        credentials: InMemoryCredentials,
+        checkArrived: LockedValue<Bool>,
+        checkMayAnswer: Gate,
+        rest: @escaping StubTransport.Handler
+    ) -> SessionStore {
+        makeSession(credentials: credentials, file: boundFile(), account: SpyAccountStore()) {
+            request, body, operation in
+            if operation == whoami,
+                request.headerFields[.authorization] == "Bearer \(storedToken)"
+            {
+                checkArrived.set(true)
+                await checkMayAnswer.wait()
+                return Stub.empty(.unauthorized)
+            }
+            return try await rest(request, body, operation)
+        }
+    }
+
+    /// The ordering the ticket names: the launch check's refusal of the credential being replaced
+    /// answers while the sign-in's own check is still on the wire. The refusal rule wipes — the
+    /// credential IS dead — and the sign-in, overtaken by that withdrawal, installs nothing. What
+    /// it may not do is return without a word, leaving the screen to say a session ended over a
+    /// token the person had just typed: it says it was interrupted, so they can sign in again.
+    @Test("a refusal of the replaced credential before the sign-in stores does not swallow it")
+    func aRefusalBeforeTheSignInStoresDoesNotSwallowIt() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        // Whatever this test ends in, a pass or a failed requirement, no request stays parked.
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+        }
+        let stored = credentials()
+        let session = refusedLaunch(
+            credentials: stored, checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            signInArrived.set(true)
+            await signInMayAnswer.wait()
+            return Stub.json(switchedUser)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+        #expect(session.state == .signingIn, "the premise: the sign-in holds the session")
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refused launch check ended")
+        signInMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the switch ended")
+
+        #expect(session.state == .signedOut, "the refusal ended the replaced session")
+        #expect(
+            session.lastError == SessionStore.signInInterrupted,
+            "the sign-in ended without a word, under a sentence about the token it was replacing"
+        )
+        #expect(stored.isEmpty, "the refused credential stayed, or the overtaken one was stored")
+    }
+
+    /// The same ordering with a sign-in the server then FAILS. Its own sentence is the one the
+    /// person needs — the refused launch check is about a credential they were already replacing.
+    @Test("a refusal of the replaced credential before a failed sign-in leaves its sentence")
+    func aRefusalBeforeAFailedSignInLeavesItsSentence() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+        }
+        let session = refusedLaunch(
+            credentials: credentials(), checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            signInArrived.set(true)
+            await signInMayAnswer.wait()
+            return Stub.empty(.internalServerError)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refused launch check ended")
+        signInMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the failed switch ended")
+
+        // Exactly what the same failure says when nothing overtakes it.
+        let control = makeSession(credentials: InMemoryCredentials()) { _, _, _ in
+            Stub.empty(.internalServerError)
+        }
+        await control.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        let expected = try #require(control.lastFailure, "the premise: the failure is classified")
+        guard case .api = expected else {
+            Issue.record("a 500 is a server answer, not \(expected)")
+            return
+        }
+
+        #expect(session.state == .signedOut)
+        #expect(session.lastFailure == expected, "the sign-in's failure was swallowed")
+        #expect(session.lastError == expected.message)
+        #expect(session.lastError == control.lastError)
+    }
+
+    /// The refusal answering AFTER the sign-in stored and established: it is about a session the
+    /// sign-in has already replaced, and the person stays signed in as the new account.
+    @Test("a refusal of the replaced credential after the sign-in stored changes nothing")
+    func aRefusalAfterTheSignInStoredChangesNothing() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        defer { checkMayAnswer.open() }
+        let stored = credentials()
+        let session = refusedLaunch(
+            credentials: stored, checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            return Stub.json(switchedUser)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+
+        await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        try #require(session.state.user?.subject == "b-account", "the premise: the switch stored")
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refused launch check ended")
+
+        #expect(session.state.user?.subject == "b-account", "a stale refusal ended the new session")
+        #expect(session.lastError == nil)
+        #expect((try? stored.string(for: SessionStore.tokenAccount)) == "memos_pat_b")
+    }
+
+    /// The refusal answering AFTER the sign-in failed: the failure's sentence is the one on the
+    /// screen, and the refusal of the credential the sign-in had already let go of does not
+    /// replace it.
+    @Test("a refusal of the replaced credential after the sign-in failed keeps its sentence")
+    func aRefusalAfterTheSignInFailedKeepsItsSentence() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        defer { checkMayAnswer.open() }
+        let session = refusedLaunch(
+            credentials: credentials(), checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            return Stub.empty(.internalServerError)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+
+        await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        let sentence = session.lastError
+        try #require(sentence != nil, "the premise: the switch failed and said so")
+        try #require(session.lastFailure != nil)
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refused launch check ended")
+
+        #expect(session.state == .signedOut)
+        #expect(session.lastError == sentence, "a stale refusal replaced the sign-in's sentence")
+        #expect(session.lastFailure != nil)
+    }
+
+    /// The native leg had the same defect: the refusal wiped while the exchange was on the wire,
+    /// and the sign-in returned without a word.
+    @Test("a refusal of the replaced credential during a native sign-in does not swallow it")
+    func aRefusalDuringANativeSignInDoesNotSwallowIt() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let exchangeArrived = LockedValue<Bool>(false)
+        let exchangeMayAnswer = Gate()
+        defer {
+            checkMayAnswer.open()
+            exchangeMayAnswer.open()
+        }
+        let stored = credentials()
+        let session = refusedLaunch(
+            credentials: stored, checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == "native_exchange_api_auth_native_exchange_post" else {
+                return Stub.json(Stub.user)
+            }
+            exchangeArrived.set(true)
+            await exchangeMayAnswer.wait()
+            return Stub.json(Stub.exchange(token: "memos_pat_device"))
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+
+        let signedIn = LockedValue<Bool>(false)
+        let switching = Task {
+            let answer = await session.signInNatively(
+                serverAddress: storedHost,
+                deviceName: "Fabian's iPhone",
+                presenter: StubPresenter(
+                    behaviour: .callback(
+                        "https://memos.example.invalid/ios/auth/callback?code=handoff-123"
+                    )
+                )
+            )
+            signedIn.set(answer)
+        }
+        let exchangeWent = await arrives { exchangeArrived.get() }
+        try #require(exchangeWent, "the exchange went out")
+        #expect(session.state == .signingIn, "the premise: the sign-in holds the session")
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refused launch check ended")
+        exchangeMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the native switch ended")
+
+        #expect(!signedIn.get(), "an overtaken sign-in installs nothing")
+        #expect(session.state == .signedOut)
+        #expect(
+            session.lastError == SessionStore.signInInterrupted,
+            "the sign-in ended without a word, under a sentence about the token it was replacing"
+        )
+        #expect(stored.isEmpty)
+    }
+
+    /// A second sign-in while one is running is refused at once: it sends nothing, waits on
+    /// nothing, and the running one still stores.
+    @Test("a sign-in refused as already running sends nothing and leaves the running one alone")
+    func aSignInRefusedAsRunningTakesNothingOver() async throws {
+        let signIns = Counter()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        defer { signInMayAnswer.open() }
+        let session = makeSession(credentials: InMemoryCredentials()) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            signIns.increment()
+            signInArrived.set(true)
+            await signInMayAnswer.wait()
+            return Stub.json(switchedUser)
+        }
+        let first = Task { await session.signIn(serverAddress: storedHost, token: "memos_pat_b") }
+        let went = await arrives { signInArrived.get() }
+        try #require(went, "the first sign-in's check went out")
+
+        // With the first one's answer still held: a second that waited on it would never end.
+        let second = Task { await session.signIn(serverAddress: storedHost, token: "memos_pat_c") }
+        let refused = await finishes(second)
+        try #require(refused, "the second sign-in waited instead of refusing")
+        #expect(session.lastError == SessionStore.signInAlreadyRunning)
+        #expect(signIns.count == 1, "the refused sign-in sent a request")
+
+        signInMayAnswer.open()
+        let ended = await finishes(first)
+        try #require(ended, "the first sign-in ended")
+        #expect(session.state.user?.subject == "b-account")
+    }
+
+    /// The other half of `overtakenSignIn`'s question: a sign-in overtaken by a session that was
+    /// ESTABLISHED meanwhile — a launch admitting the stored account — says nothing, because the
+    /// screen is that session's now.
+    @Test("a sign-in overtaken by an established session says nothing over it")
+    func aSignInOvertakenByAnEstablishmentSaysNothing() async throws {
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        defer { signInMayAnswer.open() }
+        let session = makeSession(credentials: credentials(), file: boundFile()) {
+            request, _, operation in
+            guard operation == whoami,
+                request.headerFields[.authorization] == "Bearer memos_pat_b"
+            else { return Stub.json(Stub.user) }
+            signInArrived.set(true)
+            await signInMayAnswer.wait()
+            return Stub.json(switchedUser)
+        }
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let went = await arrives { signInArrived.get() }
+        try #require(went, "the sign-in's check went out")
+
+        let launch = Task { await session.restore() }
+        let launched = await finishes(launch)
+        try #require(launched, "the launch ended")
+        try #require(
+            session.state.user?.subject == "fabian",
+            "the premise: a launch established the stored account meanwhile"
+        )
+
+        signInMayAnswer.open()
+        let ended = await finishes(switching)
+        try #require(ended, "the overtaken sign-in ended")
+        #expect(session.lastError == nil, "the overtaken sign-in wrote over the session after it")
+        #expect(session.state.user?.subject == "fabian")
+    }
+
+    /// An overtaken sign-in writes over the refusal rule's sentence and nothing else. A sign-out
+    /// whose credential would not delete leaves the one warning the person must read; the sign-in
+    /// it overtook says nothing over it.
+    @Test("an overtaken sign-in does not write over a sign-out's credential warning")
+    func anOvertakenSignInKeepsTheWipeWarning() async throws {
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        defer { signInMayAnswer.open() }
+        let stuck = UnwipeableCredentials()
+        try stuck.set(storedToken, for: SessionStore.tokenAccount)
+        try stuck.set(storedAddress, for: SessionStore.serverAccount)
+        let session = makeSession(credentials: stuck) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            signInArrived.set(true)
+            await signInMayAnswer.wait()
+            return Stub.json(switchedUser)
+        }
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let went = await arrives { signInArrived.get() }
+        try #require(went, "the sign-in's check went out")
+        await session.signOutWithoutRevoking()
+        try #require(
+            session.lastError == SessionStore.credentialWipeWarning,
+            "the premise: the sign-out could not delete the credential and said so"
+        )
+
+        signInMayAnswer.open()
+        let ended = await finishes(switching)
+        try #require(ended, "the overtaken sign-in ended")
+        #expect(session.lastError == SessionStore.credentialWipeWarning, "the warning was erased")
+        #expect(session.state == .signedOut)
+    }
+
+    /// A call refused as busy writes nothing but its sentence, and that sentence is not the
+    /// overtaken sign-in's to replace. A native sign-in with an unusable address used to fail
+    /// BEFORE the busy check — moving the generation and writing its own failure — and the
+    /// overtaken sign-in then wrote over it.
+    @Test("a sign-in refused as busy is not undone by the overtaken one's late answer")
+    func aBusyRefusalIsNotWrittenOver() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+        }
+        let session = refusedLaunch(
+            credentials: credentials(), checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            signInArrived.set(true)
+            await signInMayAnswer.wait()
+            return Stub.json(switchedUser)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refusal's wipe finished")
+
+        let native = await session.signInNatively(
+            serverAddress: "",
+            deviceName: "Fabian's iPhone",
+            presenter: StubPresenter(behaviour: .failure(.cancelled))
+        )
+        #expect(!native)
+        #expect(session.lastError == SessionStore.signInAlreadyRunning)
+        #expect(session.lastFailure == nil, "the busy call failed as if it had run")
+
+        signInMayAnswer.open()
+        let ended = await finishes(switching)
+        try #require(ended, "the overtaken sign-in ended")
+        #expect(
+            session.lastError == SessionStore.signInAlreadyRunning, "a later sentence was replaced"
+        )
+    }
+
+    /// The native leg's failures reach the screen through the same door: the exchange fails
+    /// after the refusal wiped the credential it was replacing, and the screen says exactly what
+    /// the exchange said.
+    @Test("a native sign-in failing after a refusal overtook it says exactly why")
+    func anOvertakenNativeFailureSaysWhy() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let exchangeArrived = LockedValue<Bool>(false)
+        let exchangeMayAnswer = Gate()
+        defer {
+            checkMayAnswer.open()
+            exchangeMayAnswer.open()
+        }
+        let session = refusedLaunch(
+            credentials: credentials(), checkArrived: checkArrived, checkMayAnswer: checkMayAnswer
+        ) { _, _, operation in
+            guard operation == "native_exchange_api_auth_native_exchange_post" else {
+                return Stub.json(Stub.user)
+            }
+            exchangeArrived.set(true)
+            await exchangeMayAnswer.wait()
+            return Stub.exchangeFailure("code_expired")
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+        let switching = Task {
+            _ = await session.signInNatively(
+                serverAddress: storedHost,
+                deviceName: "Fabian's iPhone",
+                presenter: StubPresenter(
+                    behaviour: .callback(
+                        "https://memos.example.invalid/ios/auth/callback?code=handoff-123"
+                    )
+                )
+            )
+        }
+        let exchangeWent = await arrives { exchangeArrived.get() }
+        try #require(exchangeWent, "the exchange went out")
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the refused launch check ended")
+        exchangeMayAnswer.open()
+        let ended = await finishes(switching)
+        try #require(ended, "the native sign-in ended")
+
+        #expect(session.lastFailure == .exchangeRejected(.codeExpired))
+        #expect(session.lastError == NativeExchangeFailure.codeExpired.message)
     }
 }
 
