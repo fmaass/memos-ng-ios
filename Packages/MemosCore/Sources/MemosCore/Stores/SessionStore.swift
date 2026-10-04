@@ -254,7 +254,9 @@ public final class SessionStore {
     /// ONE slot for both, because they ask the server the same question. `RootView`'s task and the
     /// background launch's `startOutbox` both call `restore()` while `state.user` is nil, and two
     /// admissions would bump the generation twice and then each discard the other's answer.
-    private var validationInFlight: Task<Void, Never>?
+    /// Readable so a test can wait for the flight that held a question to end, rather than for a
+    /// number of turns it hopes is enough.
+    private(set) var validationInFlight: Task<Void, Never>?
     /// Whether the check in flight can still answer for the session on this device.
     ///
     /// A check that was invalidated will write nothing — every effect it has asks first — so a
@@ -819,6 +821,22 @@ public final class SessionStore {
         await validating { await self.performRestore() }
     }
 
+    /// The launch question asked again for a session a refused sign-in put back while it was
+    /// still waiting on it. The sentence on screen is the sign-in's, so this ask leaves it.
+    private func restoreAfterRefusedSignIn(expecting generation: Int) async {
+        await validating { [self] in
+            // A hop through the injected clock, INSIDE the flight and before the question, so a
+            // test can hold the gap between taking the slot and asking open and finish a sign-in
+            // in it. A clock that throws ends the wait, not the question.
+            try? await sleeper(.zero)
+            // Asked HERE, inside the flight, with nothing awaited between it and the generation
+            // `performRestore` takes: the task that scheduled this is hops behind, and a sign-in
+            // that ended in between owns whatever this would otherwise re-admit.
+            guard generation == sessionGeneration else { return }
+            await performRestore(recovering: true)
+        }
+    }
+
     /// Asks the server about the credential the session is already holding.
     ///
     /// The re-validation half of the lifecycle: the foreground trigger and the retry schedule both
@@ -877,7 +895,7 @@ public final class SessionStore {
         validationSuperseded = validationInFlight != nil
     }
 
-    private func performRestore() async {
+    private func performRestore(recovering: Bool = false) async {
         // Taken BEFORE the first read, not after it: the credential read is an await, and a wipe
         // or a sign-in landing inside it owns the session by the time it returns. Checked again
         // the moment it does.
@@ -898,6 +916,10 @@ public final class SessionStore {
             // read that failed belongs to the session that asked for it, and writing it over a
             // session installed since would put a storage warning on somebody else's screen.
             guard owns(issued) else { return }
+            // A launch reads before it announces anything, so its failure is still `.signedOut`.
+            // A recovery starts in `.signingIn`, the one state the sign-in screen will not act in,
+            // so it lands where that launch does.
+            if recovering { state = .signedOut }
             lastError = Self.storageUnreadable
             return
         }
@@ -936,7 +958,7 @@ public final class SessionStore {
             }
         }
 
-        lastError = nil
+        if !recovering { lastError = nil }
         restoreFailure = nil
         let credential = PresentedCredential(storedToken)
         // It came OUT of the keychain, so it is this device's before anything asks the server:
@@ -1010,6 +1032,17 @@ public final class SessionStore {
             // against a sign-out.
             guard generation == sessionGeneration else {
                 MemosLog.session.info("GET /api/auth/user answered for a session that has ended")
+                return
+            }
+            // A sign-in has taken the session over without ending it: it moves the generation only
+            // once it stores, puts back or fails, so the fence above still passes. Adopted here, an
+            // answer about the credential it is replacing reads `.signingIn`'s missing user as a
+            // different account, installs that credential and moves the generation out from under
+            // the sign-in, which then returns without a word — a refused switch whose sentence is
+            // never written. Whatever the sign-in ends in replaces this session, signs it out, or
+            // puts it back and asks again.
+            guard !signingIn else {
+                MemosLog.session.info("GET /api/auth/user answered while a sign-in held it")
                 return
             }
             if let current = state.user, current.subject == user.subject {
@@ -1837,6 +1870,17 @@ public final class SessionStore {
         // flight exit without doing anything, so a session put back as `.verifying` would sit
         // there with no task and no retry behind it. The same rule as a cancelled check: whatever
         // is not confirmed gets a replacement, immediately.
+        if snapshot.state == .signingIn, snapshot.client == nil {
+            // A launch check that had not admitted anybody: no user to re-verify, so the retry
+            // ladder has nothing to ask about. Its own answer was dropped while the sign-in held
+            // the session, or is fenced out by the bump above, so the launch question itself is
+            // asked again — or the spinner stays up with nothing behind it.
+            let generation = sessionGeneration
+            Task { @MainActor [self] in
+                await restoreAfterRefusedSignIn(expecting: generation)
+            }
+            return
+        }
         guard verification != .verified, state.user != nil else { return }
         scheduleRetry(attempt: 0, delay: .zero)
     }

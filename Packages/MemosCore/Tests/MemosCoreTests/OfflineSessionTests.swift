@@ -71,8 +71,10 @@ final class FlakyCredentials: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [String: String] = [:]
     private var refusing = false
+    private var refusingReads = false
 
     func refuseWrites() { lock.withLock { refusing = true } }
+    func refuseReads() { lock.withLock { refusingReads = true } }
 
     func set(_ value: String, for account: String) async throws {
         let refuse: Bool = lock.withLock { refusing }
@@ -80,7 +82,11 @@ final class FlakyCredentials: CredentialStore, @unchecked Sendable {
         lock.withLock { storage[account] = value }
     }
 
-    func string(for account: String) async throws -> String? { lock.withLock { storage[account] } }
+    func string(for account: String) async throws -> String? {
+        let refuse: Bool = lock.withLock { refusingReads }
+        if refuse { throw Refused() }
+        return lock.withLock { storage[account] }
+    }
 
     func remove(_ account: String) async throws {
         _ = lock.withLock { storage.removeValue(forKey: account) }
@@ -178,6 +184,31 @@ struct OfflineSessionTests {
     /// report, not a suite to hang.
     private func settle(until condition: () -> Bool, turns: Int = 200) async {
         for _ in 0..<turns where !condition() { await Task.yield() }
+    }
+
+    /// Waits for something another task reports, in real time and up to a bound.
+    ///
+    /// For a signal that crosses executors — a clock the session calls from a task of its own, a
+    /// request answered off the main actor — where yielding the main actor says nothing about when
+    /// it arrives. The bound only decides how long a signal that never comes takes to FAIL, so a
+    /// regression that parks the session reports itself instead of hanging the run; a signal that
+    /// comes ends the wait.
+    private func arrives(_ condition: () -> Bool, tries: Int = 500) async -> Bool {
+        for _ in 0..<tries {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    /// Whether `task` ends within the same bound, without waiting on it for ever.
+    private func finishes(_ task: Task<Void, Never>, tries: Int = 500) async -> Bool {
+        let done = LockedValue<Bool>(false)
+        Task {
+            await task.value
+            done.set(true)
+        }
+        return await arrives({ done.get() }, tries: tries)
     }
 
     // MARK: - admission
@@ -888,6 +919,277 @@ struct OfflineSessionTests {
             session.verification == .verified,
             "a session put back unconfirmed with nothing running is stranded there"
         )
+    }
+
+    /// The interleaving the test above loses now and then, forced. A sign-in moves no generation
+    /// until it stores, puts back or fails, so a check issued before it passes its own fence; and
+    /// `.signingIn` has no user, so a success read as "a different account" installed the
+    /// credential being replaced and bumped the generation out from under the sign-in, which then
+    /// returned without writing its refusal.
+    @Test("a check answering during a sign-in does not swallow the sign-in's refusal")
+    func aCheckAnsweringDuringASignInDoesNotSwallowIt() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        // Whatever this test ends in, a pass or a failed requirement, no request stays parked.
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+        }
+        let account = SpyAccountStore()
+        let session = makeSession(
+            credentials: credentials(),
+            file: boundFile(),
+            account: account,
+            // One replacement check, so the put-back session can be seen to confirm.
+            sleeper: RetryLadderSleeper(stoppingAfter: 1)
+        ) { request, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            if request.headerFields[.authorization] == "Bearer \(storedToken)" {
+                checkArrived.set(true)
+                await checkMayAnswer.wait()
+            } else {
+                signInArrived.set(true)
+                await signInMayAnswer.wait()
+            }
+            return Stub.json(Stub.user)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+
+        account.refuseNextClears(1)
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+        #expect(session.state == .signingIn, "the premise: the sign-in holds the session")
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the launch check ended")
+        signInMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the refused switch ended")
+
+        #expect(session.lastError == SessionStore.licenceBlockedSignIn, "the refusal went unsaid")
+        #expect(session.state.user != nil, "the refused switch put the session back")
+        let confirmed = await arrives { session.verification == .verified }
+        #expect(confirmed, "and the put-back session asked again")
+        #expect(
+            session.lastError == SessionStore.licenceBlockedSignIn,
+            "the replacement check wiped the refusal the person has not read yet"
+        )
+    }
+
+    /// The same interleaving over a launch that admitted nobody: no bound file, so the launch
+    /// waits on the server in `.signingIn`. The refused switch puts that state back with no user
+    /// and no client, which gives the retry ladder nothing to ask about — so unless the launch
+    /// question is asked again, the spinner stays up with nothing behind it.
+    @Test("a refused sign-in over an unadmitted launch asks the launch question again")
+    func aRefusedSignInOverAnUnadmittedLaunchAsksAgain() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        // Whatever this test ends in, a pass or a failed requirement, no request stays parked.
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+        }
+        let account = SpyAccountStore()
+        let session = makeSession(credentials: credentials(), account: account) {
+            request, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            if request.headerFields[.authorization] == "Bearer \(storedToken)" {
+                checkArrived.set(true)
+                await checkMayAnswer.wait()
+            } else {
+                signInArrived.set(true)
+                await signInMayAnswer.wait()
+            }
+            return Stub.json(Stub.user)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+        #expect(session.state == .signingIn, "the premise: the launch admitted nobody")
+
+        account.refuseNextClears(1)
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the launch check ended")
+        signInMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the refused switch ended")
+        #expect(session.lastError == SessionStore.licenceBlockedSignIn, "the switch was refused")
+
+        let admitted = await arrives { session.state.user != nil }
+        #expect(admitted, "the launch was left on its spinner with nothing asking")
+        #expect(
+            session.lastError == SessionStore.licenceBlockedSignIn,
+            "asking again wiped the refusal the person has not read yet"
+        )
+    }
+
+    /// A sign-in that fails between the put-back and the launch question it scheduled owns the
+    /// session it left. Judged by the generation the question is asked UNDER, rather than the one
+    /// the put-back installed, the question re-admits the account that failed sign-in replaced.
+    ///
+    /// The generation moves while the re-ask already HOLDS the validation slot and is parked on
+    /// its first await — after any check made on the way into the flight, before the question.
+    /// A guard asked outside `validating` has passed by then, so only one asked inside the flight,
+    /// immediately before the question, can see the failure. The verdict is read once the flight
+    /// that held the question has ended, not after a number of turns.
+    @Test("a sign-in that fails before the re-asked launch question runs is not undone by it")
+    func aSignInFailingBeforeTheReaskWins() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        let reaskHolding = LockedValue<Bool>(false)
+        let reaskMayRun = Gate()
+        // Whatever this test ends in, a pass or a failed requirement, nothing stays parked.
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+            reaskMayRun.open()
+        }
+        let account = SpyAccountStore()
+        let handler: StubTransport.Handler = { request, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            switch request.headerFields[.authorization] ?? "" {
+            case "Bearer \(storedToken)":
+                checkArrived.set(true)
+                await checkMayAnswer.wait()
+            case "Bearer memos_pat_b":
+                signInArrived.set(true)
+                await signInMayAnswer.wait()
+            default:
+                throw offline()
+            }
+            return Stub.json(Stub.user)
+        }
+        let session = SessionStore(
+            credentials: credentials(),
+            makeClient: { _, token in Stub.client(token: token, handler: handler) },
+            // The one wait in this test is the re-ask's hop inside its flight; holding it opens
+            // the gap between taking the slot and asking the question.
+            sleeper: { _ in
+                reaskHolding.set(true)
+                await reaskMayRun.wait()
+            },
+            account: account,
+            identity: MediaIdentity()
+        )
+        // Every wait below is bounded: a regression that parks the session fails here rather
+        // than holding the run open.
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+        account.refuseNextClears(1)
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the launch check ended")
+        signInMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the refused switch ended")
+        #expect(session.lastError == SessionStore.licenceBlockedSignIn, "the switch was refused")
+
+        let holding = await arrives { reaskHolding.get() }
+        try #require(holding, "the put-back asked the launch question again")
+        let reask = try #require(
+            session.validationInFlight,
+            "the re-ask holds the validation slot while it waits to ask"
+        )
+
+        // The generation moves HERE: the flight is taken, its question not yet asked.
+        let failing = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_c")
+        }
+        let failingEnded = await finishes(failing)
+        try #require(failingEnded, "the later sign-in ended")
+        let failure = session.lastError
+        #expect(session.state == .signedOut, "the premise: the later sign-in failed")
+        #expect(failure != nil && failure != SessionStore.licenceBlockedSignIn)
+
+        reaskMayRun.open()
+        let reaskEnded = await finishes(reask)
+        try #require(reaskEnded, "the flight that held the question ended")
+        #expect(session.state == .signedOut, "the re-ask re-admitted what the failed sign-in left")
+        #expect(session.lastError == failure, "and the failure the person was reading is gone")
+    }
+
+    /// The re-asked launch question starts in `.signingIn`, where the sign-in screen does not act.
+    /// A read that fails there must leave the screen somewhere it does, as a launch's does.
+    @Test("a re-asked launch question whose read fails leaves the sign-in screen usable")
+    func aReaskWhoseReadFailsIsNotStranded() async throws {
+        let checkArrived = LockedValue<Bool>(false)
+        let checkMayAnswer = Gate()
+        let signInArrived = LockedValue<Bool>(false)
+        let signInMayAnswer = Gate()
+        // Whatever this test ends in, a pass or a failed requirement, no request stays parked.
+        defer {
+            checkMayAnswer.open()
+            signInMayAnswer.open()
+        }
+        let account = SpyAccountStore()
+        let vault = FlakyCredentials()
+        try? await vault.set(storedToken, for: SessionStore.tokenAccount)
+        try? await vault.set(storedAddress, for: SessionStore.serverAccount)
+        let session = makeSession(credentials: vault, account: account) {
+            request, _, operation in
+            guard operation == whoami else { return Stub.json(Stub.user) }
+            if request.headerFields[.authorization] == "Bearer \(storedToken)" {
+                checkArrived.set(true)
+                await checkMayAnswer.wait()
+            } else {
+                signInArrived.set(true)
+                await signInMayAnswer.wait()
+            }
+            return Stub.json(Stub.user)
+        }
+        await session.enteredForeground()
+        let launch = Task { await session.restore() }
+        let checkWent = await arrives { checkArrived.get() }
+        try #require(checkWent, "the launch check went out")
+        #expect(session.state == .signingIn, "the premise: the launch admitted nobody")
+        // The launch has read; the re-ask's read is the next one.
+        vault.refuseReads()
+
+        account.refuseNextClears(1)
+        let switching = Task {
+            await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
+        }
+        let signInWent = await arrives { signInArrived.get() }
+        try #require(signInWent, "the switch's check went out")
+        checkMayAnswer.open()
+        let launchEnded = await finishes(launch)
+        try #require(launchEnded, "the launch check ended")
+        signInMayAnswer.open()
+        let switchEnded = await finishes(switching)
+        try #require(switchEnded, "the refused switch ended")
+
+        let ended = await arrives { session.state != .signingIn }
+        #expect(ended, "the re-ask never left `.signingIn`")
+        #expect(session.state == .signedOut, "the re-ask left the screen on a spinner nothing ends")
+        #expect(session.lastError == SessionStore.storageUnreadable)
     }
 }
 
