@@ -245,6 +245,35 @@ struct ManageTokensScreenTests {
         #expect(!says("close this screen before creating or revoking tokens", locked))
     }
 
+    /// The name is taken from `User.name`, as Settings hands it to the screen. An account whose
+    /// display name came back blank is named by its address, never by the blank — which read
+    /// "signed in as , but cannot verify…".
+    @Test("an account with a blank display name is stated by its address")
+    func aBlankDisplayNameIsStatedByTheAddress() {
+        for blank in ["", "  "] {
+            let user = User(
+                subject: "sub-7f3a",
+                displayName: blank,
+                email: "fabian@example.invalid",
+                role: "user",
+                authKind: "token"
+            )
+            let listed = ScreenProbe.labels(
+                of: screen(
+                    state: .listed([token(id: 1, name: "Kitchen phone")]),
+                    appAccountName: user.name
+                ),
+                size: CGSize(width: 393, height: 1400)
+            )
+
+            #expect(
+                says("signed in as fabian@example.invalid, but", listed),
+                "display name \(blank.debugDescription) was not stated by the address"
+            )
+            #expect(!says("signed in as \(blank),", listed))
+        }
+    }
+
     /// A screen reader reaching a column of identical "Revoke" buttons cannot tell which token it
     /// is about to destroy, so every one of them is named.
     @Test("each row's revoke control is named after its own token")

@@ -170,4 +170,25 @@ struct SignOutConfirmationTests {
         #expect(SignOutFlow.accountHeading(name: "   ") == "Signed in")
         #expect(SignOutFlow.accountHeading(name: "") == "Signed in")
     }
+
+    /// The Settings account row reads `User.name` twice, for the heading and for the avatar's
+    /// initials. An account whose display name came back blank is named there by its address,
+    /// not left as a bare "Signed in" over a "?" avatar.
+    @Test("the account row names an account with a blank display name by its address")
+    func accountRowFallsThroughABlankDisplayName() {
+        for blank in ["", "  "] {
+            let user = User(
+                subject: "sub-7f3a",
+                displayName: blank,
+                email: "fabian@example.invalid",
+                role: "user",
+                authKind: "token"
+            )
+
+            #expect(
+                SignOutFlow.accountHeading(name: user.name) == "Signed in as fabian@example.invalid"
+            )
+            #expect(AccountAvatar.initials(for: user.name) == "F")
+        }
+    }
 }

@@ -25,7 +25,19 @@ public struct User: Sendable, Equatable, Identifiable, Codable {
     }
 
     public var id: String { subject }
-    public var name: String { displayName ?? email ?? subject }
+
+    /// What to call this account: the display name, else the address, else the subject. A value
+    /// that is blank — empty, or nothing but whitespace — is passed over as if it were absent,
+    /// because `??` alone takes `""` for a name and a screen then reads "signed in as , …". A value
+    /// that is not blank is handed over as it came, whitespace around it included.
+    public var name: String {
+        for candidate in [displayName, email] {
+            if let candidate, !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return candidate
+            }
+        }
+        return subject
+    }
 }
 
 extension User {
