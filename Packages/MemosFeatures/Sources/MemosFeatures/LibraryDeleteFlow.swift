@@ -11,19 +11,22 @@ import SwiftUI
 ///
 /// The uids travel INSIDE the stage, in the order they were chosen, for the reason the single
 /// flow carries its one: a question asked about one set of pictures and a run sent about another
-/// is the defect this type exists to make impossible.
+/// is the defect this type exists to make impossible. They are only ever the member's OWN chosen
+/// pictures (`tap(_:in:)`); the question carries how many chosen pictures were left out because
+/// they are another member's (MEMNG-684), so it can say so.
 @MainActor
 @Observable
 public final class LibraryDeleteFlow {
     public enum Stage: Equatable, Sendable {
         case idle
-        case asking([String])
+        case asking([String], skipped: Int = 0)
         case deleting([String])
     }
 
     public enum Event: Equatable, Sendable {
-        /// The toolbar's Delete, with the selection at that moment. Deliberately harmless.
-        case tapped([String])
+        /// The toolbar's Delete, with the own pictures of the selection at that moment and how
+        /// many others it skips (`tap(_:in:)`). Deliberately harmless.
+        case tapped([String], skipped: Int = 0)
         /// The question was answered yes, in the alert.
         case confirmed
         /// The question was dismissed, by Cancel or by the alert going away.
@@ -44,8 +47,23 @@ public final class LibraryDeleteFlow {
 
     /// The pictures a question is open about, or nil while none is. What the alert binds to.
     public var asking: [String]? {
-        guard case .asking(let uids) = stage else { return nil }
+        guard case .asking(let uids, _) = stage else { return nil }
         return uids
+    }
+
+    /// How many chosen pictures the open question leaves out as another member's; 0 while none
+    /// is open.
+    public var skipping: Int {
+        guard case .asking(_, let skipped) = stage else { return 0 }
+        return skipped
+    }
+
+    /// The toolbar's Delete as an event: the selection's own pictures, in selection order, and the
+    /// count of the others (`LibrarySelection.deletable`). The ONE place a delete's uids are taken
+    /// from a selection, so another member's picture can reach neither the question nor the run.
+    public static func tap(_ selection: LibrarySelection, in rows: [LibraryRow]) -> Event {
+        let set = selection.deletable(in: rows)
+        return .tapped(set.own, skipped: set.othersCount)
     }
 
     /// Whether a run this flow started is out. The spinner on the Delete button.
@@ -60,13 +78,14 @@ public final class LibraryDeleteFlow {
 
     public static func next(_ stage: Stage, on event: Event) -> Stage {
         switch event {
-        case .tapped(let uids):
-            // Nothing chosen is nothing to ask about. And a repeat tap is one question, about the
-            // pictures it was first asked about: it cannot restart a run or aim it elsewhere.
+        case .tapped(let uids, let skipped):
+            // Nothing of mine chosen is nothing to ask about — the disabled button says so, and
+            // this says it again. And a repeat tap is one question, about the pictures it was
+            // first asked about: it cannot restart a run or aim it elsewhere.
             guard stage == .idle, !uids.isEmpty else { return stage }
-            return .asking(uids)
+            return .asking(uids, skipped: skipped)
         case .confirmed:
-            guard case .asking(let uids) = stage else { return stage }
+            guard case .asking(let uids, _) = stage else { return stage }
             return .deleting(uids)
         case .cancelled:
             // A dismissal cannot recall a run that has already gone.
@@ -129,16 +148,25 @@ public final class LibraryDeleteFlow {
         message = nil
     }
 
-    /// What the alert asks. It names the count, so the yes is an answer about THIS many pictures.
-    public static func question(count: Int) -> String {
-        count == 1 ? "Delete 1 Item?" : "Delete \(count) Items?"
+    /// What the alert asks. It names the count, so the yes is an answer about THIS many pictures,
+    /// and, when the selection holds other members' pictures, how many of them stay (MEMNG-684).
+    /// A selection with none of mine is never asked about (`next`); its sentence says why.
+    public static func question(count: Int, skipped: Int = 0) -> String {
+        let ask = count == 1 ? "Delete 1 Item?" : "Delete \(count) Items?"
+        guard skipped > 0 else { return ask }
+        if count == 0 {
+            if skipped == 1 { return "Nothing to delete: 1 item belongs to another member." }
+            return "Nothing to delete: \(skipped) items belong to another member."
+        }
+        if skipped == 1 { return "\(ask) 1 other belongs to another member and stays." }
+        return "\(ask) \(skipped) others belong to another member and stay."
     }
 
     /// The alert's destructive button.
     public static let confirmTitle = "Delete"
 
-    /// What the alert says underneath. Every chosen picture is the member's own, and the server
-    /// hard-deletes: the file goes for good, and from any memo it was attached to.
+    /// What the alert says underneath. Every picture asked about is the member's own, and the
+    /// server hard-deletes: the file goes for good, and from any memo it was attached to.
     public static let explanation =
         "They are deleted from the server and from any memo they belong to. This can't be undone."
 

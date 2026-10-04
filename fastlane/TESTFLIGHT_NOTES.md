@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (36)
+
+- In Select, every picture in the Library can now be picked, including the ones another member added. Before, those tiles were dimmed and a tap on them did nothing.
+- Share works on any picture you pick, whoever added it.
+- Delete removes only your own pictures. When the selection also holds someone else's, the question says how many it deletes and how many it skips because they belong to another member. With none of your own picked, Delete stays off.
+- Select All now picks every picture in view, yours and another member's. Delete then removes only yours and says how many it skips, as for pictures picked one by one.
+- Nothing else changed in this build.
+- Build 34 said Select worked again before I had checked it on a phone, and it did not. Please tap a picture in Select and tell me whether the checkmark appears on it.
+
 ## 2.2.1 (35)
 
 - Sign-in no longer ends in silence when the server refuses the previous credential in the same moment: you now see a sentence that says what happened.

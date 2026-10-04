@@ -91,17 +91,23 @@ struct MediaLibraryView: View {
                         }
                         LibrarySelectToolbar(
                             count: selection.count,
+                            ownCount: selection.deletable(in: library?.items ?? []).own.count,
                             isSharing: sharing.isSharing,
                             isDeleting: deleteRunning,
                             share: { shareSelection() },
-                            delete: { deleting.claim(.tapped(selection.uids)) }
+                            // Only the chosen pictures that are mine (MEMNG-684).
+                            delete: {
+                                deleting.claim(
+                                    LibraryDeleteFlow.tap(selection, in: library?.items ?? []))
+                            }
                         )
                         .sharingFiles(sharing)
                     }
                     // On the stack around the toolbar, not on the toolbar that carries the share
                     // sheet: two presentations on one view is how one of them stops appearing.
                     .alert(
-                        LibraryDeleteFlow.question(count: deleting.asking?.count ?? 0),
+                        LibraryDeleteFlow.question(
+                            count: deleting.asking?.count ?? 0, skipped: deleting.skipping),
                         isPresented: askingDelete
                     ) {
                         Button(LibraryDeleteFlow.confirmTitle, role: .destructive) {
@@ -448,8 +454,8 @@ struct MediaLibraryView: View {
             ),
             select: choice.scope == .all ? { selection.begin() } : nil,
             selecting: selection.isActive,
-            allMineSelected: selection.coversAllMine(in: library.items),
-            toggleAll: { selection.toggleAllMine(in: library.items) },
+            allSelected: selection.coversAll(in: library.items),
+            toggleAll: { selection.toggleAll(in: library.items) },
             close: { selection.close() }
         ) {
             LibraryOptionsMenuContent(
@@ -729,7 +735,7 @@ struct LibraryGrid: View {
     var listGeneration: () -> Int = { 0 }
     /// Select mode (MEMNG-588): while it is on, a tap chooses rather than opens.
     var selection = LibrarySelection()
-    /// A tap on an own picture in select mode.
+    /// A tap on a loaded picture in select mode, mine or another member's (MEMNG-684).
     var toggle: (LibraryRow) -> Void = { _ in }
     /// The day buckets a heading's count is read from, or nil while none answer this list
     /// (`MediaLibraryPresentation.dayCount`).
@@ -1054,9 +1060,9 @@ struct LibraryGrid: View {
         }
     }
 
-    /// A tile's tap: the viewer while browsing, the selection in select mode. Another member's
-    /// tile never gets here in select mode (`SelectableTile` makes it inert), and the selection
-    /// refuses it besides (`LibrarySelection.toggle`).
+    /// A tile's tap: the viewer while browsing, the selection in select mode — any loaded tile,
+    /// mine or another member's (MEMNG-684). A tile with no row never gets here in select mode
+    /// (`SelectableTile` makes it inert), and there is no row to choose besides.
     private func tapped(_ attachment: MemoAttachment, row: LibraryRow?) {
         guard selection.isActive else {
             open(attachment)

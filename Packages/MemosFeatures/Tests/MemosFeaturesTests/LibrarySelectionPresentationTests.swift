@@ -34,11 +34,14 @@ struct LibrarySelectionPresentationTests {
                 == .browsing)
     }
 
-    @Test("in select mode an own tile is selectable, checked once chosen; another's is inert")
+    /// MEMNG-684: another member's picture is as selectable as mine; only a tile with no row is
+    /// not, because there is nothing for its tap to choose.
+    @Test("in select mode every loaded tile is selectable, checked once chosen; no row is inert")
     func selectModeTiles() {
         var selection = LibrarySelection()
         selection.begin()
         selection.toggle(row("a"))
+        selection.toggle(row("y", mine: false))
 
         #expect(
             LibrarySelectionPresentation.tile(for: row("a"), in: selection)
@@ -47,8 +50,12 @@ struct LibrarySelectionPresentationTests {
             LibrarySelectionPresentation.tile(for: row("b"), in: selection)
                 == .selectable(selected: false))
         #expect(
-            LibrarySelectionPresentation.tile(for: row("x", mine: false), in: selection) == .inert)
-        #expect(LibrarySelectionPresentation.tile(for: nil, in: selection) == .inert)
+            LibrarySelectionPresentation.tile(for: row("x", mine: false), in: selection)
+                == .selectable(selected: false))
+        #expect(
+            LibrarySelectionPresentation.tile(for: row("y", mine: false), in: selection)
+                == .selectable(selected: true))
+        #expect(LibrarySelectionPresentation.tile(for: nil, in: selection) == .unloaded)
     }
 
     @Test("a placed picture finds its row only while the list still holds it at that index")

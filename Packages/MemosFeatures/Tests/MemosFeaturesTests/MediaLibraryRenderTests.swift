@@ -294,7 +294,7 @@ struct MediaLibraryRenderTests {
         #expect(!labels.contains("Select"), "the Select capsule stayed in select mode")
 
         let all = try await Self.elements(
-            of: LibraryHeader(subtitle: "All", selecting: true, allMineSelected: true) {
+            of: LibraryHeader(subtitle: "All", selecting: true, allSelected: true) {
                 Text("row")
             },
             waitFor: "Close")
@@ -309,7 +309,8 @@ struct MediaLibraryRenderTests {
             of: VStack {
                 Spacer()
                 LibrarySelectToolbar(
-                    count: 2, isSharing: false, isDeleting: false, share: {}, delete: {})
+                    count: 2, ownCount: 2, isSharing: false, isDeleting: false, share: {},
+                    delete: {})
             },
             waitFor: "2 Items Selected")
         func element(_ label: String) -> NSObject? {
@@ -323,7 +324,8 @@ struct MediaLibraryRenderTests {
 
         let none = try await Self.elements(
             of: LibrarySelectToolbar(
-                count: 0, isSharing: false, isDeleting: false, share: {}, delete: {}),
+                count: 0, ownCount: 0, isSharing: false, isDeleting: false, share: {},
+                delete: {}),
             waitFor: "0 Items Selected")
         let idle = try #require(none.first { $0.accessibilityLabel == "Share" })
         #expect(idle.accessibilityTraits.contains(.notEnabled), "share is live with nothing chosen")
@@ -339,12 +341,28 @@ struct MediaLibraryRenderTests {
     func selectToolbarWhileDeleting() async throws {
         let found = try await Self.elements(
             of: LibrarySelectToolbar(
-                count: 2, isSharing: false, isDeleting: true, share: {}, delete: {}),
+                count: 2, ownCount: 2, isSharing: false, isDeleting: true, share: {},
+                delete: {}),
             waitFor: "2 Items Selected")
         let share = try #require(found.first { $0.accessibilityLabel == "Share" })
         let delete = try #require(found.first { $0.accessibilityLabel == "Delete" })
         #expect(share.accessibilityTraits.contains(.notEnabled), "share is live during a delete")
         #expect(delete.accessibilityTraits.contains(.notEnabled), "a second delete is offered")
+    }
+
+    /// MEMNG-684: a selection of only other members' pictures can be shared but not deleted —
+    /// none of it is mine to delete.
+    @Test("the select toolbar offers share but not delete over none of my pictures")
+    func selectToolbarOverOthersPictures() async throws {
+        let found = try await Self.elements(
+            of: LibrarySelectToolbar(
+                count: 2, ownCount: 0, isSharing: false, isDeleting: false, share: {},
+                delete: {}),
+            waitFor: "2 Items Selected")
+        let share = try #require(found.first { $0.accessibilityLabel == "Share" })
+        let delete = try #require(found.first { $0.accessibilityLabel == "Delete" })
+        #expect(!share.accessibilityTraits.contains(.notEnabled), "share is inert")
+        #expect(delete.accessibilityTraits.contains(.notEnabled), "delete offered for none of mine")
     }
 
     // MARK: - MEMNG-597: day groups and the date pill (plan page 3929 decision 13)

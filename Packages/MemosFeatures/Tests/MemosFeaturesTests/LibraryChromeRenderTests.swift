@@ -26,14 +26,15 @@ private enum ChromeWire {
 /// A populated server: one account's pictures, their day and year buckets, and a page of memos.
 /// A read that asks for a further page gets an empty one, so the grid ends where the fixture does.
 /// `days` is which days of September 2026 hold pictures: every scope scrolls over the default,
-/// and a single day is a grid too short to scroll.
+/// and a single day is a grid too short to scroll. `mine` is whether the library's pictures are the
+/// signed-in account's: false is the household's case, every picture another member's.
 private final class ChromeTransport: ClientTransport, @unchecked Sendable {
     private let rows: [String]
     private let dayBuckets: [String]
     private let markers: [String]
 
-    init(days: ClosedRange<Int> = ChromeWire.days) {
-        rows = Self.rows(days)
+    init(days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true) {
+        rows = Self.rows(days, mine: mine)
         dayBuckets = Self.dayBuckets(days)
         markers = Self.markers(days)
     }
@@ -99,12 +100,12 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
 
     private static func dayKey(_ day: Int) -> String { String(format: "2026-09-%02d", day) }
 
-    private static func row(day: Int, index: Int) -> String {
+    private static func row(day: Int, index: Int, mine: Bool) -> String {
         let uid = uid(day: day, index: index)
         let wide = index.isMultiple(of: 2)
         return """
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
-            "width":\(wide ? 1200 : 800),"height":\(wide ? 800 : 1200),"mine":true,\
+            "width":\(wide ? 1200 : 800),"height":\(wide ? 800 : 1200),"mine":\(mine),\
             "hasPrint":false,"hasLegacyPrint":false,"renditions":[],"orphan":true,\
             "memoUid":null,"takenAt":"\(dayKey(day))T\(10 + index):00:00Z",\
             "filename":"\(uid).jpg","thumbnailUrl":"/api/attachments/\(uid)/thumb",\
@@ -116,9 +117,9 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
     }
 
     /// Newest first, as the server lists them.
-    private static func rows(_ days: ClosedRange<Int>) -> [String] {
+    private static func rows(_ days: ClosedRange<Int>, mine: Bool) -> [String] {
         days.reversed().flatMap { day in
-            (0..<ChromeWire.perDay).reversed().map { row(day: day, index: $0) }
+            (0..<ChromeWire.perDay).reversed().map { row(day: day, index: $0, mine: mine) }
         }
     }
 
@@ -209,9 +210,9 @@ private actor PaintedMedia: MediaTransport {
 /// transport, which is process-wide, and the suite is serialized.
 extension MediaImageLoaderTests {
     private func chromeHost(
-        opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days
+        opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true
     ) async -> UIWindow {
-        let transport = ChromeTransport(days: days)
+        let transport = ChromeTransport(days: days, mine: mine)
         let session = SessionStore(
             credentials: ChromeCredentials(),
             makeClient: { configuration, credential in
@@ -924,7 +925,7 @@ extension MediaImageLoaderTests {
     /// called from here. Before the fix the tile's tap was a bare `.onTapGesture`, and its
     /// activation answered false and chose nothing (the reproduction, run-684-2). Whether a tile
     /// is dimmed is read from the drawing: the colour at its centre before select mode and in it
-    /// (an inert tile is drawn at 0.4 opacity).
+    /// (a tile with no row is drawn at 0.4 opacity).
     @Test("in select mode a tap on my picture chooses it, and a second tap lets it go")
     func selectTapChoosesATile() async {
         let media = PaintedMedia(palette: Self.palette())
@@ -991,6 +992,66 @@ extension MediaImageLoaderTests {
             await chromeSettle(window, turns: 20)
             #expect(Self.elements(labelled: "Share", in: window).isEmpty, "Close kept the toolbar")
             Self.shoot("684-tap-closed", window)
+        }
+    }
+
+    /// MEMNG-684 as the household sees it: most of the pictures in the grid are the other
+    /// member's, and a tap on one of THOSE in select mode chooses it too — undimmed, counted and
+    /// marked. Share takes the selection; Delete does not, because nothing chosen is mine to
+    /// delete. Every picture in this fixture is another member's (`mine: false`), so the tile
+    /// tapped is one. The tap and the dimming are read as `selectTapChoosesATile` reads them.
+    @Test("in select mode a tap on another member's picture chooses it, and only Share is offered")
+    func selectTapChoosesAnothersTile() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library, mine: false)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            guard let first = Self.photoTile(in: window) else {
+                Issue.record("no picture on screen: \(Self.labels(in: window))")
+                return
+            }
+            let centre = CGPoint(x: Self.frame(of: first).midX, y: Self.frame(of: first).midY)
+            let browsing = Self.pixel(at: centre, in: window)
+
+            let select = Self.elements(labelled: "Select", in: window)
+            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
+            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let selecting = Self.pixel(at: centre, in: window)
+            let dimmed = zip(browsing, selecting).contains { abs($0 - $1) > 0.08 }
+
+            let took = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
+            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 5)
+            let chosen = !Self.elements(labelled: "1 Item Selected", in: window).isEmpty
+            let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
+            let marked = traits.contains(.selected)
+            let share = Self.elements(labelled: "Share", in: window).first
+            let delete = Self.elements(labelled: "Delete", in: window).first
+            let shareLive = share.map { !$0.accessibilityTraits.contains(.notEnabled) } ?? false
+            let deleteLive = delete.map { !$0.accessibilityTraits.contains(.notEnabled) } ?? true
+            Self.shoot("684-theirs-selected", window)
+            let evidence =
+                "dimmed=\(dimmed) browsing=\(browsing) selecting=\(selecting) activated=\(took) "
+                + "oneSelected=\(chosen) markedSelected=\(marked) share=\(share != nil) "
+                + "shareLive=\(shareLive) delete=\(delete != nil) deleteLive=\(deleteLive)"
+            print("MEMNG684 theirs \(evidence)")
+            Attachment.record(evidence, named: "684-theirs-evidence")
+            #expect(!dimmed, "another member's picture was dimmed in select mode: \(evidence)")
+            #expect(chosen, "the tap chose nothing: \(evidence)")
+            #expect(marked, "the chosen tile is not marked selected: \(evidence)")
+            #expect(shareLive, "Share is not offered for another member's picture: \(evidence)")
+            #expect(!deleteLive, "Delete is offered for a picture that is not mine: \(evidence)")
+
+            await closeSelect(window)
         }
     }
 

@@ -4,8 +4,9 @@ import Foundation
 /// mockup's section 7), as a value: whether it is on, and which files are chosen.
 ///
 /// Here rather than in the screen because every rule it keeps is a rule about a list, not about a
-/// drawing — only the signed-in member's own pictures can be chosen, a picture that leaves the
-/// grid leaves the selection — and a rule that lives in a view body is one no test can hold.
+/// drawing — any loaded picture can be chosen, only the signed-in member's own are handed to a
+/// delete, a picture that leaves the grid leaves the selection — and a rule that lives in a view
+/// body is one no test can hold.
 ///
 /// The uids are kept in the order they were CHOSEN, not the order the grid shows them: the delete
 /// that follows (MEMNG-589) runs through them one at a time in that order, so the first picture
@@ -30,11 +31,11 @@ public struct LibrarySelection: Sendable, Equatable {
         isActive = true
     }
 
-    /// A tile's tap in select mode. Another member's picture is refused here, not only dimmed on
-    /// screen: the delete this selection feeds would be refused by the server for it anyway, and
-    /// a selection that could hold it would promise an action that cannot happen.
+    /// A tile's tap in select mode — any member's picture (MEMNG-684): in a household most of the
+    /// grid is the other member's, and Share is as much for theirs as for mine. What a delete may
+    /// take out of it is a separate question (`deletable(in:)`).
     public mutating func toggle(_ row: LibraryRow) {
-        guard isActive, row.mine else { return }
+        guard isActive else { return }
         if members.remove(row.id) != nil {
             uids.removeAll { $0 == row.id }
         } else {
@@ -43,22 +44,18 @@ public struct LibrarySelection: Sendable, Equatable {
         }
     }
 
-    /// Whether every own picture in `rows` is chosen — what the header's toggle shows, and what
-    /// makes its next tap a clear. False over a view holding none of mine: there is nothing there
-    /// for a tap to clear.
-    public func coversAllMine(in rows: [LibraryRow]) -> Bool {
-        var sawMine = false
-        for row in rows where row.mine {
-            sawMine = true
-            if !members.contains(row.id) { return false }
-        }
-        return sawMine
+    /// Whether every picture in `rows` is chosen, mine or another member's (MEMNG-684) — what the
+    /// header's toggle shows, and what makes its next tap a clear. False over an empty view: there
+    /// is nothing there for a tap to clear.
+    public func coversAll(in rows: [LibraryRow]) -> Bool {
+        !rows.isEmpty && rows.allSatisfy { members.contains($0.id) }
     }
 
-    /// Chooses every own picture in `rows`, after the ones already chosen and in the grid's order.
-    public mutating func selectAllMine(in rows: [LibraryRow]) {
+    /// Chooses every picture in `rows`, mine or another member's, after the ones already chosen
+    /// and in the grid's order. What a delete may take of them is `deletable(in:)`'s question.
+    public mutating func selectAll(in rows: [LibraryRow]) {
         guard isActive else { return }
-        for row in rows where row.mine && members.insert(row.id).inserted {
+        for row in rows where members.insert(row.id).inserted {
             uids.append(row.id)
         }
     }
@@ -69,13 +66,13 @@ public struct LibrarySelection: Sendable, Equatable {
         members = []
     }
 
-    /// The header's round toggle: select all of mine in view, and the same tap again clears.
-    public mutating func toggleAllMine(in rows: [LibraryRow]) {
+    /// The header's round toggle: select all in view, and the same tap again clears.
+    public mutating func toggleAll(in rows: [LibraryRow]) {
         guard isActive else { return }
-        if coversAllMine(in: rows) {
+        if coversAll(in: rows) {
             clear()
         } else {
-            selectAllMine(in: rows)
+            selectAll(in: rows)
         }
     }
 
@@ -86,11 +83,12 @@ public struct LibrarySelection: Sendable, Equatable {
         clear()
     }
 
-    /// The grid's list changed — a refresh, another filter, a picture deleted, somebody else signed
-    /// in. What is no longer in it, or no longer mine, leaves the selection; a share or a delete
-    /// must never act on a file the screen no longer shows.
+    /// The grid's list changed — a page arrived, a refresh, another filter, a picture deleted,
+    /// somebody else signed in. What is no longer in it leaves the selection; a share or a delete
+    /// must never act on a file the screen no longer shows. Whose picture it is does not matter
+    /// here: a chosen picture of another member's stays chosen while the grid still shows it.
     public mutating func prune(keeping rows: [LibraryRow]) {
-        let kept = Set(rows.lazy.filter(\.mine).map(\.id))
+        let kept = Set(rows.lazy.map(\.id))
         guard !members.isSubset(of: kept) else { return }
         uids.removeAll { !kept.contains($0) }
         members = Set(uids)
@@ -101,5 +99,37 @@ public struct LibrarySelection: Sendable, Equatable {
     public func rows(in rows: [LibraryRow]) -> [LibraryRow] {
         let byID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return uids.compactMap { byID[$0] }
+    }
+
+    /// What a delete of this selection may take: the chosen pictures that are the signed-in
+    /// member's own, in selection order, and how many chosen pictures are another member's and
+    /// stay. The server refuses to delete someone else's file, and a run that met that refusal
+    /// would stop there, so another member's picture never reaches the request at all.
+    public struct DeleteSet: Sendable, Equatable {
+        /// The own pictures' uids, in the order they were chosen. The ONLY uids a delete is sent.
+        public let own: [String]
+        /// How many chosen pictures belong to another member and are left alone.
+        public let othersCount: Int
+
+        public init(own: [String], othersCount: Int) {
+            self.own = own
+            self.othersCount = othersCount
+        }
+    }
+
+    /// The selection split by whose picture it is, read from `rows` — the grid's list at the
+    /// moment of asking, so `mine` is the server's latest word. A uid whose row is not in `rows`
+    /// is in neither part, as `rows(in:)` leaves it out.
+    public func deletable(in rows: [LibraryRow]) -> DeleteSet {
+        var own: [String] = []
+        var othersCount = 0
+        for row in self.rows(in: rows) {
+            if row.mine {
+                own.append(row.id)
+            } else {
+                othersCount += 1
+            }
+        }
+        return DeleteSet(own: own, othersCount: othersCount)
     }
 }

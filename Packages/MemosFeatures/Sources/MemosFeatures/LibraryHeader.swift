@@ -15,9 +15,9 @@ struct LibraryHeader<MenuContent: View>: View {
     var select: (() -> Void)?
     /// Whether the grid is in select mode, which swaps the controls on the right.
     var selecting = false
-    /// Whether every own picture in view is chosen: the toggle is drawn filled, and its next tap
+    /// Whether every picture in view is chosen: the toggle is drawn filled, and its next tap
     /// clears.
-    var allMineSelected = false
+    var allSelected = false
     var toggleAll: () -> Void = {}
     var close: () -> Void = {}
     @ViewBuilder let menu: () -> MenuContent
@@ -73,13 +73,13 @@ struct LibraryHeader<MenuContent: View>: View {
     @ViewBuilder
     private var selectModeControls: some View {
         Button(action: toggleAll) {
-            Image(systemName: allMineSelected ? "checkmark.circle.fill" : "checkmark.circle")
+            Image(systemName: allSelected ? "checkmark.circle.fill" : "checkmark.circle")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.primary)
                 .frame(width: Self.control, height: Self.control)
         }
         .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel(allMineSelected ? "Deselect All" : "Select All")
+        .accessibilityLabel(allSelected ? "Deselect All" : "Select All")
         Button(action: close) {
             Image(systemName: "xmark")
                 .font(.body.weight(.semibold))

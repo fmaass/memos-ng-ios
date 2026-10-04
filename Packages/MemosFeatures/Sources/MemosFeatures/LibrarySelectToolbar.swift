@@ -7,16 +7,17 @@ enum LibrarySelectionPresentation {
     enum Tile: Equatable {
         /// Not in select mode: a tap opens the picture.
         case browsing
-        /// An own picture, chosen or not. Unchosen it keeps its brightness, as in the Photos app.
+        /// A loaded picture, mine or another member's (MEMNG-684), chosen or not. Unchosen it keeps
+        /// its brightness, as in the Photos app.
         case selectable(selected: Bool)
-        /// Another member's picture, or a tile whose row is not the one it was drawn for: dimmed,
-        /// and a tap does nothing.
-        case inert
+        /// A tile whose row is not the one it was drawn for — the list moved under it: dimmed, and
+        /// a tap does nothing, because there is no row for the tap to choose.
+        case unloaded
     }
 
     static func tile(for row: LibraryRow?, in selection: LibrarySelection) -> Tile {
         guard selection.isActive else { return .browsing }
-        guard let row, row.mine else { return .inert }
+        guard let row else { return .unloaded }
         return .selectable(selected: selection.contains(row.id))
     }
 
@@ -40,8 +41,8 @@ enum LibrarySelectionPresentation {
         return kind == .video ? "Plays full screen" : "Opens full screen"
     }
 
-    /// How far another member's picture is dimmed in select mode.
-    static let inertOpacity = 0.4
+    /// How far a tile with no row is dimmed in select mode.
+    static let unloadedOpacity = 0.4
 
     /// Whether the toolbar's share and delete take a tap: something is chosen, and neither a share
     /// batch nor a delete run is out. One run at a time across both — a share fetching a file a
@@ -50,17 +51,25 @@ enum LibrarySelectionPresentation {
     static func actionsEnabled(count: Int, isSharing: Bool, isDeleting: Bool) -> Bool {
         count > 0 && !isSharing && !isDeleting
     }
+
+    /// Whether Delete takes a tap: the same gate, counted over the chosen pictures that are mine
+    /// (`LibrarySelection.deletable`). A selection of only other members' pictures has nothing
+    /// for it to delete. This is about permission, not about one run at a time: that is the
+    /// delete flow's and the store's (`LibraryDeleteFlow.next`, `MediaLibraryStore.delete`).
+    static func deleteEnabled(ownCount: Int, isSharing: Bool, isDeleting: Bool) -> Bool {
+        actionsEnabled(count: ownCount, isSharing: isSharing, isDeleting: isDeleting)
+    }
 }
 
-/// Select mode on a tile: other members' pictures dimmed and inert, and a small blue checkmark in
-/// the bottom-right corner of a chosen one (the mockup's section 7).
+/// Select mode on a tile: a tile with no row dimmed and inert, and a small blue checkmark in the
+/// bottom-right corner of a chosen one (the mockup's section 7).
 struct SelectableTile: ViewModifier {
     let state: LibrarySelectionPresentation.Tile
 
     func body(content: Content) -> some View {
         content
-            .opacity(state == .inert ? LibrarySelectionPresentation.inertOpacity : 1)
-            .allowsHitTesting(state != .inert)
+            .opacity(state == .unloaded ? LibrarySelectionPresentation.unloadedOpacity : 1)
+            .allowsHitTesting(state != .unloaded)
             .overlay(alignment: .bottomTrailing) {
                 if state == .selectable(selected: true) {
                     Image(systemName: "checkmark.circle.fill")
@@ -80,6 +89,8 @@ struct SelectableTile: ViewModifier {
 /// round glass delete button on the right.
 struct LibrarySelectToolbar: View {
     let count: Int
+    /// How many of the chosen pictures are mine, the only ones Delete may take (MEMNG-684).
+    let ownCount: Int
     /// A share batch is fetching: the share button shows a spinner and takes no second tap.
     let isSharing: Bool
     /// A delete run is out: the delete button shows a spinner, and neither button takes a tap.
@@ -93,6 +104,14 @@ struct LibrarySelectToolbar: View {
     private var enabled: Bool {
         LibrarySelectionPresentation.actionsEnabled(
             count: count,
+            isSharing: isSharing,
+            isDeleting: isDeleting
+        )
+    }
+
+    private var deletable: Bool {
+        LibrarySelectionPresentation.deleteEnabled(
+            ownCount: ownCount,
             isSharing: isSharing,
             isDeleting: isDeleting
         )
@@ -120,7 +139,8 @@ struct LibrarySelectToolbar: View {
                 .lineLimit(1)
             Spacer(minLength: DesignTokens.Space.snug)
             // Asks first (`LibraryDeleteFlow`); only the alert's yes deletes, one picture at a time
-            // through the single-picture endpoint (MEMNG-589).
+            // through the single-picture endpoint (MEMNG-589), and only the chosen pictures that
+            // are mine (MEMNG-684).
             Button(action: delete) {
                 Group {
                     if isDeleting {
@@ -133,7 +153,7 @@ struct LibrarySelectToolbar: View {
                 .frame(width: Self.control, height: Self.control)
             }
             .glassEffect(.regular.interactive(), in: .circle)
-            .disabled(!enabled)
+            .disabled(!deletable)
             .accessibilityLabel("Delete")
         }
         .padding(.horizontal, DesignTokens.Space.roomy)
