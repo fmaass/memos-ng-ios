@@ -432,6 +432,15 @@ extension MediaImageLoaderTests {
         await chromeSettle(window, turns: 20)
     }
 
+    /// Drags the main scroll view back up to the top of its content, the inset-adjusted top, and
+    /// `past` points beyond it: the reader's scroll back to the top (MEMNG-685), told to the
+    /// delegate as a drag, so each move is made while the scroll view moves and nothing was asked.
+    private func dragToTop(_ window: UIWindow, past: CGFloat = 0) async {
+        guard let scroller = Self.mainScroll(in: window) else { return }
+        let top = -scroller.adjustedContentInset.top
+        await drag(window, by: top - past - scroller.contentOffset.y)
+    }
+
     /// Scrolls the main scroll view to its foot, the last row clear of the bottom bar.
     private func scrollToFoot(_ window: UIWindow) async {
         guard let scroller = Self.mainScroll(in: window) else { return }
@@ -506,7 +515,8 @@ extension MediaImageLoaderTests {
 
     /// A press on the Library's item swaps the system bar for the Library's scope toolbar — its
     /// icon, then Years | Months | All — whose control moves the Library in every scope; a scroll
-    /// keeps it, and only the icon gives the bar back (MEMNG-604).
+    /// down keeps it, and the icon gives the bar back (MEMNG-604), as a scroll back to the top
+    /// does (MEMNG-685).
     @Test("a press on the Library swaps the tab bar for its scope toolbar until the icon")
     func pressSwapsTheBars() async {
         let media = PaintedMedia(palette: Self.palette())
@@ -1039,8 +1049,11 @@ extension MediaImageLoaderTests {
         }
     }
 
-    /// A scope picked in the scope toolbar keeps it (MEMNG-679): the pick swaps the scroll view for
-    /// one standing at its top, and no scroll gives the tabs back, the top of a page included.
+    /// A scope picked in the scope toolbar keeps it (MEMNG-679, MEMNG-685): the pick swaps the
+    /// scroll view for one standing at its top, and that landing — with the collapse of the
+    /// scroll view it takes away — is the pick's, not a scroll, so it gives no tabs back there,
+    /// though a scroll back to the top would. The guard against scope picks; photographed after
+    /// each pick.
     @Test("a scope picked after a scroll keeps the scope toolbar, in every scope")
     func scopePickKeepsTheScopeBar() async {
         let media = PaintedMedia(palette: Self.palette())
@@ -1072,6 +1085,7 @@ extension MediaImageLoaderTests {
                 #expect(chosen == scope.label, "\(scope.label) picked: the scope went: \(seen)")
                 #expect(!Self.barShows(in: window), "\(scope.label) picked: the tab bar: \(seen)")
                 #expect(ScopeBarProbe.libraryIconShows(in: window), "\(scope.label): \(seen)")
+                Self.shoot("685-pick-\(scope.label.lowercased())", window)
             }
 
             if let live = await ScopeBarProbe.settledControl(
@@ -1090,6 +1104,46 @@ extension MediaImageLoaderTests {
             let chosen = ScopeBarProbe.control(in: window).flatMap { ScopeBarProbe.chosen(in: $0) }
             #expect(chosen == "All", "All picked: the scope went: \(all)")
             #expect(!Self.barShows(in: window), "All picked: the tab bar came back: \(all)")
+            Self.shoot("685-pick-all", window)
+        }
+    }
+
+    /// The owner's report of 2026-10-03 (MEMNG-685): scrolled down, the Library shows its scope
+    /// toolbar; scrolled back to the top, the system tab bar stands again and the scope control is
+    /// gone, and stays gone through the layout the swap sets off — the offset the system shifts
+    /// after it is no scroll. The way up is a drag told to the scroll view's delegate
+    /// (`dragToTop`), so it is judged a scroll for the reason a reader's is: it moves while the
+    /// scroll view moves, and nothing was asked.
+    @Test("a scroll back to the top gives the tab bar back, and it stays")
+    func scrollBackToTheTopGivesTheTabs() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            let down = ScopeBarProbe.describe(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "scrolled down: no scope: \(down)")
+            #expect(!Self.barShows(in: window), "scrolled down: the tab bar stayed: \(down)")
+            Self.shoot("685-scrolled", window)
+
+            await dragToTop(window)
+            await tabsStand(window)
+            let at = Self.scrolledBy(in: window) ?? 1
+            #expect(at <= 0, "precondition: the drag ended \(at) points from the top")
+            let top = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "back at the top: no tab bar: \(top)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "back at the top: a scope: \(top)")
+            Self.shoot("685-top", window)
+
+            await chromeSettle(window, turns: 40)
+            let settled = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "40 turns on: the tab bar went: \(settled)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "40 turns on: \(settled)")
         }
     }
 
@@ -1265,8 +1319,10 @@ extension MediaImageLoaderTests {
         }
     }
 
-    /// A grid too short to scroll has no scroll to swap the bars on: it stays on the tabs whatever
-    /// a drag does to it, and the Library's item pressed where it shows is its way to the scope.
+    /// A grid too short to scroll has no scroll down to swap the bars on: on the tabs it stays on
+    /// them whatever a drag does to it, and the Library's item pressed where it shows is its way to
+    /// the scope. From the scope, a drag that pulls it past its top is a scroll reaching the top,
+    /// and gives the tabs back (MEMNG-685).
     @Test("a grid too short to scroll stays on the tabs; a press on the Library reaches the scope")
     func shortGridStaysOnTheTabs() async {
         let media = PaintedMedia(palette: Self.palette())
@@ -1299,6 +1355,13 @@ extension MediaImageLoaderTests {
             let pressed = ScopeBarProbe.describe(window)
             #expect(control != nil, "the Library pressed where it shows: no scope: \(pressed)")
             #expect(!Self.barShows(in: window), "the bar beside the scope: \(pressed)")
+
+            await dragToTop(window, past: 10)
+            await tabsStand(window)
+            await chromeSettle(window, turns: 40)
+            let pulled = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "a pull past the top: no tab bar: \(pulled)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "a pull past the top: \(pulled)")
         }
     }
 

@@ -1,10 +1,11 @@
 import MemosCore
 import Testing
 
-/// The Library's two bottom bars, every event from both states (MEMNG-604, MEMNG-679). Each row
-/// is written out rather than derived, so the table is the rule as the owner gave it, not the code
-/// read back: 3 x 3 presses, the icon, 3 selections and 4 scroll offsets on each of 3 tabs are 25
-/// events, and 18 + 2 + 6 + 24 rows cover each from both states.
+/// The Library's two bottom bars, every event from both states (MEMNG-604, MEMNG-679, MEMNG-685).
+/// Each row is written out rather than derived, so the table is the rule as the owner gave it, not
+/// the code read back: 3 x 3 presses, the icon, 3 selections, 5 scroll offsets by each of 3 kinds
+/// on the Library and 4 offsets by a scroll on each of the 2 other tabs are 36 events, and
+/// 18 + 2 + 6 + 30 + 16 rows cover each from both states.
 @Suite("DockMode")
 struct DockModeTests {
     private struct Row: CustomStringConvertible {
@@ -77,21 +78,70 @@ struct DockModeTests {
         ])
     }
 
-    /// Past 24 points the scope; at 24 or less nothing changes, and no scroll — the top of the
-    /// page and a pull past it included — gives the tabs back. Only on the Library.
-    @Test("a Library scroll past 24 points gives the scope, and no scroll gives the tabs back")
+    /// Past 24 points the scope, whatever moved the Library there; from 24 down to 1 nothing
+    /// changes, the hysteresis; at the top — 0, and a pull past it — a scroll gives the tabs back
+    /// (MEMNG-685, the owner's report of 2026-10-03), while a scope pick's landing and a jump the
+    /// app asked for leave the bar as it was. Only on the Library.
+    @Test("a Library scroll past 24 points gives the scope, and a scroll back to the top the tabs")
     func scrollPastTheThreshold() {
         check([
-            Row(from: .tabs, event: .scrolled(y: 25, showing: .library), to: .scope),
-            Row(from: .scope, event: .scrolled(y: 25, showing: .library), to: .scope),
-            Row(from: .tabs, event: .scrolled(y: 24, showing: .library), to: .tabs),
-            Row(from: .scope, event: .scrolled(y: 24, showing: .library), to: .scope),
-            Row(from: .tabs, event: .scrolled(y: 0, showing: .library), to: .tabs),
-            Row(from: .scope, event: .scrolled(y: 0, showing: .library), to: .scope),
-            Row(from: .tabs, event: .scrolled(y: -10, showing: .library), to: .tabs),
-            Row(from: .scope, event: .scrolled(y: -10, showing: .library), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 25, showing: .library, by: .scroll), to: .scope),
+            Row(from: .scope, event: .scrolled(y: 25, showing: .library, by: .scroll), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 24, showing: .library, by: .scroll), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 24, showing: .library, by: .scroll), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 1, showing: .library, by: .scroll), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 1, showing: .library, by: .scroll), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 0, showing: .library, by: .scroll), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 0, showing: .library, by: .scroll), to: .tabs),
+            Row(from: .tabs, event: .scrolled(y: -10, showing: .library, by: .scroll), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: -10, showing: .library, by: .scroll), to: .tabs),
+
+            Row(from: .tabs, event: .scrolled(y: 25, showing: .library, by: .landing), to: .scope),
+            Row(from: .scope, event: .scrolled(y: 25, showing: .library, by: .landing), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 24, showing: .library, by: .landing), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 24, showing: .library, by: .landing), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 1, showing: .library, by: .landing), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 1, showing: .library, by: .landing), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 0, showing: .library, by: .landing), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 0, showing: .library, by: .landing), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: -10, showing: .library, by: .landing), to: .tabs),
+            Row(
+                from: .scope, event: .scrolled(y: -10, showing: .library, by: .landing), to: .scope
+            ),
+
+            Row(from: .tabs, event: .scrolled(y: 25, showing: .library, by: .jump), to: .scope),
+            Row(from: .scope, event: .scrolled(y: 25, showing: .library, by: .jump), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 24, showing: .library, by: .jump), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 24, showing: .library, by: .jump), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 1, showing: .library, by: .jump), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 1, showing: .library, by: .jump), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: 0, showing: .library, by: .jump), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: 0, showing: .library, by: .jump), to: .scope),
+            Row(from: .tabs, event: .scrolled(y: -10, showing: .library, by: .jump), to: .tabs),
+            Row(from: .scope, event: .scrolled(y: -10, showing: .library, by: .jump), to: .scope),
         ])
         #expect(DockMode.scopeThreshold == 24)
+    }
+
+    /// What made a move: the jump asked whatever else holds; a scope pick's landing for an idle
+    /// move while it is unsettled; else a scroll — a move made while the scroll view moves
+    /// included, so a pick's landing never takes the reader's first scroll (MEMNG-685).
+    @Test("an asked move is a jump, an idle one in a pick's landing a landing, any other a scroll")
+    func kindOfAMove() {
+        let rows: [(asked: Bool, moving: Bool, landing: Bool, kind: DockScrollKind)] = [
+            (asked: false, moving: false, landing: false, kind: .scroll),
+            (asked: false, moving: true, landing: false, kind: .scroll),
+            (asked: false, moving: false, landing: true, kind: .landing),
+            (asked: false, moving: true, landing: true, kind: .scroll),
+            (asked: true, moving: false, landing: false, kind: .jump),
+            (asked: true, moving: true, landing: false, kind: .jump),
+            (asked: true, moving: false, landing: true, kind: .jump),
+            (asked: true, moving: true, landing: true, kind: .jump),
+        ]
+        for row in rows {
+            let kind = DockScrollKind.of(asked: row.asked, moving: row.moving, landing: row.landing)
+            #expect(kind == row.kind, "\(row)")
+        }
     }
 
     /// A Library scroll view that reports while another tab shows changes nothing, in either state.
@@ -100,9 +150,9 @@ struct DockModeTests {
         var rows: [Row] = []
         for showing in [MainTab.timeline, .places] {
             for y in [25.0, 24, 0, -10] {
-                rows.append(Row(from: .tabs, event: .scrolled(y: y, showing: showing), to: .tabs))
-                rows.append(
-                    Row(from: .scope, event: .scrolled(y: y, showing: showing), to: .scope))
+                let event = DockEvent.scrolled(y: y, showing: showing, by: .scroll)
+                rows.append(Row(from: .tabs, event: event, to: .tabs))
+                rows.append(Row(from: .scope, event: event, to: .scope))
             }
         }
         #expect(rows.count == 16)

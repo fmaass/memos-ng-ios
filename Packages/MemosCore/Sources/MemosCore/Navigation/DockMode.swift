@@ -1,7 +1,7 @@
 import Foundation
 
 /// What the bottom of the screen shows while the Library is the tab on screen (MEMNG-604,
-/// MEMNG-679).
+/// MEMNG-679, MEMNG-685).
 ///
 /// In `tabs` the system tab bar stands there, as on every other tab. In `scope` the tab bar steps
 /// aside for the Library's own bottom toolbar: its icon at the leading edge, Years | Months | All
@@ -9,10 +9,12 @@ import Foundation
 /// demand (UIKit has no call for it, only the on-scroll behaviour), so the app swaps the two bars
 /// instead, on the Library's own scroll: the tabs stand until the Library is scrolled past a small
 /// threshold, then the scope toolbar takes their place, as the Timeline's bar minimises once it
-/// scrolls. Only the Library icon gives the tabs back — no scroll does, the top of the page
-/// included, because a pick in the scope control swaps the scroll view for one standing at its
-/// top — and a press on the Library's item where the Library shows is the way into the scope on a
-/// page too short to scroll.
+/// scrolls, and a scroll back to the top — a pull past it included — gives the tabs back. Between
+/// the two nothing changes. At the top it takes a scroll: a pick in the scope control swaps the
+/// scroll view for one standing at its top, and a jump the app makes can land there, and neither
+/// is one (`DockScrollKind`). The Library icon gives the tabs back wherever the Library stands,
+/// and a press on the Library's item where the Library shows is the way into the scope on a page
+/// too short to scroll.
 nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
     case tabs
     case scope
@@ -35,10 +37,14 @@ nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
             // Leaving the Library by any route — a press elsewhere or a jump to a memo — gives
             // the tabs back, so coming back finds them.
             return tab == .library ? self : .tabs
-        case .scrolled(let y, let showing):
+        case .scrolled(let y, let showing, let kind):
             // A scroll counts on the Library alone: the one tab whose bars this decides.
-            guard showing == .library, y > Self.scopeThreshold else { return self }
-            return .scope
+            guard showing == .library else { return self }
+            // Past the threshold the scope, whatever moved the Library there.
+            if y > Self.scopeThreshold { return .scope }
+            // At the top the tabs, on a scroll alone; between the two nothing changes.
+            guard y <= 0, kind == .scroll else { return self }
+            return .tabs
         }
     }
 }
@@ -91,8 +97,33 @@ nonisolated public enum DockEvent: Sendable, Equatable {
     /// `tab` became the tab on screen, by a press or by the app.
     case selected(MainTab)
     /// One of the Library's scroll views moved while `showing` was the tab on screen. `y` is
-    /// measured from the top of its content: 0 at rest, negative while rubber-banding.
-    case scrolled(y: Double, showing: MainTab)
+    /// measured from the top of its content: 0 at rest, negative while rubber-banding. `by` is
+    /// what moved it, as far as the dock can tell.
+    case scrolled(y: Double, showing: MainTab, by: DockScrollKind)
+}
+
+/// What moved a Library scroll view, of the moves the fence passes (`DockScrollFence`): whether
+/// one that reaches the top gives the tabs back (MEMNG-685). Past the threshold every kind gives
+/// the scope.
+nonisolated public enum DockScrollKind: String, Sendable, Equatable, CaseIterable {
+    /// A scroll: a move the fence judged one that nothing names as the app's — the reader's drag,
+    /// its deceleration, an animated scroll, an idle move past the settling.
+    case scroll
+    /// A scope pick's landing: the offsets the layout settles as a pick swaps the Library's scroll
+    /// view for another — the one it puts on screen standing at its top, and the one it takes
+    /// away — until a scroll view next moves.
+    case landing
+    /// A jump the Library asked for (`askedToJump`): the app's own scroll to a day or a month.
+    case jump
+
+    /// What made a move. `asked`: the move is the jump the Library asked for; `moving`: the scroll
+    /// view was moving (its scroll phase, the ask aside); `landing`: a scope pick was made and no
+    /// scroll view has moved since. A move made while the scroll view moves is the reader's even
+    /// in a pick's landing, so the landing never takes the reader's first scroll.
+    public static func of(asked: Bool, moving: Bool, landing: Bool) -> DockScrollKind {
+        if asked { return .jump }
+        return landing && !moving ? .landing : .scroll
+    }
 }
 
 /// One reading of a Library scroll view, as the dock is fed it: how far it stands from the top
@@ -152,7 +183,9 @@ nonisolated public struct DockScrollReading: Sendable, Equatable {
 /// counts too, except within `settling` of the dock's last swap, a window every reframe inside
 /// it extends: that is the system keeping rows in place. A reframe with no swap opens no window,
 /// so a jump the app makes — Months opening at a month, a new scroll view's first landing —
-/// counts, with the reframe or after it. A kept offset is no scroll.
+/// counts, with the reframe or after it, and gives the scope past the threshold. What it does at
+/// the top is the dock's to say: it passes as the jump or the landing it is (`DockScrollKind`),
+/// and only a scroll gives the tabs back there (MEMNG-685). A kept offset is no scroll.
 ///
 /// A claim or a release (select mode's toolbar coming or going, MEMNG-684) holds the scroll view
 /// longer than a swap: at the foot of a long grid the lazy stack measures its rows again on every

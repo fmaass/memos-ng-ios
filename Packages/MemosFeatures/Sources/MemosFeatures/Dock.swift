@@ -2,12 +2,15 @@ import MemosCore
 import SwiftUI
 
 /// The app's bottom chrome: the one bar that stands at the bottom of each tab's root
-/// (MEMNG-604, MEMNG-679, MEMNG-684).
+/// (MEMNG-604, MEMNG-679, MEMNG-684, MEMNG-685).
 ///
 /// That bar is ONE derived value, `bar(on:)` (`DockBar`): the system tab bar, the Library's scope
 /// toolbar, select mode's toolbar, or none, computed from `DockMode`, the tab and what holds the
 /// claim. Every bar reads that value and keeps no condition of its own, so no two stand at once.
-/// The mode is moved by presses and by the Library's own scroll. A claim decides the bar alone
+/// The mode is moved by presses and by the Library's own scroll: down past the threshold to the
+/// scope, back to the top to the tabs — a scroll's top alone, not the landing of a scope pick
+/// (`pickedScope`) nor a jump the Library asked for (`askedToJump`), which the dock tells apart
+/// as each reading arrives (`DockScrollKind`). A claim decides the bar alone
 /// and leaves the mode as it was, so ending it brings back whichever bar was there — a scroll
 /// that arrives under a claim is dropped for that reason, and a claim or a release opens the same
 /// settling window a swap does — and holds the Library's idle moves until its scroll view next
@@ -36,6 +39,9 @@ final class AppDock {
     /// When a Library scroll view last asked to be scrolled to a place of the app's choosing, until
     /// the move it explains claims it. Not observed: nothing is drawn from it.
     @ObservationIgnored private var jumpAskedAt: ContinuousClock.Instant?
+    /// Whether a scope pick's landing is unsettled: a pick swapped the Library's scroll view and
+    /// no scroll view has moved since. Not observed: nothing is drawn from it.
+    @ObservationIgnored private var landing = false
 
     init() {}
 
@@ -88,6 +94,12 @@ final class AppDock {
     /// counts inside a swap's window too. Asked on the main actor right before the scroll.
     func askedToJump() { jumpAskedAt = .now }
 
+    /// The Library's scope moved — a pick in the scope control, a Years card, a day tile, the date
+    /// pill — and swaps its scroll view for another: what the layout settles of the two before a
+    /// scroll view next moves is that pick's landing, which gives no tabs back at the top
+    /// (MEMNG-685). Told on the main actor before the scope moves.
+    func pickedScope() { landing = true }
+
     /// Whether a jump asked for within `DockScrollFence.settling` before `instant` explains an
     /// offset that moved at `instant`. Claims it: one ask explains one move, and an ask nothing
     /// followed lapses rather than letting a later echo through.
@@ -97,18 +109,21 @@ final class AppDock {
         return instant < asked.advanced(by: DockScrollFence.settling)
     }
 
-    /// One of the Library's scroll views now stands `y` points from the top of its content.
-    /// Dropped while a claim holds the chrome, so ending the claim brings back the bar it hid, and
-    /// before any tab is known to be on screen.
-    func scrolled(to y: Double) {
+    /// One of the Library's scroll views now stands `y` points from the top of its content, moved
+    /// by `kind`. Dropped while a claim holds the chrome, so ending the claim brings back the bar
+    /// it hid, and before any tab is known to be on screen.
+    func scrolled(to y: Double, by kind: DockScrollKind) {
         guard !isTakenOver, let showing else { return }
-        send(.scrolled(y: y, showing: showing))
+        send(.scrolled(y: y, showing: showing, by: kind))
     }
 
     /// One reading of a Library scroll view, judged by that scroll view's `fence` against this
     /// dock's last swap and told as a scroll when it is one: the whole of `DockFeed`'s work, here
     /// so a test can drive the path a reading takes. `moving` is whether the scroll view was
-    /// moving; the first move after an asked jump counts as moving (`askedToJump`).
+    /// moving; the first move after an asked jump counts as moving (`askedToJump`). What moved it
+    /// travels with the offset (`DockScrollKind`): the jump asked, a scope pick's landing while no
+    /// scroll view has moved since the pick, else a scroll. A move made while the scroll view moves
+    /// ends a pick's landing.
     func scrolled(
         from previous: DockScrollReading,
         to now: DockScrollReading,
@@ -117,11 +132,13 @@ final class AppDock {
         at instant: ContinuousClock.Instant = .now
     ) {
         let asked = now.y != previous.y && claimJump(at: instant)
+        let kind = DockScrollKind.of(asked: asked, moving: moving, landing: landing)
+        if moving { landing = false }
         let y = fence.scrolled(
             from: previous, to: now, at: instant, swappedAt: swappedAt, heldAt: heldAt,
             moving: moving || asked)
         guard let y else { return }
-        scrolled(to: y)
+        scrolled(to: y, by: kind)
     }
 }
 
@@ -143,12 +160,27 @@ final class LibraryScopeChoice {
     /// by the Library, which owns the store the jump is reading on, and called synchronously so
     /// no page of the abandoned jump can land between the choice and the abandonment.
     private var handChoiceAction: (@MainActor () -> Void)?
+    /// What every move of the scope also does — telling the dock the Library's scroll view is
+    /// swapped for another (`AppDock.pickedScope`, MEMNG-685). Set by the tabs, which own the dock.
+    private var scopeMovedAction: (@MainActor () -> Void)?
 
     init() {}
 
     /// Registers what a choice made by hand must also do. The last registration wins.
     func whenChosenByHand(_ action: @escaping @MainActor () -> Void) {
         handChoiceAction = action
+    }
+
+    /// Registers what every move of the scope must also do, called before the scope moves. The
+    /// last registration wins.
+    func whenScopeMoves(_ action: @escaping @MainActor () -> Void) {
+        scopeMovedAction = action
+    }
+
+    /// The scope becomes `next`; a move to another scope is told first.
+    private func move(to next: LibraryScope) {
+        if next != scope { scopeMovedAction?() }
+        scope = next
     }
 
     /// A choice made in the scope control. It widens Months back to every year, because the
@@ -158,7 +190,7 @@ final class LibraryScopeChoice {
         if chosen != scope { handChoiceAction?() }
         year = nil
         monthTarget = nil
-        scope = chosen
+        move(to: chosen)
     }
 
     /// The date pill's tap in All: Months, across every year, at that month. Leaving All by hand
@@ -167,7 +199,7 @@ final class LibraryScopeChoice {
         if scope != .months { handChoiceAction?() }
         year = nil
         monthTarget = key
-        scope = .months
+        move(to: .months)
     }
 
     /// Months has scrolled to the pill's month, or found it is not among its months.
@@ -179,13 +211,13 @@ final class LibraryScopeChoice {
     func showMonths(of key: String) {
         year = key
         monthTarget = nil
-        scope = .months
+        move(to: .months)
     }
 
     /// A day tile: the All grid, where the jump lands.
     func showAll() {
         monthTarget = nil
-        scope = .all
+        move(to: .all)
     }
 
     func clearYear() {
@@ -253,6 +285,8 @@ struct MainTabs<Screen: View>: View {
         .tabBarMinimizeBehavior(Self.minimizesOnScroll(on: selection) ? .onScrollDown : .never)
         .environment(dock)
         .environment(scope)
+        // A move of the scope swaps the Library's scroll view: the dock hears of it first.
+        .onAppear { [dock] in scope.whenScopeMoves { dock.pickedScope() } }
         // Every way off the Library — a press in the bar or a jump to a memo — gives the tabs
         // back, so coming back finds them. Initially too, so the dock knows the tab it opens on.
         .onChange(of: selection, initial: true) { _, now in dock.send(.selected(now)) }

@@ -96,13 +96,13 @@ struct DockTests {
         dock.send(.selected(.library))
         let shown = try #require(dock.swappedAt, "the first tab on screen was not stamped")
         try await Task.sleep(for: apart)
-        dock.scrolled(to: 10)
+        dock.scrolled(to: 10, by: .scroll)
         #expect(dock.swappedAt == shown, "a scroll that swapped nothing was stamped")
-        dock.scrolled(to: 300)
+        dock.scrolled(to: 300, by: .scroll)
         let collapsed = try #require(dock.swappedAt)
         #expect(collapsed > shown, "the swap to the scope was not stamped")
         try await Task.sleep(for: apart)
-        dock.scrolled(to: 900)
+        dock.scrolled(to: 900, by: .scroll)
         #expect(dock.swappedAt == collapsed, "a scroll under the scope was stamped")
         dock.send(.pressedLibraryIcon)
         let restored = try #require(dock.swappedAt)
@@ -161,7 +161,7 @@ struct DockTests {
         dock.scrolled(from: top, to: top, judgedBy: &fence, moving: true, at: before)
         let select = UUID()
         dock.claim(select, for: .select)
-        dock.scrolled(to: 300)
+        dock.scrolled(to: 300, by: .scroll)
         #expect(dock.mode == .tabs, "a scroll under a claim swapped the bars: \(dock.mode)")
         #expect(dock.bar(on: .library) == .select, "the tab bar drawn under a claim")
         dock.release(select)
@@ -257,23 +257,107 @@ struct DockTests {
 
     /// The dock judges a scroll against the tab it was last told is on screen: a Library scroll
     /// view that reports while another tab shows, or before any tab is known, changes nothing.
+    /// Flipped for MEMNG-685: on the Library a scroll back to the top gives the tabs back.
     @Test("a scroll counts while the Library is the tab on screen, and only then")
     func scrollCountsOnTheLibraryAlone() {
         let dock = AppDock()
-        dock.scrolled(to: 300)
+        dock.scrolled(to: 300, by: .scroll)
         #expect(dock.mode == .tabs, "a scroll before any tab was known left \(dock.mode)")
 
         dock.send(.selected(.timeline))
-        dock.scrolled(to: 300)
+        dock.scrolled(to: 300, by: .scroll)
         #expect(dock.mode == .tabs, "a scroll while the Timeline shows left \(dock.mode)")
 
         dock.send(.selected(.library))
-        dock.scrolled(to: 24)
+        dock.scrolled(to: 24, by: .scroll)
         #expect(dock.mode == .tabs, "a scroll to 24 points left \(dock.mode)")
-        dock.scrolled(to: 25)
+        dock.scrolled(to: 25, by: .scroll)
         #expect(dock.mode == .scope, "a scroll to 25 points left \(dock.mode)")
-        dock.scrolled(to: 0)
-        #expect(dock.mode == .scope, "a scroll back to the top gave the tabs back")
+        dock.scrolled(to: 0, by: .scroll)
+        #expect(dock.mode == .tabs, "a scroll back to the top left \(dock.mode)")
+    }
+
+    /// A jump the Library asked for that lands at the top is the app's move, not a scroll: the
+    /// scope stays, though the same reading unasked gives the tabs back (MEMNG-685). Fed the way a
+    /// Library scroll view feeds the dock, starting in the scope away from the top, the jump's
+    /// reading made while the scroll view moves so the fence passes it whatever the window.
+    @Test("an asked jump that lands at the top keeps the scope; a scroll there gives the tabs")
+    func askedJumpToTheTopKeepsTheScope() {
+        let dock = AppDock()
+        dock.send(.selected(.library))
+        var fence = DockScrollFence()
+        let top = Self.reading(y: 0)
+        let away = Self.reading(y: 300)
+        dock.scrolled(from: top, to: away, judgedBy: &fence, moving: true)
+        #expect(dock.mode == .scope, "precondition: a scroll to 300 left \(dock.mode)")
+
+        dock.askedToJump()
+        dock.scrolled(from: away, to: top, judgedBy: &fence, moving: true)
+        #expect(dock.mode == .scope, "an asked jump to the top gave the tabs back")
+        dock.askedToJump()
+        let pulled = Self.reading(y: -10)
+        dock.scrolled(from: top, to: pulled, judgedBy: &fence, moving: false)
+        #expect(dock.mode == .scope, "an idle asked jump past the top gave the tabs back")
+
+        // The same reading with nothing asked is the reader's scroll reaching the top.
+        dock.scrolled(from: pulled, to: away, judgedBy: &fence, moving: true)
+        dock.scrolled(from: away, to: top, judgedBy: &fence, moving: true)
+        #expect(dock.mode == .tabs, "a scroll back to the top left \(dock.mode)")
+    }
+
+    /// A scope pick swaps the Library's scroll view: the one it takes away collapses and the one it
+    /// puts on screen lands at its top, both idle — the readings the probe of MEMNG-685 saw, fed
+    /// the way each scroll view feeds the dock. Neither is a scroll; the reader's first drag on
+    /// the new one is, and pulled past the top it gives the tabs back.
+    @Test("a scope pick's landing at the top keeps the scope; the next drag there does not")
+    func scopePickLandingKeepsTheScope() {
+        let dock = AppDock()
+        let choice = LibraryScopeChoice()
+        choice.whenScopeMoves { dock.pickedScope() }
+        dock.send(.selected(.library))
+        var leaving = DockScrollFence()
+        let scrolled = Self.reading(y: 960)
+        dock.scrolled(from: Self.reading(y: 0), to: scrolled, judgedBy: &leaving, moving: true)
+        #expect(dock.mode == .scope, "precondition: a scroll to 960 left \(dock.mode)")
+
+        // Past the settling of the swap to the scope, so only the pick can explain what follows.
+        let later = ContinuousClock.now.advanced(by: DockScrollFence.settling * 2)
+        choice.choose(.months)
+        let collapsed = Self.reading(y: -3367)
+        dock.scrolled(from: scrolled, to: collapsed, judgedBy: &leaving, moving: false, at: later)
+        #expect(dock.mode == .scope, "the scroll view the pick took away gave the tabs back")
+        var landed = DockScrollFence()
+        let bare = DockScrollReading(
+            y: 0, width: 402, height: 649, insetTop: 0, insetLeading: 0, insetBottom: 0,
+            insetTrailing: 0)
+        let atTop = DockScrollReading(
+            y: -0.000_000_000_000_028, width: 402, height: 649, insetTop: 139, insetLeading: 0,
+            insetBottom: 86, insetTrailing: 0)
+        dock.scrolled(from: bare, to: atTop, judgedBy: &landed, moving: false, at: later)
+        #expect(dock.mode == .scope, "the new scroll view's landing gave the tabs back")
+
+        let pulled = DockScrollReading(
+            y: -10, width: 402, height: 649, insetTop: 139, insetLeading: 0, insetBottom: 86,
+            insetTrailing: 0)
+        dock.scrolled(from: atTop, to: pulled, judgedBy: &landed, moving: true, at: later)
+        #expect(dock.mode == .tabs, "the reader's first drag past the top left \(dock.mode)")
+    }
+
+    /// Every move of the scope is told before it moves, by hand or by the Library; a choice of
+    /// the scope already showing moves nothing and is not told (MEMNG-685).
+    @Test("each move of the scope is told once; a choice of the scope showing is not")
+    func scopeMovesAreTold() {
+        let choice = LibraryScopeChoice()
+        let told = Held<[LibraryScope]>([])
+        choice.whenScopeMoves { told.value.append(choice.scope) }
+        choice.choose(.all)
+        #expect(told.value.isEmpty, "a choice of the scope showing was told")
+        choice.choose(.years)
+        choice.showMonths(of: "2026")
+        choice.showAll()
+        choice.showMonth("2026-09")
+        choice.showMonth("2026-08")
+        #expect(told.value == [.all, .years, .months, .all], "told: \(told.value)")
     }
 
     @Test("the bar folds on scroll down on Timeline and Places, never on the Library")
