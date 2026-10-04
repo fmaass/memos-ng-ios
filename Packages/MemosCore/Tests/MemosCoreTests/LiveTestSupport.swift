@@ -98,6 +98,12 @@ final class TerminationCounter: @unchecked Sendable {
 }
 
 /// A server that answers from a script, and remembers what it was asked.
+///
+/// Its guard is a COPY of `URLSessionSSETransport.connect`'s, kept because the `URLProtocol` seam
+/// cannot cover what this double is for: the `beforeConnect` / `afterPresenting` hooks run between
+/// the guard and the send, inside the transport, where nothing below `URLSession` can reach. The
+/// production guard itself is pinned by `SendGuardSeamTests` (`connectGuardIsTheRealOne`), which
+/// drives the real transport.
 actor ScriptedSSETransport: SSEConnecting {
     private var script: [ScriptedConnection]
     private(set) var requests: [URLRequest] = []

@@ -751,8 +751,19 @@ struct DeviceTokenTests {
         // about the LANE rather than about the renewal (which `outboxDrainPresentsTheSuccessor`
         // drives for real).
         let presenting = LockedValue<String>("memos_pat_first")
-        let server = URL(string: "https://memos.example.invalid")!
-        let transport = RotatingSSETransport { presenting.set("memos_pat_next") }
+        // The REAL transport, answered below `URLSession`: every connection opens and closes at
+        // once, and the stored credential rotates after the FIRST request has left — so what the
+        // reconnect presents is what the production `connect` put on the wire.
+        let route = try GuardStubProtocol.open(body: Data()) { number in
+            if number == 1 { presenting.set("memos_pat_next") }
+        }
+        defer { GuardStubProtocol.close(route) }
+        let server = route.url("")
+        let configuration = URLSessionSSETransport.makeConfiguration()
+        configuration.protocolClasses = GuardStubProtocol.only
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let transport = URLSessionSSETransport(session: session)
         let client = MediaEventClient.device(
             grant: {
                 CredentialGrant(
@@ -769,7 +780,7 @@ struct DeviceTokenTests {
 
         _ = await client.collect()
 
-        let presented = await transport.authorizations
+        let presented = route.requests.map { $0.value(forHTTPHeaderField: "Authorization") }
         #expect(presented.count >= 2, "the channel did not reconnect, so nothing was proven")
         #expect(presented.first == "Bearer memos_pat_first")
         #expect(presented.last == "Bearer memos_pat_next")
@@ -860,35 +871,6 @@ private struct RotatingDownloads: MediaDownloadTransport {
             headerFields: nil
         )!
         return (url, response)
-    }
-}
-
-/// A live channel that closes every connection at once and rotates the stored credential after the
-/// FIRST one, so what the reconnect presents is the question being asked.
-private actor RotatingSSETransport: SSEConnecting {
-    private(set) var authorizations: [String?] = []
-    /// What the production authority answered at each connect.
-    private(set) var verdicts: [Bool] = []
-    private let rotate: @Sendable () -> Void
-
-    init(rotate: @escaping @Sendable () -> Void) {
-        self.rotate = rotate
-    }
-
-    func connect(_ request: URLRequest, under authority: SendAuthority) async throws
-        -> SSEConnection
-    {
-        // The double records the PRODUCTION authority's verdict; it does not implement the policy.
-        verdicts.append(authority.holds())
-        guard authority.holds() else { throw SendAuthorityWithdrawn() }
-        authorizations.append(
-            authority.presenting(request).value(forHTTPHeaderField: "Authorization")
-        )
-        if authorizations.count == 1 { rotate() }
-        return SSEConnection(
-            statusCode: 200,
-            body: AsyncThrowingStream { $0.finish() }
-        )
     }
 }
 

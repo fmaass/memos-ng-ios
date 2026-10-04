@@ -351,16 +351,24 @@ struct SessionNoiseTests {
     /// builds a request at all. Named for what it is, and asserted on the specific error, so it
     /// cannot be mistaken for evidence about the authority.
     @Test("a download with nobody signed in is refused before a request is built")
-    func aDownloadWithNoCredentialIsRefused() async {
+    func aDownloadWithNoCredentialIsRefused() async throws {
         let session = await signedIn(handler: { _, _, _ in Stub.json(Stub.user) })
-        let transport = RecordingDownloadTransport()
+        // The REAL download transport, answered below `URLSession` by a route on the host the
+        // attachment names — so "no request was sent" is counted where a request would arrive.
+        let route = try GuardStubProtocol.open(host: "memos.example.invalid")
+        defer { GuardStubProtocol.close(route) }
+        let transport = MediaSession(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0, directory: nil),
+            protocolClasses: GuardStubProtocol.only
+        )
+        defer { transport.session.invalidateAndCancel() }
         await session.signOutWithoutRevoking()
 
         await #expect(throws: OriginalMediaError.notSignedIn) {
             try await session.download(original(), transport: transport)
         }
 
-        #expect(transport.sends == 0, "a request went out for a session nobody is signed in to")
+        #expect(route.count == 0, "a request went out for a session nobody is signed in to")
     }
 
     /// B3. A chunked upload is the longest-lived thing this app sends and it runs off the main
@@ -475,6 +483,12 @@ struct SessionNoiseTests {
 /// It asks the authority where the real transport asks it — on the executor that sends, with
 /// nothing between the answer and the send — and it counts only what got past that question, so
 /// "no request was sent" stays a fact rather than an inference from an error.
+///
+/// Its guard is a COPY of `MediaSession.download`'s, kept because the `URLProtocol` seam cannot
+/// cover what this double is for: the hold sits BEFORE the guard, in the window between the
+/// caller's fences and the send, and a stub below `URLSession` is only reached after the guard has
+/// answered. The production guard itself is pinned by `SendGuardSeamTests`
+/// (`downloadGuardIsTheRealOne`), which drives the real transport.
 final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -506,28 +520,6 @@ final class HeldDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
             file,
             HTTPURLResponse(
                 url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil
-            )!
-        )
-    }
-}
-
-/// Counts what actually left for the network, so "no request was sent" is a fact rather than an
-/// inference from an error.
-final class RecordingDownloadTransport: MediaDownloadTransport, @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
-
-    var sends: Int { lock.withLock { count } }
-
-    func download(_ request: URLRequest, under authority: SendAuthority) async throws
-        -> (URL, URLResponse)
-    {
-        guard authority.holds() else { throw SendAuthorityWithdrawn() }
-        lock.withLock { count += 1 }
-        return (
-            URL(filePath: "/dev/null"),
-            HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
             )!
         )
     }

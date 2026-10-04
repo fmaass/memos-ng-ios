@@ -64,13 +64,20 @@ public struct URLSessionSSETransport: SSEConnecting {
     /// polls every 1.5 s while work is in flight (memos-ng `app/routers/assets.py:729`, as of
     /// a1d493c), so a silence far longer than that is a connection that has stopped answering.
     public static func makeSession() -> URLSession {
+        URLSession(configuration: makeConfiguration())
+    }
+
+    /// What `makeSession()` builds its session from. Separate so a test can hand the real
+    /// transport this channel's own configuration with its protocol classes replaced by a
+    /// scripted `URLProtocol`, and drive `connect` — send guard included — with no network.
+    static func makeConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.default
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.timeoutIntervalForRequest = 90
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
-        return URLSession(configuration: configuration)
+        return configuration
     }
 
     public func connect(_ request: URLRequest, under authority: SendAuthority) async throws

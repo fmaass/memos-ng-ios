@@ -41,9 +41,20 @@ public final class MediaSession: @unchecked Sendable {
     public let cache: URLCache
     public let session: URLSession
 
-    public init(cache: URLCache = MediaCache.makeURLCache()) {
+    public convenience init(cache: URLCache = MediaCache.makeURLCache()) {
+        self.init(cache: cache, protocolClasses: nil)
+    }
+
+    /// The test seam, and nothing else: the SAME configuration production builds, with the URL
+    /// loading system's protocol classes replaced when — and only when — a test names them. That is
+    /// how a test drives the real `fetch` and `download` below, send guard included, against a
+    /// scripted `URLProtocol` and no network. `nil` leaves the configuration untouched, which is
+    /// what the public initialiser passes.
+    init(cache: URLCache, protocolClasses: [AnyClass]?) {
+        let configuration = MediaCache.makeSessionConfiguration(cache: cache)
+        if let protocolClasses { configuration.protocolClasses = protocolClasses }
         self.cache = cache
-        self.session = URLSession(configuration: MediaCache.makeSessionConfiguration(cache: cache))
+        self.session = URLSession(configuration: configuration)
     }
 
     public static let shared = MediaSession()
