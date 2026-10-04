@@ -5,6 +5,18 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (34)
+
+- Select in the Library works again: tap Select, then tap pictures and videos to pick them. Before, the tiles did not react.
+- Close Select and exactly one bar comes back at the bottom — the tab bar or the Library toolbar, whichever was there before. Build 33 sometimes showed both at once.
+- Scroll back up to the top of the Library and the tab bar with Library, Timeline and Places returns on its own. The Library icon in the toolbar still does it too.
+- The Years, Months and All capsule in the Library toolbar is narrower and sits close to the Library icon.
+- Places: the map pins have a white border and a pointer whose tip marks the exact spot.
+- Switch accounts and the Library now shows the new account's pictures straight away instead of the previous account's rows.
+- Month and year covers no longer flip to a picture from a previous account after a switch.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+- I could not check this on a phone: tell me whether the tab bar comes back at the right moment when you reach the top, and whether the swap on the way down still feels right.
+
 ## 2.2.1 (33)
 
 - Scroll a few millimetres down in the Library and the tab bar steps aside for the Library icon plus Years, Months and All, the same toolbar as in build 32. Before, only a tap did this.
