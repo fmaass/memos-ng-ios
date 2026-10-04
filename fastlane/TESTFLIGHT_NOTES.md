@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (35)
+
+- Sign-in no longer ends in silence when the server refuses the previous credential in the same moment: you now see a sentence that says what happened.
+- The token-management sign-on no longer loses the browser's answer when it arrives exactly as its twelve-minute deadline runs out.
+- An account whose display name is empty is now named by its e-mail address instead of a blank, both on the Settings account row and on the token-management screen.
+- Under the hood, a session is ended in order at every sign-out and account switch, and several tests that failed now and then are steady.
+- Nothing changed on the Library or Select screens in this build. Your report on build 34 — tapping a picture in Select does nothing, and both bars after Close — is still open; I am working on reproducing it on a device before I call it fixed.
+- This version still needs memos-ng 2.0.0. Sign-in tells you when the server is older than the app.
+
 ## 2.2.1 (34)
 
 - Select in the Library works again: tap Select, then tap pictures and videos to pick them. Before, the tiles did not react.
