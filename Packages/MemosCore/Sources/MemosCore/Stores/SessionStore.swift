@@ -357,7 +357,9 @@ public final class SessionStore {
     /// in over it — with the authority epoch that withdrawal moved to. The app wires the outbox's
     /// cancellation of the background uploads still presenting the old credential to it: whatever
     /// must happen at the epoch move happens in the call, and the cancellation it starts is handed
-    /// back, so a sign-out can wait for it before it says it is done.
+    /// back, so a sign-out can wait for it before it says it is done. It is called while the
+    /// outgoing handle is still installed beside the new generation (`endIncarnation`), so it must
+    /// not read `api` or `activeHandle` or take a fresh `sendAuthority()`.
     private let onAccountWithdrawn: (@MainActor @Sendable (Int) -> Task<Void, Never>?)?
     /// Where a diagnostic line goes, injected the same way the sleeper is.
     ///
@@ -1338,11 +1340,12 @@ public final class SessionStore {
     /// earns is decided from the value, and a value that disagreed with the sentence beside it
     /// would offer a Settings button over somebody else's timeout.
     private func park(_ failure: SessionRestoreFailure) {
+        // Withdrawing the client withdraws the authority with it, so anything holding a grant
+        // taken under it stops at its next synchronous check. The authority goes FIRST, before
+        // the handle: a sender off the main actor checks the incarnation, never the handle.
+        endIncarnation()
         client = nil
         credential = nil
-        // Withdrawing the client withdraws the authority with it, so anything holding a grant
-        // taken under it stops at its next synchronous check.
-        endIncarnation()
         supersedeValidationInFlight()
         restoreFailure = failure
         state = .unreachable(failure.message)
@@ -1481,6 +1484,10 @@ public final class SessionStore {
         user: User,
         credential: PresentedCredential
     ) {
+        // The incarnation this replaces ends FIRST, before its handle is replaced: a sender off the
+        // main actor checks the incarnation, never the handle.
+        endIncarnation()
+        presentedGrant = credential
         self.configuration = configuration
         self.client = client
         // The one place a session ADOPTS a credential — the native sign-in, and the pasted one
@@ -1499,9 +1506,7 @@ public final class SessionStore {
         // where that is revoked, and never anywhere else.
         defaultVisibility = nil
         avatar = nil
-        endIncarnation()
-        presentedGrant = credential
-        // AFTER the bump, so it names the incarnation the client above will be handed out under:
+        // AFTER the bump, so it names the incarnation the client above is handed out under:
         // this is one of the two places a non-nil client is installed, and therefore one of the
         // two that may move it.
         establishedGeneration = sessionGeneration
@@ -1690,6 +1695,13 @@ public final class SessionStore {
     /// and whenever a credential this process presented stops being the one presented — a failed
     /// replacement sign-in, a restore over a grant held only in memory — unless the caller puts
     /// that same credential back (`keeping`).
+    ///
+    /// Every site that ends an identity calls it BEFORE it clears or replaces the handle
+    /// (`scripts/incarnation-order-rule.sh` holds that order): a sender off the main actor checks
+    /// the incarnation, never `client`, so its boundary closes at the bump. The cost is that the
+    /// withdrawal callback runs while the outgoing handle is still installed beside the NEW
+    /// generation, so it must not read `api` or `activeHandle` — the one the app passes reads
+    /// neither.
     @discardableResult
     private func endIncarnation(
         withdrawingAccount: Bool = false, keeping kept: PresentedCredential? = nil
@@ -1814,9 +1826,10 @@ public final class SessionStore {
 
     private func failSignIn(_ error: NativeLoginError) {
         state = .signedOut
+        // The authority before the handle, as at every site that ends an identity.
+        endIncarnation()
         client = nil
         credential = nil
-        endIncarnation()
         supersedeValidationInFlight()
         lastError = error.message
         lastFailure = error
@@ -1873,11 +1886,12 @@ public final class SessionStore {
         // await belongs to the account being replaced; finding no client is right, and finding the
         // previous one is how an answer about A lands in B's session. The last-known identity goes
         // with it: a process that dies inside the write must not leave A's file beside B's token.
+        // The account the licence above belonged to — none, on a first sign-in — is withdrawn at
+        // this epoch, exactly as a wipe withdraws it; its uploads still hold its token. The
+        // incarnation ends before the handle is cleared: a sender off the main actor checks it.
+        endIncarnation(withdrawingAccount: true)
         client = nil
         credential = nil
-        // The account the licence above belonged to — none, on a first sign-in — is withdrawn at
-        // this epoch, exactly as a wipe withdraws it; its uploads still hold its token.
-        endIncarnation(withdrawingAccount: true)
         let installing = sessionGeneration
         await invalidateIdentityScopedState()
         // That call awaits the snapshot removal, and a sign-out or another installation can
@@ -2023,13 +2037,14 @@ public final class SessionStore {
         // INVALIDATE FIRST, before the keychain delete is awaited — see `endIncarnation`. The
         // client goes here rather than at the end so that a request starting inside that await
         // finds nothing to send instead of a credential this method is in the middle of throwing
-        // away.
-        client = nil
-        credential = nil
+        // away. The incarnation ends before the handle is cleared: a sender off the main actor
+        // checks it, never the handle.
         // The outbox hears it inside, after the epoch moved, so nothing it starts from here
         // presents this credential, and before any await: a background upload holds its own copy
         // of the token and goes on sending it until it is cancelled.
         let cancelling = endIncarnation(withdrawingAccount: true)
+        client = nil
+        credential = nil
         // Nothing is owed an answer any more, and nothing is waiting to ask for one.
         setVerification(.verified)
         persistenceProven = false

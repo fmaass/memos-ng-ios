@@ -2283,6 +2283,27 @@ s_refusal() {
   return 1
 }
 
+s_incarnation() {
+  # The senders that run off the main actor check the session's incarnation before each request,
+  # never its handle, so the boundary they stop at closes when the incarnation ends — and every
+  # site that ends an identity has to end it BEFORE it clears or replaces the handle (MEMNG-435).
+  # Ordinary main-actor tasks cannot interleave between the two statements, since nothing there
+  # suspends; only the synchronous withdrawal callback runs between them, and the callbacks that
+  # exist today do not inspect the handle. So it is held by a script of its own, in the idiom of the
+  # refusal-sites rule: the pinned sites in SessionStore.swift, each read in order, with a positive
+  # control that every pinned site is still found and is the whole set of handle writers. The
+  # controls cover the syntax the rule recognises; a write made through a helper is outside them.
+  echo "--- incarnation-order rule (the incarnation ends before the handle is cleared) ---"
+  local incarnation_rule="$GATE_TARGET/scripts/incarnation-order-rule.sh"
+  if [ -x "$incarnation_rule" ]; then
+    "$incarnation_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "INCARNATION FAIL: $incarnation_rule is missing or not executable, so the order was never"
+  echo "                  checked and this step proves nothing"
+  return 1
+}
+
 s_apicover() {
   # The generated client's filter is inclusion-only: an operation the config does not name is not
   # generated, no build mentions it, and the first sign is a feature nobody can write. That is the
@@ -2584,6 +2605,7 @@ step bundle     s_bundlecheck
 step warnaserr  s_warnings
 step deps       s_deps
 step refusal    s_refusal
+step incarnation s_incarnation
 step sharelink  s_sharelink
 step textsel    s_textsel
 step buttonstyle s_buttonstyle

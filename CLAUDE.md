@@ -36,7 +36,12 @@ a rebuild of every package with its warnings fatal, each against the tracked `Pa
 copied beside its manifest and refused any version that file does not name, so a fresh upstream
 tag cannot reach this step alone (`swift build -warnings-as-errors` for the four that declare
 macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes from its own
-manifest) → the dependency-rule greps → the share-link rule
+manifest) → the dependency-rule greps → the incarnation-order rule
+(`scripts/incarnation-order-rule.sh`: in `SessionStore.swift` each of `park`, `establish`,
+`failSignIn`, `persist`, `putBack` and `wipeCredential` calls `endIncarnation(` before its first
+write of `client` or `credential` — a sender off the main actor checks the incarnation, never the
+handle — with every pinned site found once and the functions writing the handle being exactly that
+set as the control) → the share-link rule
 (`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
 `Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → the
 text-selection rule (`scripts/textselection-rule.sh`: the literal `textSelection` appears in no
