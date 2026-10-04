@@ -158,6 +158,10 @@ public final class ManageTokensStore {
     /// What asks the deadline when nothing else happens at all. Cancelled by whoever takes the
     /// attempt, so a clock can never unlock the screen under a callback that already won.
     private var deadlineWake: Task<Void, Never>?
+    /// The sign-on whose browser answer took the claim WHERE IT ARRIVED — inside the presenter's
+    /// callback, before the parked call resumed. The store reads it once that call has resumed,
+    /// so a deadline that woke inside the hop between the two finds the attempt already taken.
+    private var answeredSignOn: Int?
     /// Only ever goes up, so one piece of work can never be mistaken for a later one — which is
     /// what lets an abandoned operation tell that the gate it is about to hand back is no longer
     /// the one it took.
@@ -258,20 +262,23 @@ public final class ManageTokensStore {
         do {
             let callbackURL: URL
             do {
+                // The claim is handed to the presenter so it is taken where the answer arrives:
+                // the resume below is a hop, and the deadline's wake can run inside it.
                 callbackURL = try await presenter.authenticate(
                     authorizeURL: authorizeURL,
                     callbackHost: callbackHost,
-                    callbackPath: NativeLogin.callbackPath
+                    callbackPath: NativeLogin.callbackPath,
+                    claimingAnswer: { [weak self] in self?.claimAnswer(mine) ?? false }
                 )
             } catch {
                 // The browser step is over whichever way it ended, and the deadline is racing it
                 // for the same attempt. The one that takes the attempt is the one that may write
                 // the screen; a loser that threw would paint its refusal over a sentence that is
                 // already there, minutes after anybody could act on it.
-                guard claimSignOn(mine) else { return lostTheAttempt(ending: true) }
+                guard tookTheAnswer(mine) else { return lostTheAttempt(ending: true) }
                 throw error
             }
-            guard claimSignOn(mine) else { return lostTheAttempt(ending: false) }
+            guard tookTheAnswer(mine) else { return lostTheAttempt(ending: false) }
             // The one reading of a callback URL in this app, shared with the sign-in lane: a
             // second copy of it here would be a second answer to "did this come back with a code".
             let code = try SessionStore.code(from: callbackURL)
@@ -477,6 +484,9 @@ public final class ManageTokensStore {
         }
         unboughtSignOn = nil
         signOn = nil
+        // A claim the answer took at the callback site belongs to the session this ends, exactly
+        // as the slot above does: the answer still on its way finds nothing to read.
+        answeredSignOn = nil
         deadlineWake?.cancel()
         deadlineWake = nil
         generation += 1
@@ -548,6 +558,26 @@ public final class ManageTokensStore {
         deadlineWake?.cancel()
         deadlineWake = nil
         return true
+    }
+
+    /// The browser step's answer asking for the claim at the callback site, synchronously, before
+    /// the call that is waiting for it resumes. What it takes is recorded for that call to read.
+    private func claimAnswer(_ mine: Int) -> Bool {
+        guard claimSignOn(mine) else { return false }
+        answeredSignOn = mine
+        return true
+    }
+
+    /// Whether this sign-on's answer holds the claim, read once the browser step has resumed.
+    ///
+    /// Taken at the callback site when the presenter asked it there. A presenter that never asks
+    /// leaves it to be taken here, after the resume, which is the most that presenter allows.
+    private func tookTheAnswer(_ mine: Int) -> Bool {
+        if answeredSignOn == mine {
+            answeredSignOn = nil
+            return true
+        }
+        return claimSignOn(mine)
     }
 
     /// The wait for the browser step ran out.

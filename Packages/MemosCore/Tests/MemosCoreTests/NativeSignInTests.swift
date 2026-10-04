@@ -374,3 +374,61 @@ struct NativeSignInTests {
         #expect(session.state == .signedOut)
     }
 }
+
+/// The claim a presenter can be handed is the management sign-on's, which races a deadline. The
+/// sign-in lane has no rival for its answer, and it must go on asking the browser step exactly as
+/// it always has: the plain call, with nothing claimed anywhere.
+extension NativeSignInTests {
+    @Test("the sign-in lane asks the plain browser step, with no claim")
+    func theSignInLaneAsksNoClaim() async {
+        let credentials = InMemoryCredentials()
+        let presenter = EntryPointPresenter(callback: callbackURL)
+        let session = store(credentials: credentials) { _, _, _ in
+            Stub.json(Stub.exchange(token: "memos_pat_device"))
+        }
+
+        await session.signInNatively(
+            serverAddress: "memos.example.invalid",
+            deviceName: "iPhone",
+            presenter: presenter
+        )
+
+        #expect(presenter.plainCalls == 1, "the sign-in lane did not ask the plain browser step")
+        #expect(presenter.claimingCalls == 0, "the sign-in lane handed the browser step a claim")
+        #expect(session.state.user?.subject == "fabian")
+    }
+}
+
+/// Answers with one callback and remembers which of the two entry points it was asked through.
+@MainActor
+private final class EntryPointPresenter: NativeLoginPresenter {
+    private let callback: String
+    private(set) var plainCalls = 0
+    private(set) var claimingCalls = 0
+
+    init(callback: String) { self.callback = callback }
+
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String
+    ) async throws -> URL {
+        plainCalls += 1
+        return try url()
+    }
+
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String,
+        claimingAnswer claim: @escaping @MainActor () -> Bool
+    ) async throws -> URL {
+        claimingCalls += 1
+        return try url()
+    }
+
+    private func url() throws -> URL {
+        guard let url = URL(string: callback) else { throw NativeLoginError.malformedCallback }
+        return url
+    }
+}

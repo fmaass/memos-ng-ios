@@ -88,6 +88,41 @@ public protocol NativeLoginPresenter: Sendable {
         callbackHost: String,
         callbackPath: String
     ) async throws -> URL
+
+    /// The same browser step, for a caller whose wait has a rival — a deadline racing the answer
+    /// for one claim.
+    ///
+    /// `claim` is asked synchronously AT THE CALLBACK SITE, exactly once per attempt, before the
+    /// continuation behind this call is resumed: a claim asked after the resume is a claim about
+    /// an instant that has already passed, because anything else on the main actor can run inside
+    /// that hop. Whatever it answers, the call still returns or throws as it otherwise would; the
+    /// caller is the one that reads what its claim said.
+    ///
+    /// The default claims nothing and is the plain call above, so a presenter that cannot take a
+    /// claim where its answer arrives leaves the caller to take it after the resume, as before.
+    @MainActor
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String,
+        claimingAnswer claim: @escaping @MainActor () -> Bool
+    ) async throws -> URL
+}
+
+extension NativeLoginPresenter {
+    @MainActor
+    public func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String,
+        claimingAnswer claim: @escaping @MainActor () -> Bool
+    ) async throws -> URL {
+        try await authenticate(
+            authorizeURL: authorizeURL,
+            callbackHost: callbackHost,
+            callbackPath: callbackPath
+        )
+    }
 }
 
 /// Which return trip a finished login came back on, and how to tell one of ours from any other

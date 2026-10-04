@@ -269,6 +269,127 @@ struct NativeLoginLifecycleTests {
     }
 }
 
+/// The claim a caller hands in is asked WHERE THE ANSWER ARRIVES — inside the inbox's delivery or
+/// the browser's close, synchronously — and not after the parked call resumes. The management
+/// sign-on races a deadline for one claim, and a claim asked one hop later is asked about an
+/// instant that anything else on the main actor may already have overtaken.
+extension NativeLoginLifecycleTests {
+    /// Starts a sign-in whose outcome is OBSERVED rather than awaited. A regression here is
+    /// exactly an attempt that ends without resuming its call, and awaiting that call would hang
+    /// the suite instead of failing it: no watchdog reaches an attempt that has been taken down,
+    /// and cancellation does not resume a checked continuation.
+    private func signIn(
+        _ harness: LoginHarness,
+        claim: @escaping @MainActor () -> Bool
+    ) -> AttemptOutcome {
+        let outcome = AttemptOutcome()
+        let presenter: SafariLoginPresenter = harness.presenter
+        Task {
+            do {
+                let url = try await presenter.authenticate(
+                    authorizeURL: authorizeURL,
+                    callbackHost: host,
+                    callbackPath: path,
+                    claimingAnswer: claim
+                )
+                outcome.finish(.success(url))
+            } catch {
+                outcome.finish(.failure(error))
+            }
+        }
+        return outcome
+    }
+
+    @Test("a delivered callback asks its claim at the callback site, once, before resuming")
+    func aDeliveredCallbackClaimsWhereItArrives() async throws {
+        let harness = harness()
+        let claims = ClaimLog()
+        let attempt = signIn(harness, claim: claims.ask)
+        await settle()
+        #expect(claims.answers.isEmpty, "a claim was asked before anything answered")
+
+        #expect(harness.inbox.deliver(callbackURL))
+        // Read with nothing awaited since the delivery: a claim asked after the resume would not
+        // have been asked yet.
+        #expect(claims.answers == [true], "the claim was not asked where the callback arrived")
+
+        guard let ended = await attempt.settled() else { return }
+        #expect(try ended.get() == callbackURL)
+        #expect(!harness.inbox.deliver(callbackURL), "a resumed sign-in claimed a second callback")
+        #expect(claims.answers == [true], "the second lane's copy asked the claim again")
+    }
+
+    @Test("a browser closed by the person asks its claim at the callback site, once")
+    func aClosedBrowserClaimsWhereItCloses() async throws {
+        let harness = harness()
+        let claims = ClaimLog()
+        let attempt = signIn(harness, claim: claims.ask)
+        await settle()
+        let browser = try #require(harness.browsers.first)
+
+        browser.closedByPerson()
+        #expect(claims.answers == [true], "the claim was not asked where the close arrived")
+
+        guard let ended = await attempt.settled() else { return }
+        #expect(throws: NativeLoginError.cancelled) { try ended.get() }
+        #expect(claims.answers == [true])
+    }
+
+    /// The claim is the CALLER's question; the presenter only asks it at the right instant. An
+    /// answer that lost its claim still ends the attempt the ordinary way — the view comes down
+    /// and the parked call returns — so nothing is left waiting on a continuation nobody resumes.
+    @Test("an answer whose claim was already taken still ends its attempt")
+    func aLostClaimStillEndsTheAttempt() async throws {
+        let harness = harness()
+        let claims = ClaimLog(verdict: false)
+        let attempt = signIn(harness, claim: claims.ask)
+        await settle()
+        let browser = try #require(harness.browsers.first)
+
+        #expect(harness.inbox.deliver(callbackURL))
+        #expect(claims.answers == [false])
+        guard let ended = await attempt.settled() else { return }
+        #expect(try ended.get() == callbackURL)
+        #expect(browser.dismissCount == 1, "the browser view was left on screen")
+        #expect(harness.inbox.waitingFor == nil, "a finished sign-in left its inbox entry behind")
+    }
+}
+
+/// How one sign-in call ended, written by the call itself when it returns or throws.
+@MainActor
+private final class AttemptOutcome {
+    typealias Ended = Result<URL, any Error>
+
+    private var result: Ended?
+
+    func finish(_ result: Ended) { self.result = result }
+
+    /// Bounded: a call that has not ended within the ceiling records an Issue and is given up on,
+    /// never awaited — a call that will not return would hang the suite rather than fail it.
+    func settled(sourceLocation: SourceLocation = #_sourceLocation) async -> Ended? {
+        for _ in 0..<2000 {
+            if let result { return result }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        Issue.record("the sign-in call never returned", sourceLocation: sourceLocation)
+        return nil
+    }
+}
+
+/// Records every time a claim is asked, and answers it as the test says.
+@MainActor
+private final class ClaimLog {
+    private let verdict: Bool
+    private(set) var answers: [Bool] = []
+
+    init(verdict: Bool = true) { self.verdict = verdict }
+
+    func ask() -> Bool {
+        answers.append(verdict)
+        return verdict
+    }
+}
+
 /// The presenter, the inbox and the machine wired the way the app wires them, with the browser
 /// view replaced by something a test can open, close and time.
 @MainActor

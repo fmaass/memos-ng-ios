@@ -1881,3 +1881,264 @@ extension ManageTokensStoreTests {
         #expect(seen.get().filter { $0.operation == revokeOperation }.count == 1)
     }
 }
+
+/// The answer and the deadline race for ONE claim, and the race is decided where the answer
+/// ARRIVES, not where the store next runs. Between the browser step's answer and the store reading
+/// it there is a continuation hop, and anything else on the main actor — the deadline's own wake
+/// included — can run inside it. An answer that had already arrived must not lose to a deadline
+/// that woke after it.
+///
+/// Every sign-on here is OBSERVED rather than awaited (`SignOnOutcome`): a regression in this area
+/// is a call that never resumes, and awaiting one would hang the suite instead of failing it.
+extension ManageTokensStoreTests {
+    private func startSignOn(
+        _ store: ManageTokensStore,
+        presenter: CallbackSitePresenter
+    ) -> SignOnOutcome {
+        let outcome = SignOnOutcome()
+        Task {
+            outcome.finish(
+                await store.authenticate(deviceName: "Fabian's iPhone", presenter: presenter)
+            )
+        }
+        return outcome
+    }
+
+    @Test("an answer that arrived before the deadline wins, even when the deadline wakes first")
+    func anAnswerThatArrivedWinsTheHopBeforeTheStoreResumes() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let clock = LockedValue(managementNow)
+        let store = makeStore(seen: seen, now: { clock.get() }) { operation in
+            switch operation {
+            // Live at the clock this test ends on: the round trip it finishes with happens after
+            // the deadline instant, and must list rather than lapse.
+            case mintOperation: .json(grantLiveAfterTheWait)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
+        }
+        let presenter = CallbackSitePresenter()
+        defer { presenter.close() }
+        let callback = try #require(URL(string: "memosng://auth-callback?code=abc"))
+
+        let signingOn = startSignOn(store, presenter: presenter)
+        await presenter.waitUntilOpen()
+        #expect(store.state == .authenticating, "the sign-on was not on screen to begin with")
+
+        // ONE main-actor turn with nothing awaited in it: the answer arrives, the deadline's
+        // instant comes, and the deadline's wake runs — all before the store's continuation can.
+        presenter.deliver(callback)
+        clock.set(managementNow.addingTimeInterval(ManageTokensStore.browserStepDeadline))
+        let deadlineTook = store.signOnDeadlinePassed()
+        guard let signedOn = await signingOn.settled() else { return }
+
+        #expect(presenter.claims == [true], "the answer did not claim where it arrived")
+        #expect(!deadlineTook, "the deadline took an attempt whose answer had already arrived")
+        #expect(signedOn, "an answer that arrived first was thrown away")
+        #expect(store.state != .locked(.unanswered), "the screen blamed a browser that answered")
+        #expect(rows(store.state)?.map(\.id) == [1], "the sign-on did not end on the list")
+        #expect(seen.get().filter { $0.operation == mintOperation }.count == 1)
+    }
+
+    /// The other order of the same race, so the one above is read as "the first to arrive wins"
+    /// rather than as "the answer always wins": a deadline that has already taken the attempt is
+    /// not undone by an answer arriving after it.
+    @Test("a deadline that ran out before the answer arrived still takes the attempt")
+    func aDeadlineThatCameFirstBeatsTheAnswerAtTheCallbackSite() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let clock = LockedValue(managementNow)
+        let store = makeStore(seen: seen, now: { clock.get() }) { operation in
+            operation == mintOperation ? .json(grantLiveAfterTheWait) : .json("[]")
+        }
+        let presenter = CallbackSitePresenter()
+        defer { presenter.close() }
+        let callback = try #require(URL(string: "memosng://auth-callback?code=abc"))
+
+        let signingOn = startSignOn(store, presenter: presenter)
+        await presenter.waitUntilOpen()
+
+        clock.set(managementNow.addingTimeInterval(ManageTokensStore.browserStepDeadline))
+        let deadlineTook = store.signOnDeadlinePassed()
+        presenter.deliver(callback)
+        guard let signedOn = await signingOn.settled() else { return }
+
+        #expect(deadlineTook, "the wait ran out and nothing said so")
+        #expect(presenter.claims == [false], "a late answer took a claim the deadline held")
+        #expect(!signedOn)
+        #expect(store.state == .locked(.unanswered), "a beaten answer wrote the screen anyway")
+        #expect(seen.get().isEmpty, "a handoff code was spent for a wait that had ended")
+    }
+
+    /// The win an answer took at the callback site lives until the store reads it, one hop later.
+    /// A Close that lands inside that hop ends the sign-on, and the win goes with it: the answer
+    /// still on its way must not go on to spend its handoff code for a screen that was closed.
+    @Test("a Close that lands between the answer's claim and the store reading it ends the sign-on")
+    func aCloseInsideTheHopEndsTheSignOn() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let store = makeStore(seen: seen) { operation in
+            operation == mintOperation ? .json(liveGrant) : .json("[]")
+        }
+        let presenter = CallbackSitePresenter()
+        defer { presenter.close() }
+        let callback = try #require(URL(string: "memosng://auth-callback?code=abc"))
+
+        let signingOn = startSignOn(store, presenter: presenter)
+        await presenter.waitUntilOpen()
+
+        presenter.deliver(callback)
+        store.forget(.closed)
+        guard let signedOn = await signingOn.settled() else { return }
+
+        #expect(presenter.claims == [true], "the answer did not claim where it arrived")
+        #expect(!signedOn, "a sign-on the person closed came back signed on")
+        #expect(store.state == .locked(.never), "a closed sign-on left something on the screen")
+        #expect(seen.get().isEmpty, "a handoff code was spent for a screen that was closed")
+    }
+
+    /// An older sign-on's win, taken at its callback site, with its resume still in the air when
+    /// the person closes and starts again. The newer sign-on's own answer then loses its claim to
+    /// its deadline — and must not be carried through by the older answer's win instead.
+    @Test("a newer sign-on never reads the win of an older one that has not resumed")
+    func aNewerSignOnNeverReadsAnOlderWin() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let clock = LockedValue(managementNow)
+        let store = makeStore(seen: seen, now: { clock.get() }) { operation in
+            switch operation {
+            case mintOperation: .json(grantLiveAfterTheWait)
+            case listOperation: .json("[\(Stub.pat(id: 1, name: "Kitchen phone"))]")
+            default: .status(.internalServerError)
+            }
+        }
+        let older = CallbackSitePresenter()
+        let newer = CallbackSitePresenter()
+        defer {
+            older.close()
+            newer.close()
+        }
+        let oldCallback = try #require(URL(string: "memosng://auth-callback?code=old"))
+        let newCallback = try #require(URL(string: "memosng://auth-callback?code=new"))
+
+        let olderSigningOn = startSignOn(store, presenter: older)
+        await older.waitUntilOpen()
+        // The older answer wins at its callback site; its resume has not happened yet.
+        older.answerButHoldTheResume(oldCallback)
+        store.forget(.closed)
+
+        let newerSigningOn = startSignOn(store, presenter: newer)
+        await newer.waitUntilOpen()
+        #expect(store.state == .authenticating, "the newer sign-on was not on screen")
+        clock.set(managementNow.addingTimeInterval(ManageTokensStore.browserStepDeadline))
+        #expect(store.signOnDeadlinePassed(), "the newer wait ran out and nothing said so")
+        newer.deliver(newCallback)
+        guard let newerSignedOn = await newerSigningOn.settled() else { return }
+
+        older.releaseTheResume()
+        guard let olderSignedOn = await olderSigningOn.settled() else { return }
+
+        #expect(older.claims == [true], "the older answer did not claim where it arrived")
+        #expect(newer.claims == [false], "the newer answer took a claim its deadline held")
+        #expect(!newerSignedOn, "the newer sign-on was carried through by an older answer's win")
+        #expect(!olderSignedOn, "a sign-on the person closed came back signed on")
+        #expect(store.state == .locked(.unanswered), "a beaten answer wrote the screen anyway")
+        #expect(seen.get().isEmpty, "a handoff code was spent for a sign-on that had ended")
+    }
+}
+
+/// How one sign-on call ended, written by the call itself when it returns.
+@MainActor
+private final class SignOnOutcome {
+    private var signedOn: Bool?
+
+    func finish(_ signedOn: Bool) { self.signedOn = signedOn }
+
+    /// Bounded: a call that has not ended within the ceiling records an Issue and is given up on,
+    /// never awaited — a call that will not return would hang the suite rather than fail it.
+    func settled(sourceLocation: SourceLocation = #_sourceLocation) async -> Bool? {
+        for _ in 0..<2000 {
+            if let signedOn { return signedOn }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        Issue.record("the sign-on call never returned", sourceLocation: sourceLocation)
+        return nil
+    }
+}
+
+/// A presenter that answers the way the real one does: the claim it was handed is asked at the
+/// callback site, synchronously, and only then is the parked call resumed — so when `deliver`
+/// returns, the store has not yet read the answer.
+@MainActor
+private final class CallbackSitePresenter: NativeLoginPresenter {
+    private var parked: CheckedContinuation<URL, any Error>?
+    private var claim: (@MainActor () -> Bool)?
+    private var held: (continuation: CheckedContinuation<URL, any Error>, url: URL)?
+    private var closed = false
+    /// What each claim asked at the callback site answered, in order.
+    private(set) var claims: [Bool] = []
+
+    /// Bounded, like every other wait in this suite.
+    func waitUntilOpen() async {
+        for _ in 0..<2000 {
+            if parked != nil { return }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String
+    ) async throws -> URL {
+        try await park(claim: nil)
+    }
+
+    func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String,
+        claimingAnswer claim: @escaping @MainActor () -> Bool
+    ) async throws -> URL {
+        try await park(claim: claim)
+    }
+
+    private func park(claim: (@MainActor () -> Bool)?) async throws -> URL {
+        guard !closed else { throw NativeLoginError.cancelled }
+        self.claim = claim
+        return try await withCheckedThrowingContinuation { parked = $0 }
+    }
+
+    /// The answer arriving: the claim asked where it arrives, then the parked call resumed.
+    func deliver(_ url: URL) {
+        answerButHoldTheResume(url)
+        releaseTheResume()
+    }
+
+    /// The claim asked where the answer arrives, with the resume held back — the hop between the
+    /// two stretched for as long as a test needs something to happen inside it.
+    func answerButHoldTheResume(_ url: URL) {
+        guard let parked else { return }
+        self.parked = nil
+        if let claim { claims.append(claim()) }
+        claim = nil
+        held = (parked, url)
+    }
+
+    func releaseTheResume() {
+        guard let held else { return }
+        self.held = nil
+        held.continuation.resume(returning: held.url)
+    }
+
+    /// Ends whatever is still parked or held and refuses anything that arrives later, so no call
+    /// is ever left on a continuation nobody resumes.
+    func close() {
+        closed = true
+        if let parked {
+            self.parked = nil
+            parked.resume(throwing: NativeLoginError.cancelled)
+        }
+        if let held {
+            self.held = nil
+            held.continuation.resume(throwing: NativeLoginError.cancelled)
+        }
+    }
+}

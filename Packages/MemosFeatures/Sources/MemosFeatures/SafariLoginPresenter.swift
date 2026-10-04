@@ -31,6 +31,9 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
         /// Carried per attempt because they name the server that was typed into this one.
         let callbackHost: String
         let callbackPath: String
+        /// The caller's claim, asked where the attempt's answer arrives and before the
+        /// continuation is resumed. `nil` for a caller that has nothing racing its answer.
+        let claim: (@MainActor () -> Bool)?
     }
 
     /// The view controller the browser view is presented from. Injectable so "there is nowhere to
@@ -73,6 +76,34 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
         callbackHost: String,
         callbackPath: String
     ) async throws -> URL {
+        try await present(
+            authorizeURL: authorizeURL,
+            callbackHost: callbackHost,
+            callbackPath: callbackPath,
+            claim: nil
+        )
+    }
+
+    public func authenticate(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String,
+        claimingAnswer claim: @escaping @MainActor () -> Bool
+    ) async throws -> URL {
+        try await present(
+            authorizeURL: authorizeURL,
+            callbackHost: callbackHost,
+            callbackPath: callbackPath,
+            claim: claim
+        )
+    }
+
+    private func present(
+        authorizeURL: URL,
+        callbackHost: String,
+        callbackPath: String,
+        claim: (@MainActor () -> Bool)?
+    ) async throws -> URL {
         // Resolved BEFORE anything is built, so "there is nowhere to present" is a sentence the
         // sign-in screen shows rather than a presentation into a window attached to nothing —
         // which puts no view on screen and looks exactly like a button that did nothing.
@@ -105,7 +136,8 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
                 continuation: continuation,
                 browser: browser,
                 callbackHost: callbackHost,
-                callbackPath: callbackPath
+                callbackPath: callbackPath,
+                claim: claim
             )
             // Each of these captures the attempt it belongs to rather than reading whatever is
             // live when it fires. That is the fence: a browser view that closes after its attempt
@@ -249,13 +281,13 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
             MemosLog.session.info(
                 "native sign-in: the callback arrived on the \(lane.description, privacy: .public)"
             )
-            end(attempt)?.continuation.resume(returning: url)
+            answer(attempt)?.resume(returning: url)
         case .abandon(let error, let attempt):
             let detail = error.message ?? "no reason given"
             MemosLog.session.error(
                 "native sign-in ended without a callback: \(detail, privacy: .public)"
             )
-            end(attempt)?.continuation.resume(throwing: error)
+            answer(attempt)?.resume(throwing: error)
         case .settle(let attempt):
             let outcome = String(describing: flow.state)
             MemosLog.session.info(
@@ -266,6 +298,18 @@ public final class SafariLoginPresenter: NSObject, NativeLoginPresenter {
             // effect rather than of most of them.
             _ = end(attempt)
         }
+    }
+
+    /// Ends one attempt with its answer and hands back the continuation to resume — the caller's
+    /// claim asked FIRST, here at the callback site and with nothing awaited, because the resume
+    /// is a hop and the caller's rival can run inside it. Whatever the claim answers, the attempt
+    /// still ends and its call still returns: the claim is the caller's to read, not this one's.
+    private func answer(
+        _ attempt: NativeLoginFlow.Attempt
+    ) -> CheckedContinuation<URL, any Error>? {
+        guard let live = end(attempt) else { return nil }
+        _ = live.claim?()
+        return live.continuation
     }
 
     /// Takes one attempt down and hands it back to be resumed — but only if it is still the live
