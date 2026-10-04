@@ -1319,7 +1319,19 @@ public final class TimelineStore {
     /// store offers the instant at which there is none. A
     /// payment that leaves a debt of its own is waited for too. No mutation awaits this: a save is
     /// finished when the save is finished, and must not wait on a read it did not need.
+    ///
+    /// It waits for the payments outstanding AT THE CALL, identity change or not. A change of
+    /// identity forgets the table without cancelling anything, so each of those reads still lands
+    /// — refused, under the handle its debt was recorded with — and a test that changed the
+    /// identity mid-payment can only assert what that answer did not do once it has arrived. So
+    /// the waits are taken from the table when called and kept here, where the change cannot drop
+    /// them. After those, it waits for whatever the table then holds — a debt one of them left,
+    /// or a payment started since — whoever's it is. A call made AFTER a change finds the table it
+    /// emptied and waits for nothing the outgoing identity started.
     func owedReadsSettled() async {
+        for payment in Array(owedPayments.values) {
+            await payment.value
+        }
         while let payment = owedPayments.values.first {
             await payment.value
         }

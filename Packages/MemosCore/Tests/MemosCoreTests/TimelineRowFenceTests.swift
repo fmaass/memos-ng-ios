@@ -785,4 +785,199 @@ struct TimelineRowFenceTests {
         #expect(store.memos.first?.content == "new")
         #expect(store.memos.first?.attachments.first?.status == .ready)
     }
+
+    /// The boundary across an identity change: it waits for every payment that was out when it was
+    /// called, although the change has forgotten them all, and a boundary called after the change
+    /// waits for none of them.
+    ///
+    /// The change forgets the store's table of payments without cancelling a single one, so each
+    /// paying read still lands — under the handle its debt was recorded with, and refused there.
+    /// A test that changes the identity mid-payment asserts what those answers did NOT do to the
+    /// incoming identity's list, which it can only assert once they have arrived. Two payments,
+    /// because the table is re-read between awaits: a boundary that went back to it after the
+    /// payment it was awaiting landed would find it emptied and leave the other one in flight.
+    ///
+    /// Which payment such a boundary awaits first is the table's iteration order, which is seeded
+    /// per allocation and so differs from one store to the next: releasing in one order exposes it
+    /// only when it awaited the payment released first. So each order is run over several fresh
+    /// stores, and a boundary that lets go early survives a run with odds of 2^-(2 × rounds).
+    @Test(
+        "the boundary waits for every payment out at its call, though the identity has changed",
+        arguments: ["a", "b"]
+    )
+    func theBoundaryWaitsOutPaymentsTheIdentityChangeForgot(releasingFirst first: String)
+        async throws
+    {
+        for round in 1...5 {
+            try await boundaryAcrossAnIdentityChange(releasingFirst: first, round: round)
+        }
+    }
+
+    private func boundaryAcrossAnIdentityChange(releasingFirst first: String, round: Int)
+        async throws
+    {
+        let second = first == "a" ? "b" : "a"
+        let context = "releasing \(first) first, round \(round)"
+        let store = TimelineStore()
+        // One of each per memo: the two memos' requests run at once, and a shared table written
+        // from both would lose one of the writes.
+        func perMemo<Value>(_ make: () -> Value) -> [String: Value] { ["a": make(), "b": make()] }
+        let reads = perMemo { Counter() }
+        let readEntered = perMemo { LockedValue<Bool>(false) }
+        let readRelease = LockedValue<Bool>(false)
+        let payingEntered = perMemo { LockedValue<Bool>(false) }
+        let payingAnswered = perMemo { LockedValue<Bool>(false) }
+        let payingRelease = perMemo { LockedValue<Bool>(false) }
+        // Whatever this round stops on, nothing it held stays held: a failed expectation must end
+        // the suite, not leave a paying read spinning behind it.
+        defer {
+            readRelease.set(true)
+            for release in payingRelease.values { release.set(true) }
+        }
+        let client = Stub.client { request, _, operation in
+            let uid = request.path?.contains("/memos/b") == true ? "b" : "a"
+            switch operation {
+            case getMemoOperation:
+                let index = reads[uid]?.count ?? 0
+                reads[uid]?.increment()
+                if index == 0 {
+                    readEntered[uid]?.set(true)
+                    try await hold(until: readRelease)
+                    return Stub.json(Stub.memo(uid: uid, content: "old"))
+                }
+                payingEntered[uid]?.set(true)
+                if let release = payingRelease[uid] {
+                    try await hold(until: release)
+                }
+                payingAnswered[uid]?.set(true)
+                return Stub.json(Stub.memo(uid: uid, content: "new"))
+            case patchMemoOperation:
+                return Stub.json(Stub.memo(uid: uid, content: "new"))
+            default:
+                return Stub.json(
+                    Stub.page([
+                        Stub.memo(uid: "a", content: "old"),
+                        Stub.memo(uid: "b", content: "old"),
+                    ])
+                )
+            }
+        }
+
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.memos.map(\.uid) == ["a", "b"], "control: the list loaded (\(context))")
+        let readDone = perMemo { LockedValue<Bool>(false) }
+        for uid in ["a", "b"] {
+            Task {
+                await store.refreshMemo(uid: uid, using: client.handle, baseURL: Stub.baseURL)
+                readDone[uid]?.set(true)
+            }
+        }
+        let readsDue = ContinuousClock.now + .seconds(2)
+        while !readEntered.values.allSatisfy({ $0.get() }) && ContinuousClock.now < readsDue {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try #require(
+            readEntered.values.allSatisfy { $0.get() },
+            "both reads left before the saves (\(context))"
+        )
+        // Each save outruns the read held for its row, so each read is fenced on arrival and leaves
+        // a debt that a fresh read pays.
+        await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
+        await store.edit(uid: "b", content: "new", using: client.handle, baseURL: Stub.baseURL)
+        readRelease.set(true)
+        let readsLandDue = ContinuousClock.now + .seconds(2)
+        while !readDone.values.allSatisfy({ $0.get() }) && ContinuousClock.now < readsLandDue {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try #require(readDone.values.allSatisfy { $0.get() }, "both reads landed (\(context))")
+        let payingDue = ContinuousClock.now + .seconds(2)
+        while !payingEntered.values.allSatisfy({ $0.get() }) && ContinuousClock.now < payingDue {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try #require(
+            payingEntered.values.allSatisfy { $0.get() },
+            "both debts are being paid, both held (\(context))"
+        )
+
+        let settled = LockedValue<Bool>(false)
+        // Started immediately, so the boundary has read the table and is waiting before the change
+        // below can forget it: the call this test is about is one made while the payments are out.
+        let boundary = Task.immediate {
+            await store.owedReadsSettled()
+            settled.set(true)
+        }
+        store.sessionIdentityChanged(
+            to: TimelineSnapshotIdentity(server: Stub.baseURL, subject: "somebody-else")
+        )
+        #expect(store.memos.isEmpty, "control: the change emptied the list (\(context))")
+
+        // A boundary called AFTER the change, with both forgotten payments still held: the table
+        // it reads was emptied by the change, so it owes nothing and returns.
+        let lateSettled = LockedValue<Bool>(false)
+        let late = Task.immediate {
+            await store.owedReadsSettled()
+            lateSettled.set(true)
+        }
+        let lateDue = ContinuousClock.now + .seconds(2)
+        while !lateSettled.get() && ContinuousClock.now < lateDue {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(
+            lateSettled.get(),
+            "a boundary called after the change waited for a payment it forgot (\(context))"
+        )
+        #expect(
+            !payingAnswered.values.contains { $0.get() },
+            "control: both forgotten payments were still held when it returned (\(context))"
+        )
+
+        // A window, not a detector of its own: a boundary that let go when the table was emptied
+        // returns inside it, and the expectation after it reads that.
+        let firstQuiet = ContinuousClock.now + .milliseconds(200)
+        while !settled.get() && ContinuousClock.now < firstQuiet {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(
+            !settled.get(),
+            "the boundary let go of the payments the identity change forgot (\(context))"
+        )
+
+        // One payment lands; the other is still held. A boundary that went back to the table after
+        // the one it was awaiting would find it empty and return here, the other still to come.
+        payingRelease[first]?.set(true)
+        let answerDue = ContinuousClock.now + .seconds(2)
+        while payingAnswered[first]?.get() != true && ContinuousClock.now < answerDue {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(payingAnswered[first]?.get() == true, "control: \(first) was answered (\(context))")
+        #expect(payingAnswered[second]?.get() == false, "control: \(second) is held (\(context))")
+        let secondQuiet = ContinuousClock.now + .milliseconds(200)
+        while !settled.get() && ContinuousClock.now < secondQuiet {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(
+            !settled.get(),
+            "the boundary returned with a payment out at its call still held (\(context))"
+        )
+
+        payingRelease[second]?.set(true)
+        let settleDue = ContinuousClock.now + .seconds(2)
+        while !settled.get() && ContinuousClock.now < settleDue {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        // The final readings are the verdict; awaiting a task that never ended would turn a
+        // boundary that never returns into a suite that never ends.
+        guard settled.get(), lateSettled.get() else {
+            Issue.record("a boundary never returned once every payment had landed (\(context))")
+            return
+        }
+        _ = await boundary.value
+        _ = await late.value
+
+        #expect(payingAnswered.values.allSatisfy { $0.get() })
+        #expect(reads["a"]?.count == 2, "the debt on a was paid once (\(context))")
+        #expect(reads["b"]?.count == 2, "the debt on b was paid once (\(context))")
+        // What the forgotten payments brought back was refused where it landed.
+        #expect(store.memos.isEmpty, "a forgotten payment reached the list (\(context))")
+    }
 }
