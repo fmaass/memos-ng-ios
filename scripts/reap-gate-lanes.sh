@@ -4,6 +4,7 @@
 # SURVIVORS lists the union of local and origin heads. Only absent, unlocked lanes older than
 # 24 hours are reaped; the current lane is always protected.
 # gate_lane_is_unlocked GATE_ROOT WORK_ROOT PATH also protects lanes during hygiene sweeps.
+# gate_drop_failed_rebuilds WORK RC removes a failed run's own package-rebuild trees.
 
 gate_lane_is_unlocked() {
   local gate_root="$1" work_root="$2" path="$3" lane ancestor locks
@@ -56,6 +57,40 @@ gate_pressure_sweep() { # TARGET WORK BRANCH LOW_KB HIGH_KB
     done
   done
   return 0
+}
+
+# A run that FAILED takes its own package-rebuild trees (WORK/warnings: the four packages' scratch
+# paths and MemosFeatures' DerivedData and package checkouts) with it, so a failed run does not
+# leave the host fuller than it found it (MEMNG-601: 2026-09-28 a run died at that step with the
+# volume at 2.3 GiB free). A run that passed keeps them for the next incremental build, and the
+# lane's DerivedData is kept either way. Its logs were copied into the artifacts before the step
+# returned. An exit code that is not a number, or no work directory, removes nothing.
+gate_drop_failed_rebuilds() { # WORK RC
+  local work="${1:-}" rc="${2:-}" kb phys
+  case "$rc" in ''|*[!0-9]*) echo "GATE_HYGIENE rebuilds: kept, the run's exit code '$rc' is not a number"; return 1 ;; esac
+  [ "$rc" -ne 0 ] || return 0
+  case "$work" in ''|/) echo "GATE_HYGIENE rebuilds: kept, no work directory was named"; return 1 ;; esac
+  # Only a plain absolute path to a real directory: a lane that is a symlink would alias another
+  # lane's trees, and a . or .. or empty segment would name something other than it seems.
+  case "$work/" in
+    /*/./*|/*/../*|*//*|[!/]*)
+      echo "GATE_HYGIENE rebuilds: kept, the work directory '$work' is not a plain absolute path"; return 1 ;;
+  esac
+  if [ -L "$work" ]; then echo "GATE_HYGIENE rebuilds: kept, the work directory $work is a symlink"; return 1; fi
+  # The whole path must be its own physical path (the remote derives it from a `pwd -P` root): a
+  # symlink anywhere above it could alias another lane, so it removes nothing then.
+  phys="$(cd "$work" 2>/dev/null && pwd -P)" || phys=""
+  if [ "$phys" != "$work" ]; then
+    echo "GATE_HYGIENE rebuilds: kept, the work directory $work is not its physical path (${phys:-unresolvable})"; return 1
+  fi
+  [ -d "$work/warnings" ] && [ ! -L "$work/warnings" ] || return 0
+  kb="$(du -sk "$work/warnings" 2>/dev/null | awk '{ print $1 }')"
+  if rm -rf "$work/warnings"; then
+    echo "GATE_HYGIENE rebuilds: the run failed (exit $rc), removed its own $work/warnings (${kb:-?} KiB)"
+  else
+    echo "GATE_HYGIENE rebuilds: the run failed (exit $rc), could not remove $work/warnings"
+    return 1
+  fi
 }
 
 reap_gate_lanes() (

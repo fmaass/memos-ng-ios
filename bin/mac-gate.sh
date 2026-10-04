@@ -2613,6 +2613,9 @@ step picturelist s_picturelist
 step apicover   s_apicover
 step testcount  s_testcount
 
+# A failed run removes its own package-rebuild trees (scripts/reap-gate-lanes.sh); it never
+# changes the verdict.
+gate_drop_failed_rebuilds "$GATE_WORK" "$first_fail"
 # The slot went back inside the xcodebuild step, before this line, and said so on its own
 # MAC_GATE_SLOT line; the traps only repeat the release.
 echo "MAC_GATE_REMOTE_SUMMARY:$summary | exit=$first_fail"

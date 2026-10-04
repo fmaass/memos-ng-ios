@@ -145,7 +145,11 @@ the same file (`scripts/reap-gate-lanes.sh:37`), called by the build host's scri
 (`bin/mac-gate.sh:1237`) and by the admission's disk reading (`:1112`), its thresholds not under test. So a lane is eligible once its branch
 is absent from both inventories, it is unlocked, and both of its directories are older than 24
 hours by their modification time — an already-old lane qualifies the moment its branch goes —
-and it disappears on the next full run whose fetch was accepted: an opportunity, not a deadline.
+and it disappears on the next full run whose fetch was accepted: an opportunity, not a deadline. A full
+run whose build-host steps failed and that reaches its remote summary also tries to remove its own
+`warnings/` rebuild trees there, never through a path that is not its own physical path (a run
+interrupted on the way does not), keeping its DerivedData (`gate_drop_failed_rebuilds`, same file and test); a run that
+passed keeps them for the next incremental build.
 
 **One simulator phase at a time on the build host, admitted by condition.** Before anything is
 copied, run admission (`bin/mac-gate.sh:1129`, `scripts/gate-admission.sh:636`) requires the host's

@@ -105,6 +105,52 @@ for root in "$gate" "$work"; do
     fails=$((fails + 1))
   fi
 done
+# A failed run removes its own rebuild trees and nothing else; a passed one keeps them.
+drop="$tmp/drop/work/fix/lane"
+mkdir -p "$drop/warnings/MemosCore" "$drop/DerivedData"
+printf 'cache\n' > "$drop/warnings/MemosCore/cache"
+printf 'cache\n' > "$drop/DerivedData/cache"
+out="$(gate_drop_failed_rebuilds "$drop" 0)"; drc=$?
+if [ "$drc" -ne 0 ] || [ -n "$out" ] || [ ! -f "$drop/warnings/MemosCore/cache" ]; then
+  echo "FAIL a passed run lost its rebuild trees or spoke (exit $drc): $out"; fails=$((fails + 1))
+fi
+for bad_rc in '' x1 -1; do
+  out="$(gate_drop_failed_rebuilds "$drop" "$bad_rc")"; drc=$?
+  if [ "$drc" -ne 1 ] || [ ! -f "$drop/warnings/MemosCore/cache" ] || ! printf '%s' "$out" | grep -q 'kept'; then
+    echo "FAIL exit code '$bad_rc' removed the rebuild trees or did not say so (exit $drc): $out"; fails=$((fails + 1))
+  fi
+done
+out="$(gate_drop_failed_rebuilds "" 65)"; drc=$?
+if [ "$drc" -ne 1 ] || ! printf '%s' "$out" | grep -q 'no work directory'; then
+  echo "FAIL an empty work directory was not refused (exit $drc): $out"; fails=$((fails + 1))
+fi
+# A lane that is a symlink to another lane, or a path that is not plain and absolute, removes nothing.
+other="$tmp/drop/work/fix/other"
+mkdir -p "$other/warnings"; printf 'cache\n' > "$other/warnings/cache"
+ln -s "$other" "$tmp/drop/work/fix/alias"
+ln -s "$tmp/drop/work" "$tmp/drop/root-alias"
+for odd in "$tmp/drop/work/fix/alias" "$tmp/drop/root-alias/fix/other" "$tmp/drop/work/fix/x/../other" "$tmp/drop/work/fix/./other" \
+  "$tmp/drop/work/fix//other" "/$tmp/drop/work/fix/other" "${other#/}"; do
+  out="$(cd / && gate_drop_failed_rebuilds "$odd" 65)"; drc=$?
+  if [ "$drc" -ne 1 ] || [ ! -f "$other/warnings/cache" ] || ! printf '%s' "$out" | grep -q 'kept'; then
+    echo "FAIL work directory '$odd' was not refused, or another lane lost its trees (exit $drc): $out"; fails=$((fails + 1))
+  fi
+done
+out="$(gate_drop_failed_rebuilds "$drop" 65)"; drc=$?
+if [ "$drc" -ne 0 ] || [ -e "$drop/warnings" ] || [ ! -f "$drop/DerivedData/cache" ] \
+   || ! printf '%s' "$out" | grep -q "^GATE_HYGIENE rebuilds: the run failed (exit 65), removed its own $drop/warnings ([0-9]* KiB)$"; then
+  echo "FAIL a failed run did not remove exactly its rebuild trees, naming them (exit $drc): $out"; fails=$((fails + 1))
+fi
+out="$(gate_drop_failed_rebuilds "$drop" 65)"; drc=$?
+[ "$drc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL a failed run with no rebuild trees left was not a no-op (exit $drc): $out"; fails=$((fails + 1)); }
+# ... and the gate's remote script calls it with its own work tree and verdict, before its summary.
+gate_text="${MAC_GATE_SCRIPT:-$repo_root/bin/mac-gate.sh}"
+calls="$(grep -n '^gate_drop_failed_rebuilds "\$GATE_WORK" "\$first_fail"$' "$gate_text" | cut -d: -f1)"
+summary_at="$(grep -n '^echo "MAC_GATE_REMOTE_SUMMARY:' "$gate_text" | cut -d: -f1)"
+if [ "$(printf '%s\n' "$calls" | grep -c .)" -ne 1 ] || [ -z "$summary_at" ] || [ "$calls" -ge "$summary_at" ]; then
+  echo "FAIL $gate_text does not call gate_drop_failed_rebuilds once before its remote summary (calls: ${calls:-none})"
+  fails=$((fails + 1))
+fi
 if [ "$fails" -ne 0 ]; then
   echo "REAP-LANES-TEST FAIL: $fails assertion(s) failed"
   exit 1
@@ -114,4 +160,6 @@ echo "ok   preserved fresh, old, and ownerless locks and their lanes"
 echo "ok   preserved local-only, origin, current, and younger-than-24-hour lanes"
 echo "ok   logged all four removed directories with sizes"
 echo "ok   shared hygiene predicate protects old locked gate/work lanes and admits unlocked ones"
+echo "ok   a failed run removes only its own rebuild trees, naming them; a passed run keeps them"
+echo "ok   the gate's remote script calls that cleanup once, before its summary"
 echo "REAP-LANES-TEST ok"
