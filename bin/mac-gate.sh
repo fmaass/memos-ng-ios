@@ -35,7 +35,8 @@
 #
 # Usage:
 #   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh
-#   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh --quick [--bundle <name> | --only-testing <id>]
+#   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh --quick [--bundle <name> | --only-testing <id>
+#                                     [--iterations <N>]]
 #                                     the ITERATION loop, never a verdict: lint, then compile for
 #                                     testing on this branch's warm lane and run the named scope on
 #                                     it. A lint error stops the run before anything is built.
@@ -44,6 +45,10 @@
 #                                     (Bundle, Bundle/Suite or Bundle/Suite/test). Neither means
 #                                     anything without --quick, and only one of them at a time.
 #                                     With --quick alone every bundle runs.
+#                                     --iterations N (1..1000, only beside --only-testing) runs
+#                                     that scope N times, stopping at the first failing run
+#                                     (-test-iterations N -run-tests-until-failure), and the
+#                                     MAC_GATE_QUICK line then carries iterations=N.
 #   bin/mac-gate.sh --classify-only   print how this branch's change set classifies, and stop.
 #                                     Needs no build host. Exit 0 = the docs-only fast path
 #                                     applies, 10 = the full gate is owed.
@@ -262,6 +267,7 @@ CLASSIFY_ONLY=0
 QUICK=0
 QUICK_BUNDLE=""
 QUICK_ONLY_TESTING=""
+QUICK_ITERATIONS=""
 # A while/shift loop rather than `for arg`, because two of these take a value. The value is
 # checked where it is read: a flag whose argument is missing would otherwise swallow the NEXT
 # flag, and `--quick --bundle --only-testing X` would run a scope nobody asked for.
@@ -279,6 +285,11 @@ while [ $# -gt 0 ]; do
         ""|-*) die_refuse "--only-testing needs an xcodebuild test identifier (Bundle, Bundle/Suite or Bundle/Suite/test)" ;;
       esac
       QUICK_ONLY_TESTING="$2"; shift ;;
+    --iterations)
+      case "${2:-}" in
+        ""|-*) die_refuse "--iterations needs a positive whole number of runs (1 to 1000)" ;;
+      esac
+      QUICK_ITERATIONS="$2"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die_refuse "unknown argument: $(printf '%q' "$1") (see --help)" ;;
   esac
@@ -293,6 +304,23 @@ if [ -n "$QUICK_BUNDLE" ] && [ -n "$QUICK_ONLY_TESTING" ]; then
 fi
 if [ "$QUICK" -eq 0 ] && { [ -n "$QUICK_BUNDLE" ] || [ -n "$QUICK_ONLY_TESTING" ]; }; then
   die_refuse "--bundle and --only-testing only mean something with --quick; the full gate runs every bundle"
+fi
+# An iteration count repeats ONE named scope until it fails: the evidence it exists for is "this
+# test, N times in a row", so a bundle or the whole suite beside it is refused rather than run.
+if [ -n "$QUICK_ITERATIONS" ] && { [ "$QUICK" -eq 0 ] || [ -z "$QUICK_ONLY_TESTING" ]; }; then
+  die_refuse "--iterations repeats one named scope, so it needs --quick --only-testing <id>"
+fi
+if [ -n "$QUICK_ITERATIONS" ]; then
+  # Digits only and no leading zero, read as text before any arithmetic: a value bash would
+  # misread (octal, overflow) never reaches a comparison. The ceiling is because every iteration
+  # runs inside the host-wide simulator slot, which every other lane's gate waits on.
+  case "$QUICK_ITERATIONS" in
+    *[!0-9]*|0*)
+      die_refuse "--iterations $(printf '%q' "$QUICK_ITERATIONS"): not a positive whole number" ;;
+  esac
+  if [ "${#QUICK_ITERATIONS}" -gt 4 ] || [ "$QUICK_ITERATIONS" -gt 1000 ]; then
+    die_refuse "--iterations $QUICK_ITERATIONS: at most 1000 runs, each one inside the shared simulator slot"
+  fi
 fi
 if [ "$QUICK" -eq 1 ] && [ "$CLASSIFY_ONLY" -eq 1 ]; then
   die_refuse "--quick and --classify-only ask for different things: one builds and tests, the other only says whether a build is owed"
@@ -668,7 +696,9 @@ QUICK_TESTS_RC="-"
 quick_summary_and_exit() {
   say "run log     : $log"
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
-  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC | exit=$first_fail"
+  # The iteration count is part of what the line claims, so it rides on the line itself: a pasted
+  # "tests=0" is then never mistaken for N runs when it was one, or for one when it was N.
+  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS} | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
 }
@@ -1160,6 +1190,7 @@ say "--- step: remote ---"
   printf "GATE_QUICK='%s'\n" "$(esc "$QUICK")"
   printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
   printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
+  printf "GATE_QUICK_ITERATIONS='%s'\n" "$(esc "$QUICK_ITERATIONS")"
   cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
   cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
   cat "$GATE_ADMISSION_SELF"
@@ -2403,6 +2434,9 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
       -onlyUsePackageVersionsFromResolvedFile \
       -skipPackagePluginValidation
     [ -z "$quick_scope" ] || set -- "$@" "-only-testing:$quick_scope"
+    # Repeat the scope, and stop at the first run that fails: xcodebuild's own exit code then says
+    # whether ANY iteration failed, and the counter below checks the result bundle shows them all.
+    [ -z "$GATE_QUICK_ITERATIONS" ] || set -- "$@" -test-iterations "$GATE_QUICK_ITERATIONS" -run-tests-until-failure
     "$@" 2>&1 | tee .gate-artifacts/quick-test.log
     quick_run_rc="${PIPESTATUS[0]}"
     # A green run of nothing is the failure this counts for. xcodebuild accepts an -only-testing
@@ -2420,9 +2454,10 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
       [ "$quick_run_rc" -ne 0 ] || quick_run_rc=1
       return "$quick_run_rc"
     fi
-    /usr/bin/python3 - "$quick_scope" <<'QUICKCOUNT_PY'
+    /usr/bin/python3 - "$quick_scope" "$GATE_QUICK_ITERATIONS" <<'QUICKCOUNT_PY'
 import json, sys
 scope = sys.argv[1]
+iterations = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else 0
 bundle = scope.split("/")[0] if scope else ""
 data = json.load(open(".gate-artifacts/quick-test-results.json"))
 
@@ -2433,7 +2468,21 @@ data = json.load(open(".gate-artifacts/quick-test-results.json"))
 # else — Skipped, and any result this walker has never been shown — is counted apart and named.
 EXECUTED = ("Passed", "Failed", "Expected Failure")
 
-def walk(node, current, ran, idle):
+# Under -test-iterations each run of a case is a "Repetition" child — of the case itself, or of each
+# argument set's node for a parameterised one. Every such group is one run of N, and each has to
+# show all N: a bundle that ran a case once when N were asked for did not honour the option.
+def rep_groups(node):
+    children = node.get("children", []) or []
+    groups = []
+    reps = [c.get("result") for c in children if c.get("nodeType") == "Repetition"]
+    if reps:
+        groups.append(reps)
+    for child in children:
+        if child.get("nodeType") not in ("Repetition", "Test Case"):
+            groups.extend(rep_groups(child))
+    return groups
+
+def walk(node, current, ran, idle, runs):
     kind = node.get("nodeType")
     name = node.get("name", "")
     if kind in ("Unit test bundle", "UI test bundle"):
@@ -2443,14 +2492,15 @@ def walk(node, current, ran, idle):
     if kind == "Test Case" and current:
         if node.get("result") in EXECUTED:
             ran[current] = ran.get(current, 0) + 1
+            runs.append((current, name, rep_groups(node) or [[]]))
         else:
             idle[current] = idle.get(current, 0) + 1
     for child in node.get("children", []) or []:
-        walk(child, current, ran, idle)
+        walk(child, current, ran, idle, runs)
 
-ran, idle = {}, {}
+ran, idle, runs = {}, {}, []
 for root in data.get("testNodes", []) or []:
-    walk(root, None, ran, idle)
+    walk(root, None, ran, idle, runs)
 print("executed test cases for the quick scope: "
       + (", ".join("%s=%d" % (k, v) for k, v in sorted(ran.items())) or "(none)"))
 print("skipped or not run: "
@@ -2463,6 +2513,24 @@ if executed < 1:
     sys.exit(1)
 print("Executed %d test cases for %s (%d skipped or not run)"
       % (executed, scope or "every bundle", skipped))
+if iterations:
+    mine = [r for r in runs if not bundle or r[0] == bundle]
+    results = [x for _, _, groups in mine for g in groups for x in g]
+    failed = [x for x in results if x not in ("Passed", "Expected Failure")]
+    if failed:
+        print("QUICK FAIL: %d of %d repetitions failed for %s" % (len(failed), len(results), scope))
+        sys.exit(1)
+    # Every explicit repetition group is held to N, one included: two runs shown when one was
+    # asked for is not the run that was asked for. A case with no repetition nodes at all is the
+    # plain single-run shape, so it answers N=1 and nothing more.
+    short = ["%s=%d" % (name, len(g)) for _, name, groups in mine for g in groups
+             if len(g) != iterations and not (iterations == 1 and len(g) == 0)]
+    if short:
+        print("QUICK FAIL: asked for %d iterations, the result bundle shows %s"
+              % (iterations, ", ".join(short)))
+        sys.exit(1)
+    print("Ran %d iterations of each of %d executed test cases for %s (%d repetitions, all passed)"
+          % (iterations, len(mine), scope, len(results)))
 QUICKCOUNT_PY
     if [ $? -ne 0 ] && [ "$quick_run_rc" -eq 0 ]; then quick_run_rc=1; fi
     return "$quick_run_rc"

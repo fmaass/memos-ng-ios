@@ -85,6 +85,23 @@ refuse "--bundle naming an unbuilt bundle"   "not one of the test bundles"      
 refuse "--bundle naming two bundles at once" "contains whitespace"                --quick --bundle "MemosAPITests MemosCoreTests"
 refuse "--bundle with a trailing space"      "contains whitespace"                --quick --bundle "MemosCoreTests "
 
+# --iterations repeats ONE named scope until it fails, so it needs --quick --only-testing, and its
+# value is a positive whole number with a ceiling: every iteration holds the host-wide simulator slot.
+refuse "--iterations with --quick alone"        "needs --quick --only-testing"   --quick --iterations 5
+refuse "--iterations with --bundle"             "needs --quick --only-testing"   --quick --bundle MemosCoreTests --iterations 5
+refuse "--iterations with no scope and no quick" "needs --quick --only-testing"  --iterations 5
+refuse "--iterations with no value at all"      "needs a positive whole number"  --quick --only-testing MemosCoreTests/X --iterations
+refuse "--iterations with an empty value"       "needs a positive whole number"  --quick --only-testing MemosCoreTests/X --iterations ""
+refuse "--iterations swallowing the next flag"  "needs a positive whole number"  --quick --iterations --only-testing MemosCoreTests/X
+refuse "--iterations zero"                      "not a positive whole number"    --quick --only-testing MemosCoreTests/X --iterations 0
+refuse "--iterations negative"                  "needs a positive whole number"  --quick --only-testing MemosCoreTests/X --iterations -3
+refuse "--iterations not a number"              "not a positive whole number"    --quick --only-testing MemosCoreTests/X --iterations five
+refuse "--iterations a fraction"                "not a positive whole number"    --quick --only-testing MemosCoreTests/X --iterations 1.5
+refuse "--iterations with a leading zero"       "not a positive whole number"    --quick --only-testing MemosCoreTests/X --iterations 05
+refuse "--iterations with whitespace"           "not a positive whole number"    --quick --only-testing MemosCoreTests/X --iterations "5 "
+refuse "--iterations above the ceiling"         "at most 1000"                   --quick --only-testing MemosCoreTests/X --iterations 1001
+refuse "--iterations far above the ceiling"     "at most 1000"                   --quick --only-testing MemosCoreTests/X --iterations 99999999999999999999
+
 # --- the fixture ----------------------------------------------------------------------------------
 # A repository shaped like this one in the only ways the local half of the gate reads: a HEAD, an
 # origin/main to measure against, a project.yml with the version keys, the named selftests and
@@ -503,6 +520,41 @@ else
   printf '%s\n' "$OUT" | sed 's/^/     | /'
 fi
 
+# --- part 5b: --iterations carries a repeat count to the build host and onto the quick line ----------
+new_case iterations
+cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
+MAC_GATE_STEP lint 0
+MAC_GATE_STEP generate 0
+MAC_GATE_STEP build 0
+MAC_GATE_STEP tests 0
+MAC_GATE_QUICK_REMOTE: lint=0 build=0 tests=0
+REMOTE_EOF
+STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR" \
+  --quick --only-testing MemosCoreTests/LiveWriteTests --iterations 50
+if [ "$RC" -eq 0 ] && grep -q "GATE_QUICK_ITERATIONS='50'" "$CASE_DIR/remote-script.txt" 2>/dev/null; then
+  ok "--iterations reaches the build host as GATE_QUICK_ITERATIONS"
+else
+  bad "--iterations did not reach the build host (exit $RC)"
+  printf '%s\n' "$OUT" | sed 's/^/     | /'
+fi
+# The flags themselves, on the line that appends them — a comment naming them is not the append.
+if grep -Eq '^[[:space:]]*\[ -z "\$GATE_QUICK_ITERATIONS" \] \|\| set -- "\$@" -test-iterations "\$GATE_QUICK_ITERATIONS" -run-tests-until-failure$' \
+     "$CASE_DIR/remote-script.txt" 2>/dev/null; then
+  ok "the remote quick test command appends -test-iterations N -run-tests-until-failure"
+else
+  bad "the remote quick test command does not append -test-iterations and -run-tests-until-failure"
+fi
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=0 tests=0 iterations=50 \| exit=0$')"
+if [ "$n" -eq 1 ]; then ok "the quick line names the iteration count it ran with"
+else bad "expected one 'MAC_GATE_QUICK: lint=0 build=0 tests=0 iterations=50 | exit=0' line, found $n"
+     printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
+# Without the option nothing changes: no iterations field, an empty count sent.
+if grep -q "GATE_QUICK_ITERATIONS=''" "$tmp/case-scope/remote-script.txt" 2>/dev/null; then
+  ok "a run without --iterations sends an empty count"
+else
+  bad "a run without --iterations did not send an empty GATE_QUICK_ITERATIONS"
+fi
+
 # --- part 6: a docs-only change set does not short-circuit a quick run ------------------------------
 # The fast path is a VERDICT about a change set. A quick run is not a verdict, it is a request to
 # compile and test — so it goes to the build host whatever the change set looks like.
@@ -580,12 +632,42 @@ write_fixture() { # $1 = file, $2... = "<case name>|<result>" (none = a bundle t
   } > "$out"
 }
 
-run_counter() { # $1 = fixture, $2 = scope
+run_counter() { # $1 = fixture, $2 = scope, $3 = the --iterations count (optional)
   local dir="$tmp/counter-run"
   rm -rf "$dir"; mkdir -p "$dir/.gate-artifacts"
   cp "$1" "$dir/.gate-artifacts/quick-test-results.json"
-  OUT="$(cd "$dir" && python3 "$counter" "$2" 2>&1)"
+  OUT="$(cd "$dir" && python3 "$counter" "$2" "${3:-}" 2>&1)"
   RC=$?
+}
+
+# A run with -test-iterations: each Test Case carries one Repetition child per run.
+# $1 = file, $2... = "<case name>|<case result>|<repetition results, comma-separated or empty>"
+write_rep_fixture() {
+  local out="$1"; shift
+  {
+    printf '{"testNodes":[{"nodeType":"Test Plan","name":"MemosNG","children":['
+    printf '{"nodeType":"Unit test bundle","name":"MemosCoreTests.xctest","children":['
+    printf '{"nodeType":"Test Suite","name":"UnreachableRecoveryTests","children":['
+    local first=1 entry name rest result reps rep rfirst
+    for entry in "$@"; do
+      name="${entry%%|*}"; rest="${entry#*|}"; result="${rest%%|*}"; reps="${rest#*|}"
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      printf '{"nodeType":"Test Case","name":"%s","result":"%s","children":[' "$name" "$result"
+      rfirst=1
+      if [ -n "$reps" ]; then
+        local i=0
+        for rep in ${reps//,/ }; do
+          i=$((i + 1))
+          [ "$rfirst" -eq 1 ] || printf ','
+          rfirst=0
+          printf '{"nodeType":"Repetition","name":"Repetition %d","result":"%s"}' "$i" "$rep"
+        done
+      fi
+      printf ']}'
+    done
+    printf ']}]}]}]}\n'
+  } > "$out"
 }
 
 if [ "$counter_control" -eq 1 ]; then
@@ -647,6 +729,67 @@ if [ "$counter_control" -eq 1 ]; then
     bad "an unscoped skipped-only run was not a failure (exit $RC)"
     printf '%s\n' "$OUT" | sed 's/^/     | /'
   fi
+
+  # --iterations: the result bundle has to SHOW the runs that were asked for, every one passing.
+  S=MemosCoreTests/UnreachableRecoveryTests
+  write_rep_fixture "$tmp/reps-ok.json" "a()|Passed|Passed,Passed,Passed"
+  run_counter "$tmp/reps-ok.json" "$S" 3
+  if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q 'Ran 3 iterations of each of 1 executed test cases'; then
+    ok "three asked, three passing repetitions shown: not a failure, and the count is printed"
+  else
+    bad "a run showing every asked-for repetition was rejected or not described (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  write_rep_fixture "$tmp/reps-failed.json" "a()|Failed|Passed,Passed,Failed"
+  run_counter "$tmp/reps-failed.json" "$S" 3
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'QUICK FAIL: 1 of 3 repetitions failed'; then
+    ok "a failure in any one repetition fails the count"
+  else
+    bad "a failed repetition did not fail the count (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  write_rep_fixture "$tmp/reps-ignored.json" "a()|Passed|"
+  run_counter "$tmp/reps-ignored.json" "$S" 3
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'QUICK FAIL: asked for 3 iterations'; then
+    ok "a bundle that shows no repetitions when 3 were asked for is a failure (iterations not honoured)"
+  else
+    bad "a run that ignored --iterations was not a failure (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  write_rep_fixture "$tmp/reps-short.json" "a()|Passed|Passed,Passed,Passed" "b()|Passed|Passed,Passed"
+  run_counter "$tmp/reps-short.json" "$S" 3
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'QUICK FAIL: asked for 3 iterations'; then
+    ok "one case short of the asked-for repetitions fails the count (off by one)"
+  else
+    bad "a case one repetition short was not a failure (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  # One iteration is a plain run: no repetition nodes are owed.
+  write_rep_fixture "$tmp/reps-one.json" "a()|Passed|"
+  run_counter "$tmp/reps-one.json" "$S" 1
+  if [ "$RC" -eq 0 ]; then ok "--iterations 1 with no repetition nodes is not a failure"
+  else bad "--iterations 1 was failed for showing no repetitions (exit $RC)"
+       printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
+
+  # One iteration asked, two runs shown: an explicit repetition group is held to N at N=1 too.
+  write_rep_fixture "$tmp/reps-one-two.json" "a()|Passed|Passed,Passed"
+  run_counter "$tmp/reps-one-two.json" "$S" 1
+  if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q 'QUICK FAIL: asked for 1 iterations'; then
+    ok "--iterations 1 with two repetitions shown is a failure (explicit groups are held to N)"
+  else
+    bad "--iterations 1 with two passing repetitions was not a failure (exit $RC)"
+    printf '%s\n' "$OUT" | sed 's/^/     | /'
+  fi
+
+  # And without --iterations the repetition check never runs, whatever the bundle shows.
+  run_counter "$tmp/reps-failed.json" "$S"
+  if [ "$RC" -eq 0 ]; then ok "without --iterations the count does not judge repetitions (xcodebuild's rc does)"
+  else bad "without --iterations the count judged repetitions (exit $RC)"
+       printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 fi
 
 # --- verdict ----------------------------------------------------------------------------------------

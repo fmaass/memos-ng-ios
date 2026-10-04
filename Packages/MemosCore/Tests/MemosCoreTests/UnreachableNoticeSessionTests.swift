@@ -26,6 +26,15 @@ final class ParkingSleeper: @unchecked Sendable {
     private var parked: [Int: CheckedContinuation<Void, Never>] = [:]
     private var released: Set<Int> = []
     private var recorded: [Duration] = []
+    private var hook: (@Sendable () -> Void)?
+
+    /// Runs on the sleeping task after its wait is recorded and before it parks: the window in
+    /// which a release from the test's turn lands on a wait that `waits` already shows but that
+    /// has not parked yet. A seam for this double's own suite; nil everywhere else.
+    var betweenRecordingAndParking: (@Sendable () -> Void)? {
+        get { lock.withLock { hook } }
+        set { lock.withLock { hook = newValue } }
+    }
 
     /// Every wait asked for, in the order it was asked for. The index into it is what `release`
     /// takes.
@@ -36,6 +45,7 @@ final class ParkingSleeper: @unchecked Sendable {
             recorded.append(wait)
             return recorded.count - 1
         }
+        betweenRecordingAndParking?()
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             // A release that arrived while this call was between recording and parking must not be
             // lost: the caller's task and the test run on different turns of the main actor.
@@ -56,11 +66,16 @@ final class ParkingSleeper: @unchecked Sendable {
         continuation?.resume()
     }
 
-    /// Lets go of everything still parked, so a finished test leaves no continuation behind.
+    /// Lets go of every wait recorded so far, so a finished test leaves no continuation behind.
+    ///
+    /// Recorded, not parked: the sleeping task records and parks off the main actor, so a test that
+    /// saw `waits` grow can call this before that wait has parked. Marking only the parked ones
+    /// left such a wait to park afterwards, never released — the wake behind it never ran, and the
+    /// notice it would have raised never showed (MEMNG-628).
     func releaseAll() {
         let all: [CheckedContinuation<Void, Never>] = lock.withLock {
             let waiting = Array(parked.values)
-            released.formUnion(parked.keys)
+            released.formUnion(recorded.indices)
             parked.removeAll()
             return waiting
         }

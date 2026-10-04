@@ -118,7 +118,9 @@ pins and the entitlement, dependency-rule, share-link, text-selection and token-
 greps and the generated-surface rule. The
 lint is the same `swift format lint --strict --recursive .` the full gate runs, it comes first, and
 a lint error stops the run there: generate, build and tests are not invoked and the exit is the
-lint's own code. It prints its own
+lint's own code. `--iterations <N>` (1 to 1000, refused without `--only-testing`) repeats that one
+scope with `-test-iterations N -run-tests-until-failure`, fails when any run fails or the result
+bundle shows a case run fewer than N times, and adds `iterations=N` to the quick line. It prints its own
 `MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only
 the full gate writes `mac-gate SUMMARY`.
 

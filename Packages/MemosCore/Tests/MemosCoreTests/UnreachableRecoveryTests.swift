@@ -66,12 +66,30 @@ struct UnreachableRecoveryTests {
         for _ in 0..<turns where !condition() { await Task.yield() }
     }
 
+    /// Polls a signal that crosses executors — the notice's wake records its wait from a task off
+    /// the main actor — against a clock rather than a count of main-actor turns, which says nothing
+    /// about when that task runs. The bound only decides how long a signal that never comes takes
+    /// to FAIL; a signal that comes ends the wait.
+    private func arrives(_ condition: () -> Bool, tries: Int = 500) async -> Bool {
+        for _ in 0..<tries {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
     /// Lets the notice's wake run out and waits for the banner it publishes.
-    private func raiseTheNotice(on session: SessionStore) async {
+    ///
+    /// Both waits are required, not hoped for: a wait that silently gave up here used to release
+    /// nothing and leave the wake asleep, and the test then failed later, on the notice, as if the
+    /// product had lowered it (MEMNG-628).
+    private func raiseTheNotice(on session: SessionStore) async throws {
         clock.advance(waitSeconds(SessionStore.bannerDelay) + 1)
-        await settle(until: { !self.notice.waits.isEmpty })
+        let asked = await arrives({ !self.notice.waits.isEmpty })
+        try #require(asked, "the notice's wake asked to sleep out the delay")
         notice.releaseAll()
-        await settle(until: { session.showsUnreachableNotice })
+        let raised = await arrives({ session.showsUnreachableNotice })
+        try #require(raised, "the released wake raised the notice")
     }
 
     // MARK: - the route a success actually takes
@@ -125,7 +143,7 @@ struct UnreachableRecoveryTests {
     /// answer — and it may not reset the ladder that is already climbing, or a flapping
     /// connection would hold the app at a three-second retry for as long as it flapped.
     @Test("a success older than the failure that followed it asks once and decides nothing")
-    func anOlderSuccessAsksOnceAndLeavesTheLadderClimbing() async {
+    func anOlderSuccessAsksOnceAndLeavesTheLadderClimbing() async throws {
         defer {
             ladder.releaseAll()
             notice.releaseAll()
@@ -142,7 +160,7 @@ struct UnreachableRecoveryTests {
         await session.signIn(serverAddress: recoveryAddress, token: recoveryToken)
         let generation = session.activeHandle!.generation
         session.noteTransportFailure(.offline, issuedUnder: generation)
-        await raiseTheNotice(on: session)
+        try await raiseTheNotice(on: session)
 
         // Two rungs of the ladder, each failing: the schedule is at attempt 3 when the stale
         // success arrives. Releasing rung i is what schedules attempt i + 2.
@@ -216,7 +234,7 @@ struct UnreachableRecoveryTests {
     /// The same replacement, reported the other way round: the success arrives carrying a
     /// generation that ended while it was in the air. It is refused at the door.
     @Test("a success stamped with an ended generation leaves the live session exactly as it was")
-    func aStaleGenerationSuccessIsRefused() async {
+    func aStaleGenerationSuccessIsRefused() async throws {
         defer {
             ladder.releaseAll()
             notice.releaseAll()
@@ -234,7 +252,7 @@ struct UnreachableRecoveryTests {
         let live = session.activeHandle!.generation
         #expect(live != ended, "the second sign-in is a different incarnation")
         session.noteTransportFailure(.offline, issuedUnder: live)
-        await raiseTheNotice(on: session)
+        try await raiseTheNotice(on: session)
         let beforeTheStaleSuccess = whoamis.count
 
         session.noteTransportSuccess(issuedUnder: ended)
