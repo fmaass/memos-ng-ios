@@ -172,6 +172,15 @@ if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "BUNDLE FAIL: app declares 
 else
   bad "the gate's read-back let an app bundle without the user-defaults entry through (exit $rc)"; show "$out"
 fi
+ext_bad_dir="$tmp/bad-ext/MemosNG.app"
+fake_bundle "$ext_bad_dir" live.discomarder.memosng "$APP_MANIFEST"
+fake_bundle "$ext_bad_dir/PlugIns/MemosShare.appex" live.discomarder.memosng.share "$tmp/extension-no-ud.plist"
+out="$(python3 "$step_py" "$ext_bad_dir" "$ext_bad_dir/PlugIns/MemosShare.appex" 9.9.9 "$VERDICT" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "BUNDLE FAIL: extension declares no user-defaults entry"; then
+  ok "the gate's read-back fails an extension bundle without the user-defaults entry, naming it"
+else
+  bad "the gate's read-back let an extension bundle without the user-defaults entry through (exit $rc)"; show "$out"
+fi
 
 echo "gate privacy manifest: $((cases - fails)) of $cases checks passed"
 [ "$fails" -eq 0 ]

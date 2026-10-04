@@ -92,6 +92,10 @@ new_repo() {
   done
   printf 'gate_lane_is_unlocked() { return 0; }\n# helper text: ORIGINAL-REAPER\n' > "$work/scripts/reap-gate-lanes.sh"
   printf '# helper text: ORIGINAL-WORKDIR\n' > "$work/scripts/gate-work-dir.sh"
+  printf '# helper text: ORIGINAL-ROOTREFUSAL\n' > "$work/scripts/gate-root-refusal.sh"
+  printf '#!/bin/sh\necho "candidate owner: helper text ORIGINAL-OWNER"\nexit 0\n' \
+    > "$work/scripts/testcount-candidate-owner.sh"
+  chmod +x "$work/scripts/testcount-candidate-owner.sh"
   cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1
@@ -276,8 +280,8 @@ else bad "$n private cop(ies) left under $run_tmp"; fi
 
 # --- case 3: a helper the gate hands to the build host, edited mid-run ---------------------------
 # The quick mode, because it reaches the preflight and the remote script, which both carry the lane
-# reaper and the work-root derivation; the edit lands after the run has begun and before either is
-# assembled.
+# reaper and the work-root derivation, and the preflight the gate-root refusal; the edit lands after
+# the run has begun and before either is assembled.
 w2="$(new_repo helpers)" || { echo "FAIL: cannot build the helpers fixture"; exit 1; }
 git -C "$w2" checkout --quiet -b fix/helpers
 printf 'let two = 2\n' >> "$w2/Sources/App.swift"
@@ -287,6 +291,7 @@ start_paused "$w2" "$CASE_DIR" --quick
 if wait_paused "$PAUSE" "$PID"; then
   printf 'gate_lane_is_unlocked() { return 0; }\n# helper text: EDITED-REAPER!\n' > "$w2/scripts/reap-gate-lanes.sh"
   printf '# helper text: EDITED-WORKDIR!\n' > "$w2/scripts/gate-work-dir.sh"
+  printf '# helper text: EDITED-ROOTREFUSAL!\n' > "$w2/scripts/gate-root-refusal.sh"
 else
   bad "helpers: the run never reached the selftest pause"
 fi
@@ -301,12 +306,46 @@ for sent in preflight-script.txt remote-script.txt; do
     bad "helpers: $sent carries the edited helpers"; show "$(grep -n 'helper text' "$CASE_DIR/$sent")"
   fi
 done
+if [ -s "$CASE_DIR/preflight-script.txt" ] && grep -q 'ORIGINAL-ROOTREFUSAL' "$CASE_DIR/preflight-script.txt" \
+   && ! grep -q 'EDITED-ROOTREFUSAL' "$CASE_DIR/preflight-script.txt"; then
+  ok "helpers: the preflight carries the gate-root refusal as it was when the run began"
+else
+  bad "helpers: the preflight does not carry the original gate-root refusal"
+  show "$(grep -n 'helper text' "$CASE_DIR/preflight-script.txt" 2>&1)"
+fi
 prev="$(grep -B1 '^MAC_GATE_QUICK: ' "$CASE_DIR/out.txt" | head -1)"
 if printf '%s\n' "$prev" | grep -Eq "$SHA_LINE_RE"; then
   ok "helpers: a quick run names its script's sha256 on the line before MAC_GATE_QUICK"
 else
   bad "helpers: the line before MAC_GATE_QUICK is not the sha line"; show "$prev"
 fi
+
+# --- case 3b: the helper the gate runs at its end, edited mid-run -------------------------------
+# The copyback runs the test-count candidate's owner from the private copy; both modes end there,
+# and this case uses a full run on a branch of its own. The edit lands while the run waits at the
+# pause.
+git -C "$w2" checkout --quiet -b fix/owner
+new_case owner
+start_paused "$w2" "$CASE_DIR"
+if wait_paused "$PAUSE" "$PID"; then
+  printf '#!/bin/sh\necho "candidate owner: helper text EDITED-OWNER!"\nexit 0\n' \
+    > "$w2/scripts/testcount-candidate-owner.sh"
+else
+  bad "owner: the run never reached the selftest pause"
+fi
+finish "$PAUSE" "$PID"
+if grep -q '^--- step: copyback ---' "$CASE_DIR/out.txt"; then
+  ok "owner: the full run reached its copyback (control)"
+else
+  bad "owner: the full run never reached its copyback"; show "$(cat "$CASE_DIR/out.txt")"
+fi
+if grep -q 'helper text ORIGINAL-OWNER' "$CASE_DIR/out.txt" && ! grep -q 'EDITED-OWNER' "$CASE_DIR/out.txt"; then
+  ok "owner: the copyback ran the candidate owner as it was when the run began"
+else
+  bad "owner: the copyback did not run the original candidate owner"
+  show "$(grep -n 'candidate' "$CASE_DIR/out.txt")"
+fi
+git -C "$w2" checkout --quiet scripts/testcount-candidate-owner.sh
 
 # --- case 4: a marker from outside is not a private copy -----------------------------------------
 # The copy knows it is one by the directory it runs from. A caller exporting that marker at the
