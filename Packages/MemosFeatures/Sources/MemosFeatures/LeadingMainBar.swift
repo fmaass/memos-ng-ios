@@ -11,7 +11,9 @@ import SwiftUI
 /// system's bottom toolbar draws them under the `system` style. The capsule and the Library icon
 /// share one glass identity, so the capsule flows into the icon and the scope's glass grows out of
 /// it, and back. The system toolbar cannot do this: its glass belongs to UIKit and no container of
-/// the app's can hold it, which is why the scope row is drawn here under this style.
+/// the app's can hold it, which is why the scope row is drawn here under this style — and, since
+/// build 39, under the `system` style too, alone, in that toolbar's place
+/// (`MediaLibraryView.systemRow`).
 struct LeadingMainBar: View {
     enum BarShape: Equatable {
         case tabs
@@ -19,7 +21,9 @@ struct LeadingMainBar: View {
         case scope
     }
 
-    let shape: BarShape
+    /// Nil under the system style wherever its own tab bar or a claim's bar stands: the container
+    /// stays and draws nothing, so the scope's glass materialises inside it (MEMNG-690, build 39).
+    let shape: BarShape?
     let selection: MainTab
     /// A press on a tab: the same binding the system bar writes (`MainTabs.pressing`), so the dock
     /// hears it before the selection moves.
@@ -51,14 +55,17 @@ struct LeadingMainBar: View {
         GlassEffectContainer(spacing: Self.scopeGap) {
             HStack(spacing: Self.scopeGap) {
                 switch shape {
-                case .tabs: capsule
-                case .folded: foldedIcon
-                case .scope: scopeRow
+                case .tabs?: capsule
+                case .folded?: foldedIcon
+                case .scope?: scopeRow
+                case nil: EmptyView()
                 }
             }
         }
         .animation(.smooth(duration: 0.35), value: shape)
-        .frame(height: Self.height)
+        // Outside the animation: the inset under the scroll view changes at once, as the tab
+        // bar's does, while the glass inside appears and goes in the container's animation.
+        .frame(height: shape == nil ? 0 : Self.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.leading, Self.leadingInset)
         .offset(y: Self.bottomDrop)
@@ -74,7 +81,7 @@ struct LeadingMainBar: View {
         .frame(height: Self.height)
         .glassEffect(.regular.interactive(), in: .capsule)
         .glassEffectID(GlassID.main, in: glass)
-        .modifier(MainGlassMarker(shape: shape))
+        .modifier(MainGlassMarker(shape: .tabs))
     }
 
     private var foldedIcon: some View {
@@ -83,7 +90,7 @@ struct LeadingMainBar: View {
             .frame(height: Self.height)
             .glassEffect(.regular.interactive(), in: .capsule)
             .glassEffectID(GlassID.main, in: glass)
-            .modifier(MainGlassMarker(shape: shape))
+            .modifier(MainGlassMarker(shape: .folded))
     }
 
     @ViewBuilder
@@ -101,7 +108,7 @@ struct LeadingMainBar: View {
         .accessibilityIdentifier(MediaLibraryView.tabsButton)
         .glassEffect(.regular.interactive(), in: .circle)
         .glassEffectID(GlassID.main, in: glass)
-        .modifier(MainGlassMarker(shape: shape))
+        .modifier(MainGlassMarker(shape: .scope))
         .padding(.leading, Self.scopeIconInset)
         // The control at the toolbar's size: on its own iOS draws it 32 pt tall, in the bottom
         // toolbar 48 (measured under each style).

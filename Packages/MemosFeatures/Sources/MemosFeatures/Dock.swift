@@ -236,8 +236,8 @@ final class LibraryScopeChoice {
     }
 }
 
-/// Years | Months | All, as the system's segmented control in the Library's scope toolbar
-/// (MEMNG-604): a picker bound to the Library's scope, whose glass and selection iOS draws.
+/// Years | Months | All, as the system's segmented control in the Library's scope row
+/// (MEMNG-604, MEMNG-690): a picker bound to the Library's scope, whose selection iOS draws.
 struct LibraryScopePicker: View {
     let scope: LibraryScopeChoice
 
@@ -267,11 +267,12 @@ struct LibraryScopePicker: View {
 }
 
 /// The three tabs, each with its own navigation stack and scroll position, under the SYSTEM tab
-/// bar (MEMNG-666), which steps aside on the Library for its scope toolbar (MEMNG-604, MEMNG-679).
+/// bar (MEMNG-666), which steps aside on the Library for its scope row (MEMNG-604, MEMNG-679).
 ///
 /// The bar is the `TabView`'s own, so iOS draws its Liquid Glass, the selection's morph between
 /// tabs and its minimising on scroll on Timeline and Places. The app decides only WHEN it stands
-/// aside: on the Library while `AppDock`'s mode is the scope, and under a claim.
+/// aside: on the Library while `AppDock`'s mode is the scope, and under a claim. The scope row is
+/// the app's own glass under both styles (`LeadingMainBar`, MEMNG-690).
 struct MainTabs<Screen: View>: View {
     @Binding var selection: MainTab
     @ViewBuilder let screen: (MainTab) -> Screen
@@ -301,6 +302,9 @@ struct MainTabs<Screen: View>: View {
                         // Attached under every style, its content empty under the system's: a
                         // modifier that came and went with the style would rebuild the screen,
                         // and the switch is pressed in Settings, which that screen's stack holds.
+                        // The system style's scope row is the Library's own, inside its stack
+                        // (`MediaLibraryView.systemRow`): a change of what this bar holds moved
+                        // the Library's grid to its top (MEMNG-690, build 39).
                         .safeAreaBar(edge: .bottom) {
                             if style == .leading, let shape = Self.leadingShape(dock, on: tab) {
                                 LeadingMainBar(

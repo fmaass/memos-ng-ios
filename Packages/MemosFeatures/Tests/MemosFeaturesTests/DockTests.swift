@@ -439,6 +439,40 @@ struct DockTests {
         #expect(Tabs.leadingShape(dock, on: .timeline) == nil)
     }
 
+    /// MEMNG-690, build 39: under the system style the Library draws the scope row and nothing
+    /// else — the tabs are the system's bar, a claim's bar is the claimant's.
+    @Test("under the system style the Library draws the scope row on its scope alone")
+    func systemShapeIsTheScopeAlone() {
+        let dock = AppDock()
+        dock.send(.selected(.library))
+        func row() -> LeadingMainBar.BarShape? {
+            MediaLibraryView.systemRow(dock.bar(on: .library), style: .system)
+        }
+        #expect(row() == nil, "a row over the tabs at rest")
+        dock.send(.pressedTab(.library, showing: .library))
+        #expect(dock.bar(on: .library) == .scope, "precondition: the scope")
+        #expect(row() == .scope)
+        let claim = UUID()
+        dock.claim(claim, for: .select)
+        #expect(row() == nil, "a row beside Select's toolbar")
+        dock.release(claim)
+        #expect(row() == .scope, "the row lost to the claim")
+        dock.send(.pressedLibraryIcon)
+        #expect(row() == nil, "the icon left the row")
+    }
+
+    /// The Library draws the row, and so keeps its height clear at its foot, exactly where the
+    /// system style's row stands; the leading style is left as build 38 shipped it.
+    @Test("the Library draws the scope row on the scope under the system style only")
+    func libraryReservesTheSystemRow() {
+        for bar in DockBar.allCases {
+            let system = MediaLibraryView.systemRow(bar, style: .system)
+            #expect(system == (bar == .scope ? .scope : nil), "\(bar) under system")
+            let leading = MediaLibraryView.systemRow(bar, style: .leading)
+            #expect(leading == nil, "\(bar) under leading")
+        }
+    }
+
     @Test("a claim delivered twice claims once, and two claims need two releases")
     func takeoverClaims() {
         let dock = AppDock()

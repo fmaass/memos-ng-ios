@@ -1309,7 +1309,8 @@ extension MediaImageLoaderTests {
             await chromeSettle(window, turns: 60)
             let after = ScopeBarProbe.describe(window)
             let at = Self.scrolledBy(in: window) ?? 0
-            #expect(at > 24, "precondition: the icon pressed at \(at), not below the threshold")
+            let by = how ?? "nothing"
+            #expect(at > 24, "precondition: the icon pressed at \(at), not past 24, by \(by)")
             #expect(Self.barShows(in: window), "the icon did not give the bar back: \(after)")
             #expect(ScopeBarProbe.control(in: window) == nil, "the scope came back: \(after)")
             Self.shoot("library-icon", window)
@@ -1819,7 +1820,13 @@ extension MediaImageLoaderTests {
             await scopeStands(window)
             let scrolled = ScopeBarProbe.describe(window)
             #expect(Self.scopeShows(in: window), "precondition D: no scope: \(scrolled)")
+            #expect(Self.mainGlass(.scope, in: window) != nil, "precondition D: no app row")
             await enterSelect(window, pass: "D")
+            // Since build 39 the scope is the app's row (MEMNG-690): Select's claim takes it away
+            // as it took the system toolbar, and Close gives it back while the Library is scrolled.
+            let selecting = ScopeBarProbe.describe(window)
+            #expect(
+                Self.mainGlass(.scope, in: window) == nil, "D: the row under Select: \(selecting)")
             let closed = pressClose(window, pass: "D")
             let samples = await sampleBars(window, witness, from: closed, for: .seconds(2))
             let timeline = witness.dock?.bar(on: .timeline).rawValue ?? "nothing"
@@ -1828,6 +1835,11 @@ extension MediaImageLoaderTests {
             judgeDoubleBar(
                 "D", samples, witness, in: window,
                 context: "the Timeline's tab bar drawn \(wide) -> \(narrow) pt before the Library")
+            let row = Self.mainGlass(.scope, in: window) != nil
+            #expect(
+                row == (witness.dock?.bar(on: .library) == .scope),
+                "D: the app row \(row ? "stands" : "is absent") where the dock says \(library)")
+            #expect(!ScopeBarProbe.systemToolbarShows(in: window), "D: UIKit drew a toolbar")
         }
     }
 }
@@ -2066,6 +2078,133 @@ extension MediaImageLoaderTests {
             judgeDoubleBar(
                 "leading-D", samples, witness, in: window,
                 context: "leading, the Timeline folded before the Library")
+        }
+    }
+}
+
+/// The system bar style's scope row (MEMNG-690, build 39): the tabs are the system's bar, and once
+/// the Library is scrolled, or its item pressed where it shows, the row in its place is the app's
+/// own glass — the one the leading style draws (`LeadingMainBar`) — never UIKit's bottom toolbar,
+/// whose coming and going the owner found jerky. Photographed as `shot-690-system-<n>-…`.
+extension MediaImageLoaderTests {
+    /// How the scope row's control stands at one instant: whether it is on screen, the opacity
+    /// Core Animation is drawing up its chain (the product of every presentation layer's), and how
+    /// many layers in that chain carry an animation. A row that pops is drawn whole at its first
+    /// sample with nothing animating; one inside an animated transaction is not.
+    fileprivate static func rowMotion(in window: UIWindow, at ms: Int) -> String {
+        guard let control = ScopeBarProbe.control(in: window) else { return "t=\(ms) no row" }
+        var opacity: Float = 1
+        var animating = 0
+        var node: UIView? = control
+        while let view = node, view !== window {
+            let layer = view.layer.presentation() ?? view.layer
+            opacity *= layer.opacity
+            if !(view.layer.animationKeys() ?? []).isEmpty { animating += 1 }
+            node = view.superview
+        }
+        return "t=\(ms) row opacity=\(opacity) animating=\(animating)"
+    }
+
+    /// (1)–(3) The Library at rest stands the system tab bar and no row; scrolled past the
+    /// threshold, the app's row alone — no tab bar and no UIKit toolbar — at the place the system
+    /// toolbar drew it; its Library icon gives the tabs back and the row goes.
+    @Test("system 1-3: the Library's scope is the app's glass row alone, and its icon ends it")
+    func systemLibraryScopeRow() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await chromeHost(opening: .library, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            let rest = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "system 1: no tab bar at rest: \(rest)")
+            #expect(Self.mainGlass(.scope, in: window) == nil, "system 1: a row at rest: \(rest)")
+            #expect(ScopeBarProbe.control(in: window) == nil, "system 1: a scope at rest: \(rest)")
+            #expect(!Self.leadingTabsShow(in: window), "system 1: the app's capsule at rest")
+            Self.shoot("690-system-1-library-rest", window)
+
+            await scrollDown(window)
+            await scopeStands(window)
+            let icon = await leadingGlass(.scope, in: window)
+            let start = ContinuousClock.now
+            let samples = await sampleBars(window, witness, from: start, for: .seconds(1))
+            Self.shoot("690-system-2-library-scope", window)
+            let scrolled = ScopeBarProbe.describe(window)
+            let control = ScopeBarProbe.control(in: window)
+            let segment = control.map { $0.convert($0.bounds, to: window) }
+            notes(
+                "690-system-2",
+                [
+                    "icon=\(String(describing: icon)) segmented=\(String(describing: segment))",
+                    "toolbar of 38: icon x 28, 48 x 48; segmented x 93 y 798.7, 220 x 48",
+                    scrolled,
+                ])
+            #expect(icon != nil, "system 2: no app row scrolled: \(scrolled)")
+            let iconAt = String(describing: icon)
+            let segmentAt = String(describing: segment)
+            #expect(abs((icon?.minX ?? -100) - 28) <= 2, "system 2: icon at \(iconAt)")
+            #expect(abs((segment?.minX ?? -100) - 93) <= 2, "system 2: control at \(segmentAt)")
+            #expect(!Self.barShows(in: window), "system 2: the tab bar beside the row: \(scrolled)")
+            #expect(
+                !ScopeBarProbe.systemToolbarShows(in: window),
+                "system 2: UIKit drew a toolbar: \(scrolled)")
+            #expect(!Self.leadingTabsShow(in: window), "system 2: the app's capsule beside the row")
+            judgeDoubleBar(
+                "system-2", samples, witness, in: window, context: "system, Library scrolled")
+
+            let how = ScopeBarProbe.pressLibraryIcon(in: window)
+            #expect(how != nil, "system 3: no icon took a press: \(scrolled)")
+            await tabsStand(window)
+            // The row's icon gives the tabs back where the grid stands; a re-selection of the
+            // Library's tab would have scrolled it to the top instead.
+            let at = Self.scrolledBy(in: window) ?? 0
+            #expect(at > 24, "system 3: the press left the grid at \(at), by \(how ?? "nothing")")
+            let after = ScopeBarProbe.describe(window)
+            #expect(Self.barShows(in: window), "system 3: the icon gave no tabs back: \(after)")
+            #expect(Self.mainGlass(.scope, in: window) == nil, "system 3: the row stayed: \(after)")
+            #expect(witness.dock?.bar(on: .library) == .tabs, "system 3: the dock kept the scope")
+            Self.shoot("690-system-3-library-icon", window)
+        }
+    }
+
+    /// (A) The row's appearance and going, watched: the Library's item pressed where it shows
+    /// brings the row, the icon takes it away, each sampled every settle turn for 700 ms. Logged,
+    /// not judged — a frame-accurate verdict on an animation is not a render test's to give — so
+    /// that the gate log says whether the row came in drawn whole or inside an animation.
+    @Test("system A: the row's coming and going, sampled")
+    func systemRowMotion() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await chromeSettle(window, turns: 20)
+            #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
+            var coming: [String] = []
+            let pressed = ContinuousClock.now
+            while ContinuousClock.now < pressed.advanced(by: .milliseconds(700)) {
+                let ms = Int((ContinuousClock.now - pressed) / .milliseconds(1))
+                coming.append(Self.rowMotion(in: window, at: ms))
+                await chromeSettle(window)
+            }
+            await scopeStands(window)
+            #expect(Self.mainGlass(.scope, in: window) != nil, "system A: no row after the press")
+            var going: [String] = []
+            let left = ContinuousClock.now
+            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "system A: no icon press")
+            while ContinuousClock.now < left.advanced(by: .milliseconds(700)) {
+                let ms = Int((ContinuousClock.now - left) / .milliseconds(1))
+                going.append(Self.rowMotion(in: window, at: ms))
+                await chromeSettle(window)
+            }
+            notes("690-system-A-coming", coming)
+            notes("690-system-A-going", going)
         }
     }
 }

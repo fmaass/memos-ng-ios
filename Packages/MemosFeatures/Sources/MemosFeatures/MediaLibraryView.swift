@@ -23,15 +23,15 @@ struct MediaLibraryView: View {
     /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
     @State private var buckets: LibraryBucketStore?
     /// Which of Years, Months and All is on screen, and the year a Years card narrowed Months to.
-    /// Shared with the scope toolbar, whose segmented control picks it (MEMNG-604); a
+    /// Shared with the scope row, whose segmented control picks it (MEMNG-604, MEMNG-690); a
     /// Library hosted with no tabs above it keeps its own, at All.
     @Environment(LibraryScopeChoice.self) private var sharedChoice: LibraryScopeChoice?
     @State private var ownChoice = LibraryScopeChoice()
-    /// The dock: whether the scope toolbar stands in the tab bar's place, and the claim select
+    /// The dock: whether the scope row stands in the tab bar's place, and the claim select
     /// mode takes so that its toolbar is the only bottom chrome.
     @Environment(AppDock.self) private var dock: AppDock?
-    /// The bar style a host put in the environment, else the device's: under the leading style
-    /// the scope row is the leading bar's to draw (`LeadingMainBar`), not this screen's toolbar.
+    /// The bar style a host put in the environment, else the device's: under the system style
+    /// the scope row is drawn here (`systemRow`).
     @Environment(BarStylePreference.self) private var styleHost: BarStylePreference?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
@@ -54,8 +54,18 @@ struct MediaLibraryView: View {
     /// the current direction FROM, so there is only ever one answer on screen.
     private let preferences = LibraryPreferences.shared
 
-    /// The scope toolbar's Library icon, which gives the system tab bar back.
+    /// The scope row's Library icon, which gives the tabs back (`LeadingMainBar`).
     static let tabsButton = "library-show-tabs"
+
+    /// What the Library draws at its foot for the scope under `style`: the scope row where the
+    /// dock's one bar is the scope under the system style, else nothing — the tabs are the
+    /// system's bar, a claim's bar the claimant's, and the leading style's row is the tabs' own
+    /// (`MainTabs.leadingShape`), left as build 38 shipped it.
+    static func systemRow(_ bar: DockBar, style: BarStyle) -> LeadingMainBar.BarShape? {
+        bar == .scope && style == .system ? .scope : nil
+    }
+
+    private var style: BarStyle { (styleHost ?? .shared).style }
 
     /// The one bar at the foot of the Library (`AppDock.bar(on:)`). Hosted with no dock — a test
     /// that shows the Library alone — there is no tab bar or scope toolbar to stand, and the same
@@ -85,7 +95,7 @@ struct MediaLibraryView: View {
             }
             // Select mode's toolbar, in the dock's place. It stands when the dock's one bottom
             // bar is `select` — select mode's claim (`dockClaim`) — the same value the tab bar and
-            // the scope toolbar are drawn from, so none of them is drawn beside it.
+            // the scope row are drawn from, so none of them is drawn beside it.
             .safeAreaBar(edge: .bottom) {
                 if bottomBar == .select {
                     VStack(spacing: DesignTokens.Space.tight) {
@@ -120,33 +130,24 @@ struct MediaLibraryView: View {
                     } message: {
                         Text(LibraryDeleteFlow.explanation)
                     }
+                } else if let dock, style == .system {
+                    // The scope row under the system style (MEMNG-690, build 39): the app's own
+                    // glass, the leading style's row, in the place the system toolbar stood —
+                    // inside this stack, so its height clears the grid's foot as the toolbar's
+                    // did, and the bar the tabs carry (`MainTabs`) never changes under this
+                    // style: a change there moved the grid to its top. Built whatever the shape,
+                    // so its container outlives the swap and the glass appears and goes inside
+                    // the container's animation.
+                    LeadingMainBar(
+                        shape: Self.systemRow(bottomBar, style: style),
+                        selection: .library,
+                        press: { _ in },
+                        pressLibraryIcon: { dock.send(.pressedLibraryIcon) },
+                        scope: choice
+                    )
                 }
             }
             .toolbarVisibility(.hidden, for: .navigationBar)
-            // The scope toolbar, in the system tab bar's place once the Library is scrolled or
-            // its item pressed where it shows (MEMNG-604, MEMNG-679): the system's own bottom
-            // bar, so iOS draws its glass.
-            .toolbar {
-                if let dock, dock.bar(on: .library) == .scope,
-                    (styleHost ?? .shared).style == .system
-                {
-                    ToolbarItem(placement: .bottomBar) {
-                        Button {
-                            dock.send(.pressedLibraryIcon)
-                        } label: {
-                            Label(MainTab.library.title, systemImage: MainTab.library.symbol)
-                        }
-                        .accessibilityIdentifier(Self.tabsButton)
-                    }
-                    ToolbarSpacer(.fixed, placement: .bottomBar)
-                    ToolbarItem(placement: .bottomBar) {
-                        LibraryScopePicker(scope: choice)
-                    }
-                    // The trailing space stays empty, as in Photos (MEMNG-680): the picker's own
-                    // width narrows it, and this keeps the narrowed capsule against the icon.
-                    ToolbarSpacer(.flexible, placement: .bottomBar)
-                }
-            }
             // INSIDE the stack, while the viewer's cover is outside it: two presentations declared
             // on one view is how one of them silently stops appearing, and this screen now has
             // both a cover and a sheet.

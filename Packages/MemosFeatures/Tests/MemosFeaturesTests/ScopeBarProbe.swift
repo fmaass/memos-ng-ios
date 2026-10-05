@@ -113,7 +113,20 @@ enum ScopeBarProbe {
                 return "the toolbar item's custom view: \(how)"
             }
         }
-        for element in drawnIcons(in: window) {
+        // Since build 39 the icon is the app's row (MEMNG-690), and two accessibility nodes stand
+        // at its place: the button is pressed first — its identifier, then its button trait, then
+        // the smallest frame — so the press is never an activation of a node around it.
+        let icons = drawnIcons(in: window).map { element in
+            let named = identifier(of: element) == MediaLibraryView.tabsButton
+            let button = element.accessibilityTraits.contains(.button)
+            let frame = windowFrame(of: element, in: window)
+            return (
+                element: element, rank: (named ? 0 : 2) + (button ? 0 : 1),
+                area: frame.width * frame.height
+            )
+        }
+        let ordered = icons.sorted { ($0.rank, $0.area) < ($1.rank, $1.area) }.map(\.element)
+        for element in ordered {
             if let control = element as? UIControl {
                 control.sendActions(for: .touchUpInside)
                 return "the drawn \(type(of: control))'s touch-up"
@@ -123,6 +136,19 @@ enum ScopeBarProbe {
             }
         }
         return nil
+    }
+
+    /// Whether UIKit draws a bottom toolbar of its own: a shown navigation toolbar with items, or
+    /// a `UIToolbar` view on screen. Since build 39 the scope row is the app's glass under both
+    /// styles (MEMNG-690), so the Library leaves UIKit no toolbar to draw.
+    static func systemToolbarShows(in window: UIWindow) -> Bool {
+        if !shownToolbarItems(in: window).isEmpty { return true }
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let toolbar = view as? UIToolbar, isOnScreen(toolbar, in: window) { return true }
+            stack.append(contentsOf: view.subviews)
+        }
+        return false
     }
 
     /// Whether the scope toolbar's Library icon is on screen, by the same readings the press uses.
@@ -287,7 +313,13 @@ enum ScopeBarProbe {
     }
 
     private static func identifier(of object: NSObject) -> String? {
-        (object as? UIAccessibilityIdentification)?.accessibilityIdentifier
+        if let named = object as? UIAccessibilityIdentification {
+            return named.accessibilityIdentifier
+        }
+        // SwiftUI's accessibility nodes answer the selector without declaring the protocol, as
+        // the leading bar's glass markers are found (`mainGlass`).
+        guard object.responds(to: Selector(("accessibilityIdentifier"))) else { return nil }
+        return object.value(forKey: "accessibilityIdentifier") as? String
     }
 
     private static func isLibraryIcon(_ item: UIBarButtonItem) -> Bool {

@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (39)
+
+- With the System tab bar, the Library's Years | Months | All row is now drawn with the app's own glass instead of the system's bottom toolbar, so it should appear and go smoothly.
+- The tab bar itself is unchanged: the same System bar, centred, shrinking on the Timeline as before.
+- The Leading switch is still in Settings → Appearance → Tab bar, and Leading is unchanged.
+- Please scroll the Library down and back up a few times with System selected, and judge how the row comes and goes.
+
 ## 2.2.1 (38)
 
 - New: a second kind of tab bar to try. Settings → Appearance → Tab bar: System or Leading. System is the bar you have now and stays the default, so nothing changes until you switch.
