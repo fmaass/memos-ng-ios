@@ -213,7 +213,7 @@ extension MediaImageLoaderTests {
     /// reporting the dock — so the test can ask the dock which bar it says stands.
     private func chromeHost(
         opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true,
-        witness: DockWitness? = nil
+        witness: DockWitness? = nil, style: BarStyle = .system
     ) async -> UIWindow {
         let transport = ChromeTransport(days: days, mine: mine)
         let session = SessionStore(
@@ -245,10 +245,14 @@ extension MediaImageLoaderTests {
         window.overrideUserInterfaceStyle = .light
         if let witness {
             window.rootViewController = UIHostingController(
-                rootView: DockWitnessTabs(opening: tab, witness: witness).environment(session))
+                rootView: DockWitnessTabs(opening: tab, witness: witness)
+                    .environment(session)
+                    .environment(Self.styleHost(style)))
         } else {
             window.rootViewController = UIHostingController(
-                rootView: MainTabView(opening: tab).environment(session))
+                rootView: MainTabView(opening: tab)
+                    .environment(session)
+                    .environment(Self.styleHost(style)))
         }
         window.makeKeyAndVisible()
         return window
@@ -801,7 +805,7 @@ extension MediaImageLoaderTests {
 
     private static func bottomBars(in window: UIWindow) -> BottomBars {
         BottomBars(
-            tabs: barShows(in: window),
+            tabs: barShows(in: window) || leadingTabsShow(in: window),
             scope: ScopeBarProbe.control(in: window) != nil,
             select: !elements(labelled: "Share", in: window).isEmpty)
     }
@@ -1518,7 +1522,7 @@ extension MediaImageLoaderTests {
     ) -> BarSample {
         BarSample(
             ms: Int(((ContinuousClock.now - start) / .milliseconds(1)).rounded()),
-            tabs: barShows(in: window),
+            tabs: barShows(in: window) || leadingTabsShow(in: window),
             scope: ScopeBarProbe.control(in: window) != nil,
             select: !elements(labelled: "Share", in: window).isEmpty,
             said: witness.dock?.bar(on: .library),
@@ -1843,5 +1847,225 @@ private final class ChromeCredentials: CredentialStore, @unchecked Sendable {
 
     func remove(_ account: String) async throws {
         _ = lock.withLock { values.removeValue(forKey: account) }
+    }
+}
+
+/// The leading bar style (MEMNG-690): the app's own main bar at the leading edge, folding in place
+/// on the Timeline's scroll and swapping to the scope row on the Library's, hosted as the tests
+/// above host the app and photographed as `shot-690-leading-<n>-…`.
+extension MediaImageLoaderTests {
+    /// The style a test hosts the app under: nothing for the system style, so the tests above run
+    /// in the environment they always did; a preference over scratch defaults for the leading one.
+    fileprivate static func styleHost(_ style: BarStyle) -> BarStylePreference? {
+        guard style == .leading else { return nil }
+        let name = "leading-bar-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        let preference = BarStylePreference(defaults: defaults)
+        preference.select(.leading)
+        return preference
+    }
+
+    /// The frame of the leading bar's main glass in `shape`, nil when it is not on screen.
+    fileprivate static func mainGlass(
+        _ shape: LeadingMainBar.BarShape, in window: UIWindow
+    ) -> CGRect? {
+        let wanted = LeadingMainBar.identifier(of: shape)
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            // Asked by key, as `SystemTabBarRenderTests` asks the Places root: SwiftUI's
+            // accessibility nodes answer the selector without declaring the protocol.
+            var identifier: String?
+            if object.responds(to: Selector(("accessibilityIdentifier"))) {
+                identifier = object.value(forKey: "accessibilityIdentifier") as? String
+            }
+            if identifier == wanted {
+                let frame = Self.frame(of: object)
+                if !frame.isEmpty, frame.intersects(window.bounds) { return frame }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
+    /// Whether the leading bar's tabs stand, as a capsule or folded to an icon.
+    fileprivate static func leadingTabsShow(in window: UIWindow) -> Bool {
+        mainGlass(.tabs, in: window) != nil || mainGlass(.folded, in: window) != nil
+    }
+
+    /// Waits until the leading bar's main glass stands in `shape`; answers its frame.
+    fileprivate func leadingGlass(
+        _ shape: LeadingMainBar.BarShape, in window: UIWindow
+    ) async -> CGRect? {
+        for _ in 0..<200 where Self.mainGlass(shape, in: window) == nil {
+            await chromeSettle(window)
+        }
+        // The morph's own time, so the picture shows where it ends.
+        await chromeSettle(window, turns: 30)
+        return Self.mainGlass(shape, in: window)
+    }
+
+    /// Presses `tab` in the leading bar, the button reading its name in the window's foot.
+    fileprivate func pressLeading(_ tab: MainTab, in window: UIWindow) -> Bool {
+        let foot = window.bounds.height * 0.8
+        let buttons = Self.elements(labelled: tab.title, in: window).filter {
+            Self.frame(of: $0).minY >= foot
+        }
+        return buttons.contains { $0.accessibilityActivate() }
+    }
+
+    /// The Timeline under the leading style, its memos served and settled.
+    fileprivate func leadingTimeline(
+        _ media: PaintedMedia, witness: DockWitness? = nil
+    ) async -> UIWindow {
+        let window = await chromeHost(opening: .timeline, witness: witness, style: .leading)
+        await libraryServed(media, window, pictures: 1)
+        await chromeSettle(window, turns: 40)
+        return window
+    }
+
+    private func notes(_ name: String, _ lines: [String]) {
+        let text = lines.joined(separator: "\n")
+        print("LEADING \(name): \(text)")
+        Attachment.record(text, named: "notes-\(name)")
+    }
+
+    /// (1) The Timeline at rest: the capsule at the leading inset, the system tab bar hidden.
+    @Test("leading 1: the Timeline at rest stands the capsule at the leading inset, no tab bar")
+    func leadingTimelineAtRest() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            let capsule = await leadingGlass(.tabs, in: window)
+            Self.shoot("690-leading-1-timeline-rest", window)
+            notes("690-leading-1", ["capsule=\(String(describing: capsule))"])
+            #expect(!Self.barShows(in: window), "the system tab bar stands under leading")
+            let inset = window.safeAreaInsets.left + LeadingMainBar.leadingInset
+            let at = String(describing: capsule)
+            #expect(abs((capsule?.minX ?? -100) - inset) <= 1, "capsule at \(at)")
+            #expect((capsule?.width ?? 0) > 200, "the capsule holds three tabs")
+        }
+    }
+
+    /// (2) The Timeline scrolled down by the reader: the icon alone, at the capsule's leading x;
+    /// (3) scrolled back up, the capsule; folded again and the icon pressed, the capsule.
+    @Test("leading 2-3: the Timeline's scroll folds the capsule in place; up or the icon unfolds")
+    func leadingTimelineFoldsInPlace() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            let rest = await leadingGlass(.tabs, in: window)
+            await drag(window, by: 240)
+            let folded = await leadingGlass(.folded, in: window)
+            Self.shoot("690-leading-2-timeline-folded", window)
+            let line =
+                "rest=\(String(describing: rest)) folded=\(String(describing: folded))"
+                + " scrolledBy=\(String(describing: Self.scrolledBy(in: window)))"
+            #expect(folded != nil, "the capsule did not fold: \(line)")
+            #expect(abs((folded?.minX ?? -100) - (rest?.minX ?? 100)) <= 1, "x moved: \(line)")
+            #expect((folded?.width ?? .infinity) < (rest?.width ?? 0), "not narrower: \(line)")
+            #expect(Self.mainGlass(.tabs, in: window) == nil, "capsule beside the icon: \(line)")
+
+            await drag(window, by: -80)
+            let back = await leadingGlass(.tabs, in: window)
+            Self.shoot("690-leading-3a-timeline-scrolled-up", window)
+            #expect(back != nil, "a scroll up left it folded")
+            #expect(abs((back?.minX ?? -100) - (rest?.minX ?? 100)) <= 1)
+
+            await drag(window, by: 160)
+            let again = await leadingGlass(.folded, in: window)
+            #expect(again != nil, "the second scroll down did not fold")
+            #expect(pressLeading(.timeline, in: window), "the folded icon took no press")
+            let tapped = await leadingGlass(.tabs, in: window)
+            Self.shoot("690-leading-3b-timeline-icon-tapped", window)
+            #expect(tapped != nil, "the icon's press left it folded")
+            #expect(abs((tapped?.width ?? 0) - (rest?.width ?? 1)) <= 1)
+            let back3 = "back=\(String(describing: back))"
+            notes("690-leading-2-3", [line, back3, "tapped=\(String(describing: tapped))"])
+        }
+    }
+
+    /// (4) The Library at rest, then scrolled: the scope row stands alone, where today's scope
+    /// toolbar stands, and no capsule beside it.
+    @Test("leading 4: the Library's scroll swaps the capsule for the scope row, one bar")
+    func leadingLibraryScope() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await chromeHost(opening: .library, witness: witness, style: .leading)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            let rest = await leadingGlass(.tabs, in: window)
+            Self.shoot("690-leading-4a-library-rest", window)
+            #expect(abs((rest?.minX ?? -100) - LeadingMainBar.leadingInset) <= 1)
+            await scrollDown(window)
+            await scopeStands(window)
+            let icon = await leadingGlass(.scope, in: window)
+            let start = ContinuousClock.now
+            let samples = await sampleBars(window, witness, from: start, for: .seconds(1))
+            Self.shoot("690-leading-4b-library-scope", window)
+            let control = ScopeBarProbe.control(in: window)
+            let segment = control.map { $0.convert($0.bounds, to: window) }
+            let glass = "rest=\(String(describing: rest)) icon=\(String(describing: icon))"
+            let picker = "segmented=\(String(describing: segment)); system: x 93 y 798.7, 220 x 48"
+            notes("690-leading-4", [glass, picker])
+            #expect(control != nil, "no scope control")
+            #expect(abs((icon?.minX ?? -100) - 28) <= 2, "icon at \(String(describing: icon))")
+            #expect(!Self.leadingTabsShow(in: window), "the capsule stands beside the scope")
+            judgeDoubleBar(
+                "leading-4", samples, witness, in: window, context: "leading, Library scrolled")
+        }
+    }
+
+    /// (5) Sequence D under the leading style: the app opened on the Timeline, scrolled so its bar
+    /// folds, scrolled back, the Library pressed in the capsule, scrolled to its scope, Select,
+    /// Close. Watched 2 s from the press: one bar, the one the dock says.
+    @Test("leading 5: arriving from the Timeline, Select and Close leave one bar")
+    func leadingDoubleBarD() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await leadingTimeline(media, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            _ = await leadingGlass(.tabs, in: window)
+            await drag(window, by: 240)
+            let folded = await leadingGlass(.folded, in: window)
+            #expect(folded != nil, "precondition: the Timeline's bar folded")
+            await drag(window, by: -80)
+            _ = await leadingGlass(.tabs, in: window)
+            #expect(pressLeading(.library, in: window), "the capsule's Library took no press")
+            for _ in 0..<200 where Self.elements(labelled: "Photo", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            #expect(Self.leadingTabsShow(in: window), "precondition: the Library on the capsule")
+            await scrollDown(window)
+            await scopeStands(window)
+            #expect(Self.scopeShows(in: window), "precondition: no scope")
+            await enterSelect(window, pass: "leading-D")
+            let closed = pressClose(window, pass: "leading-D")
+            let samples = await sampleBars(window, witness, from: closed, for: .seconds(2))
+            Self.shoot("690-leading-5-select-closed", window)
+            judgeDoubleBar(
+                "leading-D", samples, witness, in: window,
+                context: "leading, the Timeline folded before the Library")
+        }
     }
 }

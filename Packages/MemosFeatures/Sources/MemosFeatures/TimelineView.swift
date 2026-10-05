@@ -24,6 +24,8 @@ public struct TimelineView: View {
     /// A memo the Library asked this tab to open. Optional for the same reason the outbox is: a
     /// preview or a test host has no router.
     @Environment(MemoJump.self) private var jump: MemoJump?
+    /// The tabs' dock, which the list's scrolls are told to; nil when hosted without the tabs.
+    @Environment(AppDock.self) private var dock: AppDock?
     @State private var timeline: TimelineStore?
     /// A memo read from the server because a jump named one this list has never loaded. It is what
     /// the detail screen opens WITH — the loaded list is left alone, so nothing is inserted into a
@@ -345,6 +347,8 @@ public struct TimelineView: View {
                 // could ask for them: the cursor only ever descends. Arriving at the top is what
                 // asks now — an arrival, not a top row appearing, for the reason `TimelineTopWatch`
                 // gives.
+                // The reader's scrolls fold and unfold the leading bar (MEMNG-690).
+                .feedsDock(dock, on: .timeline)
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                     TimelineTopWatch.isAtTop(
                         contentOffsetY: geometry.contentOffset.y,

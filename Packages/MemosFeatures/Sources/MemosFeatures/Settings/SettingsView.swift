@@ -28,6 +28,8 @@ struct SettingsView: View {
     /// Optional for the same reason, and the same object the outbox listens to — see
     /// `Outbox.uploadPreferences`.
     @Environment(UploadSettings.self) private var uploadSettings: UploadSettings?
+    /// The bar style a host put in the environment, else the device's (`BarStylePreference`).
+    @Environment(BarStylePreference.self) private var barStyle: BarStylePreference?
 
     /// The one conversation, handed in by the screen that also puts it in the toolbar menu. Two
     /// stages would be two machines and, between them, two revokes — see `SignOutConversation`.
@@ -194,6 +196,17 @@ struct SettingsView: View {
             }
         }
         .pickerStyle(.segmented)
+        Divider()
+        // Which main bar stands under the tabs (MEMNG-690); the system's until changed.
+        LabeledContent("Tab bar") {
+            Picker("Tab bar", selection: barStyleChoice) {
+                ForEach(BarStyle.allCases) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+        }
     }
 
     @ViewBuilder
@@ -252,6 +265,12 @@ struct SettingsView: View {
             get: { uploadSettings?.allowsMobileData ?? false },
             set: { value in Task { await uploadSettings?.select(value) } }
         )
+    }
+
+    /// The device's bar style, or the one a host put in the environment.
+    private var barStyleChoice: Binding<BarStyle> {
+        let preference = barStyle ?? .shared
+        return Binding(get: { preference.style }, set: { preference.select($0) })
     }
 
     private var appearanceChoice: Binding<AppearancePreference> {

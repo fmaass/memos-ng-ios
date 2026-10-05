@@ -30,6 +30,9 @@ struct MediaLibraryView: View {
     /// The dock: whether the scope toolbar stands in the tab bar's place, and the claim select
     /// mode takes so that its toolbar is the only bottom chrome.
     @Environment(AppDock.self) private var dock: AppDock?
+    /// The bar style a host put in the environment, else the device's: under the leading style
+    /// the scope row is the leading bar's to draw (`LeadingMainBar`), not this screen's toolbar.
+    @Environment(BarStylePreference.self) private var styleHost: BarStylePreference?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -124,7 +127,9 @@ struct MediaLibraryView: View {
             // its item pressed where it shows (MEMNG-604, MEMNG-679): the system's own bottom
             // bar, so iOS draws its glass.
             .toolbar {
-                if let dock, dock.bar(on: .library) == .scope {
+                if let dock, dock.bar(on: .library) == .scope,
+                    (styleHost ?? .shared).style == .system
+                {
                     ToolbarItem(placement: .bottomBar) {
                         Button {
                             dock.send(.pressedLibraryIcon)

@@ -344,7 +344,8 @@ struct DockModeTests {
             "a swing past the second release's settling counted")
     }
 
-    /// The one bottom bar (MEMNG-684), for every mode x tab x claim: 2 x 3 x 3 rows, written out.
+    /// The one bottom bar (MEMNG-684), for every mode x tab x claim: 3 x 3 x 3 rows, written out.
+    /// Folded is a shape of the tabs (MEMNG-690): it stands the tabs wherever `tabs` would.
     /// A takeover leaves nothing anywhere; select mode its toolbar on the Library and nothing
     /// elsewhere; with no claim the scope stands on the Library in `scope`, the tabs otherwise.
     @Test("one bottom bar for every mode, tab and claim")
@@ -368,6 +369,15 @@ struct DockModeTests {
             (.scope, .library, nil, .scope),
             (.scope, .library, .select, .select),
             (.scope, .library, .takeover, .none),
+            (.folded, .timeline, nil, .tabs),
+            (.folded, .timeline, .select, .none),
+            (.folded, .timeline, .takeover, .none),
+            (.folded, .places, nil, .tabs),
+            (.folded, .places, .select, .none),
+            (.folded, .places, .takeover, .none),
+            (.folded, .library, nil, .tabs),
+            (.folded, .library, .select, .select),
+            (.folded, .library, .takeover, .none),
         ]
         #expect(table.count == DockMode.allCases.count * MainTab.allCases.count * 3)
         for (mode, tab, claim, bar) in table {
@@ -378,5 +388,44 @@ struct DockModeTests {
         // Every combination is a row: none is left to a default.
         let rows = Set(table.map { "\($0.0)-\($0.1)-\($0.2.map(\.rawValue) ?? "-")" })
         #expect(rows.count == table.count, "a combination written twice")
+    }
+
+    /// The leading bar's fold (MEMNG-690): the reader's scroll down of the Timeline past the
+    /// threshold folds, a scroll up or a return to the top unfolds, the icon pressed unfolds, and
+    /// nothing else moves it — an idle move, another tab's scroll view, the Library's own scroll.
+    @Test("a reader's scroll of the Timeline folds the bar down and unfolds it up")
+    func timelineScrollFolds() {
+        func scroll(
+            _ y: Double, _ travel: Double, moving: Bool = true, tab: MainTab = .timeline,
+            showing: MainTab = .timeline
+        ) -> DockEvent {
+            .scrolledTab(tab, y: y, travel: travel, showing: showing, moving: moving)
+        }
+        #expect(DockMode.tabs.after(scroll(40, 16)) == .folded, "down past the threshold")
+        #expect(DockMode.tabs.after(scroll(24, 16)) == .tabs, "down to the threshold, not past")
+        #expect(DockMode.folded.after(scroll(300, -1)) == .tabs, "any scroll up")
+        #expect(DockMode.folded.after(scroll(0, 0)) == .tabs, "back at the top")
+        #expect(DockMode.folded.after(scroll(-12, -4)) == .tabs, "a pull past the top")
+        #expect(DockMode.folded.after(scroll(300, 20)) == .folded, "further down stays folded")
+        #expect(DockMode.tabs.after(scroll(400, 40, moving: false)) == .tabs, "an idle move")
+        #expect(DockMode.folded.after(scroll(0, -40, moving: false)) == .folded, "idle to top")
+        #expect(DockMode.tabs.after(scroll(400, 40, showing: .places)) == .tabs, "not on screen")
+        #expect(DockMode.tabs.after(scroll(400, 40, tab: .library, showing: .library)) == .tabs)
+        #expect(DockMode.scope.after(scroll(400, 40)) == .scope, "the scope is the Library's")
+        #expect(DockMode.tabs.after(scroll(400, 40, tab: .places, showing: .places)) == .folded)
+    }
+
+    @Test("a fold is the tab's: the icon, another tab and the Library unfold it")
+    func foldEndsOffItsTab() {
+        #expect(DockMode.folded.after(.pressedTab(.timeline, showing: .timeline)) == .tabs)
+        #expect(DockMode.folded.after(.pressedTab(.library, showing: .timeline)) == .tabs)
+        #expect(DockMode.folded.after(.selected(.library)) == .tabs)
+        #expect(DockMode.folded.after(.selected(.places)) == .tabs)
+        #expect(DockMode.scope.after(.selected(.library)) == .scope, "the scope is kept")
+        #expect(DockMode.folded.folds(on: .timeline))
+        #expect(DockMode.folded.folds(on: .places))
+        #expect(!DockMode.folded.folds(on: .library))
+        #expect(!DockMode.tabs.folds(on: .timeline))
+        #expect(!DockMode.scope.folds(on: .timeline))
     }
 }

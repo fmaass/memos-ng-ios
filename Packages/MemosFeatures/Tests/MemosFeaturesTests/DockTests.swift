@@ -367,6 +367,78 @@ struct DockTests {
         #expect(Tabs.minimizesOnScroll(on: .places))
     }
 
+    @Test("the system bar minimises itself under the system style alone")
+    func minimisesUnderTheSystemStyleOnly() {
+        #expect(!Tabs.minimizesOnScroll(on: .timeline, style: .leading))
+        #expect(!Tabs.minimizesOnScroll(on: .places, style: .leading))
+        #expect(!Tabs.minimizesOnScroll(on: .library, style: .leading))
+        #expect(Tabs.minimizesOnScroll(on: .timeline, style: .system))
+    }
+
+    /// MEMNG-690: under the leading style the system bar never stands; under the system style it
+    /// stands exactly where the dock's one bar is the tabs.
+    @Test("the system tab bar stands on the tabs under the system style, nowhere under leading")
+    func systemBarFollowsTheStyle() {
+        for bar in DockBar.allCases {
+            let system = Tabs.systemBar(for: bar, style: .system)
+            #expect(system == (bar == .tabs ? .automatic : .hidden), "\(bar) under system")
+            #expect(Tabs.systemBar(for: bar, style: .leading) == .hidden, "\(bar) under leading")
+        }
+    }
+
+    private static func reading(_ y: Double) -> DockScrollReading {
+        DockScrollReading(
+            y: y, width: 402, height: 700, insetTop: 100, insetLeading: 0, insetBottom: 96,
+            insetTrailing: 0)
+    }
+
+    /// The Timeline's list fed through the path the Library's scroll views take: a drag down
+    /// folds the leading bar to its icon, a drag up gives the capsule back, an idle move changes
+    /// nothing, and the Library's bar is never folded.
+    @Test("the Timeline's scroll folds the leading bar through the dock; a scroll up unfolds it")
+    func timelineScrollFoldsThroughTheDock() {
+        let dock = AppDock()
+        var fence = DockScrollFence()
+        dock.send(.selected(.timeline))
+        #expect(Tabs.leadingShape(dock, on: .timeline) == .tabs)
+        let later = ContinuousClock.now.advanced(by: .seconds(5))
+        dock.scrolled(
+            from: Self.reading(0), to: Self.reading(200), judgedBy: &fence, moving: false,
+            at: later, on: .timeline)
+        #expect(dock.mode == .tabs, "an idle move folded the bar")
+        dock.scrolled(
+            from: Self.reading(200), to: Self.reading(260), judgedBy: &fence, moving: true,
+            at: later, on: .timeline)
+        #expect(dock.mode == .folded)
+        #expect(Tabs.leadingShape(dock, on: .timeline) == .folded)
+        #expect(Tabs.leadingShape(dock, on: .library) == .tabs, "the Library folded")
+        #expect(dock.bar(on: .timeline) == .tabs, "a fold is no other bar")
+        dock.scrolled(
+            from: Self.reading(260), to: Self.reading(250), judgedBy: &fence, moving: true,
+            at: later, on: .timeline)
+        #expect(dock.mode == .tabs)
+        dock.scrolled(
+            from: Self.reading(250), to: Self.reading(400), judgedBy: &fence, moving: true,
+            at: later, on: .timeline)
+        dock.send(.pressedTab(.timeline, showing: .timeline))
+        #expect(dock.mode == .tabs, "the icon's press gave the capsule back")
+    }
+
+    @Test("the leading bar draws the scope row on the Library's scope and nothing under a claim")
+    func leadingShapeFollowsTheBar() {
+        let dock = AppDock()
+        dock.send(.selected(.library))
+        dock.send(.pressedTab(.library, showing: .library))
+        #expect(Tabs.leadingShape(dock, on: .library) == .scope)
+        #expect(Tabs.leadingShape(dock, on: .timeline) == .tabs)
+        let claim = UUID()
+        dock.claim(claim, for: .select)
+        #expect(Tabs.leadingShape(dock, on: .library) == nil)
+        dock.release(claim)
+        dock.claim(claim, for: .takeover)
+        #expect(Tabs.leadingShape(dock, on: .timeline) == nil)
+    }
+
     @Test("a claim delivered twice claims once, and two claims need two releases")
     func takeoverClaims() {
         let dock = AppDock()
@@ -431,5 +503,39 @@ struct DockTests {
         choice.showMonths(of: "2026")
         choice.showAll()
         #expect(abandoned == 0)
+    }
+}
+
+/// The bar style is the device's, kept as the Library's order is (MEMNG-690).
+@MainActor
+@Suite("The bar style preference")
+struct BarStylePreferenceTests {
+    private func scratch() -> UserDefaults {
+        let name = "bar-style-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }
+
+    @Test("a device that never chose stands on the system bar")
+    func defaultsToTheSystemBar() {
+        #expect(BarStylePreference(defaults: scratch()).style == .system)
+    }
+
+    @Test("a choice is written down and read back by the next launch")
+    func choiceSurvivesALaunch() {
+        let defaults = scratch()
+        BarStylePreference(defaults: defaults).select(.leading)
+        #expect(BarStylePreference(defaults: defaults).style == .leading)
+        #expect(defaults.string(forKey: BarStylePreference.styleKey) == "leading")
+    }
+
+    @Test("an absent, empty or unknown stored value is the system bar")
+    func unknownIsTheSystemBar() {
+        #expect(BarStylePreference.style(fromStored: nil) == .system)
+        #expect(BarStylePreference.style(fromStored: "") == .system)
+        #expect(BarStylePreference.style(fromStored: "trailing") == .system)
+        #expect(BarStylePreference.style(fromStored: "leading") == .leading)
+        #expect(BarStylePreference.style(fromStored: "system") == .system)
     }
 }

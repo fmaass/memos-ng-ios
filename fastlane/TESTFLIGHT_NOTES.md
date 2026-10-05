@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (38)
+
+- New: a second kind of tab bar to try. Settings → Appearance → Tab bar: System or Leading. System is the bar you have now and stays the default, so nothing changes until you switch.
+- Leading draws the bar at the left edge, where the shrunken system bar's icon sits. On the Timeline, scroll down: the bar should shrink to the Timeline icon in place, its left edge not moving. Scroll up or tap the icon and it grows back from the same edge. Please watch whether it really looks like the bar is not moving.
+- In the Library with Leading, scrolling down turns the bar into the Library icon with Years | Months | All beside it, and scrolling back to the top turns it back. Please watch whether the glass flows from one into the other rather than jumping.
+- Places has no list to scroll, so its bar does not shrink there; tapping between tabs works as before.
+- Nothing else changed in this build.
+
 ## 2.2.1 (37)
 
 - After Close in the Library's Select mode, the tab bar no longer comes back on top of the Years | Months | All bar when you had come to the Library from the Timeline. One bar at the bottom, the one the screen is in.

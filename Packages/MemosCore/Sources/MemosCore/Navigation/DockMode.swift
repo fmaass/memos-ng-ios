@@ -15,14 +15,27 @@ import Foundation
 /// is one (`DockScrollKind`). The Library icon gives the tabs back wherever the Library stands,
 /// and a press on the Library's item where the Library shows is the way into the scope on a page
 /// too short to scroll.
+///
+/// In `folded` the main bar stands folded to the selected tab's icon (MEMNG-690): the app-drawn
+/// leading bar's own minimise, on the Timeline's scroll down, given back by a scroll up, a return
+/// to the top or a press on the icon. The system bar minimises itself and never reads it, so under
+/// the system bar it changes nothing on screen; the Library never folds, its scroll is the scope's.
 nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
     case tabs
     case scope
+    case folded
 
     public static let initial: DockMode = .tabs
 
-    /// How far the Library scrolls before the scope toolbar replaces the tabs, in points.
+    /// How far the Library scrolls before the scope toolbar replaces the tabs, in points, and how
+    /// far another tab scrolls down before its bar folds.
     public static let scopeThreshold: Double = 24
+
+    /// Whether the main bar under `tab`'s root stands folded to its icon: in `folded`, on any tab
+    /// but the Library.
+    public func folds(on tab: MainTab) -> Bool {
+        self == .folded && tab != .library
+    }
 
     /// The state after `event`. An event that changes nothing answers the state it was asked of.
     public func after(_ event: DockEvent) -> DockMode {
@@ -35,8 +48,8 @@ nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
             return .tabs
         case .selected(let tab):
             // Leaving the Library by any route — a press elsewhere or a jump to a memo — gives
-            // the tabs back, so coming back finds them.
-            return tab == .library ? self : .tabs
+            // the tabs back, so coming back finds them. A fold is the tab's it was made on.
+            return tab == .library && self != .folded ? self : .tabs
         case .scrolled(let y, let showing, let kind):
             // A scroll counts on the Library alone: the one tab whose bars this decides.
             guard showing == .library else { return self }
@@ -45,6 +58,14 @@ nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
             // At the top the tabs, on a scroll alone; between the two nothing changes.
             guard y <= 0, kind == .scroll else { return self }
             return .tabs
+        case .scrolledTab(let tab, let y, let travel, let showing, let moving):
+            // The reader's own scroll of the tab on screen, the Library's aside: down past the
+            // threshold folds, up or back at the top unfolds, the system's minimise on scroll.
+            // An idle move is the layout's or the app's (a list growing above the reader), never
+            // the reader's, and changes nothing.
+            guard tab == showing, tab != .library, moving, self != .scope else { return self }
+            if y <= 0 || travel < 0 { return .tabs }
+            return travel > 0 && y > Self.scopeThreshold ? .folded : self
         }
     }
 }
@@ -82,6 +103,7 @@ nonisolated public enum DockBar: String, Sendable, Equatable, CaseIterable {
         case .select:
             return tab == .library ? .select : .none
         case nil:
+            // Folded is a shape of the tabs, not another bar (`DockMode.folds(on:)`).
             return tab == .library && mode == .scope ? .scope : .tabs
         }
     }
@@ -100,6 +122,10 @@ nonisolated public enum DockEvent: Sendable, Equatable {
     /// measured from the top of its content: 0 at rest, negative while rubber-banding. `by` is
     /// what moved it, as far as the dock can tell.
     case scrolled(y: Double, showing: MainTab, by: DockScrollKind)
+    /// `tab`'s own scroll view — the Timeline's — moved `travel` points (down positive) to stand
+    /// `y` from the top of its content while `showing` was on screen; `moving` is whether the
+    /// reader's drag, its deceleration or an animated scroll moved it rather than the layout.
+    case scrolledTab(MainTab, y: Double, travel: Double, showing: MainTab, moving: Bool)
 }
 
 /// What moved a Library scroll view, of the moves the fence passes (`DockScrollFence`): whether
