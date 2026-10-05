@@ -83,6 +83,8 @@ public struct TimelineView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
+            // The app's main bar, inside the stack (MEMNG-690).
+            .leadingFootBar(on: .timeline)
             // A large title, as every tab root has one now that the bar under them is the
             // system's (MEMNG-666): it names the tab the bar has selected, and it folds into the
             // inline bar as the first memo scrolls up under it. The toolbar keeps both its

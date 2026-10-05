@@ -390,29 +390,143 @@ struct DockModeTests {
         #expect(rows.count == table.count, "a combination written twice")
     }
 
-    /// The leading bar's fold (MEMNG-690): the reader's scroll down of the Timeline past the
-    /// threshold folds, a scroll up or a return to the top unfolds, the icon pressed unfolds, and
-    /// nothing else moves it — an idle move, another tab's scroll view, the Library's own scroll.
-    @Test("a reader's scroll of the Timeline folds the bar down and unfolds it up")
-    func timelineScrollFolds() {
-        func scroll(
-            _ y: Double, _ travel: Double, moving: Bool = true, tab: MainTab = .timeline,
-            showing: MainTab = .timeline
-        ) -> DockEvent {
-            .scrolledTab(tab, y: y, travel: travel, showing: showing, moving: moving)
+    /// One reading of a tab's scroll view as the feed hands it to `DockFold`: where it stands,
+    /// how far it moved since the last reading (down positive), and whether the reader moved it.
+    private struct Move {
+        let y: Double
+        let step: Double
+        var moving = true
+    }
+
+    /// The modes a run of readings leaves the dock in, one per reading, from `start`: each
+    /// reading committed by one `DockFold` and told to the dock only as the decision it commits.
+    private static func drive(
+        _ moves: [Move], from start: DockMode = .tabs, tab: MainTab = .timeline,
+        showing: MainTab? = nil
+    ) -> [DockMode] {
+        var fold = DockFold()
+        var mode = start
+        return moves.map { move in
+            if let folds = fold.read(y: move.y, step: move.step, moving: move.moving) {
+                mode = mode.after(.scrolledTab(tab, folds: folds, showing: showing ?? tab))
+            }
+            return mode
         }
-        #expect(DockMode.tabs.after(scroll(40, 16)) == .folded, "down past the threshold")
-        #expect(DockMode.tabs.after(scroll(24, 16)) == .tabs, "down to the threshold, not past")
-        #expect(DockMode.folded.after(scroll(300, -1)) == .tabs, "any scroll up")
-        #expect(DockMode.folded.after(scroll(0, 0)) == .tabs, "back at the top")
-        #expect(DockMode.folded.after(scroll(-12, -4)) == .tabs, "a pull past the top")
-        #expect(DockMode.folded.after(scroll(300, 20)) == .folded, "further down stays folded")
-        #expect(DockMode.tabs.after(scroll(400, 40, moving: false)) == .tabs, "an idle move")
-        #expect(DockMode.folded.after(scroll(0, -40, moving: false)) == .folded, "idle to top")
-        #expect(DockMode.tabs.after(scroll(400, 40, showing: .places)) == .tabs, "not on screen")
-        #expect(DockMode.tabs.after(scroll(400, 40, tab: .library, showing: .library)) == .tabs)
-        #expect(DockMode.scope.after(scroll(400, 40)) == .scope, "the scope is the Library's")
-        #expect(DockMode.tabs.after(scroll(400, 40, tab: .places, showing: .places)) == .folded)
+    }
+
+    /// The leading bar's committed fold (MEMNG-690): the travel of one run in one direction
+    /// decides, 24 points down folding and 24 up unfolding; the top unfolds; a reversal starts a
+    /// new run, so a wavering finger flips nothing; a move that is not the reader's counts for
+    /// nothing; the Library's scroll and a tab not on screen move nothing.
+    @Test("a run of the reader's travel folds and unfolds the bar once per direction")
+    func foldIsCommittedPerRun() {
+        let table: [(String, DockMode, MainTab, MainTab?, [Move], [DockMode])] = [
+            (
+                "a waver below the threshold", .tabs, .timeline, nil,
+                [
+                    Move(y: 230, step: 10), Move(y: 225, step: -5), Move(y: 235, step: 10),
+                    Move(y: 228, step: -7), Move(y: 238, step: 10), Move(y: 231, step: -7),
+                ],
+                [.tabs, .tabs, .tabs, .tabs, .tabs, .tabs]
+            ),
+            (
+                "24 down folds, 23 does not", .tabs, .timeline, nil,
+                [Move(y: 23, step: 23), Move(y: 1, step: -22), Move(y: 25, step: 24)],
+                [.tabs, .tabs, .folded]
+            ),
+            (
+                "down 30 folds", .tabs, .timeline, nil,
+                [Move(y: 215, step: 15), Move(y: 230, step: 15)], [.tabs, .folded]
+            ),
+            (
+                "down 30, then up 10, stays folded", .tabs, .timeline, nil,
+                [Move(y: 230, step: 30), Move(y: 220, step: -10)], [.folded, .folded]
+            ),
+            (
+                "further down stays folded", .folded, .timeline, nil,
+                [Move(y: 260, step: 30), Move(y: 300, step: 40)], [.folded, .folded]
+            ),
+            (
+                "up 30 unfolds, at the run's 24th point", .folded, .timeline, nil,
+                [Move(y: 290, step: -10), Move(y: 280, step: -10), Move(y: 270, step: -10)],
+                [.folded, .folded, .tabs]
+            ),
+            (
+                "a reversal starts a new run", .tabs, .timeline, nil,
+                [Move(y: 220, step: 20), Move(y: 215, step: -5), Move(y: 235, step: 20)],
+                [.tabs, .tabs, .tabs]
+            ),
+            (
+                "at the top unfolds", .folded, .timeline, nil,
+                [Move(y: 0, step: -5)], [.tabs]
+            ),
+            (
+                "a pull past the top unfolds", .folded, .timeline, nil,
+                [Move(y: -12, step: -4)], [.tabs]
+            ),
+            (
+                "down from a pull past the top, still at the top", .tabs, .timeline, nil,
+                [Move(y: -30, step: -30), Move(y: 0, step: 30)], [.tabs, .tabs]
+            ),
+            (
+                "an idle move folds nothing", .tabs, .timeline, nil,
+                [Move(y: 400, step: 200, moving: false)], [.tabs]
+            ),
+            (
+                "an idle move to the top unfolds nothing", .folded, .timeline, nil,
+                [Move(y: 0, step: -40, moving: false)], [.folded]
+            ),
+            (
+                "an idle move neither counts nor breaks a run", .tabs, .timeline, nil,
+                [
+                    Move(y: 212, step: 12), Move(y: 100, step: -112, moving: false),
+                    Move(y: 112, step: 12),
+                ],
+                [.tabs, .tabs, .folded]
+            ),
+            (
+                "the Library's own scroll folds nothing", .tabs, .library, nil,
+                [Move(y: 230, step: 30), Move(y: 260, step: 30)], [.tabs, .tabs]
+            ),
+            (
+                "the scope is the Library's", .scope, .timeline, nil,
+                [Move(y: 230, step: 30), Move(y: 200, step: -30)], [.scope, .scope]
+            ),
+            (
+                "a tab not on screen folds nothing", .tabs, .timeline, .places,
+                [Move(y: 230, step: 30)], [.tabs]
+            ),
+            (
+                "Places, if it scrolls, as the Timeline", .tabs, .places, nil,
+                [
+                    Move(y: 215, step: 15), Move(y: 230, step: 15), Move(y: 220, step: -10),
+                    Move(y: 195, step: -25),
+                ],
+                [.tabs, .folded, .folded, .tabs]
+            ),
+        ]
+        for (name, start, tab, showing, moves, modes) in table {
+            #expect(moves.count == modes.count, "\(name): a row without a mode per reading")
+            let seen = Self.drive(moves, from: start, tab: tab, showing: showing)
+            #expect(seen == modes, "\(name): \(seen)")
+        }
+    }
+
+    /// A new gesture is a new run: the fold the last one committed is not re-committed by the
+    /// first point of the next, so the icon's press between them holds (MEMNG-690).
+    @Test("a gesture begins a new run")
+    func gestureBeginsANewRun() {
+        var fold = DockFold()
+        #expect(fold.read(y: 230, step: 30, moving: true) == true, "precondition: folded")
+        #expect(fold.run == 30)
+        #expect(fold.read(y: 231, step: 1, moving: true) == true, "the same run goes on")
+        fold.began()
+        #expect(fold.run == 0)
+        #expect(fold.read(y: 232, step: 1, moving: true) == nil, "a new gesture's first point")
+        #expect(fold.read(y: 256, step: 24, moving: true) == true, "24 down in the new run")
+        #expect(fold.read(y: 256, step: 0, moving: true) == nil, "no step, no decision")
+        #expect(fold.read(y: 0, step: -256, moving: true) == false)
+        #expect(fold.run == 0, "the top ends the run")
     }
 
     @Test("a fold is the tab's: the icon, another tab and the Library unfold it")

@@ -3,23 +3,21 @@ import Foundation
 /// What the bottom of the screen shows while the Library is the tab on screen (MEMNG-604,
 /// MEMNG-679, MEMNG-685).
 ///
-/// In `tabs` the system tab bar stands there, as on every other tab. In `scope` the tab bar steps
-/// aside for the Library's own bottom toolbar: its icon at the leading edge, Years | Months | All
-/// beside it, the way Photos draws a minimised bar. The system tab bar cannot be minimised on
-/// demand (UIKit has no call for it, only the on-scroll behaviour), so the app swaps the two bars
-/// instead, on the Library's own scroll: the tabs stand until the Library is scrolled past a small
-/// threshold, then the scope toolbar takes their place, as the Timeline's bar minimises once it
-/// scrolls, and a scroll back to the top — a pull past it included — gives the tabs back. Between
+/// In `tabs` the tabs' capsule stands there, as on every other tab. In `scope` it gives way to the
+/// Library's scope row: its icon at the leading edge, Years | Months | All beside it, the way
+/// Photos draws a minimised bar. The Library's own scroll swaps the two: the tabs stand until the
+/// Library is scrolled past a small threshold, then the scope row takes their place, as the
+/// Timeline's bar folds once it scrolls, and a scroll back to the top — a pull past it included —
+/// gives the tabs back. Between
 /// the two nothing changes. At the top it takes a scroll: a pick in the scope control swaps the
 /// scroll view for one standing at its top, and a jump the app makes can land there, and neither
 /// is one (`DockScrollKind`). The Library icon gives the tabs back wherever the Library stands,
 /// and a press on the Library's item where the Library shows is the way into the scope on a page
 /// too short to scroll.
 ///
-/// In `folded` the main bar stands folded to the selected tab's icon (MEMNG-690): the app-drawn
-/// leading bar's own minimise, on the Timeline's scroll down, given back by a scroll up, a return
-/// to the top or a press on the icon. The system bar minimises itself and never reads it, so under
-/// the system bar it changes nothing on screen; the Library never folds, its scroll is the scope's.
+/// In `folded` the main bar stands folded to the selected tab's icon (MEMNG-690), on the
+/// Timeline's scroll down, given back by a scroll up, a return to the top or a press on the icon;
+/// the Library never folds, its scroll is the scope's.
 nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
     case tabs
     case scope
@@ -58,15 +56,59 @@ nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
             // At the top the tabs, on a scroll alone; between the two nothing changes.
             guard y <= 0, kind == .scroll else { return self }
             return .tabs
-        case .scrolledTab(let tab, let y, let travel, let showing, let moving):
-            // The reader's own scroll of the tab on screen, the Library's aside: down past the
-            // threshold folds, up or back at the top unfolds, the system's minimise on scroll.
-            // An idle move is the layout's or the app's (a list growing above the reader), never
-            // the reader's, and changes nothing.
-            guard tab == showing, tab != .library, moving, self != .scope else { return self }
-            if y <= 0 || travel < 0 { return .tabs }
-            return travel > 0 && y > Self.scopeThreshold ? .folded : self
+        case .scrolledTab(let tab, let folds, let showing):
+            // A decision `DockFold` committed on the tab on screen, the Library's aside: its
+            // scroll is the scope's.
+            guard tab == showing, tab != .library, self != .scope else { return self }
+            return folds ? .folded : .tabs
         }
+    }
+}
+
+/// The reader's scroll of a tab's own scroll view, committed once per direction (MEMNG-690): what
+/// folds and unfolds the leading bar, the way iOS minimises its own bar.
+///
+/// A decision per reading flipped the bar on every step against the drag — a finger that wavers
+/// moves the offset back a point or two — and each flip restarted the bar's morph: the jerk build
+/// 38 showed. So the travel is summed per run, a run being the moves made in one direction since
+/// the last reversal or the start of a gesture: down `threshold` points commits the fold, up as far
+/// commits the unfold, and the top of the content unfolds whatever the run. A move that is not the
+/// reader's — the layout's or the app's, made while the scroll view is idle — neither counts nor
+/// breaks a run, and a scroll that comes to rest keeps what it committed.
+///
+/// `moving` is the feed's `ScrollPhase.isScrolling`: every phase but `.idle`. `.tracking`,
+/// `.interacting` and `.decelerating` are the reader's own. `.animating` counts too, on purpose:
+/// the Timeline's animated scrolls — a jump's scroll to the new list's top, the status bar's
+/// scroll to the top — end at the top, which unfolds whatever the run, so counting them can
+/// only unfold early, never fold.
+nonisolated public struct DockFold: Sendable, Equatable {
+    /// How far one run travels before it commits, in points.
+    public static let threshold: Double = DockMode.scopeThreshold
+
+    /// The current run: down positive, 0 when none has begun.
+    public private(set) var run: Double = 0
+
+    public init() {}
+
+    /// A gesture begins — the scroll view starts to move after resting: a new run, so a press on
+    /// the icon between two gestures is not undone by the first point of the next.
+    public mutating func began() { run = 0 }
+
+    /// One reading: the scroll view stands `y` from the top of its content (0 at rest), moved `step`
+    /// points since the last reading (down positive); `moving` is whether the reader's drag, its
+    /// deceleration or an animated scroll moved it. Answers what the reading commits — true to
+    /// fold, false to unfold — or nil when it commits nothing.
+    public mutating func read(y: Double, step: Double, moving: Bool) -> Bool? {
+        guard moving else { return nil }
+        if y <= 0 {
+            run = 0
+            return false
+        }
+        guard step != 0 else { return nil }
+        run = run == 0 || (run > 0) == (step > 0) ? run + step : step
+        if run >= Self.threshold { return true }
+        if run <= -Self.threshold { return false }
+        return nil
     }
 }
 
@@ -79,8 +121,8 @@ nonisolated public enum DockClaim: String, Sendable, Equatable, CaseIterable {
     case takeover
 }
 
-/// The one bottom bar that stands under a tab's root (MEMNG-684): the system tab bar, the
-/// Library's scope toolbar, select mode's toolbar, or none of them.
+/// The one bottom bar that stands under a tab's root (MEMNG-684): the tabs' capsule, the
+/// Library's scope row, select mode's toolbar, or none of them.
 ///
 /// Every bar is drawn from this one value and from nothing else, so no two of them can be asked
 /// to stand at once: the tab bar stands only on `tabs`, the scope toolbar only on `scope`, select
@@ -111,7 +153,7 @@ nonisolated public enum DockBar: String, Sendable, Equatable, CaseIterable {
 
 /// What the dock hears.
 nonisolated public enum DockEvent: Sendable, Equatable {
-    /// A press on `tab`'s item in the system tab bar while `showing` was the tab on screen —
+    /// A press on `tab`'s item in the tab bar while `showing` was the tab on screen —
     /// the same tab when it is pressed again.
     case pressedTab(MainTab, showing: MainTab)
     /// A press on the Library icon in the Library's scope toolbar.
@@ -122,10 +164,9 @@ nonisolated public enum DockEvent: Sendable, Equatable {
     /// measured from the top of its content: 0 at rest, negative while rubber-banding. `by` is
     /// what moved it, as far as the dock can tell.
     case scrolled(y: Double, showing: MainTab, by: DockScrollKind)
-    /// `tab`'s own scroll view — the Timeline's — moved `travel` points (down positive) to stand
-    /// `y` from the top of its content while `showing` was on screen; `moving` is whether the
-    /// reader's drag, its deceleration or an animated scroll moved it rather than the layout.
-    case scrolledTab(MainTab, y: Double, travel: Double, showing: MainTab, moving: Bool)
+    /// The reader's scroll of `tab`'s own scroll view — the Timeline's — committed a fold (`folds`)
+    /// or an unfold (`DockFold`) while `showing` was on screen. Sent once per decision.
+    case scrolledTab(MainTab, folds: Bool, showing: MainTab)
 }
 
 /// What moved a Library scroll view, of the moves the fence passes (`DockScrollFence`): whether

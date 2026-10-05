@@ -81,27 +81,26 @@ private final class SystemBarCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// The signed-in app's bar is the SYSTEM's, and each tab root stands under a large title of its
-/// own (MEMNG-666).
+/// The signed-in app's bar is its own capsule, never the system's (MEMNG-690), and each tab root
+/// stands under a large title of its own (MEMNG-666).
 ///
-/// The real `MainTabView` over a real `SessionStore` and the real generated client: whether the
-/// system bar is drawn is decided by the modifiers between the `TabView` and each root, and a
-/// harness that built its own `TabView` would be asserting its own chain. The bar is read off the
-/// `UITabBar` UIKit built for it — its items, the one it marks selected, and whether it is on the
-/// screen at all — and pressed through the controller that owns it, which is the path the system
-/// bar's own taps take.
+/// The real `MainTabView` over a real `SessionStore` and the real generated client: which bar is
+/// drawn is decided by the modifiers between the `TabView` and each root, and a harness that
+/// built its own `TabView` would be asserting its own chain. The app's bar is read off what it
+/// draws (`ScopeBarProbe.tabsFrame`), the selection off the controller UIKit built for the
+/// `TabView`, and UIKit's own bar is held off the screen.
 @MainActor
-@Suite("The system tab bar and the tab roots' titles")
+@Suite("The tab bar and the tab roots' titles")
 struct SystemTabBarRenderTests {
     /// The least height of the label a LARGE title is drawn in: the large-title style measures
     /// about 41 points on a phone and the inline style about 22, so the threshold sits between.
     static let largeTitleHeight: CGFloat = 30
 
     @Test(
-        "each tab root stands over the system tab bar, under a large title of its own",
+        "each tab root stands over the app's bar, under a large title of its own",
         arguments: MainTab.allCases
     )
-    func eachRootStandsOverTheSystemBar(tab: MainTab) async {
+    func eachRootStandsOverTheAppBar(tab: MainTab) async {
         let window = await Self.host(opening: tab)
         defer { Self.tearDown(window) }
 
@@ -109,12 +108,14 @@ struct SystemTabBarRenderTests {
             await Self.settle(window)
         }
 
-        let bar = Self.systemTabBar(in: window)
-        let titles = bar?.items?.compactMap(\.title) ?? []
-        // On the screen, not merely built: SwiftUI keeps a hidden bar in the hierarchy.
-        #expect(Self.barShows(in: window), "\(tab.title): the system tab bar is not on screen")
+        let titles = ScopeBarProbe.tabTitlesLeftToRight(in: window)
+        #expect(ScopeBarProbe.tabsShow(in: window), "\(tab.title): the app's bar is not on screen")
+        // On the screen, not merely built: SwiftUI keeps the hidden bar in the hierarchy.
+        #expect(!ScopeBarProbe.systemTabBarShows(in: window), "\(tab.title): UIKit's bar shows")
         #expect(titles == MainTab.allCases.map(\.title), "\(tab.title): the bar reads \(titles)")
-        #expect(bar?.selectedItem?.title == tab.title, "\(tab.title) is not the tab selected")
+        #expect(
+            ScopeBarProbe.selectedTitle(in: window) == tab.title,
+            "\(tab.title) is not the tab selected")
 
         // The title stands LARGE: a label reading the tab's name, drawn in the top third of the
         // window outside the bar, at least as tall as the large-title style draws it.
@@ -146,10 +147,12 @@ struct SystemTabBarRenderTests {
         #expect(frame.width >= bounds.width - 1, "the Places root is \(frame) in \(bounds)")
         #expect(frame.height >= bounds.height / 2, "the Places root is \(frame) in \(bounds)")
         // And the bar it was laid out against stands at the foot of the window.
-        #expect(Self.barShows(in: window), "no system tab bar under the loading Places")
-        if let bar = Self.systemTabBar(in: window) {
-            let drawn = bar.convert(bar.bounds, to: window)
-            #expect(abs(drawn.maxY - bounds.maxY) < 1, "the bar is drawn at \(drawn)")
+        #expect(ScopeBarProbe.tabsShow(in: window), "no tab bar under the loading Places")
+        if let drawn = ScopeBarProbe.tabsFrame(in: window) {
+            // Its foot 21 pt above the screen's edge, where the system bar's stood
+            // (`LeadingMainBar.bottomDrop`); a pixel either way for the rounding of the glass.
+            let foot = bounds.maxY - drawn.maxY
+            #expect(foot > 10 && foot < 32, "the bar is drawn at \(drawn)")
         }
     }
 
@@ -208,32 +211,9 @@ struct SystemTabBarRenderTests {
     /// Whether the screen has reached what the root test reads: the bar up on `tab`, and a large
     /// label reading its name.
     private static func arrived(on tab: MainTab, in window: UIWindow) -> Bool {
-        guard barShows(in: window) else { return false }
-        guard systemTabBar(in: window)?.selectedItem?.title == tab.title else { return false }
+        guard ScopeBarProbe.tabsShow(in: window) else { return false }
+        guard ScopeBarProbe.selectedTitle(in: window) == tab.title else { return false }
         return titleHeight(tab.title, in: window) >= largeTitleHeight
-    }
-
-    // MARK: - the bar
-
-    private static func systemTabBar(in view: UIView) -> UITabBar? {
-        if let bar = view as? UITabBar { return bar }
-        for subview in view.subviews {
-            if let bar = systemTabBar(in: subview) { return bar }
-        }
-        return nil
-    }
-
-    /// Whether the system tab bar is on screen: in the hierarchy, nothing up its chain of
-    /// superviews hiding it, and some part of it inside the window.
-    private static func barShows(in window: UIWindow) -> Bool {
-        guard let bar = systemTabBar(in: window) else { return false }
-        var node: UIView? = bar
-        while let current = node {
-            if current.isHidden || current.alpha < 0.01 { return false }
-            node = current.superview
-        }
-        let frame = bar.convert(bar.bounds, to: window)
-        return !frame.isNull && !frame.isEmpty && frame.intersects(window.bounds)
     }
 
     // MARK: - what the screen reads

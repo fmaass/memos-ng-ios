@@ -213,7 +213,7 @@ extension MediaImageLoaderTests {
     /// reporting the dock — so the test can ask the dock which bar it says stands.
     private func chromeHost(
         opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true,
-        witness: DockWitness? = nil, style: BarStyle = .system
+        witness: DockWitness? = nil
     ) async -> UIWindow {
         let transport = ChromeTransport(days: days, mine: mine)
         let session = SessionStore(
@@ -246,13 +246,11 @@ extension MediaImageLoaderTests {
         if let witness {
             window.rootViewController = UIHostingController(
                 rootView: DockWitnessTabs(opening: tab, witness: witness)
-                    .environment(session)
-                    .environment(Self.styleHost(style)))
+                    .environment(session))
         } else {
             window.rootViewController = UIHostingController(
                 rootView: MainTabView(opening: tab)
-                    .environment(session)
-                    .environment(Self.styleHost(style)))
+                    .environment(session))
         }
         window.makeKeyAndVisible()
         return window
@@ -283,25 +281,10 @@ extension MediaImageLoaderTests {
         Attachment.record(image, named: "shot-\(name)", as: .png)
     }
 
-    private static func tabBar(in window: UIWindow) -> UITabBar? {
-        var stack: [UIView] = [window]
-        while let view = stack.popLast() {
-            if let bar = view as? UITabBar { return bar }
-            stack.append(contentsOf: view.subviews)
-        }
-        return nil
-    }
-
-    /// Whether the system tab bar is on screen: nothing up its chain hiding it, inside the window.
+    /// Whether the tabs stand: the app's capsule, or the capsule folded to its icon — the one bar
+    /// since the system style went (MEMNG-690).
     private static func barShows(in window: UIWindow) -> Bool {
-        guard let bar = tabBar(in: window) else { return false }
-        var node: UIView? = bar
-        while let current = node {
-            if current.isHidden || current.alpha < 0.01 { return false }
-            node = current.superview
-        }
-        let frame = bar.convert(bar.bounds, to: window)
-        return !frame.isEmpty && frame.intersects(window.bounds)
+        ScopeBarProbe.tabsShow(in: window)
     }
 
     /// The tallest scroll view on screen: the one the Library's scope is drawn in.
@@ -383,7 +366,7 @@ extension MediaImageLoaderTests {
         await chromeSettle(window, turns: 20)
     }
 
-    /// Presses the Library's item in the system bar and waits for the scope toolbar to stand in
+    /// Presses the Library's item in the tab bar and waits for the scope toolbar to stand in
     /// the bar's place; returns its control.
     private func pressIntoScope(_ window: UIWindow) async -> UISegmentedControl? {
         #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
@@ -471,7 +454,7 @@ extension MediaImageLoaderTests {
         await chromeSettle(window, turns: 20)
     }
 
-    /// Waits until the system tab bar stands again and no scope is drawn.
+    /// Waits until the tab bar stands again and no scope is drawn.
     private func tabsStand(_ window: UIWindow) async {
         for _ in 0..<200 where !Self.tabsShow(in: window) {
             await chromeSettle(window)
@@ -487,14 +470,14 @@ extension MediaImageLoaderTests {
         ScopeBarProbe.control(in: window) == nil && barShows(in: window)
     }
 
-    /// Waits until the system bar has `tab` chosen.
+    /// Waits until the tab bar has `tab` chosen.
     private func tabChosen(_ tab: MainTab, _ window: UIWindow) async {
-        for _ in 0..<200 where Self.tabBar(in: window)?.selectedItem?.title != tab.title {
+        for _ in 0..<200 where ScopeBarProbe.selectedTitle(in: window) != tab.title {
             await chromeSettle(window)
         }
     }
 
-    /// The Library at launch: the system tab bar and nothing of its scope. A scroll down past the
+    /// The Library at launch: the tab bar and nothing of its scope. A scroll down past the
     /// threshold swaps the bar for the scope toolbar — the Library icon beside Years | Months |
     /// All, on All — the way the Timeline's bar minimises once it scrolls (MEMNG-679).
     @Test("the Library opens on the tab bar, and a scroll down swaps it for the scope toolbar")
@@ -508,7 +491,7 @@ extension MediaImageLoaderTests {
             }
             await libraryServed(media, window)
             let seen = ScopeBarProbe.describe(window)
-            #expect(Self.barShows(in: window), "the Library at launch: no system tab bar")
+            #expect(Self.barShows(in: window), "the Library at launch: no tab bar")
             #expect(ScopeBarProbe.control(in: window) == nil, "a scope at launch: \(seen)")
             #expect(!ScopeBarProbe.libraryIconShows(in: window), "an icon at launch: \(seen)")
             Self.shoot("library-tabs", window)
@@ -526,7 +509,7 @@ extension MediaImageLoaderTests {
         }
     }
 
-    /// A press on the Library's item swaps the system bar for the Library's scope toolbar — its
+    /// A press on the Library's item swaps the tab bar for the Library's scope toolbar — its
     /// icon, then Years | Months | All — whose control moves the Library in every scope; a scroll
     /// down keeps it, and the icon gives the bar back (MEMNG-604), as a scroll back to the top
     /// does (MEMNG-685).
@@ -548,7 +531,7 @@ extension MediaImageLoaderTests {
             #expect(control?.numberOfSegments == 3, "segments: \(seen)")
             #expect(control.flatMap { ScopeBarProbe.chosen(in: $0) } == "All", "\(seen)")
             #expect(ScopeBarProbe.libraryIconShows(in: window), "no Library icon: \(seen)")
-            #expect(!Self.barShows(in: window), "the system tab bar beside the scope: \(seen)")
+            #expect(!Self.barShows(in: window), "the tab bar beside the scope: \(seen)")
             Self.shoot("library-scope-all", window)
 
             // Each scope by hand, and the Library itself moves, not only the control: a Years card
@@ -612,7 +595,7 @@ extension MediaImageLoaderTests {
             Attachment.record("icon pressed by \(how ?? "nothing"); \(after)", named: "chrome-icon")
             #expect(Self.barShows(in: window), "the icon did not give the bar back: \(after)")
             #expect(ScopeBarProbe.control(in: window) == nil, "the scope stayed: \(after)")
-            let selected = Self.tabBar(in: window)?.selectedItem?.title
+            let selected = ScopeBarProbe.selectedTitle(in: window)
             #expect(selected == MainTab.library.title, "the bar came back on \(selected ?? "-")")
         }
     }
@@ -627,7 +610,7 @@ extension MediaImageLoaderTests {
                 window.rootViewController = nil
             }
             let timeline = MainTab.timeline.title
-            for _ in 0..<200 where Self.tabBar(in: window)?.selectedItem?.title != timeline {
+            for _ in 0..<200 where ScopeBarProbe.selectedTitle(in: window) != timeline {
                 await chromeSettle(window)
             }
             // The Library pressed from the Timeline, which opens it on the tabs, and then again
@@ -699,7 +682,7 @@ extension MediaImageLoaderTests {
             await chromeSettle(window, turns: 20)
             let seen = ScopeBarProbe.describe(window)
             #expect(!share.isEmpty, "select mode drew no toolbar")
-            #expect(!Self.barShows(in: window), "the system tab bar under select mode: \(seen)")
+            #expect(!Self.barShows(in: window), "the tab bar under select mode: \(seen)")
             #expect(ScopeBarProbe.control(in: window) == nil, "the scope under select: \(seen)")
             #expect(!ScopeBarProbe.libraryIconShows(in: window), "the icon under select: \(seen)")
             Self.shoot("library-select", window)
@@ -724,7 +707,7 @@ extension MediaImageLoaderTests {
             for _ in 0..<200 where Self.barShows(in: window) {
                 await chromeSettle(window)
             }
-            #expect(!Self.barShows(in: window), "the system tab bar stayed under select mode")
+            #expect(!Self.barShows(in: window), "the tab bar stayed under select mode")
             await closeSelect(window)
             for _ in 0..<200 where !Self.barShows(in: window) {
                 await chromeSettle(window)
@@ -736,8 +719,9 @@ extension MediaImageLoaderTests {
 
             // MEMNG-684: the same from a grid that scrolled. Scrolled down, the scope stands;
             // Select and Close must bring back the scope, and no two bars may stand at any
-            // sampled turn on the way.
-            await scrollDown(window)
+            // sampled turn on the way. A reader's drag: the idle moves just after a claim lets
+            // go are held as the layout's (`AppDock.heldAt`), and fold nothing (MEMNG-690).
+            await drag(window, by: 960)
             await scopeStands(window)
             #expect(Self.scopeShows(in: window), "precondition: the scroll gave the scope")
             Self.shoot("684-scrolled-scope", window)
@@ -791,7 +775,7 @@ extension MediaImageLoaderTests {
         }
     }
 
-    /// Which of the three bottom bars stand at one instant: the system tab bar, the scope
+    /// Which of the three bottom bars stand at one instant: the tab bar, the scope
     /// control, and select mode's toolbar (its Share button).
     private struct BottomBars: Equatable, CustomStringConvertible {
         let tabs: Bool
@@ -1075,10 +1059,11 @@ extension MediaImageLoaderTests {
         }
     }
 
-    /// Timeline and Places stand over the system bar with nothing of the Library's, and the
+    /// Timeline and Places stand over the tab bar with nothing of the Library's, and the
     /// Library's item pressed from either opens the Library on the tabs (MEMNG-679): a press from
     /// another tab is the way back to the Library, not into its scope. Pressed again where it
-    /// shows, it gives the scope toolbar; a press back on the tab left gives that tab its bar.
+    /// shows, it gives the scope toolbar; a move back to the tab left, the one a jump makes
+    /// past a scope row that offers no other tab, gives that tab its bar.
     @Test("Timeline and Places keep the tab bar; the Library pressed from them opens on the tabs")
     func otherRootsHaveNoScope() async {
         let media = PaintedMedia(palette: Self.palette())
@@ -1088,7 +1073,7 @@ extension MediaImageLoaderTests {
                 await tabChosen(tab, window)
                 await chromeSettle(window, turns: 80)
                 let seen = ScopeBarProbe.describe(window)
-                #expect(Self.barShows(in: window), "\(tab.title): no system tab bar")
+                #expect(Self.barShows(in: window), "\(tab.title): no tab bar")
                 #expect(ScopeBarProbe.control(in: window) == nil, "\(tab.title): \(seen)")
                 #expect(!ScopeBarProbe.libraryIconShows(in: window), "\(tab.title): \(seen)")
                 Self.shoot(tab.rawValue, window)
@@ -1108,7 +1093,7 @@ extension MediaImageLoaderTests {
                 #expect(control != nil, "the Library pressed where it shows: no scope: \(again)")
                 #expect(!Self.barShows(in: window), "the bar beside the scope: \(again)")
 
-                #expect(ScopeBarProbe.pressTab(tab, in: window), "\(tab.title) took no press")
+                #expect(ScopeBarProbe.moveTo(tab, in: window), "\(tab.title) took no move")
                 for _ in 0..<200 where !Self.barShows(in: window) {
                     await chromeSettle(window)
                 }
@@ -1182,7 +1167,7 @@ extension MediaImageLoaderTests {
     }
 
     /// The owner's report of 2026-10-03 (MEMNG-685): scrolled down, the Library shows its scope
-    /// toolbar; scrolled back to the top, the system tab bar stands again and the scope control is
+    /// toolbar; scrolled back to the top, the tab bar stands again and the scope control is
     /// gone, and stays gone through the layout the swap sets off — the offset the system shifts
     /// after it is no scroll. The way up is a drag told to the scroll view's delegate
     /// (`dragToTop`), so it is judged a scroll for the reason a reader's is: it moves while the
@@ -1459,7 +1444,7 @@ extension MediaImageLoaderTests {
             await scrollToFoot(window)
             let left = Self.scrolledBy(in: window) ?? 0
 
-            #expect(ScopeBarProbe.pressTab(.timeline, in: window), "Timeline took no press")
+            #expect(ScopeBarProbe.moveTo(.timeline, in: window), "Timeline took no move")
             await tabChosen(.timeline, window)
             await chromeSettle(window, turns: 40)
             #expect(ScopeBarProbe.pressTab(.library, in: window), "Library took no press")
@@ -1477,7 +1462,7 @@ extension MediaImageLoaderTests {
     }
 
     // The owner's device report of 2026-10-04: after Close on the Library's Select, BOTH bottom
-    // bars showed — the system tab bar and the scope toolbar with Years | Months | All. The tests
+    // bars showed — the tab bar and the scope toolbar with Years | Months | All. The tests
     // above prove the two exclusive only from a settled, idle grid on a Library opened directly;
     // the four below each drive one sequence they never run, and are allowed to fail: a failure
     // is the reproduction.
@@ -1495,7 +1480,7 @@ extension MediaImageLoaderTests {
         let tabBar: String
         let scopeBar: String
 
-        /// The owner's report: the system tab bar and the scope toolbar on screen together.
+        /// The owner's report: the tab bar and the scope toolbar on screen together.
         var clash: Bool { tabs && scope }
         var standing: Int { [tabs, scope, select].filter { $0 }.count }
         var bars: String { "tabs=\(tabs) scope=\(scope) select=\(select)" }
@@ -1777,12 +1762,12 @@ extension MediaImageLoaderTests {
     }
 
     /// Sequence D: the app as it opens, on the Timeline (`MainTabView`'s default); the Timeline
-    /// dragged down, which minimises its tab bar on a device
-    /// (`tabBarMinimizeBehavior(.onScrollDown)` there) — the simulator does not minimise on these
-    /// synthetic drags, so whether it did is logged, not asserted; the Library pressed, scrolled
-    /// down to its scope; Select; Close. Watched 2 s from the press. What A, B and C lack is the
-    /// Timeline's screen, built before the Library: every built screen states the tab bar's
-    /// visibility, and keyed on its own tab the Timeline's said `.automatic` here (MEMNG-684).
+    /// dragged down, which folds the app's capsule to the Timeline icon (MEMNG-690); the icon
+    /// pressed to widen it again, as a person must before reaching another tab; the Library
+    /// pressed, scrolled down to its scope; Select; Close. Watched 2 s from the press. What A, B
+    /// and C lack is the Timeline's screen, built before the Library: every built screen states the
+    /// tab bar's visibility, and keyed on its own tab the Timeline's said `.automatic` here
+    /// (MEMNG-684).
     @Test("double bar D: arriving from the Timeline, Select and Close")
     func doubleBar_D_arrivingFromTimeline() async {
         let media = PaintedMedia(palette: Self.palette())
@@ -1795,19 +1780,26 @@ extension MediaImageLoaderTests {
             }
             await tabChosen(.timeline, window)
             await chromeSettle(window, turns: 80)
-            // Minimised, the bar draws its selected tab alone: what it draws narrows.
-            let wide = DoubleBarProbe.tabBarDrawnWidth(in: window) ?? 0
+            // Folded, the capsule draws its selected tab alone: what it draws narrows.
+            let wide = ScopeBarProbe.tabsFrame(in: window)?.width ?? 0
             var narrow = wide
             for _ in 0..<6 where narrow > wide - 40 {
                 await drag(window, by: 200)
-                narrow = DoubleBarProbe.tabBarDrawnWidth(in: window) ?? 0
+                await chromeSettle(window, turns: 30)
+                narrow = ScopeBarProbe.tabsFrame(in: window)?.width ?? 0
             }
-            let timelineBar = DoubleBarProbe.tabBarDetail(in: window)
-            print("DOUBLEBAR D timeline tab bar drawn \(wide) -> \(narrow) pt: \(timelineBar)")
+            print("DOUBLEBAR D timeline capsule drawn \(wide) -> \(narrow) pt")
             Self.shoot("doublebar-D-timeline", window)
-            let minimised = narrow <= wide - 40
-            print("DOUBLEBAR D observation: the Timeline's tab bar minimised: \(minimised)")
+            #expect(
+                narrow <= wide - 40, "D: the Timeline's capsule did not fold: \(wide) -> \(narrow)")
 
+            // The folded icon widens the capsule again; then its Library item can be pressed.
+            #expect(
+                ScopeBarProbe.pressTab(.timeline, in: window), "D: the folded icon took no press")
+            for _ in 0..<200 where (ScopeBarProbe.tabsFrame(in: window)?.width ?? 0) < wide - 1 {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 30)
             #expect(ScopeBarProbe.pressTab(.library, in: window), "D: Library took no press")
             await tabChosen(.library, window)
             for _ in 0..<200 where Self.elements(labelled: "Photo", in: window).isEmpty {
@@ -1834,7 +1826,7 @@ extension MediaImageLoaderTests {
             print("DOUBLEBAR D after Close, dock per tab: timeline \(timeline), library \(library)")
             judgeDoubleBar(
                 "D", samples, witness, in: window,
-                context: "the Timeline's tab bar drawn \(wide) -> \(narrow) pt before the Library")
+                context: "the Timeline's capsule drawn \(wide) -> \(narrow) pt before the Library")
             let row = Self.mainGlass(.scope, in: window) != nil
             #expect(
                 row == (witness.dock?.bar(on: .library) == .scope),
@@ -1862,22 +1854,10 @@ private final class ChromeCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// The leading bar style (MEMNG-690): the app's own main bar at the leading edge, folding in place
+/// The app's own main bar (MEMNG-690) at the leading edge, folding in place
 /// on the Timeline's scroll and swapping to the scope row on the Library's, hosted as the tests
 /// above host the app and photographed as `shot-690-leading-<n>-…`.
 extension MediaImageLoaderTests {
-    /// The style a test hosts the app under: nothing for the system style, so the tests above run
-    /// in the environment they always did; a preference over scratch defaults for the leading one.
-    fileprivate static func styleHost(_ style: BarStyle) -> BarStylePreference? {
-        guard style == .leading else { return nil }
-        let name = "leading-bar-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        let preference = BarStylePreference(defaults: defaults)
-        preference.select(.leading)
-        return preference
-    }
-
     /// The frame of the leading bar's main glass in `shape`, nil when it is not on screen.
     fileprivate static func mainGlass(
         _ shape: LeadingMainBar.BarShape, in window: UIWindow
@@ -1929,11 +1909,11 @@ extension MediaImageLoaderTests {
         return buttons.contains { $0.accessibilityActivate() }
     }
 
-    /// The Timeline under the leading style, its memos served and settled.
+    /// The Timeline, its memos served and settled.
     fileprivate func leadingTimeline(
         _ media: PaintedMedia, witness: DockWitness? = nil
     ) async -> UIWindow {
-        let window = await chromeHost(opening: .timeline, witness: witness, style: .leading)
+        let window = await chromeHost(opening: .timeline, witness: witness)
         await libraryServed(media, window, pictures: 1)
         await chromeSettle(window, turns: 40)
         return window
@@ -1958,7 +1938,7 @@ extension MediaImageLoaderTests {
             let capsule = await leadingGlass(.tabs, in: window)
             Self.shoot("690-leading-1-timeline-rest", window)
             notes("690-leading-1", ["capsule=\(String(describing: capsule))"])
-            #expect(!Self.barShows(in: window), "the system tab bar stands under leading")
+            #expect(!ScopeBarProbe.systemTabBarShows(in: window), "the system tab bar stands")
             let inset = window.safeAreaInsets.left + LeadingMainBar.leadingInset
             let at = String(describing: capsule)
             #expect(abs((capsule?.minX ?? -100) - inset) <= 1, "capsule at \(at)")
@@ -2015,7 +1995,7 @@ extension MediaImageLoaderTests {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
             let witness = DockWitness()
-            let window = await chromeHost(opening: .library, witness: witness, style: .leading)
+            let window = await chromeHost(opening: .library, witness: witness)
             defer {
                 window.isHidden = true
                 window.rootViewController = nil
@@ -2043,7 +2023,7 @@ extension MediaImageLoaderTests {
         }
     }
 
-    /// (5) Sequence D under the leading style: the app opened on the Timeline, scrolled so its bar
+    /// (5) Sequence D: the app opened on the Timeline, scrolled so its bar
     /// folds, scrolled back, the Library pressed in the capsule, scrolled to its scope, Select,
     /// Close. Watched 2 s from the press: one bar, the one the dock says.
     @Test("leading 5: arriving from the Timeline, Select and Close leave one bar")
@@ -2082,100 +2062,231 @@ extension MediaImageLoaderTests {
     }
 }
 
-/// The system bar style's scope row (MEMNG-690, build 39): the tabs are the system's bar, and once
-/// the Library is scrolled, or its item pressed where it shows, the row in its place is the app's
-/// own glass — the one the leading style draws (`LeadingMainBar`) — never UIKit's bottom toolbar,
-/// whose coming and going the owner found jerky. Photographed as `shot-690-system-<n>-…`.
 extension MediaImageLoaderTests {
-    /// How the scope row's control stands at one instant: whether it is on screen, the opacity
-    /// Core Animation is drawing up its chain (the product of every presentation layer's), and how
-    /// many layers in that chain carry an animation. A row that pops is drawn whole at its first
-    /// sample with nothing animating; one inside an animated transaction is not.
-    fileprivate static func rowMotion(in window: UIWindow, at ms: Int) -> String {
-        guard let control = ScopeBarProbe.control(in: window) else { return "t=\(ms) no row" }
-        var opacity: Float = 1
-        var animating = 0
-        var node: UIView? = control
-        while let view = node, view !== window {
-            let layer = view.layer.presentation() ?? view.layer
-            opacity *= layer.opacity
-            if !(view.layer.animationKeys() ?? []).isEmpty { animating += 1 }
-            node = view.superview
-        }
-        return "t=\(ms) row opacity=\(opacity) animating=\(animating)"
+    /// One drawn frame of a film: when it was drawn, the capsule's leading edge read from its
+    /// pixels (nil when no edge was found), and where the main scroll view stood.
+    fileprivate struct FilmFrame {
+        let ms: Int
+        let edge: CGFloat?
+        let y: CGFloat?
+        /// The main glass's leading x as the layout places it (`mainGlass`), nil when none stands.
+        let glass: CGFloat?
+        /// The bar's band read as column brightness (`barSignature`): what a frame between two
+        /// shapes is told apart by.
+        let bar: [Double]?
     }
 
-    /// (1)–(3) The Library at rest stands the system tab bar and no row; scrolled past the
-    /// threshold, the app's row alone — no tab bar and no UIKit toolbar — at the place the system
-    /// toolbar drew it; its Library icon gives the tabs back and the row goes.
-    @Test("system 1-3: the Library's scope is the app's glass row alone, and its icon ends it")
-    func systemLibraryScopeRow() async {
-        let media = PaintedMedia(palette: Self.palette())
-        await withTransport(media) {
-            let witness = DockWitness()
-            let window = await chromeHost(opening: .library, witness: witness)
-            defer {
-                window.isHidden = true
-                window.rootViewController = nil
+    /// The bar's band of `image` — 800 to 845 pt down, inside the 62 pt bar standing 21 pt above
+    /// the foot — as the mean brightness of 40 columns across the width.
+    fileprivate static func barSignature(of image: UIImage) -> [Double]? {
+        guard let cg = image.cgImage, let data = cg.dataProvider?.data,
+            let bytes = CFDataGetBytePtr(data)
+        else { return nil }
+        let scale = image.scale
+        let row = cg.bytesPerRow
+        let size = cg.bitsPerPixel / 8
+        let top = Int(800 * scale)
+        let bottom = min(Int(845 * scale), cg.height)
+        let columns = 40
+        let step = cg.width / columns
+        guard top < bottom, step > 0 else { return nil }
+        return (0..<columns).map { column in
+            var sum = 0
+            var count = 0
+            for y in stride(from: top, to: bottom, by: 2) {
+                for x in stride(from: column * step, to: (column + 1) * step, by: 2) {
+                    sum += (0..<min(size, 3)).reduce(0) { $0 + Int(bytes[y * row + x * size + $1]) }
+                    count += 1
+                }
             }
-            await libraryServed(media, window)
-            let rest = ScopeBarProbe.describe(window)
-            #expect(Self.barShows(in: window), "system 1: no tab bar at rest: \(rest)")
-            #expect(Self.mainGlass(.scope, in: window) == nil, "system 1: a row at rest: \(rest)")
-            #expect(ScopeBarProbe.control(in: window) == nil, "system 1: a scope at rest: \(rest)")
-            #expect(!Self.leadingTabsShow(in: window), "system 1: the app's capsule at rest")
-            Self.shoot("690-system-1-library-rest", window)
-
-            await scrollDown(window)
-            await scopeStands(window)
-            let icon = await leadingGlass(.scope, in: window)
-            let start = ContinuousClock.now
-            let samples = await sampleBars(window, witness, from: start, for: .seconds(1))
-            Self.shoot("690-system-2-library-scope", window)
-            let scrolled = ScopeBarProbe.describe(window)
-            let control = ScopeBarProbe.control(in: window)
-            let segment = control.map { $0.convert($0.bounds, to: window) }
-            notes(
-                "690-system-2",
-                [
-                    "icon=\(String(describing: icon)) segmented=\(String(describing: segment))",
-                    "toolbar of 38: icon x 28, 48 x 48; segmented x 93 y 798.7, 220 x 48",
-                    scrolled,
-                ])
-            #expect(icon != nil, "system 2: no app row scrolled: \(scrolled)")
-            let iconAt = String(describing: icon)
-            let segmentAt = String(describing: segment)
-            #expect(abs((icon?.minX ?? -100) - 28) <= 2, "system 2: icon at \(iconAt)")
-            #expect(abs((segment?.minX ?? -100) - 93) <= 2, "system 2: control at \(segmentAt)")
-            #expect(!Self.barShows(in: window), "system 2: the tab bar beside the row: \(scrolled)")
-            #expect(
-                !ScopeBarProbe.systemToolbarShows(in: window),
-                "system 2: UIKit drew a toolbar: \(scrolled)")
-            #expect(!Self.leadingTabsShow(in: window), "system 2: the app's capsule beside the row")
-            judgeDoubleBar(
-                "system-2", samples, witness, in: window, context: "system, Library scrolled")
-
-            let how = ScopeBarProbe.pressLibraryIcon(in: window)
-            #expect(how != nil, "system 3: no icon took a press: \(scrolled)")
-            await tabsStand(window)
-            // The row's icon gives the tabs back where the grid stands; a re-selection of the
-            // Library's tab would have scrolled it to the top instead.
-            let at = Self.scrolledBy(in: window) ?? 0
-            #expect(at > 24, "system 3: the press left the grid at \(at), by \(how ?? "nothing")")
-            let after = ScopeBarProbe.describe(window)
-            #expect(Self.barShows(in: window), "system 3: the icon gave no tabs back: \(after)")
-            #expect(Self.mainGlass(.scope, in: window) == nil, "system 3: the row stayed: \(after)")
-            #expect(witness.dock?.bar(on: .library) == .tabs, "system 3: the dock kept the scope")
-            Self.shoot("690-system-3-library-icon", window)
+            return Double(sum) / Double(max(count, 1))
         }
     }
 
-    /// (A) The row's appearance and going, watched: the Library's item pressed where it shows
-    /// brings the row, the icon takes it away, each sampled every settle turn for 700 ms. Logged,
-    /// not judged — a frame-accurate verdict on an animation is not a render test's to give — so
-    /// that the gate log says whether the row came in drawn whole or inside an animation.
-    @Test("system A: the row's coming and going, sampled")
-    func systemRowMotion() async {
+    /// Where the bar's glass starts on a row of `image`: the first pixel from 8 pt in that is
+    /// clearly brighter than the screen's edge beside it — the glass's rim, 255 against the
+    /// grouped background's ~228 — read on three rows through the bar's middle, the median taken.
+    fileprivate static func leadingEdge(of image: UIImage) -> CGFloat? {
+        guard let cg = image.cgImage, let data = cg.dataProvider?.data,
+            let bytes = CFDataGetBytePtr(data)
+        else { return nil }
+        let scale = image.scale
+        let row = cg.bytesPerRow
+        let size = cg.bitsPerPixel / 8
+        func level(_ x: Int, _ y: Int) -> Int {
+            (0..<min(size, 4)).reduce(0) { $0 + Int(bytes[y * row + x * size + $1]) }
+        }
+        var found: [CGFloat] = []
+        for points in [CGFloat(812), 822, 832] {
+            let y = Int(points * scale)
+            guard y < cg.height else { continue }
+            let near = Array(Int(2 * scale)..<Int(6 * scale))
+            let reference = near.map { level($0, y) }.reduce(0, +) / max(near.count, 1)
+            let span = Int(8 * scale)..<min(Int(120 * scale), cg.width)
+            if let x = span.first(where: { level($0, y) - reference > 30 }) {
+                found.append(CGFloat(x) / scale)
+            }
+        }
+        return found.isEmpty ? nil : found.sorted()[found.count / 2]
+    }
+
+    /// A drag a film plays: from `start` into the film, the main scroll view moved `distance` over
+    /// `span` at an even pace, told to its delegate as one drag that begins and ends around it.
+    @MainActor
+    fileprivate final class Glide {
+        let start: Duration
+        let span: Duration
+        let distance: CGFloat
+        private var from: CGFloat?
+        private var ended = false
+
+        init(at start: Duration, by distance: CGFloat, over span: Duration = .milliseconds(250)) {
+            self.start = start
+            self.distance = distance
+            self.span = span
+        }
+
+        /// The drag `elapsed` into the film.
+        func turn(_ elapsed: Duration, _ scroller: UIScrollView?) {
+            guard let scroller, elapsed >= start, !ended else { return }
+            if from == nil {
+                from = scroller.contentOffset.y
+                scroller.delegate?.scrollViewWillBeginDragging?(scroller)
+            }
+            let done = min((elapsed - start) / span, 1)
+            let offset = CGPoint(x: 0, y: (from ?? 0) + distance * CGFloat(done))
+            scroller.setContentOffset(offset, animated: false)
+            guard done >= 1 else { return }
+            ended = true
+            var target = scroller.contentOffset
+            scroller.delegate?.scrollViewWillEndDragging?(
+                scroller, withVelocity: .zero, targetContentOffset: &target)
+            scroller.delegate?.scrollViewDidEndDragging?(scroller, willDecelerate: false)
+        }
+    }
+
+    /// Films the window for `span`: `turn` runs every ~16 ms, handed the time since the film
+    /// began — what drags or presses — and the window is drawn at 2x when ~33 ms have passed
+    /// since the last frame, each frame attached and read for the leading edge.
+    fileprivate func film(
+        _ clip: String, _ window: UIWindow, for span: Duration = .milliseconds(1100),
+        turn: (Duration) -> Void
+    ) async -> [FilmFrame] {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
+        let start = ContinuousClock.now
+        var drawn: ContinuousClock.Instant?
+        var frames: [FilmFrame] = []
+        while ContinuousClock.now < start.advanced(by: span) {
+            turn(ContinuousClock.now - start)
+            if drawn.map({ ContinuousClock.now - $0 >= .milliseconds(33) }) ?? true {
+                drawn = ContinuousClock.now
+                let ms = Int((ContinuousClock.now - start) / .milliseconds(1))
+                let image = renderer.image { _ in
+                    _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                }
+                let index = String(format: "%03d", frames.count)
+                Attachment.record(image, named: "film-\(clip)-\(index)-\(ms)", as: .png)
+                let edge = Self.leadingEdge(of: image)
+                let glass = [LeadingMainBar.BarShape.tabs, .folded, .scope].lazy
+                    .compactMap { Self.mainGlass($0, in: window)?.minX }.first
+                frames.append(
+                    FilmFrame(
+                        ms: ms, edge: edge, y: Self.scrolledBy(in: window), glass: glass,
+                        bar: Self.barSignature(of: image)))
+            }
+            try? await Task.sleep(for: .milliseconds(16))
+        }
+        let lines = frames.map { frame in
+            let edge = frame.edge.map { String(format: "%.1f", $0) } ?? "-"
+            let y = frame.y.map { String(format: "%.0f", $0) } ?? "-"
+            let glass = frame.glass.map { String(format: "%.1f", $0) } ?? "-"
+            return "t=\(frame.ms) edge=\(edge) glass=\(glass) y=\(y)"
+        }
+        print("FILM \(clip): \(frames.count) frames over \(frames.last?.ms ?? 0) ms")
+        for line in lines { print("FILM \(clip) \(line)") }
+        Attachment.record(lines.joined(separator: "\n"), named: "film-\(clip)-notes")
+        return frames
+    }
+
+    /// `act` once, the first turn at or past `at`.
+    fileprivate static func once(
+        at moment: Duration, _ act: @escaping () -> Void
+    ) -> (Duration) -> Void {
+        var done = false
+        return { elapsed in
+            guard elapsed >= moment, !done else { return }
+            done = true
+            act()
+        }
+    }
+
+    /// The fold's whole ask: the capsule's leading edge, read from the pixels of every frame of
+    /// the transition, never moves by more than a point.
+    fileprivate func judgeEdge(_ clip: String, _ frames: [FilmFrame]) {
+        let edges = frames.compactMap(\.edge)
+        let spread = (edges.max() ?? 0) - (edges.min() ?? 0)
+        let seen = "\(clip): edges \(edges.map { Int(($0 * 10).rounded()) }) (tenths of a pt)"
+        #expect(
+            edges.count * 2 >= frames.count, "\(clip): the edge read on too few frames: \(seen)")
+        #expect(spread <= 1, "\(clip): the leading edge moved \(spread) pt: \(seen)")
+        let inset = LeadingMainBar.leadingInset
+        #expect(abs((edges.first ?? -100) - inset) <= 2, "\(clip): not at the inset: \(seen)")
+    }
+
+    /// The frames between the clip's first shape and its last: those whose bar band is as far from
+    /// both as 15 % of the way between them. A cut has none — every frame is one shape or the
+    /// other — which is what the drawn frames of the fold showed while it swapped two glasses.
+    fileprivate static func between(_ frames: [FilmFrame]) -> (whole: Double, ms: [Int]) {
+        let bars = frames.compactMap { frame in frame.bar.map { (frame.ms, $0) } }
+        guard let first = bars.first?.1, let last = bars.last?.1 else { return (0, []) }
+        func distance(_ a: [Double], _ b: [Double]) -> Double {
+            zip(a, b).map { abs($0 - $1) }.reduce(0, +)
+        }
+        let whole = distance(first, last)
+        let ms = bars.filter {
+            distance($0.1, first) > 0.15 * whole && distance($0.1, last) > 0.15 * whole
+        }
+        .map { $0.0 }
+        return (whole, ms)
+    }
+
+    /// The fold is a change the eye follows: the clip holds at least one frame between its two
+    /// shapes. Judged where nothing else moves under the bar — the icon's press.
+    fileprivate func judgeMorph(_ clip: String, _ frames: [FilmFrame]) {
+        let (whole, ms) = Self.between(frames)
+        print("FILM \(clip) between: whole=\(Int(whole)) frames at \(ms) ms")
+        #expect(whole > 30, "\(clip): the bar did not change (\(whole))")
+        #expect(!ms.isEmpty, "\(clip): no frame between the two shapes - a cut")
+    }
+
+    /// The bar stays at the leading inset as the layout places it, on every frame that has one:
+    /// what a clip over the Library's grid or the map is judged by, where no pixel edge reads.
+    fileprivate func judgeGlass(_ clip: String, _ frames: [FilmFrame]) {
+        let placed = frames.compactMap(\.glass)
+        let inset = LeadingMainBar.leadingInset
+        let off = placed.filter { abs($0 - inset) > 1 }
+        #expect(placed.count * 2 >= frames.count, "\(clip): the glass placed on too few frames")
+        #expect(off.isEmpty, "\(clip): the glass placed away from \(inset): \(placed)")
+    }
+
+    /// The grid's foot clears the bar: the last row of content ends above the glass.
+    fileprivate func footClears(_ glass: CGRect?, _ window: UIWindow, _ name: String) {
+        guard let scroller = Self.mainScroll(in: window), let glass else {
+            Issue.record("\(name): no scroll view or no glass to measure")
+            return
+        }
+        let drawn = scroller.convert(scroller.bounds, to: window)
+        let end = drawn.maxY - scroller.adjustedContentInset.bottom
+        #expect(end <= glass.minY + 1, "\(name): the content ends at \(end), the glass at \(glass)")
+    }
+
+    /// The scope row's icon gives the capsule back where the grid stands:
+    /// the grid is not moved to its top (39's probe: y 960 before the press, 0 after), and the next
+    /// scroll down brings the row back (as `iconThenScrollCollapsesAgain`).
+    @Test("leading 6: the row's icon gives the capsule back where the grid stands")
+    func leadingIconKeepsTheGrid() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
             let window = await chromeHost(opening: .library)
@@ -2184,27 +2295,286 @@ extension MediaImageLoaderTests {
                 window.rootViewController = nil
             }
             await libraryServed(media, window)
-            await chromeSettle(window, turns: 20)
-            #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")
-            var coming: [String] = []
-            let pressed = ContinuousClock.now
-            while ContinuousClock.now < pressed.advanced(by: .milliseconds(700)) {
-                let ms = Int((ContinuousClock.now - pressed) / .milliseconds(1))
-                coming.append(Self.rowMotion(in: window, at: ms))
-                await chromeSettle(window)
-            }
+            await scrollDown(window)
             await scopeStands(window)
-            #expect(Self.mainGlass(.scope, in: window) != nil, "system A: no row after the press")
-            var going: [String] = []
-            let left = ContinuousClock.now
-            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "system A: no icon press")
-            while ContinuousClock.now < left.advanced(by: .milliseconds(700)) {
-                let ms = Int((ContinuousClock.now - left) / .milliseconds(1))
-                going.append(Self.rowMotion(in: window, at: ms))
-                await chromeSettle(window)
-            }
-            notes("690-system-A-coming", coming)
-            notes("690-system-A-going", going)
+            _ = await leadingGlass(.scope, in: window)
+            let before = Self.scrolledBy(in: window) ?? 0
+            let how = ScopeBarProbe.pressLibraryIcon(in: window)
+            #expect(how != nil, "no icon took a press: \(ScopeBarProbe.describe(window))")
+            let capsule = await leadingGlass(.tabs, in: window)
+            await chromeSettle(window, turns: 60)
+            let after = Self.scrolledBy(in: window) ?? 0
+            print(
+                "LEADING 690-6: before=\(before) after=\(after) capsule=\(String(describing: capsule))"
+            )
+            #expect(before > 500, "precondition: the grid scrolled to \(before)")
+            #expect(abs(after - before) <= 1, "the icon moved the grid from \(before) to \(after)")
+            #expect(capsule != nil, "the icon gave no capsule back")
+            #expect(ScopeBarProbe.control(in: window) == nil, "the row stayed")
+            await scrollFurther(window, by: 200)
+            await scopeStands(window)
+            #expect(ScopeBarProbe.control(in: window) != nil, "a scroll after the icon: no row")
         }
+    }
+
+    /// The content's foot clears the bar on the Timeline and on the Library, on its scope row and
+    /// on its capsule alike (the retired system style's foot was held by `pressSwapsTheBars`).
+    @Test("leading 7: the foot of every scrolling root clears the leading bar")
+    func leadingFootClears() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await scrollToFoot(window)
+            let timeline = Self.mainGlass(.tabs, in: window) ?? Self.mainGlass(.folded, in: window)
+            Self.shoot("690-fold-foot-timeline", window)
+            footClears(timeline, window, "Timeline")
+        }
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            await scrollDown(window)
+            await scopeStands(window)
+            await scrollToFoot(window)
+            let row = await leadingGlass(.scope, in: window)
+            Self.shoot("690-fold-foot-library-scope", window)
+            footClears(row, window, "Library scope row")
+            let atFoot = Self.scrolledBy(in: window) ?? 0
+            #expect(ScopeBarProbe.pressLibraryIcon(in: window) != nil, "no icon took a press")
+            let capsule = await leadingGlass(.tabs, in: window)
+            await chromeSettle(window, turns: 40)
+            Self.shoot("690-fold-foot-library-capsule", window)
+            footClears(capsule, window, "Library capsule")
+            let after = Self.scrolledBy(in: window) ?? 0
+            print("LEADING 690-7: foot=\(atFoot) after the icon=\(after)")
+            #expect(after > atFoot - 100, "the icon at the foot moved the grid to \(after)")
+        }
+    }
+
+    /// Clips (a)–(c): the Timeline folds on a drag down, unfolds on a drag up, and unfolds on the
+    /// icon's press — the capsule's leading edge read from every frame of each.
+    @Test("film a-c: the Timeline's fold and unfold, the leading edge held")
+    func filmTimelineFold() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            _ = await leadingGlass(.tabs, in: window)
+            let down = Glide(at: .milliseconds(100), by: 240)
+            let fold = await film("a-timeline-fold", window) {
+                down.turn($0, Self.mainScroll(in: window))
+            }
+            judgeEdge("a", fold)
+            judgeGlass("a", fold)
+            #expect(Self.mainGlass(.folded, in: window) != nil, "(a) the drag down did not fold")
+            let up = Glide(at: .milliseconds(100), by: -80, over: .milliseconds(150))
+            let unfold = await film("b-timeline-unfold", window) {
+                up.turn($0, Self.mainScroll(in: window))
+            }
+            judgeEdge("b", unfold)
+            judgeGlass("b", unfold)
+            #expect(Self.mainGlass(.tabs, in: window) != nil, "(b) the drag up did not unfold")
+            await drag(window, by: 200)
+            _ = await leadingGlass(.folded, in: window)
+            let press = Self.once(at: .milliseconds(100)) {
+                _ = self.pressLeading(.timeline, in: window)
+            }
+            let tap = await film("c-timeline-icon", window, turn: press)
+            judgeEdge("c", tap)
+            judgeGlass("c", tap)
+            judgeMorph("c", tap)
+            for (clip, frames) in [("a", fold), ("b", unfold)] {
+                let (whole, ms) = Self.between(frames)
+                print("FILM \(clip) between (the list moves too): whole=\(Int(whole)) at \(ms) ms")
+            }
+            #expect(Self.mainGlass(.tabs, in: window) != nil, "(c) the icon did not unfold")
+            print("FILM a scroll y: \(fold.compactMap(\.y).map { Int($0) })")
+        }
+    }
+
+    /// Clips (d)–(e): the Library's capsule morphs into the scope row on a drag down and back on
+    /// the icon's press, the grid kept; (f) the capsule's tabs pressed, Timeline, Library, Places.
+    @Test("film d-f: the Library's morph and the tabs pressed")
+    func filmLibraryAndTabs() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            _ = await leadingGlass(.tabs, in: window)
+            let library = Self.once(at: .milliseconds(100)) {
+                _ = self.pressLeading(.library, in: window)
+            }
+            let places = Self.once(at: .milliseconds(800)) {
+                _ = self.pressLeading(.places, in: window)
+            }
+            let tabs = await film("f-tabs", window, for: .milliseconds(1600)) {
+                library($0)
+                places($0)
+            }
+            judgeGlass("f", tabs)
+            _ = pressLeading(.library, in: window)
+            await libraryServed(media, window)
+            _ = await leadingGlass(.tabs, in: window)
+            let down = Glide(at: .milliseconds(100), by: 400, over: .milliseconds(300))
+            let scope = await film("d-library-scope", window) {
+                down.turn($0, Self.mainScroll(in: window))
+            }
+            #expect(ScopeBarProbe.control(in: window) != nil, "(d) the drag down drew no row")
+            let icon = Self.once(at: .milliseconds(100)) {
+                _ = ScopeBarProbe.pressLibraryIcon(in: window)
+            }
+            let back = await film("e-library-icon", window, turn: icon)
+            #expect(Self.mainGlass(.tabs, in: window) != nil, "(e) the icon gave no capsule")
+            let kept = back.compactMap(\.y)
+            #expect((kept.max() ?? 0) - (kept.min() ?? 0) <= 1, "(e) the grid moved: \(kept)")
+            print("FILM d frames=\(scope.count) e frames=\(back.count)")
+        }
+    }
+}
+/// The leading bar alone on a plain background, its shape written by the test: the control the
+/// recording of the fold is read against (MEMNG-690).
+@MainActor
+@Observable
+private final class BarLabShape {
+    var shape: LeadingMainBar.BarShape? = .tabs
+}
+
+private struct BarLab: View {
+    let box: BarLabShape
+
+    var body: some View {
+        Color(.systemGroupedBackground)
+            .safeAreaBar(edge: .bottom) {
+                LeadingMainBar(
+                    shape: box.shape, selection: .timeline, press: { _ in },
+                    pressLibraryIcon: {}, scope: LibraryScopeChoice())
+            }
+    }
+}
+
+extension MediaImageLoaderTests {
+    /// Runs `turn` for `span` and draws nothing, so the main thread stays free for the animation
+    /// the simulator's own screen recording sees — a frame drawn in the test blocks it for tens of
+    /// milliseconds, and the glass's morph is drawn outside the app, where no drawn frame reaches.
+    /// Answers the segment's wall-clock bounds, by which the recording is cut.
+    fileprivate func play(
+        _ clip: String, for span: Duration = .milliseconds(1500), turn: (Duration) -> Void
+    ) async -> String {
+        let begun = Date().timeIntervalSince1970
+        let start = ContinuousClock.now
+        while ContinuousClock.now < start.advanced(by: span) {
+            turn(ContinuousClock.now - start)
+            try? await Task.sleep(for: .milliseconds(8))
+        }
+        let line = "REC \(clip) \(begun) \(Date().timeIntervalSince1970)"
+        print(line)
+        return line
+    }
+
+    /// The host app's temporary directory, where the recorder outside the simulator looks.
+    private static func recordingFile(_ name: String) -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(name)
+    }
+
+    /// The clips (a)–(e) as the simulator's screen shows them, for a recording made outside the
+    /// app (`simctl io recordVideo`), plus the bar alone as the control: the transitions played
+    /// with nothing drawn, each segment's wall-clock bounds written where the recorder reads them.
+    @Test("record a-e: the fold and the morph as the simulator's screen shows them")
+    func recordFold() async {
+        var marks: [String] = []
+        // The recorder starts on this file and answers with `rec690-recording`, so a run of the
+        // whole bundle records this test alone.
+        try? "ready".write(
+            to: Self.recordingFile("rec690-ready"), atomically: true, encoding: .utf8)
+        var waited = 0
+        while !FileManager.default.fileExists(atPath: Self.recordingFile("rec690-recording").path),
+            waited < 90_000
+        {
+            try? await Task.sleep(for: .milliseconds(250))
+            waited += 250
+        }
+        print("REC recorder waited \(waited) ms")
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            _ = await leadingGlass(.tabs, in: window)
+            let atRest = Self.mainScroll(in: window)?.adjustedContentInset.bottom
+            let down = Glide(at: .milliseconds(400), by: 240)
+            marks.append(
+                await play("a-timeline-fold") { down.turn($0, Self.mainScroll(in: window)) })
+            #expect(Self.mainGlass(.folded, in: window) != nil, "(a) the drag down did not fold")
+            // The list is not reframed by the fold: the bar is one height in every shape.
+            let folded = Self.mainScroll(in: window)?.adjustedContentInset.bottom
+            print("REC a inset \(String(describing: atRest)) -> \(String(describing: folded))")
+            #expect(atRest != nil && atRest == folded, "(a) the fold moved the list's foot")
+            let up = Glide(at: .milliseconds(400), by: -80, over: .milliseconds(150))
+            marks.append(
+                await play("b-timeline-unfold") { up.turn($0, Self.mainScroll(in: window)) })
+            #expect(Self.mainGlass(.tabs, in: window) != nil, "(b) the drag up did not unfold")
+            await drag(window, by: 200)
+            _ = await leadingGlass(.folded, in: window)
+            let press = Self.once(at: .milliseconds(400)) {
+                _ = self.pressLeading(.timeline, in: window)
+            }
+            marks.append(await play("c-timeline-icon", turn: press))
+            #expect(Self.mainGlass(.tabs, in: window) != nil, "(c) the icon did not unfold")
+            _ = pressLeading(.library, in: window)
+            await libraryServed(media, window)
+            _ = await leadingGlass(.tabs, in: window)
+            let scroll = Glide(at: .milliseconds(400), by: 400, over: .milliseconds(300))
+            marks.append(
+                await play("d-library-scope") { scroll.turn($0, Self.mainScroll(in: window)) })
+            #expect(ScopeBarProbe.control(in: window) != nil, "(d) the drag down drew no row")
+            let icon = Self.once(at: .milliseconds(400)) {
+                _ = ScopeBarProbe.pressLibraryIcon(in: window)
+            }
+            marks.append(await play("e-library-icon", turn: icon))
+            #expect(Self.mainGlass(.tabs, in: window) != nil, "(e) the icon gave no capsule")
+        }
+        let box = BarLabShape()
+        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
+        let window: UIWindow
+        if let scene = scene as? UIWindowScene {
+            window = UIWindow(windowScene: scene)
+            window.frame = frame
+        } else {
+            window = UIWindow(frame: frame)
+        }
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = UIHostingController(rootView: BarLab(box: box))
+        window.makeKeyAndVisible()
+        await chromeSettle(window, turns: 20)
+        let fold = Self.once(at: .milliseconds(400)) { box.shape = .folded }
+        let unfold = Self.once(at: .milliseconds(1100)) { box.shape = .tabs }
+        marks.append(
+            await play("lab-bar-alone", for: .milliseconds(1900)) {
+                fold($0)
+                unfold($0)
+            })
+        #expect(Self.mainGlass(.tabs, in: window) != nil, "(lab) the bar did not come back")
+        window.isHidden = true
+        window.rootViewController = nil
+        try? marks.joined(separator: "\n").write(
+            to: Self.recordingFile("rec690-done"), atomically: true, encoding: .utf8)
+        // The recorder stops on that file; the device must outlive the stop.
+        try? await Task.sleep(for: .seconds(3))
     }
 }

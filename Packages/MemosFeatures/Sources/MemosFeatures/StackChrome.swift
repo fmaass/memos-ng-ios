@@ -68,7 +68,10 @@ extension View {
                     .toolbarVisibility(.hidden, for: .tabBar)
                     .modifier(DockTakeover(takesOver: true))
             } else {
+                // The dock stays as it was on the tab's root: its bar is drawn inside the stack,
+                // so a screen inside the tab draws it too (MEMNG-690).
                 destination(value)
+                    .leadingFootBar(on: nil)
                     .modifier(DockTakeover(takesOver: false))
             }
         }

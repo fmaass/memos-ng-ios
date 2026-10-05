@@ -17,7 +17,7 @@ private final class TestPath {
     var path = NavigationPath()
 }
 
-/// The signed-in app's shape in miniature: the real tabs under the real system bar, a stack inside
+/// The signed-in app's shape in miniature: the real tabs under the app's real bar, a stack inside
 /// the Timeline, and the app's own way of declaring what that stack pushes.
 ///
 /// What is INSIDE each tab and destination is deliberately a stand-in, and only that. Everything
@@ -35,6 +35,8 @@ private struct ChromeHarness: View {
             case .timeline:
                 NavigationStack(path: $nav.path) {
                     Text("the timeline")
+                        // As `TimelineView` draws it: the app's bar inside the stack (MEMNG-690).
+                        .leadingFootBar(on: .timeline)
                         .stackDestination(for: SettingsRoute.self) { _ in
                             Text("settings")
                         }
@@ -127,12 +129,11 @@ private final class HostedTabs {
         } while Date() < deadline
     }
 
-    /// Whether the bar under what is on screen right now offers the tab named `title`: the
-    /// system tab bar is on screen and one of its items reads it (MEMNG-666). By equality, so the
+    /// Whether the bar under what is on screen right now offers the tab named `title`: the app's
+    /// capsule is on screen and one of its items reads it (MEMNG-690). By equality, so the
     /// stand-in screens' lower-case "the timeline" cannot answer for the tab.
     func showsTab(_ title: String) -> Bool {
-        guard systemTabBarShows, let bar = Self.tabBar(in: window) else { return false }
-        return bar.items?.contains { $0.title == title } ?? false
+        ScopeBarProbe.tabTitlesLeftToRight(in: window).contains(title)
     }
 
     /// Whether the bar is drawn: both of the harness's tabs the ticket names are offered in it.
@@ -140,7 +141,7 @@ private final class HostedTabs {
         showsTab(MainTab.timeline.title) && showsTab(MainTab.library.title)
     }
 
-    /// Whether the SYSTEM tab bar is on screen.
+    /// Whether UIKit's own tab bar is on screen: never, the app's bar being the only one.
     ///
     /// Not `UITabBar` merely existing: SwiftUI keeps the bar in the hierarchy and takes it off the
     /// screen, so the question is geometric as well as a matter of flags — is any part of it still
@@ -223,8 +224,8 @@ struct StackChromeTests {
         #expect(screen.dockShows, "on the timeline — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
         #expect(screen.showsTab(MainTab.library.title))
-        // The bar under a tab root is the system's (MEMNG-666).
-        #expect(screen.systemTabBarShows)
+        // The bar under a tab root is the app's, never UIKit's (MEMNG-690).
+        #expect(!screen.systemTabBarShows)
 
         withoutAnimation { nav.path.append(SettingsRoute()) }
         screen.settle(waitingFor: { !screen.showsTab(MainTab.library.title) })
@@ -239,7 +240,7 @@ struct StackChromeTests {
         #expect(screen.dockShows, "back on the timeline — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
         #expect(screen.showsTab(MainTab.library.title))
-        #expect(screen.systemTabBarShows)
+        #expect(!screen.systemTabBarShows)
     }
 
     @Test("a memo pushed from the timeline keeps the dock under it")
@@ -259,7 +260,7 @@ struct StackChromeTests {
 
         #expect(screen.dockShows, "on the memo — \(screen.labels)")
         #expect(screen.showsTab(MainTab.timeline.title))
-        #expect(screen.systemTabBarShows, "the memo took the system tab bar away")
+        #expect(!screen.systemTabBarShows, "UIKit's tab bar under the memo")
     }
 
     @Test("which screens take the dock over is said once, on the route")

@@ -158,12 +158,6 @@ enum DoubleBarProbe {
         return found.isEmpty ? "absent" : found.joined(separator: " ; ")
     }
 
-    /// The width of what the tab bar draws — its visible leaves' union — which narrows when the
-    /// system minimises it to the selected tab; nil when there is no tab bar.
-    static func tabBarDrawnWidth(in window: UIWindow) -> CGFloat? {
-        tabBar(in: window).map { drawnExtent(of: $0, in: window).width }
-    }
-
     private static func tabBar(in window: UIWindow) -> UITabBar? {
         var stack: [UIView] = [window]
         while let view = stack.popLast() {

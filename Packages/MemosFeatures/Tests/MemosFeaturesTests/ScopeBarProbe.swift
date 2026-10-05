@@ -73,9 +73,33 @@ enum ScopeBarProbe {
         return control.titleForSegment(at: index)
     }
 
-    /// Presses `tab`'s item through the controller UIKit built for the system bar, the way a tap
-    /// on it does — which, on the tab already showing, is a re-selection the `TabView` hears.
+    /// Presses `tab`'s item in the app's bar (`LeadingMainBar`, MEMNG-690), the button reading its
+    /// name in the window's foot — never the scope row's Library icon, which reads "Library" too
+    /// and is a different press. False when no such item is on screen: a folded capsule shows
+    /// the selected tab alone, and the scope row shows none, as a person finds them.
     static func pressTab(_ tab: MainTab, in window: UIWindow) -> Bool {
+        let foot = window.bounds.height * 0.8
+        var stack: [Any] = [window]
+        var items: [NSObject] = []
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            if object.accessibilityLabel == tab.title,
+                identifier(of: object) != MediaLibraryView.tabsButton,
+                windowFrame(of: object, in: window).minY >= foot
+            {
+                items.append(object)
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return items.contains { $0.accessibilityActivate() }
+    }
+
+    /// Moves to `tab` through the controller UIKit keeps under the hidden bar: no press of the
+    /// app's bar, the move a jump to a memo makes from wherever the bar stands — the scope row
+    /// included, which offers no other tab to a person (MEMNG-690).
+    static func moveTo(_ tab: MainTab, in window: UIWindow) -> Bool {
         guard
             let controller = tabController(in: window.rootViewController),
             let index = controller.tabBar.items?.firstIndex(where: { $0.title == tab.title }),
@@ -90,6 +114,72 @@ enum ScopeBarProbe {
         controller.selectedViewController = target
         delegate?.tabBarController?(controller, didSelect: target)
         return true
+    }
+
+    /// Where the app's tabs are drawn — its capsule, or the capsule folded to the selected tab's
+    /// icon — in the window's coordinates; nil when they are not on screen (MEMNG-690).
+    static func tabsFrame(in window: UIWindow) -> CGRect? {
+        let wanted = [LeadingMainBar.identifier(of: .tabs), LeadingMainBar.identifier(of: .folded)]
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            if let named = identifier(of: object), wanted.contains(named) {
+                let frame = windowFrame(of: object, in: window)
+                if !frame.isEmpty, frame.intersects(window.bounds) { return frame }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
+    /// The tab titles the app's capsule shows, in the order they are drawn, left to right: each an
+    /// element reading a tab's name with its middle inside the capsule (`tabsFrame`), the scope
+    /// row's Library icon excepted. A title found at two places is one item drawn twice and is
+    /// measured at the leftmost. Empty when the capsule is not on screen.
+    static func tabTitlesLeftToRight(in window: UIWindow) -> [String] {
+        guard let capsule = tabsFrame(in: window) else { return [] }
+        let titles = MainTab.allCases.map(\.title)
+        var drawnAt: [String: CGFloat] = [:]
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            if let label = object.accessibilityLabel, titles.contains(label),
+                identifier(of: object) != MediaLibraryView.tabsButton
+            {
+                let frame = windowFrame(of: object, in: window)
+                if !frame.isEmpty, capsule.contains(CGPoint(x: frame.midX, y: frame.midY)) {
+                    drawnAt[label] = min(drawnAt[label] ?? .infinity, frame.midX)
+                }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return drawnAt.keys.sorted { (drawnAt[$0] ?? 0) < (drawnAt[$1] ?? 0) }
+    }
+
+    /// The tab the `TabView` has selected, read off the controller UIKit built for it: its own
+    /// bar is never drawn, but it still holds the selection.
+    static func selectedTitle(in window: UIWindow) -> String? {
+        tabController(in: window.rootViewController)?.tabBar.selectedItem?.title
+    }
+
+    /// Whether the app's tabs stand at the foot of the window (`tabsFrame`).
+    static func tabsShow(in window: UIWindow) -> Bool {
+        tabsFrame(in: window) != nil
+    }
+
+    /// Whether UIKit's own tab bar is on screen: it never is, the app's bar being the only one
+    /// (MEMNG-690) — SwiftUI keeps the hidden bar in the hierarchy, so on screen is the test.
+    static func systemTabBarShows(in window: UIWindow) -> Bool {
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let bar = view as? UITabBar, isOnScreen(bar, in: window) { return true }
+            stack.append(contentsOf: view.subviews)
+        }
+        return false
     }
 
     /// Presses the scope toolbar's Library icon through what UIKit built for it: the bar button
@@ -280,12 +370,11 @@ enum ScopeBarProbe {
         }
     }
 
-    /// What is drawn for the Library icon in the window's foot, outside the tab bar: a view or an
-    /// accessibility element carrying the button's identifier, or reading "Library" there — the
-    /// Library's header reads "Library" too, at the top, which is why the foot is the condition.
+    /// What is drawn for the scope row's Library icon: a view or an accessibility element carrying
+    /// the button's identifier. Not a label reading "Library" in the foot: the app's capsule has
+    /// a Library item there too (MEMNG-690), and it is a tab, not the icon.
     private static func drawnIcons(in window: UIWindow) -> [NSObject] {
         var found: [NSObject] = []
-        let foot = window.bounds.height * 0.8
         var stack: [Any] = [window]
         while let node = stack.popLast() {
             guard let object = node as? NSObject, !(object is UITabBar) else { continue }
@@ -293,9 +382,7 @@ enum ScopeBarProbe {
             let frame =
                 (object as? UIView).map { $0.convert($0.bounds, to: window) }
                 ?? object.accessibilityFrame
-            let named =
-                identifier(of: object) == MediaLibraryView.tabsButton
-                || (object.accessibilityLabel == MainTab.library.title && frame.minY >= foot)
+            let named = identifier(of: object) == MediaLibraryView.tabsButton
             if named, !frame.isEmpty { found.append(object) }
             stack.append(contentsOf: object.accessibilityElements ?? [])
             if let view = object as? UIView { stack.append(contentsOf: view.subviews) }

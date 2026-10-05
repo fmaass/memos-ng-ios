@@ -339,25 +339,6 @@ extension MediaImageLoaderTests {
         return element.accessibilityFrame
     }
 
-    /// The system tab bar, when it is on screen: nothing up its chain of superviews hiding it,
-    /// and some part of it inside the window.
-    private static func systemTabBarOnScreen(in window: UIWindow) -> UITabBar? {
-        var stack: [UIView] = [window]
-        while let view = stack.popLast() {
-            if let bar = view as? UITabBar {
-                var node: UIView? = bar
-                while let current = node {
-                    if current.isHidden || current.alpha < 0.01 { return nil }
-                    node = current.superview
-                }
-                let frame = bar.convert(bar.bounds, to: window)
-                return !frame.isEmpty && frame.intersects(window.bounds) ? bar : nil
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-        return nil
-    }
-
     /// On the test host's own window scene: a window belonging to no scene never completes the
     /// appearance transitions the system bar's hiding and showing ride on (`StackChromeTests`).
     private static func sceneWindow() -> UIWindow {
@@ -422,12 +403,12 @@ extension MediaImageLoaderTests {
             rootView: MainTabView(opening: .library).environment(session))
         window.makeKeyAndVisible()
 
-        // At rest the system tab bar is up and no scope is drawn; a press on the Library's item
-        // puts the scope toolbar in the bar's place, Years | Months | All on All (MEMNG-604).
-        for _ in 0..<200 where Self.systemTabBarOnScreen(in: window) == nil {
+        // At rest the app's capsule is up and no scope is drawn; a press on the Library's item
+        // puts the scope row in the capsule's place, Years | Months | All on All (MEMNG-604).
+        for _ in 0..<200 where !ScopeBarProbe.tabsShow(in: window) {
             await segmentSettle(window, turns: 1)
         }
-        #expect(Self.systemTabBarOnScreen(in: window) != nil, "the Library at rest: no tab bar")
+        #expect(ScopeBarProbe.tabsShow(in: window), "the Library at rest: no tab bar")
         let resting = ScopeBarProbe.describe(window)
         #expect(ScopeBarProbe.control(in: window) == nil, "a scope at rest: \(resting)")
         #expect(ScopeBarProbe.pressTab(.library, in: window), "the bar's Library took no press")

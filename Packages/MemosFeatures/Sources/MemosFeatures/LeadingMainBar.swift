@@ -1,19 +1,18 @@
 import MemosCore
 import SwiftUI
 
-/// The app-drawn main bar of the `leading` bar style (MEMNG-690): ONE Liquid Glass capsule holding
+/// The app's main bar, the only one it has (MEMNG-690): ONE Liquid Glass capsule holding
 /// the three tabs, anchored at the leading edge where the system's minimised icon lands, so that
 /// folding it changes its width and nothing else — "it looks like the bar is not moving".
 ///
-/// Its three shapes are one glass in one container, so iOS morphs between them rather than cutting:
-/// the capsule, the selected tab's icon alone (`folded`, the Timeline scrolled down), and on the
-/// Library the scope row — the Library icon and Years | Months | All, at the place and size the
-/// system's bottom toolbar draws them under the `system` style. The capsule and the Library icon
-/// share one glass identity, so the capsule flows into the icon and the scope's glass grows out of
-/// it, and back. The system toolbar cannot do this: its glass belongs to UIKit and no container of
-/// the app's can hold it, which is why the scope row is drawn here under this style — and, since
-/// build 39, under the `system` style too, alone, in that toolbar's place
-/// (`MediaLibraryView.systemRow`).
+/// Its three shapes are one glass in one container: the capsule, the selected tab's icon alone
+/// (`folded`, the Timeline scrolled down) — the same capsule narrowed, so the fold is a change of
+/// width that animates, not a swap of glasses — and on the Library the scope row: the Library icon
+/// and Years | Months | All, at the place and size the system's bottom toolbar drew them. The
+/// capsule and the Library icon share one glass identity, so the capsule flows into the icon and
+/// the scope's glass grows out of it, and back. The system toolbar cannot do this: its glass
+/// belongs to UIKit and no container of the app's can hold it. On the Library this bar is drawn
+/// inside the Library's own stack (`MediaLibraryView.footRow`).
 struct LeadingMainBar: View {
     enum BarShape: Equatable {
         case tabs
@@ -21,8 +20,8 @@ struct LeadingMainBar: View {
         case scope
     }
 
-    /// Nil under the system style wherever its own tab bar or a claim's bar stands: the container
-    /// stays and draws nothing, so the scope's glass materialises inside it (MEMNG-690, build 39).
+    /// Nil on the Library under a claim, where select mode's toolbar stands: the container stays
+    /// and draws nothing, so the bar's glass materialises inside it when the claim ends.
     let shape: BarShape?
     let selection: MainTab
     /// A press on a tab: the same binding the system bar writes (`MainTabs.pressing`), so the dock
@@ -45,7 +44,7 @@ struct LeadingMainBar: View {
     /// and the scroll view above is not reframed.
     static let height: CGFloat = 62
     /// The scope row's Library icon: a 48 pt glass circle 7 pt in from the capsule's edge, as the
-    /// system toolbar draws it (measured under the `system` style: x 28, 48 x 48).
+    /// system toolbar drew it (measured under the retired `system` style: x 28, 48 x 48).
     static let scopeIconInset: CGFloat = 7
     static let scopeIconSide: CGFloat = 48
     /// Between the icon's glass and the scope control's, as the toolbar's fixed spacer leaves it.
@@ -55,8 +54,8 @@ struct LeadingMainBar: View {
         GlassEffectContainer(spacing: Self.scopeGap) {
             HStack(spacing: Self.scopeGap) {
                 switch shape {
-                case .tabs?: capsule
-                case .folded?: foldedIcon
+                // One case, so one view: the fold narrows the capsule it is.
+                case .tabs?, .folded?: capsule(folded: shape == .folded)
                 case .scope?: scopeRow
                 case nil: EmptyView()
                 }
@@ -71,26 +70,28 @@ struct LeadingMainBar: View {
         .offset(y: Self.bottomDrop)
     }
 
-    private var capsule: some View {
+    /// The capsule, and folded the selected tab's icon alone in it. The fold is not a swap of
+    /// two glasses: a swap inside the container cut from one to the other on the simulator's own
+    /// screen recording, the bar alone on a plain background included (MEMNG-690 round 2). So the
+    /// folded bar is the same capsule with the other tabs narrowed to nothing — the glass's width
+    /// is layout, and the container's animation moves it like any other frame.
+    private func capsule(folded: Bool) -> some View {
         HStack(spacing: 0) {
             ForEach(MainTab.allCases) { tab in
-                item(tab, titled: true)
+                let shown = !folded || tab == selection
+                item(tab, titled: !folded)
+                    .frame(width: shown ? (folded ? 54 : 86) : 0)
+                    .opacity(shown ? 1 : 0)
+                    .clipped()
+                    .allowsHitTesting(shown)
+                    .accessibilityHidden(!shown)
             }
         }
-        .padding(.horizontal, DesignTokens.Space.snug)
+        .padding(.horizontal, folded ? DesignTokens.Space.tight : DesignTokens.Space.snug)
         .frame(height: Self.height)
         .glassEffect(.regular.interactive(), in: .capsule)
         .glassEffectID(GlassID.main, in: glass)
-        .modifier(MainGlassMarker(shape: .tabs))
-    }
-
-    private var foldedIcon: some View {
-        item(selection, titled: false)
-            .padding(.horizontal, DesignTokens.Space.tight)
-            .frame(height: Self.height)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .glassEffectID(GlassID.main, in: glass)
-            .modifier(MainGlassMarker(shape: .folded))
+        .modifier(MainGlassMarker(shape: folded ? .folded : .tabs))
     }
 
     @ViewBuilder
@@ -111,7 +112,7 @@ struct LeadingMainBar: View {
         .modifier(MainGlassMarker(shape: .scope))
         .padding(.leading, Self.scopeIconInset)
         // The control at the toolbar's size: on its own iOS draws it 32 pt tall, in the bottom
-        // toolbar 48 (measured under each style).
+        // toolbar 48 (measured under the retired `system` style).
         LibraryScopePicker(scope: scope)
             .controlSize(.extraLarge)
             .padding(5)

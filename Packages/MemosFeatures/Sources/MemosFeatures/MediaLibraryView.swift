@@ -30,9 +30,6 @@ struct MediaLibraryView: View {
     /// The dock: whether the scope row stands in the tab bar's place, and the claim select
     /// mode takes so that its toolbar is the only bottom chrome.
     @Environment(AppDock.self) private var dock: AppDock?
-    /// The bar style a host put in the environment, else the device's: under the system style
-    /// the scope row is drawn here (`systemRow`).
-    @Environment(BarStylePreference.self) private var styleHost: BarStylePreference?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -57,15 +54,19 @@ struct MediaLibraryView: View {
     /// The scope row's Library icon, which gives the tabs back (`LeadingMainBar`).
     static let tabsButton = "library-show-tabs"
 
-    /// What the Library draws at its foot for the scope under `style`: the scope row where the
-    /// dock's one bar is the scope under the system style, else nothing — the tabs are the
-    /// system's bar, a claim's bar the claimant's, and the leading style's row is the tabs' own
-    /// (`MainTabs.leadingShape`), left as build 38 shipped it.
-    static func systemRow(_ bar: DockBar, style: BarStyle) -> LeadingMainBar.BarShape? {
-        bar == .scope && style == .system ? .scope : nil
+    /// What the Library draws at its foot, inside its own stack, for the dock's one `bar`: the
+    /// scope row where the bar is the scope, the capsule where the tabs stand — the bar the tabs
+    /// draw on the other roots (`leadingFootBar`) — and nothing under a claim, whose bar is the
+    /// claimant's. Here and not around the stack: a change of what a bar around the stack holds
+    /// moved the grid to its top (MEMNG-690), one inside it does not, and its height clears the
+    /// grid's foot.
+    static func footRow(_ bar: DockBar) -> LeadingMainBar.BarShape? {
+        switch bar {
+        case .scope: .scope
+        case .tabs: .tabs
+        case .select, .none: nil
+        }
     }
-
-    private var style: BarStyle { (styleHost ?? .shared).style }
 
     /// The one bar at the foot of the Library (`AppDock.bar(on:)`). Hosted with no dock — a test
     /// that shows the Library alone — there is no tab bar or scope toolbar to stand, and the same
@@ -130,18 +131,16 @@ struct MediaLibraryView: View {
                     } message: {
                         Text(LibraryDeleteFlow.explanation)
                     }
-                } else if let dock, style == .system {
-                    // The scope row under the system style (MEMNG-690, build 39): the app's own
-                    // glass, the leading style's row, in the place the system toolbar stood —
-                    // inside this stack, so its height clears the grid's foot as the toolbar's
-                    // did, and the bar the tabs carry (`MainTabs`) never changes under this
-                    // style: a change there moved the grid to its top. Built whatever the shape,
-                    // so its container outlives the swap and the glass appears and goes inside
-                    // the container's animation.
+                } else if let dock {
+                    // The app's own glass at the Library's foot (`footRow`, MEMNG-690): the scope
+                    // row and the capsule, the two in one
+                    // container so the capsule morphs into the row and back. Built whatever the
+                    // shape, so the container outlives the swap and the glass appears and goes
+                    // inside the container's animation.
                     LeadingMainBar(
-                        shape: Self.systemRow(bottomBar, style: style),
+                        shape: Self.footRow(bottomBar),
                         selection: .library,
-                        press: { _ in },
+                        press: { dock.pressTab($0) },
                         pressLibraryIcon: { dock.send(.pressedLibraryIcon) },
                         scope: choice
                     )

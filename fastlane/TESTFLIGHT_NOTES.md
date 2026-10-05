@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (40)
+
+- The tab bar is now the app's own and the only one: the glass bar at the left edge that Leading drew. The System bar and the Settings → Appearance → Tab bar switch are gone.
+- On the Timeline, scrolling down narrows the bar in place to the Timeline icon, its left edge not moving. Scrolling back up or tapping the icon widens it again. It now narrows and widens smoothly instead of jumping, and one scroll down no longer shrinks, grows and shrinks it again.
+- In the Library, scrolling down turns the bar into the Library icon with Years | Months | All beside it, and scrolling back to the top or tapping the Library icon turns it back.
+- Please try the Timeline: scroll down and up, and tap the narrowed icon. Then the Library: scroll down and back. Then switch between the three tabs a few times.
+- Nothing else changed in this build.
+
 ## 2.2.1 (39)
 
 - With the System tab bar, the Library's Years | Months | All row is now drawn with the app's own glass instead of the system's bottom toolbar, so it should appear and go smoothly.

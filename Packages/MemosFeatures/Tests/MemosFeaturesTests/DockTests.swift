@@ -360,68 +360,130 @@ struct DockTests {
         #expect(told.value == [.all, .years, .months, .all], "told: \(told.value)")
     }
 
-    @Test("the bar folds on scroll down on Timeline and Places, never on the Library")
-    func minimisesOffTheLibrary() {
-        #expect(!Tabs.minimizesOnScroll(on: .library))
-        #expect(Tabs.minimizesOnScroll(on: .timeline))
-        #expect(Tabs.minimizesOnScroll(on: .places))
-    }
-
-    @Test("the system bar minimises itself under the system style alone")
-    func minimisesUnderTheSystemStyleOnly() {
-        #expect(!Tabs.minimizesOnScroll(on: .timeline, style: .leading))
-        #expect(!Tabs.minimizesOnScroll(on: .places, style: .leading))
-        #expect(!Tabs.minimizesOnScroll(on: .library, style: .leading))
-        #expect(Tabs.minimizesOnScroll(on: .timeline, style: .system))
-    }
-
-    /// MEMNG-690: under the leading style the system bar never stands; under the system style it
-    /// stands exactly where the dock's one bar is the tabs.
-    @Test("the system tab bar stands on the tabs under the system style, nowhere under leading")
-    func systemBarFollowsTheStyle() {
-        for bar in DockBar.allCases {
-            let system = Tabs.systemBar(for: bar, style: .system)
-            #expect(system == (bar == .tabs ? .automatic : .hidden), "\(bar) under system")
-            #expect(Tabs.systemBar(for: bar, style: .leading) == .hidden, "\(bar) under leading")
-        }
-    }
-
     private static func reading(_ y: Double) -> DockScrollReading {
         DockScrollReading(
             y: y, width: 402, height: 700, insetTop: 100, insetLeading: 0, insetBottom: 96,
             insetTrailing: 0)
     }
 
-    /// The Timeline's list fed through the path the Library's scroll views take: a drag down
-    /// folds the leading bar to its icon, a drag up gives the capsule back, an idle move changes
+    /// The Timeline's list fed through the path its feed takes (`AppDock.scrolledTab`): a run of
+    /// the reader's travel down folds the leading bar to its icon and one up gives the capsule
+    /// back, each told to the dock once; an idle move, a waver and a scroll under a claim change
     /// nothing, and the Library's bar is never folded.
-    @Test("the Timeline's scroll folds the leading bar through the dock; a scroll up unfolds it")
+    @Test("the Timeline's scroll folds the leading bar through the dock, once per direction")
     func timelineScrollFoldsThroughTheDock() {
         let dock = AppDock()
-        var fence = DockScrollFence()
+        var fold = DockFold()
         dock.send(.selected(.timeline))
+        let swapped = dock.swappedAt
+        func move(_ from: Double, _ to: Double, moving: Bool = true) {
+            dock.scrolledTab(
+                .timeline, from: Self.reading(from), to: Self.reading(to), committing: &fold,
+                moving: moving)
+        }
         #expect(Tabs.leadingShape(dock, on: .timeline) == .tabs)
-        let later = ContinuousClock.now.advanced(by: .seconds(5))
-        dock.scrolled(
-            from: Self.reading(0), to: Self.reading(200), judgedBy: &fence, moving: false,
-            at: later, on: .timeline)
+        move(0, 200, moving: false)
         #expect(dock.mode == .tabs, "an idle move folded the bar")
-        dock.scrolled(
-            from: Self.reading(200), to: Self.reading(260), judgedBy: &fence, moving: true,
-            at: later, on: .timeline)
+        move(200, 220)
+        move(220, 215)
+        move(215, 235)
+        #expect(dock.mode == .tabs, "a waver below the threshold folded the bar")
+        #expect(dock.swappedAt == swapped, "a reading that decided nothing reached the dock")
+        move(235, 260)
         #expect(dock.mode == .folded)
+        let folded = dock.swappedAt
+        #expect(folded != swapped, "the fold was not told to the dock")
         #expect(Tabs.leadingShape(dock, on: .timeline) == .folded)
         #expect(Tabs.leadingShape(dock, on: .library) == .tabs, "the Library folded")
         #expect(dock.bar(on: .timeline) == .tabs, "a fold is no other bar")
-        dock.scrolled(
-            from: Self.reading(260), to: Self.reading(250), judgedBy: &fence, moving: true,
-            at: later, on: .timeline)
-        #expect(dock.mode == .tabs)
-        dock.scrolled(
-            from: Self.reading(250), to: Self.reading(400), judgedBy: &fence, moving: true,
-            at: later, on: .timeline)
+        move(260, 300)
+        move(300, 400)
+        #expect(dock.swappedAt == folded, "a fold already standing was told again")
+        move(400, 390)
+        #expect(dock.mode == .folded, "up 10 unfolded")
+        move(390, 360)
+        #expect(dock.mode == .tabs, "up 40 left it folded")
+        move(360, 400)
+        #expect(dock.mode == .folded)
         dock.send(.pressedTab(.timeline, showing: .timeline))
         #expect(dock.mode == .tabs, "the icon's press gave the capsule back")
+        fold.began()
+        move(400, 410)
+        #expect(dock.mode == .tabs, "the next gesture's first points undid the press")
+        let claim = UUID()
+        dock.claim(claim, for: .takeover)
+        move(410, 600)
+        #expect(dock.mode == .tabs, "a scroll under a claim folded the bar")
+        dock.release(claim)
+        dock.send(.selected(.places))
+        move(600, 800)
+        #expect(dock.mode == .tabs, "the Timeline's scroll folded the bar on Places")
+    }
+
+    /// The Timeline's large title folding into the inline bar mid-drag takes its height off the top
+    /// inset: the reading's `y` (offset + inset) falls while the content goes on moving down. The
+    /// travel is the offset's, so the drag stays folded — read as `y`'s, it was a run back up, and
+    /// the simulator's recording showed the bar unfold and fold again inside one drag (MEMNG-690).
+    @Test("a large title folding mid-drag is not travel back up")
+    func largeTitleFoldIsNotTravel() {
+        let dock = AppDock()
+        var fold = DockFold()
+        dock.send(.selected(.timeline))
+        func reading(_ y: Double, top: Double) -> DockScrollReading {
+            DockScrollReading(
+                y: y, width: 402, height: 700, insetTop: top, insetLeading: 0, insetBottom: 96,
+                insetTrailing: 0)
+        }
+        func move(_ from: DockScrollReading, _ to: DockScrollReading) {
+            dock.scrolledTab(.timeline, from: from, to: to, committing: &fold, moving: true)
+        }
+        move(reading(0, top: 148), reading(80, top: 148))
+        #expect(dock.mode == .folded, "precondition: 80 down folded")
+        // The title goes: the inset loses 52 pt while the offset moves on 12 pt down, so `y`
+        // falls by 40.
+        move(reading(80, top: 148), reading(40, top: 96))
+        #expect(dock.mode == .folded, "the title's fold unfolded the bar")
+        move(reading(40, top: 96), reading(60, top: 96))
+        #expect(dock.mode == .folded)
+        move(reading(60, top: 96), reading(30, top: 96))
+        #expect(dock.mode == .tabs, "a run of 30 up no longer unfolds")
+    }
+
+    /// The Library's leading bar is drawn inside its own stack (MEMNG-690): its presses are the
+    /// tabs' presses, registered by the tabs, and nothing before they are.
+    @Test("a press in the Library's leading bar is the tabs' press")
+    func libraryBarPressesThroughTheTabs() {
+        let dock = AppDock()
+        dock.pressTab(.timeline)
+        let held = Held(MainTab.library)
+        let binding = Binding(get: { held.value }, set: { held.value = $0 })
+        dock.send(.selected(.library))
+        dock.whenTabPressed { Tabs.pressing(selection: binding, dock: dock).wrappedValue = $0 }
+        dock.pressTab(.library)
+        #expect(dock.mode == .scope, "the Library pressed where it shows is its scope")
+        #expect(held.value == .library)
+        dock.pressTab(.timeline)
+        #expect(held.value == .timeline)
+        #expect(dock.mode == .tabs)
+    }
+
+    /// Each root draws the bar inside its own stack (MEMNG-690): its shape there, nothing
+    /// without a dock nor under a takeover.
+    @Test("a root's foot bar is the bar's shape, nothing without a dock or under a takeover")
+    func footBarFollowsTheDock() {
+        let dock = AppDock()
+        dock.send(.selected(.timeline))
+        #expect(LeadingFootBar.shape(dock, on: .timeline) == .tabs)
+        #expect(LeadingFootBar.shape(dock, on: .places) == .tabs)
+        #expect(LeadingFootBar.shape(nil, on: .timeline) == nil, "no dock")
+        var fold = DockFold()
+        dock.scrolledTab(
+            .timeline, from: Self.reading(200), to: Self.reading(260), committing: &fold,
+            moving: true)
+        #expect(LeadingFootBar.shape(dock, on: .timeline) == .folded)
+        let claim = UUID()
+        dock.claim(claim, for: .takeover)
+        #expect(LeadingFootBar.shape(dock, on: .timeline) == nil, "a takeover")
     }
 
     @Test("the leading bar draws the scope row on the Library's scope and nothing under a claim")
@@ -439,37 +501,19 @@ struct DockTests {
         #expect(Tabs.leadingShape(dock, on: .timeline) == nil)
     }
 
-    /// MEMNG-690, build 39: under the system style the Library draws the scope row and nothing
-    /// else — the tabs are the system's bar, a claim's bar is the claimant's.
-    @Test("under the system style the Library draws the scope row on its scope alone")
-    func systemShapeIsTheScopeAlone() {
-        let dock = AppDock()
-        dock.send(.selected(.library))
-        func row() -> LeadingMainBar.BarShape? {
-            MediaLibraryView.systemRow(dock.bar(on: .library), style: .system)
-        }
-        #expect(row() == nil, "a row over the tabs at rest")
-        dock.send(.pressedTab(.library, showing: .library))
-        #expect(dock.bar(on: .library) == .scope, "precondition: the scope")
-        #expect(row() == .scope)
-        let claim = UUID()
-        dock.claim(claim, for: .select)
-        #expect(row() == nil, "a row beside Select's toolbar")
-        dock.release(claim)
-        #expect(row() == .scope, "the row lost to the claim")
-        dock.send(.pressedLibraryIcon)
-        #expect(row() == nil, "the icon left the row")
-    }
-
-    /// The Library draws the row, and so keeps its height clear at its foot, exactly where the
-    /// system style's row stands; the leading style is left as build 38 shipped it.
-    @Test("the Library draws the scope row on the scope under the system style only")
-    func libraryReservesTheSystemRow() {
+    /// The Library draws its foot's bar inside its stack, and so keeps its height clear at its
+    /// foot: the scope row on the scope, the capsule on the tabs, nothing under a claim
+    /// (MEMNG-690).
+    @Test("the Library draws the scope row on its scope, the capsule on the tabs")
+    func libraryDrawsItsFootRow() {
         for bar in DockBar.allCases {
-            let system = MediaLibraryView.systemRow(bar, style: .system)
-            #expect(system == (bar == .scope ? .scope : nil), "\(bar) under system")
-            let leading = MediaLibraryView.systemRow(bar, style: .leading)
-            #expect(leading == nil, "\(bar) under leading")
+            let wanted: LeadingMainBar.BarShape? =
+                switch bar {
+                case .scope: .scope
+                case .tabs: .tabs
+                case .select, .none: nil
+                }
+            #expect(MediaLibraryView.footRow(bar) == wanted, "\(bar)")
         }
     }
 
@@ -537,39 +581,5 @@ struct DockTests {
         choice.showMonths(of: "2026")
         choice.showAll()
         #expect(abandoned == 0)
-    }
-}
-
-/// The bar style is the device's, kept as the Library's order is (MEMNG-690).
-@MainActor
-@Suite("The bar style preference")
-struct BarStylePreferenceTests {
-    private func scratch() -> UserDefaults {
-        let name = "bar-style-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        return defaults
-    }
-
-    @Test("a device that never chose stands on the system bar")
-    func defaultsToTheSystemBar() {
-        #expect(BarStylePreference(defaults: scratch()).style == .system)
-    }
-
-    @Test("a choice is written down and read back by the next launch")
-    func choiceSurvivesALaunch() {
-        let defaults = scratch()
-        BarStylePreference(defaults: defaults).select(.leading)
-        #expect(BarStylePreference(defaults: defaults).style == .leading)
-        #expect(defaults.string(forKey: BarStylePreference.styleKey) == "leading")
-    }
-
-    @Test("an absent, empty or unknown stored value is the system bar")
-    func unknownIsTheSystemBar() {
-        #expect(BarStylePreference.style(fromStored: nil) == .system)
-        #expect(BarStylePreference.style(fromStored: "") == .system)
-        #expect(BarStylePreference.style(fromStored: "trailing") == .system)
-        #expect(BarStylePreference.style(fromStored: "leading") == .leading)
-        #expect(BarStylePreference.style(fromStored: "system") == .system)
     }
 }
