@@ -5,6 +5,12 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (42)
+
+- Pressing a tab no longer loses the main bar to a scroll reading that arrives late from a list you had already left: the bar now stays where the press put it.
+- I could not reproduce the lost press after an unfold and a quick run of tab presses on this build, so nothing changed there; two new checks hold the bar to that exact sequence from now on.
+- Everything else is as in 41.
+
 ## 2.2.1 (41)
 
 - The selected tab now sits on a pill that slides to the tab you tap, with a small bounce, and a tab swells under your finger while you press it. I built both to match the system tab bar's own.
