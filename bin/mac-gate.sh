@@ -1119,22 +1119,28 @@ GATE_MOUNT_GUARD_SELF="$GATE_RUN_COPY/scripts/gate-mount-guard.sh"
 if [ ! -r "$GATE_MOUNT_GUARD_SELF" ]; then
   say "mount       : REFUSE the guard $GATE_MOUNT_GUARD_SELF is not in this run's copy — nothing was sent"
 else
-  mount_out="$(
+  # The answer lands in a file, never in a command substitution: $(…) strips every trailing
+  # newline, so a blank third line would vanish before it is counted and a three-line answer would
+  # pass as two (Codex, 2026-10-06). The file keeps every byte the host sent.
+  mount_answer="$GATE_RUN_COPY/mount-answer.txt"
+  (
     exec 9>&-
     { cat "$GATE_MOUNT_GUARD_SELF"; printf '%s\n' 'gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work'; } \
-      | timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' 2>&1
-  )"
+      | timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' > "$mount_answer" 2>&1
+  )
   mount_ssh_rc=$?
-  # The answer, verbatim and bracketed line by line, so stray whitespace and noise show in the log.
-  while IFS= read -r mount_line; do say "mount       : [$mount_line]"; done <<< "$mount_out"
+  # The answer, verbatim and bracketed line by line, so stray whitespace, blank lines and noise show
+  # in the log; the `|| [ -n … ]` keeps a last line the host did not terminate.
+  while IFS= read -r mount_line || [ -n "$mount_line" ]; do say "mount       : [$mount_line]"; done < "$mount_answer"
+  mount_lines="$(awk 'END { print NR }' "$mount_answer")"
   # The WHOLE answer is judged, never the lines that happen to look right: exactly two lines, the
   # verdict and then the state, nothing else (stderr is in it, so noise refuses too); the two agree;
   # and a pending state counts only with marker=valid. The marker states are the ones
   # scripts/gate-mount-guard.sh can print (gate_mg_marker, and not-read outside report mode).
   mount_marker_re='(valid|not-read|missing|unreadable|expired|other-host|unmeasured:(clock|ioreg)|malformed:[A-Za-z0-9._-]+)'
-  mount_first="$(printf '%s\n' "$mount_out" | sed -n 1p)"
-  mount_second="$(printf '%s\n' "$mount_out" | sed -n 2p)"
-  if [ "$mount_ssh_rc" -eq 0 ] && [ "$(printf '%s\n' "$mount_out" | wc -l | tr -d ' ')" = 2 ] \
+  mount_first="$(sed -n 1p "$mount_answer")"
+  mount_second="$(sed -n 2p "$mount_answer")"
+  if [ "$mount_ssh_rc" -eq 0 ] && [ "$mount_lines" = 2 ] \
      && printf '%s\n' "$mount_first" | grep -qE '^MOUNT (OK|REFUSE) ' \
      && printf '%s\n' "$mount_second" | grep -qE "^mountguard=(enforced|pending:OK|pending:REFUSE) marker=$mount_marker_re\$"; then
     mount_verdict="${mount_first#MOUNT }"; mount_verdict="${mount_verdict%% *}"
