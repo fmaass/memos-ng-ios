@@ -146,6 +146,10 @@
 #                 slot was claimed, so it stopped waiting instead of testing for nobody;
 #            15 = MAC_GATE_ESTATE_LOCK names a lock this run could not open or take (nothing was
 #                 copied, run or written to the run ledger);
+#            16 = mount=16: the build host's build root is not proven to be the designated
+#                 merkur_build image (the guard refused, or its answer could not be read), and no
+#                 valid pending marker allowed the refusal to be reported instead; nothing was
+#                 written on the host, no slot was claimed and no device was created;
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -266,7 +270,7 @@ fi
 # unset, or exported by a caller at some other directory — makes a fresh copy, because the copy's
 # directory is what the run removes when it ends. The variable is dropped as soon as it is read, so
 # a gate a selftest starts makes a copy of its own.
-GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh gate-admission.sh"
+GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh gate-admission.sh gate-mount-guard.sh"
 gate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi \
     | awk '{print $1}'
@@ -657,7 +661,11 @@ LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) token=$
 # by a name only this run can have produced. Deleting a name that is already gone is a no-op, so
 # the two claims cannot fight; the message below is printed only when this side found something
 # still standing.
+# Nothing of this run's can exist on the host before the mount step accepted the build root, and a
+# signal during that step's own ssh must not be answered with more ssh: no give-back until then.
+GATE_MOUNT_ACCEPTED=0
 remove_gate_device() {
+  [ "$GATE_MOUNT_ACCEPTED" -eq 1 ] || return 0
   [ -z "$SIMULATOR" ] || return 0   # a device this run did not create is not this run's to delete
   [ -n "${DEVICE_NAME:-}" ] || return 0
   local name; name="$(esc "$DEVICE_NAME")"
@@ -778,7 +786,7 @@ gate_ledger_append() { # $1 = the run's exit code
   local rc="$1" mode remote_text="" clock="" start="" end="" start_utc="-" end_utc="-" wall="-" slot_wait="-"
   local row t=$'\t' value
   case "$rc" in
-    2|3|4|11|12|13|14|15) mode=refused ;;
+    2|3|4|11|12|13|14|15|16) mode=refused ;;
     *)
       if [ "$GATE_LEDGER_FASTPATH" -eq 1 ]; then mode=fastpath
       elif [ "${QUICK:-0}" -eq 1 ]; then mode=quick
@@ -963,9 +971,10 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These five must be there; the main-bar freeze's is among them because the freeze is
-# the owner's (ADR-0008), and a freeze whose own test can vanish unnoticed is not one.
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh; do
+# directory. These seven must be there; the main-bar freeze's is among them because the freeze is
+# the owner's (ADR-0008), and a freeze whose own test can vanish unnoticed is not one; the mount
+# guard's two because a run on the wrong disk looks exactly like a green one.
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -978,7 +987,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -1089,6 +1098,60 @@ fi
 if [ "$CLASSIFY_VERDICT" = fastpath ]; then
   say "classify    : docs-only, but --quick was asked for a build rather than for a verdict — continuing"
 fi
+
+# --- (1b) the build root is the designated image ------------------------------------------------
+# The build host's ~/build is meant to be the merkur_build disk image (MEMNG-602). When the image is
+# not mounted there macOS leaves the plain directory, and every byte this run would write lands
+# silently on the internal disk. So before the first ssh that writes (the preflight's mkdir), the
+# guard from this run's private copy (scripts/gate-mount-guard.sh) reads the volume and this repo's
+# two subtrees on it, read-only, in report mode: while a valid pending marker
+# (~/.config/build-mount-guard/pending on the host) exists, a refusal is reported as
+# mountguard=pending:REFUSE and the run goes on; without one it is mount=16 and the run ends here.
+# Only one verdict line and one state line that agree with the exit code are an answer: a guard
+# that is missing, could not run, timed out or said anything else has proved nothing, and refuses.
+# A refusal sends nothing more: the device give-back (remove_gate_device) stays off until this step
+# has accepted the answer, so neither the exit trap nor a signal mid-step ssh over to give back a
+# device that was never created, and no lock was taken yet.
+say "--- step: mount ---"
+mount_rc=16
+mount_state=enforced
+GATE_MOUNT_GUARD_SELF="$GATE_RUN_COPY/scripts/gate-mount-guard.sh"
+if [ ! -r "$GATE_MOUNT_GUARD_SELF" ]; then
+  say "mount       : REFUSE the guard $GATE_MOUNT_GUARD_SELF is not in this run's copy — nothing was sent"
+else
+  mount_out="$(
+    exec 9>&-
+    { cat "$GATE_MOUNT_GUARD_SELF"; printf '%s\n' 'gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work'; } \
+      | timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' 2>&1
+  )"
+  mount_ssh_rc=$?
+  # The answer, verbatim and bracketed line by line, so stray whitespace and noise show in the log.
+  while IFS= read -r mount_line; do say "mount       : [$mount_line]"; done <<< "$mount_out"
+  # The WHOLE answer is judged, never the lines that happen to look right: exactly two lines, the
+  # verdict and then the state, nothing else (stderr is in it, so noise refuses too); the two agree;
+  # and a pending state counts only with marker=valid. The marker states are the ones
+  # scripts/gate-mount-guard.sh can print (gate_mg_marker, and not-read outside report mode).
+  mount_marker_re='(valid|not-read|missing|unreadable|expired|other-host|unmeasured:(clock|ioreg)|malformed:[A-Za-z0-9._-]+)'
+  mount_first="$(printf '%s\n' "$mount_out" | sed -n 1p)"
+  mount_second="$(printf '%s\n' "$mount_out" | sed -n 2p)"
+  if [ "$mount_ssh_rc" -eq 0 ] && [ "$(printf '%s\n' "$mount_out" | wc -l | tr -d ' ')" = 2 ] \
+     && printf '%s\n' "$mount_first" | grep -qE '^MOUNT (OK|REFUSE) ' \
+     && printf '%s\n' "$mount_second" | grep -qE "^mountguard=(enforced|pending:OK|pending:REFUSE) marker=$mount_marker_re\$"; then
+    mount_verdict="${mount_first#MOUNT }"; mount_verdict="${mount_verdict%% *}"
+    mount_state="${mount_second%% marker=*}"; mount_state="${mount_state#mountguard=}"
+    case "$mount_verdict:$mount_state:${mount_second##* marker=}" in
+      OK:enforced:valid) ;;
+      OK:enforced:*|OK:pending:OK:valid|REFUSE:pending:REFUSE:valid) mount_rc=0 ;;
+    esac
+    [ "$mount_rc" -eq 0 ] || mount_state=enforced
+  fi
+  [ "$mount_rc" -eq 0 ] \
+    || say "mount       : REFUSE (guard exit $mount_ssh_rc) — the build root is not proven to be the merkur_build image; nothing was written on the host"
+fi
+record mount "$mount_rc"
+SUMMARY_INFO="$SUMMARY_INFO mountguard=$mount_state"
+[ "$mount_rc" -eq 0 ] || end_run
+GATE_MOUNT_ACCEPTED=1
 
 # --- (2) resolve the remote target and refuse anything outside the gate root -------------------
 # Resolved on the build host, where the path actually exists: lexically (so a `..` in the branch
@@ -1432,7 +1495,7 @@ GATE_ADMISSION_NEED_KB=$((GATE_RUN_PEAK_KB + GATE_RESERVE_KB))
 gate_run_admission "$GATE_ADMISSION_NEED_KB" gate_host_available_kb
 admit_rc=$?
 record admit "$admit_rc"
-SUMMARY_INFO=" disk=$(cat "$GATE_RUN_COPY/.admit-disk" 2>/dev/null || echo -)"
+SUMMARY_INFO="$SUMMARY_INFO disk=$(cat "$GATE_RUN_COPY/.admit-disk" 2>/dev/null || echo -)"
 [ "$admit_rc" -eq 0 ] || end_run
 
 say "--- step: rsync ---"
@@ -1583,7 +1646,8 @@ done
 # (gate_pressure_sweep in scripts/reap-gate-lanes.sh). The 2026-09-05 mid-run ENOSPC needs more
 # headroom for DerivedData and warnings rebuilds: 15G low, 20G high.
 gate_pressure_sweep "$GATE_TARGET" "$GATE_WORK" "$GATE_BRANCH" 15728640 20971520
-disk_free="$(df -h / | awk 'NR==2 {print $4}')"
+# The volume the trees are on, never `/`: the build root is meant to be a volume of its own.
+disk_free="$(df -h "$GATE_TARGET" | awk 'NR==2 {print $4}')"
 echo "GATE_HYGIENE disk free after sweep: $disk_free"
 case "$disk_free" in
   *G*) : ;;

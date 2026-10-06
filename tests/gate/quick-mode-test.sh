@@ -129,12 +129,13 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok"\nexit 0\n' "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
   done
   printf 'gate_lane_is_unlocked() { return 0; }\n' > "$work/scripts/reap-gate-lanes.sh"
   cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
+  cp "$repo_root/scripts/gate-mount-guard.sh" "$work/scripts/gate-mount-guard.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1
   git -C "$work" remote add origin "$origin"
@@ -157,6 +158,9 @@ case "$args" in
 esac
 script="$(cat)"
 case "$script" in
+  # the build root's mount guard (its call is the line the gate appends to the helper): a healthy mount
+  *'
+gate_mount_guard report '*) echo "MOUNT OK uuid=stub dev=/dev/disk8s1"; echo "mountguard=enforced marker=not-read"; exit 0 ;;
   # the run admission's disk reading, known by its call (the remote script carries the helper that
   # defines it, so the helper's own text cannot tell the two apart): room enough, admitted at once
   *'gate_lane_space "$target"'*) echo "FREE_KB 99999999 OWN_KB 0"; exit 0 ;;

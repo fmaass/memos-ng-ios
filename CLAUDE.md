@@ -227,6 +227,30 @@ helper is vendored byte-identical by the other iOS repos: `scripts/GATE_ADMISSIO
 the reference commit and its sha256, and `tests/gate/admission-test.sh`, one of the selftests every
 run needs (`bin/mac-gate.sh:689`), checks that sha and every case above against fake readers.
 
+**The build root must be the merkur_build image (MEMNG-602).** A full or quick run's first contact
+with the build host is the `--- step: mount ---`, after the classification and before the
+preflight's first write: it pipes `scripts/gate-mount-guard.sh` from the run's private copy (it is
+one of `GATE_RUN_HELPERS`) to `ssh bash -s` and asks `gate_mount_guard report memos-ng-ios/gate
+memos-ng-ios/work`, under `timeout 30`. The guard reads the volume at `~/build` — the recorded
+UUID, apfs, mounted exactly there with ownership, attached from the one sparse bundle, a mount
+boundary below `$HOME`, the unmounted directory's sentinel hidden — and this repo's two subtrees on
+it, read-only. Its refusal is `mount=16` and the run ends there with exit 16 (`mode=refused` in the
+run ledger): nothing was written on the host, no lock taken, no slot claimed, no device created,
+and no further ssh is made — a signal during the step's ssh included, because the device give-back
+stays off until the step has accepted the answer. The whole answer is judged: exit 0 and exactly two
+lines, `MOUNT OK|REFUSE …` then `mountguard=<state> marker=<one of the guard's marker states>`,
+agreeing, with a `pending:` state only beside `marker=valid`; anything else — a missing helper, a
+failed or timed-out ssh, an extra line, stderr noise — is a refusal too, its answer quoted in the log.
+While a valid pending marker `~/.config/build-mount-guard/pending` on the host (this host's
+`IOPlatformUUID`, a window of at most 72 h, `now < expires`) exists, a refusal is reported instead:
+`mount=0` with `mountguard=pending:REFUSE` on the summary; otherwise the summary carries
+`mountguard=enforced` (or `pending:OK`). Renewing the marker needs the orchestrator's approval and a
+second renewal the owner's. After the image comes unmounted, recovery is manual: `launchctl
+kickstart -k gui/501/live.discomarder.merkur-build-image`, which the refusal line names. No
+environment variable moves the root, the UUID or the bundle path. The remote free-space line after
+the sweep reads the target's volume, never `/`. `tests/gate/mount-guard-test.sh` holds the guard and
+`tests/gate/mount-refusal-path-test.sh` the gate's refusal path; both are named selftests.
+
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
 

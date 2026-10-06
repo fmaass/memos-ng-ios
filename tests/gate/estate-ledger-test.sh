@@ -69,7 +69,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh; do
     cat > "$work/tests/gate/$stub" <<STUB_EOF
 #!/usr/bin/env bash
 echo "selftest" >> "\${STUB_DIR:-/nonexistent}/calls"
@@ -90,6 +90,7 @@ STUB_EOF
   done
   printf 'gate_lane_is_unlocked() { return 0; }\n' > "$work/scripts/reap-gate-lanes.sh"
   cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
+  cp "$repo_root/scripts/gate-mount-guard.sh" "$work/scripts/gate-mount-guard.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1
   git -C "$work" remote add origin "$origin"
@@ -122,6 +123,9 @@ case "$*" in
 esac
 script="$(cat)"
 case "$script" in
+  # the build root's mount guard (its call is the line the gate appends to the helper): a healthy mount
+  *'
+gate_mount_guard report '*) echo "ssh mount" >> "$STUB_DIR/calls"; fd_note mount; echo "MOUNT OK uuid=stub dev=/dev/disk8s1"; echo "mountguard=enforced marker=not-read"; exit 0 ;;
   *'gate_lane_space "$target"'*)
     echo "ssh admission" >> "$STUB_DIR/calls"; fd_note admission
     if [ -n "${STUB_ADMIT_LOW_ONCE:-}" ] && [ ! -e "$STUB_ADMIT_LOW_ONCE" ]; then

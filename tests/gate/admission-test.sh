@@ -46,6 +46,7 @@ SIM="$tmp/sim"         # devices: one file per UDID, "STATE|NAME"; undeletable-<
 mkdir -p "$F" "$SIM" "$tmp/bin"
 cat > "$tmp/bin/df" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$F/df-args"
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 239362496 1 %s 45%% /\n' "\$(cat "$F/free")"
 [ ! -e "$F/df-fail" ] || exit 1
 EOF
@@ -616,6 +617,34 @@ space_case() { # NAME SETUP
 space_case "df exiting nonzero with a plausible line" ": > '$F/df-fail'"
 space_case "du exiting nonzero with a plausible total" ": > '$F/du-fail'"
 space_case "du printing a total that is not a number" "echo 'n/a' > '$F/du'"
+
+# The build root is meant to be a volume of its own (MEMNG-602), so a reading of `/` measures the
+# wrong disk the moment the image is mounted. The run admission's reader is asked about the lane's
+# target, never `/`; and so is the gate's own free-space line after the remote sweep.
+healthy; rm -f "$F/df-args"
+out="$(space_run)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "$F/df-args" 2>/dev/null)" = "-Pk $tmp/lane/target" ]; then
+  ok "the gate's remote reader asks df about the lane's target and nothing else ($(cat "$F/df-args"))"
+else bad "the gate's remote reader asked df about [$(cat "$F/df-args" 2>/dev/null | tr '\n' ',')], rc $rc"; fi
+hygiene_text="$(grep -E '^disk_free="\$\(df ' "${MAC_GATE_SCRIPT:-$repo_root/bin/mac-gate.sh}")"
+mkdir -p "$tmp/pathdf"
+cat > "$tmp/pathdf/df" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$F/hygiene-df-args"
+printf 'Filesystem Size Used Avail Capacity Mounted on\n/dev/disk8s1 466Gi 9Gi 123Gi 8%% /x\n'
+EOF
+chmod +x "$tmp/pathdf/df"
+if [ "$(printf '%s\n' "$hygiene_text" | grep -c .)" -eq 1 ]; then
+  ok "the gate's remote free-space line was found exactly once (control)"
+  rm -f "$F/hygiene-df-args"
+  out="$( { printf "GATE_TARGET='%s'\n" "$tmp/lane/target"; printf '%s\n' "$hygiene_text" 'echo "free=$disk_free"'; } \
+    | PATH="$tmp/pathdf:$PATH" bash -s 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && [ "$out" = "free=123Gi" ] && [ "$(cat "$F/hygiene-df-args" 2>/dev/null)" = "-h $tmp/lane/target" ]; then
+    ok "the gate's remote free-space line reads the target's volume, never / ($(cat "$F/hygiene-df-args"))"
+  else bad "the gate's remote free-space line asked df about [$(cat "$F/hygiene-df-args" 2>/dev/null | tr '\n' ',')]: rc $rc, '$out'"; fi
+else
+  bad "the gate's remote free-space line (disk_free=\"\$(df …) was found $(printf '%s\n' "$hygiene_text" | grep -c .) times, not once"
+fi
 
 # --- the controller's ssh goes away ---------------------------------------------------------------------------
 # Each script starts with SIGPIPE at its default (a trap cannot be set on a signal ignored at entry)

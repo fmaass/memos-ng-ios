@@ -89,7 +89,7 @@ new_repo() {
   } > "$work/project.yml"
   # The stubs report what they inherited: neither the pause nor the copy's own marker may reach a
   # child, or a gate run BY a selftest would pause, or trust a copy that is not its own.
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok pause=[${MAC_GATE_SELFTEST_PAUSE_DIR:-}] copy=[${MAC_GATE_RUN_COPY:-}]"\nexit 0\n' \
       "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
@@ -101,6 +101,7 @@ new_repo() {
     > "$work/scripts/testcount-candidate-owner.sh"
   chmod +x "$work/scripts/testcount-candidate-owner.sh"
   cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
+  cp "$repo_root/scripts/gate-mount-guard.sh" "$work/scripts/gate-mount-guard.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1
   git -C "$work" remote add origin "$origin"
@@ -120,6 +121,9 @@ case "$*" in
 esac
 script="$(cat)"
 case "$script" in
+  # the build root's mount guard (its call is the line the gate appends to the helper): a healthy mount
+  *'
+gate_mount_guard report '*) echo "MOUNT OK uuid=stub dev=/dev/disk8s1"; echo "mountguard=enforced marker=not-read"; exit 0 ;;
   # the run admission's disk reading, known by its call (the remote script carries the helper that
   # defines it, so the helper's own text cannot tell the two apart): room enough, admitted at once
   *'gate_lane_space "$target"'*) echo "FREE_KB 99999999 OWN_KB 0"; exit 0 ;;
