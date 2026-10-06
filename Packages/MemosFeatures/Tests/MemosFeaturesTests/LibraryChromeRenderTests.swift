@@ -2889,6 +2889,155 @@ extension MediaImageLoaderTests {
     }
 }
 
+/// MEMNG-702: a press on the main bar while a tab comes back or the pill slides. Run 7 of the
+/// MEMNG-690 recordings saw the capsule fold again on a scrolled Timeline shown again, and the
+/// next press found its tab gone; and a second press inside one pill slide retargets the spring.
+extension MediaImageLoaderTests {
+    /// One sample of the bar while presses land: the dock's mode and tab, the tab the tab view has
+    /// chosen, which glass stands and how far the main scroll view stands from its top.
+    private static func refoldSample(
+        _ window: UIWindow, _ witness: DockWitness, at ms: Int
+    ) -> String {
+        let glass = [LeadingMainBar.BarShape.tabs, .folded, .scope]
+            .filter { mainGlass($0, in: window) != nil }
+        let mode = witness.dock?.mode.rawValue ?? "-"
+        let showing = witness.dock?.showing?.rawValue ?? "-"
+        let chosen = ScopeBarProbe.selectedTitle(in: window) ?? "-"
+        let y = scrolledBy(in: window).map { "\(Int($0))" } ?? "-"
+        return "t=\(ms) mode=\(mode) showing=\(showing) chosen=\(chosen) glass=\(glass) y=\(y)"
+    }
+
+    /// The Timeline scrolled down and folded, the icon pressed so the capsule stands again over a
+    /// list still scrolled; then, at the recording's pace (`play`: 8 ms turns, nothing drawn or
+    /// laid out by the test), Places at 300 ms, the Timeline at 900 and the Library at 1500 —
+    /// 600 ms after the Timeline's return, as run 7 pressed them. Nobody scrolls the Timeline
+    /// after it comes back, so nothing may fold it, and the Library's press must reach the Library.
+    @Test("refold 1: a scrolled Timeline shown again keeps the capsule; a press 600 ms on lands")
+    func returnedTimelineKeepsTheCapsule() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let witness = DockWitness()
+            let window = await leadingTimeline(media, witness: witness)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            _ = await leadingGlass(.tabs, in: window)
+            await drag(window, by: 200)
+            #expect(await leadingGlass(.folded, in: window) != nil, "precondition: no fold")
+            #expect(pressLeading(.timeline, in: window), "the folded icon took no press")
+            #expect(await leadingGlass(.tabs, in: window) != nil, "the icon left it folded")
+            await chromeSettle(window, turns: 20)
+            let presses: [(MainTab, Int)] = [(.places, 300), (.timeline, 900), (.library, 1500)]
+            var pressed: [MainTab: Int] = [:]
+            var took: [String] = []
+            var modes: [String] = []
+            var foldedOnReturn: [Int] = []
+            let start = ContinuousClock.now
+            while ContinuousClock.now < start.advanced(by: .milliseconds(2100)) {
+                let ms = Int((ContinuousClock.now - start) / .milliseconds(1))
+                for (tab, at) in presses where ms >= at && pressed[tab] == nil {
+                    pressed[tab] = ms
+                    let landed = pressLeading(tab, in: window)
+                    took.append("\(tab.title)@\(ms)=\(landed)")
+                }
+                let showing = witness.dock?.showing?.rawValue ?? "-"
+                let mode = "\(witness.dock?.mode.rawValue ?? "-")/\(showing)"
+                if modes.last.map({ !$0.hasSuffix(" \(mode)") }) ?? true {
+                    modes.append("t=\(ms) \(mode)")
+                }
+                let returned = pressed[.timeline] != nil && pressed[.library] == nil
+                if returned, witness.dock?.mode == .folded { foldedOnReturn.append(ms) }
+                try? await Task.sleep(for: .milliseconds(8))
+            }
+            await tabChosen(.library, window)
+            let end = Self.refoldSample(window, witness, at: 2100)
+            let lines = ["presses \(took)", "end \(end)"] + modes
+            for line in lines { print("REFOLD702 \(line)") }
+            notes("702-refold-1", lines)
+            #expect(took.allSatisfy { $0.hasSuffix("=true") }, "a press hit nothing: \(took)")
+            #expect(foldedOnReturn.isEmpty, "folded on the return at \(foldedOnReturn) ms")
+            #expect(witness.dock?.showing == .library, "the dock is not on the Library: \(took)")
+            #expect(
+                ScopeBarProbe.selectedTitle(in: window) == MainTab.library.title,
+                "the Library was not chosen: \(took) \(end)")
+        }
+    }
+
+    /// Two presses inside one slide of the selection pill: Places from the Library, two tabs
+    /// along, and the Timeline between them as soon as the pill is seen on its way. The spring is
+    /// retargeted, and the pill ends under the Timeline, the last tab pressed.
+    @Test("refold 2: a second press inside one pill slide ends the pill under the last tab")
+    func pillRetargetsOnASecondPress() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            _ = await leadingGlass(.tabs, in: window)
+            await chromeSettle(window, turns: 20)
+            let from = Self.itemFrame(.library, in: window)?.midX ?? -1
+            let first = Self.itemFrame(.places, in: window)?.midX ?? -1
+            // Strictly between the two ends of the first slide, clear of both by more than 2 pt.
+            let inside = { (x: CGFloat) in
+                x > min(from, first) + 2 && x < max(from, first) - 2
+            }
+            // The second press as soon as the pill has left the Library, inside its slide. A
+            // settle turn's sleep is a minimum: on a loaded simulator one can wake after the
+            // whole slide, and the press would come after it. So a missed window is set up again
+            // from the Library, at most three times, and the last miss is the failure below.
+            var between: CGFloat?
+            var attempts = 0
+            while attempts < 3 {
+                attempts += 1
+                if attempts > 1 {
+                    #expect(pressLeading(.library, in: window), "the Library took no press")
+                    for _ in 0..<80 {
+                        if let x = Self.pillFrame(in: window)?.midX, abs(x - from) <= 2 { break }
+                        await chromeSettle(window)
+                    }
+                    await chromeSettle(window, turns: 20)
+                }
+                #expect(pressLeading(.places, in: window), "Places took no press")
+                between = Self.pillFrame(in: window)?.midX
+                for _ in 0..<40 where between.map({ abs($0 - from) <= 2 }) ?? true {
+                    await chromeSettle(window)
+                    between = Self.pillFrame(in: window)?.midX
+                }
+                if between.map(inside) ?? false { break }
+            }
+            #expect(pressLeading(.timeline, in: window), "the Timeline took no press")
+            var seen: [Int] = []
+            for _ in 0..<40 {
+                if let x = Self.pillFrame(in: window)?.midX { seen.append(Int(x)) }
+                await chromeSettle(window)
+            }
+            await tabChosen(.timeline, window)
+            let pill = Self.pillFrame(in: window)
+            let item = Self.itemFrame(.timeline, in: window)
+            let line =
+                "library \(Int(from)) places \(Int(first)) attempts \(attempts) at the second press "
+                + "\(String(describing: between)) pill \(String(describing: pill)) "
+                + "timeline \(String(describing: item)) seen \(seen)"
+            print("REFOLD702 pill \(line)")
+            notes("702-refold-2", [line])
+            // The second press came while the pill moved: away from both ends of the first slide.
+            #expect(
+                between.map(inside) ?? false,
+                "the second press did not land inside the slide: \(line)")
+            #expect(
+                abs((pill?.midX ?? -100) - (item?.midX ?? 100)) <= 2,
+                "the pill did not end under the Timeline: \(line)")
+            #expect(
+                ScopeBarProbe.selectedTitle(in: window) == MainTab.timeline.title,
+                "the Timeline was not chosen: \(line)")
+        }
+    }
+}
+
 extension MediaImageLoaderTests {
     /// Runs `turn` for `span` and draws nothing, so the main thread stays free for the animation
     /// the simulator's own screen recording sees — a frame drawn in the test blocks it for tens of
