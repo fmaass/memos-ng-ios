@@ -254,7 +254,7 @@ struct DockModeTests {
     /// MEMNG-684: a claim or a release the scroll view lived through holds its idle moves past the
     /// settling — the swing a lazy stack makes at the foot a second later is no scroll — until it
     /// next moves; a moving reading counts at once and ends the hold. Lived through: the fence
-    /// took a reading before the hold was made (review round 2), and heard it within the settling.
+    /// took a reading before the hold was made (review round 2), however late it heard it.
     @Test("a claim or release holds idle moves until the scroll view moves; a moving one counts")
     func holdLastsUntilAMove() {
         let held = ContinuousClock.now
@@ -276,16 +276,6 @@ struct DockModeTests {
             heldAt: held, moving: true)
         #expect(dragged == 4000, "a moving reading under the hold was dropped")
         #expect(idle(4000, 4100, after: .seconds(4)) == 4100, "the hold outlived the move")
-
-        var stranger = DockScrollFence()
-        let warm = stranger.scrolled(
-            from: reading(y: 0), to: reading(y: 10), at: held.advanced(by: .seconds(-1)),
-            moving: true)
-        #expect(warm == 10)
-        let stale = stranger.scrolled(
-            from: reading(y: 10), to: reading(y: 300), at: held.advanced(by: .milliseconds(800)),
-            heldAt: held)
-        #expect(stale == 300, "a hold first heard after the settling held this scroll view")
     }
 
     /// Review round 2: a scroll view that came after the claim or release — the one a scope pick
@@ -314,6 +304,39 @@ struct DockModeTests {
             from: shown, to: reading(y: 300, insetBottom: 34),
             at: held.advanced(by: .milliseconds(800)), heldAt: held)
         #expect(later == 300, "a fence first read at the release's own instant held")
+    }
+
+    /// MEMNG-703: the witness rule is the fence's identity, never a delivery deadline. A scroll
+    /// view that read before the claim or release — the Library grid at the foot as Close is
+    /// pressed — lived through it however late the layout hands it its next reading: an idle
+    /// reflow heard 600 ms or 5 s after the release is no scroll, and the hold ends only when the
+    /// scroll view next moves.
+    @Test("a fence that read before the claim or release holds it however late its next reading")
+    func survivingFenceHoldsLateReadings() {
+        let held = ContinuousClock.now
+        for late in [Duration.milliseconds(600), .seconds(5)] {
+            var survivor = DockScrollFence()
+            let warm = survivor.scrolled(
+                from: reading(y: 0), to: reading(y: 960), at: held.advanced(by: .seconds(-1)),
+                moving: true)
+            #expect(warm == 960, "the drag that brought the scroll view there")
+            let heard = held.advanced(by: late)
+            let reflow = survivor.scrolled(
+                from: reading(y: 960), to: reading(y: 980), at: heard, heldAt: held)
+            #expect(reflow == nil, "an idle reflow first heard \(late) after the release counted")
+            let swing = survivor.scrolled(
+                from: reading(y: 980), to: reading(y: 535), at: heard.advanced(by: .seconds(1)),
+                heldAt: held)
+            #expect(swing == nil, "a later idle swing under the hold heard at \(late) counted")
+            let dragged = survivor.scrolled(
+                from: reading(y: 535), to: reading(y: 200), at: heard.advanced(by: .seconds(2)),
+                heldAt: held, moving: true)
+            #expect(dragged == 200, "the reader's drag under the hold was dropped")
+            let after = survivor.scrolled(
+                from: reading(y: 200), to: reading(y: 300), at: heard.advanced(by: .seconds(3)),
+                heldAt: held)
+            #expect(after == 300, "the hold heard at \(late) outlived the move that ended it")
+        }
     }
 
     /// A second claim or release re-arms the hold of a fence whose first hold a move ended, and a

@@ -261,10 +261,13 @@ nonisolated public struct DockScrollReading: Sendable, Equatable {
 /// no scroll until it next moves: the reader's next drag, its deceleration or an animated scroll
 /// counts at once and ends the hold, and so does a jump the Library asked for, which the caller
 /// reports as moving. Lived through is the witness rule (review round 2): the fence had taken a
-/// reading before the claim or release was made — its scroll view was there for it — and is
-/// handed it within `settling` of it. A scroll view that came after it, the one a scope pick puts
-/// on screen as Select ends, holds nothing however soon it is first heard, so its first landing
-/// counts once the settling has passed, as any new scroll view's does.
+/// reading before the claim or release was made — its scroll view was there for it — however
+/// late its next reading is handed it. The layout makes those readings when it makes them, and a
+/// surviving scroll view's first one after a release can come well past `settling`: a deadline on
+/// it would let that idle reflow swap the bars the reader just chose (MEMNG-703). A scroll view
+/// that came after it, the one a scope pick puts on screen as Select ends, holds nothing however
+/// soon it is first heard, so its first landing counts once the settling has passed, as any new
+/// scroll view's does.
 nonisolated public struct DockScrollFence: Sendable {
     /// How long after a swap, or a reframe that follows it, the layout is given to settle.
     public static let settling: Duration = .milliseconds(500)
@@ -297,11 +300,11 @@ nonisolated public struct DockScrollFence: Sendable {
         let firstRead = self.firstRead ?? instant
         self.firstRead = firstRead
         // The witness rule: a claim or release holds this fence only if the fence had read before
-        // it was made and is handed it within the settling. One made before the first reading,
-        // or first handed later, holds nothing.
+        // it was made. One made before the first reading holds nothing; when it is first handed
+        // over is the layout's timing, not the scroll view's identity, and decides nothing.
         if let heldAt, heardHold.map({ $0 < heldAt }) ?? true {
             heardHold = heldAt
-            holding = firstRead < heldAt && instant < heldAt.advanced(by: Self.settling)
+            holding = firstRead < heldAt
         }
         if moving { holding = false }
         let settling = settledFrom.map { instant < $0.advanced(by: Self.settling) } ?? false

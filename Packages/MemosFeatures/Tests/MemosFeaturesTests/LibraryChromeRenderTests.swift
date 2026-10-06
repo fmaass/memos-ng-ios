@@ -1739,6 +1739,7 @@ extension MediaImageLoaderTests {
             let closed = pressClose(window, pass: "C")
             var releasedAt: ContinuousClock.Instant?
             var fed = "never"
+            var modeAfterLate: DockMode?
             let samples = await sampleBars(window, witness, from: closed, for: .seconds(3)) { _ in
                 if releasedAt == nil, dock.heldAt != claimed { releasedAt = dock.heldAt }
                 guard fed == "never", let release = releasedAt,
@@ -1748,6 +1749,7 @@ extension MediaImageLoaderTests {
                 let late = Self.dockReading(of: scroller, y: resting.y - 425)
                 let modeBefore = dock.mode
                 dock.scrolled(from: now, to: late, judgedBy: &fence, moving: false)
+                modeAfterLate = dock.mode
                 let after = (ContinuousClock.now - release) / .milliseconds(1)
                 fed =
                     "at \(Int(after)) ms after the release, idle, y \(Int(now.y)) -> "
@@ -1758,6 +1760,9 @@ extension MediaImageLoaderTests {
                 "C", samples, witness, in: window,
                 context: "foot at \(Int(atFoot)); release stamped \(released ?? "never") after "
                     + "the press; late reading \(fed)")
+            // The fence lived through the release, so an idle reflow is the layout's however late
+            // it is heard: the tabs the icon gave back stay (MEMNG-703).
+            #expect(modeAfterLate == .tabs, "C: the late idle reading moved the dock: \(fed)")
         }
     }
 
