@@ -58,6 +58,20 @@ picture-list forwarding rule (`scripts/picturelist-forwarding-rule.sh`: in each 
 and `MemoDetailView.swift` the literal `listing: submission.pictures` appears on exactly one
 uncommented line — neither save call site can be reached from a test, both being private functions
 behind a sheet that never presents — with the `attaching:` forwarding beside it as the control) → the
+main-bar freeze rule (`scripts/mainbar-freeze-rule.sh`, the executable half of ADR-0008: outside
+comments `LeadingMainBar(` is constructed on exactly one line of the Features sources and that line
+is in `Dock.swift`, no line ends in the bare name (a construction split across lines), `Dock.swift`
+hides the system tab bar and pins its minimise behaviour to `.never`, every line naming `.tabBar`
+also says `.hidden` (so a modifier split across lines cannot show it), `tabViewBottomAccessory`, `role: .search` and `BarStyle` appear nowhere and
+`placement: .bottomBar` not in `MediaLibraryView.swift`, `LeadingMainBar.swift` keeps the whole
+declaration lines of `leadingInset` 21, `height` 62 and the `pillTravel` spring (response 0.35,
+damping ratio 0.7), and the one-bar, edge-fade, leading 6 and 7, bubble 1–3 and fold-film render
+tests and DockModeTests' fold table keep their exact `@Test("…")` lines — so a rename, a deletion
+or a trait such as `.disabled` fails it — while neither test file carries a `.disabled` or
+`.enabled(if:` trait anywhere and the `@Suite` line the render tests' extension belongs to, in
+`MediaImageLoaderTests.swift`, is pinned whole, with the type declared once in `LeadingMainBar.swift`, at
+least two `safeAreaBar(edge: .bottom)` lines and each test file's `@Test(` count as the controls;
+its own test, `tests/gate/mainbar-freeze-rule-test.sh`, is a selftest every run names) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
 exclusions, with the operation count it read as the control) → the
@@ -395,7 +409,9 @@ Writes to known pages resolve BY ID from here; name-search is discovery only.
   ADR-0007: page:4044 — proposed: background uploads without resumption — one whole-file background
   URLSession upload task per media file over the existing /api/uploads, retried whole on failure, no
   resumable-upload protocol on either side; memos-ng removed its tus 1.0 router as 1.11.0, plan page 4043
-  in the memos-ng book)
+  in the memos-ng book; ADR-0008: page:4248 — accepted 2026-10-06: the main bottom bar is the app's own
+  Liquid Glass capsule hosted once over the tab view, frozen as built on 2.2.1 (41); a change to it needs
+  the owner's explicit ask and simulator screen recordings before any build)
 - Playbook — background uploads, native resumable (2026-09-24): page:4030 (chapter:3155; S1 handover
   page:4031)
 - Handover — search-renovation (WP-10 nightly package, 2026-09-23): page:3938 (chapter:3155); playbook

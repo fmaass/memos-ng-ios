@@ -129,7 +129,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok"\nexit 0\n' "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
   done

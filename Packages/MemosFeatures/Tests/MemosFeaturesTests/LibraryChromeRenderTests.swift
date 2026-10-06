@@ -2643,7 +2643,8 @@ extension MediaImageLoaderTests {
 
     /// The one bar keeps 40's scroll edge effect: the content under it fades where it faded under
     /// the bar in the stack's own bottom bar (`EdgeLab`, red rows under each), read beside the
-    /// capsule's leading edge as the row where the fade is half done. Hosted as `MainTabs` and a
+    /// capsule's leading edge as the row where the fade, to white or to black, is half done, and
+    /// the same row at the window's far side. Hosted as `MainTabs` and a
     /// root host it: the bottom bar of a `TabView` around the stack, a clear room in the stack. An
     /// overlay with a clear room drew no effect at all (quick run 4), with any invisible room one
     /// 32 pt low (quick runs 5-7); the other rooms are printed beside it, for what decides it.
@@ -2654,20 +2655,17 @@ extension MediaImageLoaderTests {
         var lines: [String] = []
         for room in 0...EdgeLab.rooms {
             let window = Self.labWindow(UIHostingController(rootView: EdgeLab(room: room)))
-            await chromeSettle(window, turns: 40)
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 2
-            let image = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
-                _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
-            }
+            let reading = await steadyEdge(window)
+            let (image, shifts, inset) = (reading.image, reading.shifts, reading.inset)
             Attachment.record(image, named: "edge-lab-\(room)", as: .png)
-            let greens = Self.greens(of: image, x: 10, from: 700, to: 872)
-            middle.append(Self.fadeMiddle(greens, from: 700))
-            let inset = Self.mainScroll(in: window)?.adjustedContentInset.bottom
+            middle.append(reading.middle)
             insets.append(inset)
-            let sampled = stride(from: 0, to: greens.count, by: 8).map { greens[$0] }
+            let sampled = stride(from: 0, to: shifts.count, by: 8).map { shifts[$0] }
             let at = String(describing: middle[room])
-            lines.append("\(room): middle \(at) inset \(String(describing: inset)) \(sampled)")
+            let across = String(describing: reading.across)
+            lines.append(
+                "\(room): middle \(at) across \(across) inset \(String(describing: inset))"
+                    + " \(sampled) after \(reading.turns) turns")
             window.isHidden = true
             window.rootViewController = nil
         }
@@ -2686,9 +2684,13 @@ extension MediaImageLoaderTests {
             "the room's inset is not the bar's: \(lines)")
     }
 
-    /// The green of `image` at `x` on every point row from `from` to `to`: red content has
-    /// little, the scroll edge effect's fade to white more.
-    fileprivate static func greens(of image: UIImage, x: CGFloat, from: Int, to: Int) -> [Int] {
+    /// How far the colour of `image` at `x` has moved, on every point row from `from` to `to`, from
+    /// its colour on the first: the red, green and blue differences summed. The scroll edge effect
+    /// fades the red content toward white in its light style and toward black in its dark one, and
+    /// the system picks the style over this red differently run to run (quick run 8's captures:
+    /// rooms 0, 2, 4 and 5 dark, R 235 to 173, rooms 3, 6, 7 and 8 light, G 75 to 223); the green
+    /// alone saw only the light one, and a dark fade read as none.
+    fileprivate static func shifts(of image: UIImage, x: CGFloat, from: Int, to: Int) -> [Int] {
         guard let cg = image.cgImage else { return [] }
         let (width, height) = (cg.width, cg.height)
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -2705,19 +2707,70 @@ extension MediaImageLoaderTests {
         }
         guard drawn else { return [] }
         let column = Int(x * image.scale)
-        return (from...to).compactMap { row in
+        let colours: [[Int]] = (from...to).compactMap { row in
             let line = Int(CGFloat(row) * image.scale)
             guard line < height, column < width else { return nil }
-            return Int(pixels[(line * width + column) * 4 + 1])
+            let at = (line * width + column) * 4
+            return (0..<3).map { Int(pixels[at + $0]) }
         }
+        guard let base = colours.first else { return [] }
+        return colours.map { colour in (0..<3).reduce(0) { $0 + abs(colour[$1] - base[$1]) } }
     }
 
-    /// The first row, from `from` down, where `greens` has risen half way from its first value to
-    /// its largest; nil when it never rises by more than 20.
-    fileprivate static func fadeMiddle(_ greens: [Int], from: Int) -> CGFloat? {
-        guard let base = greens.first, let top = greens.max(), top - base > 20 else { return nil }
-        let half = base + (top - base) / 2
-        return greens.firstIndex { $0 >= half }.map { CGFloat(from + $0) }
+    /// The first row, from `from` down, where `shifts` has come half way to its largest; nil when
+    /// it never moves by more than 20.
+    fileprivate static func fadeMiddle(_ shifts: [Int], from: Int) -> CGFloat? {
+        guard let top = shifts.max(), top > 20 else { return nil }
+        return shifts.firstIndex { $0 * 2 >= top }.map { CGFloat(from + $0) }
+    }
+
+    /// One drawing of the edge lab's window, read as `roomKeepsTheEdgeEffect` reads it, and the
+    /// settle turns it took to reach.
+    private struct EdgeReading {
+        let image: UIImage
+        let shifts: [Int]
+        let middle: CGFloat?
+        /// The middle read at the window's far side, clear of every bar the lab draws.
+        let across: CGFloat?
+        let inset: CGFloat?
+        let turns: Int
+    }
+
+    /// Drawn turn by turn until the fade and the inset read alike 6 drawings running with a fade
+    /// drawn, or 6 s: a run's first window is cold and the system's scroll edge effect gives no
+    /// signal that it is drawn, so a still nil is no proof of settled (a fadeless room waits).
+    private func steadyEdge(_ window: UIWindow) async -> EdgeReading {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+        await chromeSettle(window, turns: 40)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
+        var turns = 40
+        var last: EdgeReading?
+        var alike = 0
+        while true {
+            await chromeSettle(window, turns: 1)
+            turns += 1
+            let image = renderer.image { _ in
+                _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let shifts = Self.shifts(of: image, x: 10, from: 700, to: 872)
+            let far = Self.shifts(of: image, x: 395, from: 700, to: 872)
+            let near = Self.fadeMiddle(shifts, from: 700)
+            let across = Self.fadeMiddle(far, from: 700)
+            // The edge effect fades the whole width alike (run 8: 789 at 10, 788 at 395); a change
+            // beside the capsule alone, its shadow say, is no fade.
+            let spans = near.flatMap { at in across.map { abs($0 - at) <= 2 } } == true
+            let reading = EdgeReading(
+                image: image, shifts: shifts, middle: spans ? near : nil, across: across,
+                inset: Self.mainScroll(in: window)?.adjustedContentInset.bottom, turns: turns)
+            let same = last.map { $0.middle == reading.middle && $0.inset == reading.inset }
+            alike = same == true ? alike + 1 : 1
+            last = reading
+            if (alike >= 6 && reading.middle != nil) || ContinuousClock.now >= deadline {
+                return reading
+            }
+        }
     }
 
     /// MEMNG-690 phase 3, the owner on 40: the main bar's bubble. The pill stands under the

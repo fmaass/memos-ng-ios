@@ -922,8 +922,9 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These four must be there.
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh; do
+# directory. These five must be there; the main-bar freeze's is among them because the freeze is
+# the owner's (ADR-0008), and a freeze whose own test can vanish unnoticed is not one.
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -936,7 +937,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -2538,6 +2539,25 @@ s_picturelist() {
   return 1
 }
 
+s_mainbar() {
+  # The owner froze the main bottom bar as built on 2.2.1 (41) (ADR-0008, MEMNG-690): one app-drawn
+  # capsule hosted once over the tab view, the system bar hidden. Each variant it replaced is one
+  # line away from coming back, and the render tests that hold its behaviour can be renamed,
+  # disabled or deleted like any other test. So the hosting, the hidden system bar, the absence of
+  # the rejected variants, three constants and the names of those tests are held by literal counts
+  # with positive controls in the same run, in a script of its own whose text may carry the
+  # literals the checked files are counted for.
+  echo "--- main-bar freeze rule (the bar as the owner froze it, ADR-0008) ---"
+  local mainbar_rule="$GATE_TARGET/scripts/mainbar-freeze-rule.sh"
+  if [ -x "$mainbar_rule" ]; then
+    "$mainbar_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "MAINBAR FAIL: $mainbar_rule is missing or not executable, so the frozen bar was never"
+  echo "              checked and this step proves nothing"
+  return 1
+}
+
 s_refusal() {
   # A refusal is judged where the answer arrives and acted on one or more actor hops later, and in
   # between a renewal can replace the credential it was about. The fix is one typed value carrying
@@ -2885,6 +2905,7 @@ step sharelink  s_sharelink
 step textsel    s_textsel
 step buttonstyle s_buttonstyle
 step picturelist s_picturelist
+step mainbar    s_mainbar
 step apicover   s_apicover
 step testcount  s_testcount
 
