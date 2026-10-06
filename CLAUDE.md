@@ -242,6 +242,13 @@ what it runs (`tests/gate/private-copy-test.sh` edits the script and a helper mi
 selftests under `tests/gate/` and the tree mirrored to the build host are still read from the tree. Any redirect of a gate's output by a caller uses a path unique to the branch and the run
 too, never a generic name in a shared directory: that is how one run's evidence gets truncated
 mid-write by another's (`tests/gate/concurrent-log-test.sh` holds the gate to its half of it).
+A worktree's `.gate-artifacts/` goes with the worktree at merge-closeout, so the run's row in the
+estate ledger (`MAC_GATE_RUNS_LEDGER`, default `/home/fabian/projects/worktrees/gate-runs.tsv`)
+names a durable copy instead: on its way out, after everything else it writes, the run copies its
+complete log, byte for byte, to `MAC_GATE_RUNS_LOGS` (default `gate-logs/` beside the ledger) as
+`memos-ng-ios-<branch>-<run token>.log`, fast path included. A copy that cannot be made keeps the
+row on the local log behind one `LEDGER-LOG-KEPT-LOCAL <why>` line and never changes the run's exit
+code (`tests/gate/estate-ledger-test.sh`, case 22).
 
 **Git is the only medium between the two machines.** The gate directory is a mirror, never a
 checkout, and it is never opened in Xcode. A hands-on clone on the Mac lives at

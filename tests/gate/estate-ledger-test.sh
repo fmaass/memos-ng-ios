@@ -204,6 +204,7 @@ new_case() {
 gate_env() { # $1 = stub dir; fills GATE_ENV
   local dir="$1"
   GATE_ENV=(env -u MAC_GATE_BRANCH -u MAC_GATE_RUN_COPY -u MAC_GATE_ESTATE_LOCK -u MAC_GATE_ESTATE_LOCK_STAMPS
+    -u MAC_GATE_RUNS_LOGS
     "PATH=$dir/bin:$PATH" TMPDIR="$dir/tmp"
     MAC_GATE_HOST=stub-host MAC_GATE_ARTIFACTS="${ARTIFACTS:-$dir/artifacts}"
     MAC_GATE_RUNS_LEDGER="$LEDGER" STUB_DIR="$dir"
@@ -214,6 +215,7 @@ gate_env() { # $1 = stub dir; fills GATE_ENV
   [ -z "${POLL_S:-}" ] || GATE_ENV+=(GATE_POLL_S="$POLL_S")
   [ -z "${ESTATE:-}" ] || GATE_ENV+=(MAC_GATE_ESTATE_LOCK="$ESTATE")
   [ -z "${PAUSE:-}" ] || GATE_ENV+=(MAC_GATE_SELFTEST_PAUSE_DIR="$PAUSE")
+  [ -z "${RUNS_LOGS:-}" ] || GATE_ENV+=(MAC_GATE_RUNS_LOGS="$RUNS_LOGS")
 }
 run_gate() { # $1 = work tree, $2 = stub dir, then gate arguments; sets OUT and RC
   local work="$1" dir="$2"; shift 2
@@ -607,8 +609,8 @@ if wait_for_file "$CASE_DIR/a/pause/paused" "$PID_A"; then
   wait "$PID_A"; RC_A=$?
   wait "$PID_B"; RC_B=$?
   if [ "$RC_A" -eq 0 ] && [ "$RC_B" -eq 0 ] && [ "$(row_count)" -eq 2 ] \
-     && [ "$(rows | sed -n 1p | cut -f12)" = "$(sed -n 's/^run log     : //p' "$CASE_DIR/a/out.txt")" ] \
-     && [ "$(rows | sed -n 2p | cut -f12)" = "$(sed -n 's/^run log     : //p' "$CASE_DIR/b/out.txt")" ]; then
+     && cmp -s "$(rows | sed -n 1p | cut -f12)" "$(sed -n 's/^run log     : //p' "$CASE_DIR/a/out.txt")" \
+     && cmp -s "$(rows | sed -n 2p | cut -f12)" "$(sed -n 's/^run log     : //p' "$CASE_DIR/b/out.txt")"; then
     ok "contention: both runs passed, A's row first and B's second"
   else
     bad "contention: exits $RC_A/$RC_B, or the rows are not A then B"; show "$(cat "$LEDGER" 2>/dev/null)"
@@ -850,7 +852,12 @@ if wait_for_file "$CASE_DIR/hold/held" "$PID"; then
   else
     bad "init term: exit $RC, rows $(row_count), and no LEDGER-SKIPPED"; show "$OUT"
   fi
-  expect_row "init term" log="$hold_log" exit=143 mode=full remote_start=-
+  expect_row "init term" log="$CASE_DIR/gate-logs/memos-ng-ios-${hold_log##*/mac-gate-}" exit=143 mode=full remote_start=-
+  if cmp -s "$CASE_DIR/gate-logs/memos-ng-ios-${hold_log##*/mac-gate-}" "$hold_log"; then
+    ok "init term: the row's durable copy is the run's local log, byte for byte"
+  else
+    bad "init term: the durable copy differs from $hold_log"
+  fi
 else
   bad "init term: the run never reached its log's creation"; show "$(cat "$CASE_DIR/out.txt")"
 fi
@@ -924,6 +931,126 @@ for kind in preflight admission remote; do
   xargs kill < "$STUB_FD_DIR/sleepers" 2>/dev/null
 done
 unset STUB_FD_DIR
+
+# --- case 22: the row names a durable copy of the COMPLETE run log, beside the ledger ------------
+# A worktree's .gate-artifacts dies with the worktree at merge-closeout, so a row naming the local
+# log would point at nothing once its branch merged. The copy is named for the repo, the branch
+# (slash to dash) and the run's token; it holds every byte the local log holds when the run has
+# ended; and a copy that cannot be made never costs the row or the run's exit code.
+# expect_durable_log: the one row names <dir>/memos-ng-ios-<slug>-<token>.log, that file exists,
+# and it is byte-for-byte the local log of the run as it stands after the run ended.
+expect_durable_log() { # $1 = label, $2 = the directory the copy must be in, $3 = branch slug
+  local label="$1" dir="$2" slug="$3" row token got local_log
+  row="$(rows | tail -n 1)"; token="$(field "$row" 7)"; got="$(field "$row" 12)"
+  local_log="${ARTIFACTS:-$CASE_DIR/artifacts}/mac-gate-$slug-$token.log"
+  if [ -z "$token" ] || [ "$got" != "$dir/memos-ng-ios-$slug-$token.log" ]; then
+    bad "$label: log_path is [$got], expected [$dir/memos-ng-ios-$slug-$token.log]"; show "$row"; return
+  fi
+  if [ ! -f "$got" ] || [ ! -f "$local_log" ]; then
+    bad "$label: the copy [$got] or the local log [$local_log] does not exist"; return
+  fi
+  if [ "$(wc -c < "$got")" -eq "$(wc -c < "$local_log")" ] && cmp -s "$got" "$local_log" \
+     && grep -q "$SUMMARY_RE" "$got"; then
+    ok "$label: the row names the durable copy, $(wc -c < "$got") bytes, identical to the finished local log"
+  else
+    bad "$label: the copy ($(wc -c < "$got") bytes) differs from the finished local log ($(wc -c < "$local_log") bytes)"
+  fi
+}
+# Default: the directory beside the ledger, created when absent; a full run, branch fix/ledger-src.
+new_case durable-default
+STUB_REMOTE_OUT="$tmp/case-full-pass/remote.txt" run_gate "$w" "$CASE_DIR"
+[ "$RC" -eq 0 ] && ok "durable default: exit 0" || { bad "durable default: exit $RC"; show "$OUT"; }
+expect_durable_log "durable default" "$CASE_DIR/gate-logs" fix-ledger-src
+if has "LEDGER-LOG-KEPT-LOCAL"; then bad "durable default: a copy that was made still says LEDGER-LOG-KEPT-LOCAL"; show "$OUT"
+else ok "durable default: no LEDGER-LOG-KEPT-LOCAL when the copy was made"; fi
+# Override, fast path: MAC_GATE_RUNS_LOGS wins, its missing parents are made, a space in the path
+# survives quoting, and nothing appears in the default directory.
+new_case durable-override
+RUNS_LOGS="$CASE_DIR/with space/logs" run_gate "$d" "$CASE_DIR"
+[ "$RC" -eq 0 ] && ok "durable override: exit 0" || { bad "durable override: exit $RC"; show "$OUT"; }
+expect_durable_log "durable override, fast path" "$CASE_DIR/with space/logs" docs-ledger-docs
+if [ -e "$CASE_DIR/gate-logs" ]; then bad "durable override: the default directory beside the ledger was written too"
+else ok "durable override: the default directory beside the ledger was not created"; fi
+# Two runs of one branch: two rows, two distinct copies, each its own run's log.
+new_case durable-twice
+run_gate "$d" "$CASE_DIR"; rc1=$RC
+first="$(rows | tail -n 1)"
+run_gate "$d" "$CASE_DIR"; rc2=$RC
+second="$(rows | tail -n 1)"
+p1="$(field "$first" 12)"; p2="$(field "$second" 12)"
+if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$(row_count)" -eq 2 ] && [ "$p1" != "$p2" ] \
+   && [ "${p1%/*}" = "$CASE_DIR/gate-logs" ] && [ "${p2%/*}" = "$CASE_DIR/gate-logs" ] \
+   && [ -f "$p1" ] && [ -f "$p2" ] && [ "$(ls "$CASE_DIR/gate-logs" | grep -c .)" -eq 2 ] \
+   && cmp -s "$p1" "$CASE_DIR/artifacts/mac-gate-docs-ledger-docs-$(field "$first" 7).log"; then
+  ok "durable twice: two runs of one branch keep two copies, the first still its own run's log"
+else
+  bad "durable twice: exits $rc1/$rc2, rows $(row_count), copies [$p1] [$p2]"; show "$(ls -la "$CASE_DIR/gate-logs" 2>&1)"
+fi
+# A copy that cannot be made: the directory cannot be created (parent read-only), or it exists and
+# cannot be written. The row is still written, naming the local log; one LEDGER-LOG-KEPT-LOCAL
+# line says why, on stdout and in that log; the exit code is the run's own, pass or fail.
+for kind in uncreatable unwritable; do
+  for run in pass fail; do
+    new_case "keep-$kind-$run"
+    mkdir -p "$CASE_DIR/ro"
+    if [ "$kind" = uncreatable ]; then RUNS_LOGS="$CASE_DIR/ro/logs"; else RUNS_LOGS="$CASE_DIR/ro"; fi
+    chmod 555 "$CASE_DIR/ro"
+    if [ "$run" = pass ]; then
+      RUNS_LOGS="$RUNS_LOGS" run_gate "$d" "$CASE_DIR"; want=0; slug=docs-ledger-docs
+    else
+      RUNS_LOGS="$RUNS_LOGS" STUB_REMOTE_OUT="$tmp/failing-remote.txt" STUB_REMOTE_RC=65 run_gate "$w" "$CASE_DIR"
+      want=65; slug=fix-ledger-src
+    fi
+    chmod 755 "$CASE_DIR/ro"
+    row="$(rows | tail -n 1)"; token="$(field "$row" 7)"
+    local_log="$CASE_DIR/artifacts/mac-gate-$slug-$token.log"
+    if [ "$RC" -eq "$want" ] && [ "$(row_count)" -eq 1 ] && [ "$(field "$row" 12)" = "$local_log" ] \
+       && [ "$(field "$row" 9)" = "$want" ] \
+       && [ "$(printf '%s\n' "$OUT" | grep -c '^LEDGER-LOG-KEPT-LOCAL .')" -eq 1 ] \
+       && [ "$(grep -c '^LEDGER-LOG-KEPT-LOCAL .' "$local_log")" -eq 1 ] \
+       && ! has "LEDGER-SKIPPED" && [ -z "$(ls -A "$CASE_DIR/ro")" ]; then
+      ok "copy failure ($kind dir, $run run): row kept naming the local log, one LEDGER-LOG-KEPT-LOCAL, exit still $want"
+    else
+      bad "copy failure ($kind dir, $run run): exit $RC (expected $want), rows $(row_count), log_path [$(field "$row" 12)]"
+      show "$OUT"; show "$(ls -la "$CASE_DIR/ro" 2>&1)"
+    fi
+  done
+done
+unset RUNS_LOGS
+# A file already at the copy's name is somebody else's: it is left as it was, and the row keeps the
+# local log. The token is pinned through od so the name is known before the run.
+new_case keep-existing
+printf '#!/bin/sh\necho " de ad be ef 00 11 22 33"\n' > "$CASE_DIR/bin/od"; chmod +x "$CASE_DIR/bin/od"
+mkdir -p "$CASE_DIR/gate-logs"
+printf 'another run\n' > "$CASE_DIR/gate-logs/memos-ng-ios-docs-ledger-docs-deadbeef00112233.log"
+run_gate "$d" "$CASE_DIR"
+row="$(rows | tail -n 1)"
+if [ "$RC" -eq 0 ] && [ "$(row_count)" -eq 1 ] \
+   && [ "$(field "$row" 12)" = "$CASE_DIR/artifacts/mac-gate-docs-ledger-docs-deadbeef00112233.log" ] \
+   && [ "$(cat "$CASE_DIR/gate-logs/memos-ng-ios-docs-ledger-docs-deadbeef00112233.log")" = "another run" ] \
+   && [ "$(printf '%s\n' "$OUT" | grep -c '^LEDGER-LOG-KEPT-LOCAL .')" -eq 1 ]; then
+  ok "copy name taken: the file there is untouched, the row keeps the local log, one LEDGER-LOG-KEPT-LOCAL"
+else
+  bad "copy name taken: exit $RC, rows $(row_count), log_path [$(field "$row" 12)]"; show "$OUT"
+fi
+# A ledger that refuses AFTER the copy was made (a device that is always full, so the header write
+# fails): no row, LEDGER-SKIPPED, and the copy still holds every byte of the local log — the skip
+# line included. Linux only: /dev/full does not exist on macOS.
+if [ -c /dev/full ]; then
+  new_case skip-after-copy
+  LEDGER=/dev/full RUNS_LOGS="$CASE_DIR/logs" run_gate "$d" "$CASE_DIR"
+  copy="$(ls "$CASE_DIR/logs"/memos-ng-ios-docs-ledger-docs-*.log 2>/dev/null)"
+  local_log="$CASE_DIR/artifacts/mac-gate-${copy##*/memos-ng-ios-}"
+  if [ "$RC" -eq 0 ] && has "LEDGER-SKIPPED cannot write the header" && [ -n "$copy" ] && [ -f "$local_log" ] \
+     && [ "$(tail -n 1 "$copy")" = "LEDGER-SKIPPED cannot write the header of /dev/full" ] \
+     && [ "$(wc -c < "$copy")" -eq "$(wc -c < "$local_log")" ] && cmp -s "$copy" "$local_log"; then
+    ok "skip after copy: LEDGER-SKIPPED reaches the copy too, which stays byte for byte the local log"
+  else
+    bad "skip after copy: exit $RC, copy [$copy] vs [$local_log]"; show "$OUT"
+  fi
+else
+  echo "skip skip-after-copy: no /dev/full on this host, not judged"
+fi
 
 echo "estate-ledger-test: $cases cases, $fails failed"
 [ "$fails" -eq 0 ]

@@ -107,6 +107,10 @@
 #                        forever for the wrapper that is waiting for the gate.
 #   MAC_GATE_RUNS_LEDGER the run ledger every run past its log's creation appends ONE row to
 #                        (default /home/fabian/projects/worktrees/gate-runs.tsv).
+#   MAC_GATE_RUNS_LOGS   where that row's durable copy of this run's complete log goes, as
+#                        memos-ng-ios-<branch>-<run token>.log, and which the row names: a
+#                        worktree's .gate-artifacts goes with the worktree at merge-closeout
+#                        (default: gate-logs/ beside MAC_GATE_RUNS_LEDGER).
 #   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The bundles
 #                        below are always enforced and cannot be removed by setting this — an
 #                        override that could shrink the list would let a suite stop being built
@@ -708,16 +712,49 @@ die_locked() {
 #   exit                                  the run's own exit code;
 #   wall_s                                remote_end - remote_start;
 #   slot_wait_s                           the slot parser's slot_wait, once the remote has returned;
-#   log_path                              this run's log.
+#   log_path                              the durable copy of this run's complete log, taken
+#                                         under the ledger's flock after everything else the run
+#                                         wrote; the local log instead, after one
+#                                         LEDGER-LOG-KEPT-LOCAL line saying why, when no copy
+#                                         could be made.
 # It is telemetry. The append runs in a subshell, under a flock on the ledger, and anything that
 # goes wrong there says LEDGER-SKIPPED and why; the run's exit code is captured before the cleanup
 # and is the code the trap exits with, whatever the ledger did.
 GATE_RUNS_LEDGER="${MAC_GATE_RUNS_LEDGER:-/home/fabian/projects/worktrees/gate-runs.tsv}"
+# Derived from the ledger, so a suite that points the ledger at a scratch file keeps the copies
+# there too.
+GATE_RUNS_LOGS="${MAC_GATE_RUNS_LOGS:-$(dirname "$GATE_RUNS_LEDGER")/gate-logs}"
+GATE_LEDGER_LOG_COPY=""
+GATE_LEDGER_LOG_PATH=""
 GATE_LEDGER_FASTPATH=0
 GATE_REMOTE_LOG_OFFSET=""
 gate_ledger_skip() {
   printf 'LEDGER-SKIPPED %s\n' "$1"
   printf 'LEDGER-SKIPPED %s\n' "$1" >> "$log" 2>/dev/null
+  # Once the copy exists it must keep saying everything the local log says.
+  [ -z "$GATE_LEDGER_LOG_COPY" ] || printf 'LEDGER-SKIPPED %s\n' "$1" >> "$GATE_LEDGER_LOG_COPY" 2>/dev/null
+}
+gate_ledger_kept_local() {
+  printf 'LEDGER-LOG-KEPT-LOCAL %s\n' "$1"
+  printf 'LEDGER-LOG-KEPT-LOCAL %s\n' "$1" >> "$log" 2>/dev/null
+}
+# Sets GATE_LEDGER_LOG_PATH to the log the row will name. Called from the append with the ledger's
+# flock held, after the run's last write to $log, so the copy holds the whole run; only the
+# ledger's own skip lines can follow it, and gate_ledger_skip writes those into the copy as well.
+# A copy that cannot be made or does not compare equal costs the copy, never the row: the row
+# names the local log, which the LEDGER-LOG-KEPT-LOCAL line has already reached.
+gate_ledger_keep_log() {
+  local dest="$GATE_RUNS_LOGS/memos-ng-ios-$branch_slug-$RUN_TOKEN.log"
+  GATE_LEDGER_LOG_PATH="$log"
+  mkdir -p "$GATE_RUNS_LOGS" 2>/dev/null \
+    || { gate_ledger_kept_local "cannot create $GATE_RUNS_LOGS"; return 1; }
+  # The token is this run's alone; a file already there is somebody else's and stays untouched.
+  [ ! -e "$dest" ] \
+    || { gate_ledger_kept_local "$dest already exists and is not this run's"; return 1; }
+  cp "$log" "$dest" 2>/dev/null && cmp -s "$log" "$dest" \
+    || { rm -f "${dest:?}" 2>/dev/null; gate_ledger_kept_local "cannot copy $log to $dest"; return 1; }
+  GATE_LEDGER_LOG_COPY="$dest"
+  GATE_LEDGER_LOG_PATH="$dest"
 }
 gate_ledger_utc() { # an epoch on stdout as UTC; non-zero, with nothing printed, when it cannot
   local out
@@ -800,15 +837,19 @@ gate_ledger_append() { # $1 = the run's exit code
   row="$(gate_ledger_field "$GATE_ESTATE_LOCK_REQUESTED")${t}$(gate_ledger_field "$GATE_ESTATE_LOCK_ACQUIRED")" \
     && row="$row${t}${start_utc}${t}${end_utc}" \
     && row="$row${t}memos-ng-ios${t}$(gate_ledger_field "$branch")${t}$(gate_ledger_field "$RUN_TOKEN")${t}$mode${t}$rc" \
-    && row="$row${t}$wall${t}$slot_wait${t}$(gate_ledger_field "$log")" \
+    && row="$row${t}$wall${t}$slot_wait" \
     || { gate_ledger_skip "cannot compose the row"; return 1; }
-  [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" = 12 ] \
-    || { gate_ledger_skip "the row does not have 12 fields"; return 1; }
   { exec 8>>"$GATE_RUNS_LEDGER"; } 2>/dev/null \
     || { gate_ledger_skip "cannot open the run ledger $GATE_RUNS_LEDGER"; return 1; }
   # Bounded: a ledger somebody holds forever must not keep this run from ending.
   flock -w 120 8 \
     || { gate_ledger_skip "cannot lock the run ledger $GATE_RUNS_LEDGER"; return 1; }
+  # Its failure is reported by the function and changes only which log the row names.
+  gate_ledger_keep_log
+  row="$row${t}$(gate_ledger_field "$GATE_LEDGER_LOG_PATH")" \
+    || { gate_ledger_skip "cannot compose the row"; return 1; }
+  [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" = 12 ] \
+    || { gate_ledger_skip "the row does not have 12 fields"; return 1; }
   if [ ! -s "$GATE_RUNS_LEDGER" ]; then
     printf 'lock_requested_utc\tlock_acquired_utc\tremote_start_utc\tremote_end_utc\trepo\tbranch\trun_token\tmode\texit\twall_s\tslot_wait_s\tlog_path\n' >&8 \
       || { gate_ledger_skip "cannot write the header of $GATE_RUNS_LEDGER"; return 1; }
