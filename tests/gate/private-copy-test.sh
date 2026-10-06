@@ -33,6 +33,10 @@ GATE="${MAC_GATE_SCRIPT:-$repo_root/bin/mac-gate.sh}"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/gate-private-copy-XXXXXX")" || { echo "FAIL: cannot make a temp dir"; exit 1; }
 tmp="$(cd "$tmp" && pwd -P)" || exit 1
 trap 'rm -rf "$tmp"' EXIT
+# The gates this suite starts never queue behind an estate lock a parent gate holds, and their run
+# ledger rows land here rather than in the estate's ledger.
+unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS
+export MAC_GATE_RUNS_LEDGER="$tmp/gate-runs.tsv"
 
 fails=0
 cases=0

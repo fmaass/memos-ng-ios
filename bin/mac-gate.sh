@@ -99,6 +99,14 @@
 #                        run's own log, mac-gate-<branch>-<run token>.log — one file per run, so
 #                        two runs cannot write over each other and a caller's redirect cannot
 #                        truncate either (default: <repo>/.gate-artifacts)
+#   MAC_GATE_ESTATE_LOCK  a lock file this run takes itself (flock, blocking) before anything else
+#                        it does, and holds until it ends; the wait is stamped into the run log and
+#                        the run ledger. Unset: no lock is taken. A lock it cannot open or take
+#                        refuses the run (exit 15). Never set it under an outside `flock` on the
+#                        same path: the gate's own open is a second lock on that file, and it waits
+#                        forever for the wrapper that is waiting for the gate.
+#   MAC_GATE_RUNS_LEDGER the run ledger every run past its log's creation appends ONE row to
+#                        (default /home/fabian/projects/worktrees/gate-runs.tsv).
 #   MAC_GATE_TEST_BUNDLES  ADDITIONAL test bundles that must each run >= 1 test. The bundles
 #                        below are always enforced and cannot be removed by setting this — an
 #                        override that could shrink the list would let a suite stop being built
@@ -132,6 +140,8 @@
 #                 (admit=13 or slot=13);
 #            14 = slot=14, in the build host's log only: its controller's ssh went away before the
 #                 slot was claimed, so it stopped waiting instead of testing for nobody;
+#            15 = MAC_GATE_ESTATE_LOCK names a lock this run could not open or take (nothing was
+#                 copied, run or written to the run ledger);
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -154,6 +164,60 @@ die_refuse() {
   printf 'mac-gate: REFUSED: %s\n' "$1" >&2
   exit 2
 }
+
+# Whether this process is the run's private copy (see "the run's private copy" below): defined
+# here, ahead of everything that mutates anything, because the estate lock is taken first.
+gate_run_copy_is_own() {
+  local claimed="${MAC_GATE_RUN_COPY:-}" here
+  [ -n "$claimed" ] || return 1
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || return 1
+  [ "$here" = "$claimed" ] || return 1
+  case "${here##*/}" in mac-gate-run.*) ;; *) return 1 ;; esac
+  [ "$(cat "$here/.mac-gate-run-copy" 2>/dev/null)" = "$here" ]
+}
+# The estate lock. The bootstrap takes it before anything this run does can change anything — the
+# stale-candidate cleanup below included — so the run it covers is the whole run, what an outside
+# `flock … mac-gate.sh` used to cover. The descriptor it is held on (9, opened without
+# close-on-exec) is the one the exec further down hands to the copy: the copy never reopens it, so
+# there is no moment between the two in which the lock is free. Everything from here to that exec
+# is ONE brace group: bash reads a compound command whole before running any of it, so a wait of
+# hours cannot end in reading a file that was edited meanwhile. The copy drops the variable, so a
+# gate a selftest starts never queues behind the run that started it. A clock that cannot be read
+# leaves "?" as the stamp: the lock is still held, and the run ledger declines the row.
+# That same missing close-on-exec hands descriptor 9 to every child, and a child that holds it holds
+# the lock: an ssh client the build host keeps busy would hold the next run back after this one was
+# killed. So every child that can outlive a moment — each ssh, rsync, timeout, flock, fetch, poll
+# sleep, selftest, helper and the tee beside them — is started with `9>&-`, and a subshell that
+# waits on one closes it first with `exec 9>&-`. A redirect around a group in this shell is not
+# enough: bash keeps its saved copy open in every subshell forked inside. The exec to the copy is
+# the one launch that keeps it. tests/gate/estate-ledger-test.sh (case 21) kills a run mid-child.
+GATE_ESTATE_LOCK_REQUESTED=""
+GATE_ESTATE_LOCK_ACQUIRED=""
+die_estate_lock() {
+  printf 'mac-gate: REFUSED: %s\n' "$1" >&2
+  exit 15
+}
+{
+if gate_run_copy_is_own; then
+  if [ -n "${MAC_GATE_ESTATE_LOCK_STAMPS:-}" ]; then
+    GATE_ESTATE_LOCK_REQUESTED="${MAC_GATE_ESTATE_LOCK_STAMPS%% *}"
+    GATE_ESTATE_LOCK_ACQUIRED="${MAC_GATE_ESTATE_LOCK_STAMPS#* }"
+  fi
+  unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS
+else
+  unset MAC_GATE_ESTATE_LOCK_STAMPS
+  if [ -n "${MAC_GATE_ESTATE_LOCK:-}" ]; then
+    GATE_ESTATE_LOCK_REQUESTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || GATE_ESTATE_LOCK_REQUESTED="?"
+    [ -n "$GATE_ESTATE_LOCK_REQUESTED" ] || GATE_ESTATE_LOCK_REQUESTED="?"
+    { exec 9>>"$MAC_GATE_ESTATE_LOCK"; } 2>/dev/null \
+      || die_estate_lock "cannot open the estate lock $MAC_GATE_ESTATE_LOCK (MAC_GATE_ESTATE_LOCK)"
+    flock 9 \
+      || die_estate_lock "cannot take the estate lock $MAC_GATE_ESTATE_LOCK (MAC_GATE_ESTATE_LOCK)"
+    GATE_ESTATE_LOCK_ACQUIRED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || GATE_ESTATE_LOCK_ACQUIRED="?"
+    [ -n "$GATE_ESTATE_LOCK_ACQUIRED" ] || GATE_ESTATE_LOCK_ACQUIRED="?"
+    export MAC_GATE_ESTATE_LOCK_STAMPS="$GATE_ESTATE_LOCK_REQUESTED $GATE_ESTATE_LOCK_ACQUIRED"
+  fi
+fi
 
 # --- the test-count candidate: cleared before anything else --------------------------------------
 # The candidate at the documented path (`<repo root>/.gate-artifacts/testcount-baseline.tsv`, or
@@ -203,14 +267,6 @@ gate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi \
     | awk '{print $1}'
 }
-gate_run_copy_is_own() {
-  local claimed="${MAC_GATE_RUN_COPY:-}" here
-  [ -n "$claimed" ] || return 1
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || return 1
-  [ "$here" = "$claimed" ] || return 1
-  case "${here##*/}" in mac-gate-run.*) ;; *) return 1 ;; esac
-  [ "$(cat "$here/.mac-gate-run-copy" 2>/dev/null)" = "$here" ]
-}
 if gate_run_copy_is_own; then
   GATE_RUN_COPY="$MAC_GATE_RUN_COPY"
   unset MAC_GATE_RUN_COPY
@@ -238,6 +294,7 @@ else
   export MAC_GATE_RUN_COPY="$gate_run_dir"
   exec "${BASH:-bash}" "$gate_run_dir/mac-gate.sh" "$@"
 fi
+}
 remove_run_copy() {
   [ -n "${GATE_RUN_COPY:-}" ] || return 0
   rm -rf "$GATE_RUN_COPY"
@@ -421,7 +478,7 @@ gate_classify() {
   # the full gate, because then nothing is known about what changed.
   local fetch_note=""
   # Pruning makes deleted branches disappear from the local inventory used by the lane reaper.
-  if git fetch --quiet --prune origin 2>/dev/null; then
+  if git fetch --quiet --prune origin 2>/dev/null 9>&-; then
     ORIGIN_FETCHED=1
   else
     fetch_note=" (origin could not be fetched — the origin/main already on disk was used)"
@@ -587,7 +644,6 @@ DEVICE_NAME="gate-${branch_slug}-$RUN_TOKEN"
 LOCK_DIR=""
 LOCK_OWNER="host=$(hostname -s) pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) token=$RUN_TOKEN"
 
-open_run_log
 
 # The build host deletes the device when the remote script ends, however it ends. That covers a
 # failing step and a refusal — it does NOT cover this script being interrupted: a remote shell
@@ -605,7 +661,7 @@ remove_gate_device() {
     "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH
      export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
      xcrun simctl shutdown '$name' >/dev/null 2>&1
-     xcrun simctl delete '$name' >/dev/null 2>&1" \
+     xcrun simctl delete '$name' >/dev/null 2>&1" 9>&- \
     && say "simulator   : removed the leftover device $DEVICE_NAME from the build host"
   return 0
 }
@@ -624,7 +680,7 @@ release_gate_lock() {
 [ -d "$lock" ] || exit 0
 if [ "$(cat "$lock/owner" 2>/dev/null)" = "$owner" ]; then rm -rf "$lock"; fi
 REL_EOF
-  } | timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' >/dev/null 2>&1
+  } 9>&- | timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' >/dev/null 2>&1 9>&-
   return 0
 }
 
@@ -638,10 +694,161 @@ die_locked() {
   exit 3
 }
 
-trap 'remove_gate_device; release_gate_lock; remove_run_copy' EXIT
-trap 'remove_gate_device; release_gate_lock; exit 130' INT
-trap 'remove_gate_device; release_gate_lock; exit 143' TERM
-trap 'remove_gate_device; release_gate_lock; exit 129' HUP
+# --- the run ledger -------------------------------------------------------------------------------
+# One row per run that got this far (its token and log exist), appended by the exit trap below
+# once the cleanup is done, so every way out — a verdict, a refusal, a signal — is counted the
+# same way. Twelve tab-separated fields; a field the run never reached is "-":
+#   lock_requested_utc lock_acquired_utc  the estate lock's wait, when this run took it;
+#   remote_start_utc remote_end_utc       the build host's own clock (MAC_GATE_REMOTE_CLOCK lines,
+#                                         read only from what the remote printed — never from the
+#                                         selftests' output above it);
+#   repo branch run_token                 who this run was;
+#   mode                                  refused (an exit code the table at the top calls a
+#                                         refusal), else fastpath, else quick, else full;
+#   exit                                  the run's own exit code;
+#   wall_s                                remote_end - remote_start;
+#   slot_wait_s                           the slot parser's slot_wait, once the remote has returned;
+#   log_path                              this run's log.
+# It is telemetry. The append runs in a subshell, under a flock on the ledger, and anything that
+# goes wrong there says LEDGER-SKIPPED and why; the run's exit code is captured before the cleanup
+# and is the code the trap exits with, whatever the ledger did.
+GATE_RUNS_LEDGER="${MAC_GATE_RUNS_LEDGER:-/home/fabian/projects/worktrees/gate-runs.tsv}"
+GATE_LEDGER_FASTPATH=0
+GATE_REMOTE_LOG_OFFSET=""
+gate_ledger_skip() {
+  printf 'LEDGER-SKIPPED %s\n' "$1"
+  printf 'LEDGER-SKIPPED %s\n' "$1" >> "$log" 2>/dev/null
+}
+gate_ledger_utc() { # an epoch on stdout as UTC; non-zero, with nothing printed, when it cannot
+  local out
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  out="$(date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+    || out="$(date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 1
+  gate_ledger_is_utc "$out" || return 1
+  printf '%s' "$out"
+}
+gate_ledger_is_utc() {
+  case "$1" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) return 0 ;;
+  esac
+  return 1
+}
+gate_ledger_field() { printf '%s' "${1:--}" | tr '\t\n' '  '; }
+# Every step is checked: errexit is off in this script, so a status nobody reads is a status lost.
+# Any failure says LEDGER-SKIPPED and why, and writes no row — a row with a hole where a
+# measurement should be would read as a measurement.
+gate_ledger_append() { # $1 = the run's exit code
+  local rc="$1" mode remote_text="" clock="" start="" end="" start_utc="-" end_utc="-" wall="-" slot_wait="-"
+  local row t=$'\t' value
+  case "$rc" in
+    2|3|4|11|12|13|14|15) mode=refused ;;
+    *)
+      if [ "$GATE_LEDGER_FASTPATH" -eq 1 ]; then mode=fastpath
+      elif [ "${QUICK:-0}" -eq 1 ]; then mode=quick
+      else mode=full; fi ;;
+  esac
+  if [ -n "$GATE_ESTATE_LOCK_REQUESTED" ]; then
+    gate_ledger_is_utc "$GATE_ESTATE_LOCK_REQUESTED" \
+      || { gate_ledger_skip "the estate lock's request time could not be read ($GATE_ESTATE_LOCK_REQUESTED)"; return 1; }
+    gate_ledger_is_utc "$GATE_ESTATE_LOCK_ACQUIRED" \
+      || { gate_ledger_skip "the estate lock's acquisition time could not be read ($GATE_ESTATE_LOCK_ACQUIRED)"; return 1; }
+  fi
+  if [ -n "$GATE_REMOTE_LOG_OFFSET" ]; then
+    case "$GATE_REMOTE_LOG_OFFSET" in
+      *[!0-9]*) gate_ledger_skip "where the remote's output starts in $log could not be read"; return 1 ;;
+    esac
+    remote_text="$(tail -c +"$((GATE_REMOTE_LOG_OFFSET + 1))" "$log")" \
+      || { gate_ledger_skip "cannot read the remote's output back from $log"; return 1; }
+    # One pass that reads ALL of the remote's text from a here-string — nothing here stops reading
+    # early, so a long build log cannot turn a match into a broken pipe — and answers three
+    # things on one line: whether any clock read failed (a stamp that is not digits, or the
+    # marker a step prints when its timestamp failed), the first start and the last end.
+    clock="$(awk '
+      /^MAC_GATE_REMOTE_CLOCK start=/ { v = substr($0, 29); if (v ~ /^[0-9]+$/) { if (s == "") s = v } else bad = 1; next }
+      /^MAC_GATE_REMOTE_CLOCK end=/   { v = substr($0, 27); if (v ~ /^[0-9]+$/) e = v; else bad = 1; next }
+      /^MAC_GATE_REMOTE_CLOCK unreadable/ { bad = 1 }
+      END { print (bad ? "unreadable" : "ok"), (s == "" ? "-" : s), (e == "" ? "-" : e) }
+    ' <<< "$remote_text")" \
+      || { gate_ledger_skip "cannot read the build host's clock lines from $log"; return 1; }
+    case "$clock" in
+      "ok "*) ;;
+      "unreadable "*) gate_ledger_skip "the build host could not read its own clock"; return 1 ;;
+      *) gate_ledger_skip "cannot read the build host's clock lines from $log"; return 1 ;;
+    esac
+    start="${clock#ok }"; start="${start%% *}"; [ "$start" != "-" ] || start=""
+    end="${clock##* }"; [ "$end" != "-" ] || end=""
+    if [ -n "$start" ]; then
+      start_utc="$(gate_ledger_utc "$start")" \
+        || { gate_ledger_skip "cannot convert remote_start $start to UTC"; return 1; }
+    fi
+    if [ -n "$end" ]; then
+      end_utc="$(gate_ledger_utc "$end")" \
+        || { gate_ledger_skip "cannot convert remote_end $end to UTC"; return 1; }
+    fi
+    if [ -n "$start" ] && [ -n "$end" ]; then wall="$((end - start))"; fi
+    if [ -n "${remote_rc:-}" ] && declare -F slot_field >/dev/null; then
+      slot_wait="$(slot_field slot_wait)" \
+        || { gate_ledger_skip "cannot read slot_wait from $log"; return 1; }
+    fi
+  fi
+  for value in "$wall" "$slot_wait"; do
+    case "$value" in
+      -) ;;
+      ''|*[!0-9]*) gate_ledger_skip "not a measurement: $value"; return 1 ;;
+    esac
+  done
+  row="$(gate_ledger_field "$GATE_ESTATE_LOCK_REQUESTED")${t}$(gate_ledger_field "$GATE_ESTATE_LOCK_ACQUIRED")" \
+    && row="$row${t}${start_utc}${t}${end_utc}" \
+    && row="$row${t}memos-ng-ios${t}$(gate_ledger_field "$branch")${t}$(gate_ledger_field "$RUN_TOKEN")${t}$mode${t}$rc" \
+    && row="$row${t}$wall${t}$slot_wait${t}$(gate_ledger_field "$log")" \
+    || { gate_ledger_skip "cannot compose the row"; return 1; }
+  [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" = 12 ] \
+    || { gate_ledger_skip "the row does not have 12 fields"; return 1; }
+  { exec 8>>"$GATE_RUNS_LEDGER"; } 2>/dev/null \
+    || { gate_ledger_skip "cannot open the run ledger $GATE_RUNS_LEDGER"; return 1; }
+  # Bounded: a ledger somebody holds forever must not keep this run from ending.
+  flock -w 120 8 \
+    || { gate_ledger_skip "cannot lock the run ledger $GATE_RUNS_LEDGER"; return 1; }
+  if [ ! -s "$GATE_RUNS_LEDGER" ]; then
+    printf 'lock_requested_utc\tlock_acquired_utc\tremote_start_utc\tremote_end_utc\trepo\tbranch\trun_token\tmode\texit\twall_s\tslot_wait_s\tlog_path\n' >&8 \
+      || { gate_ledger_skip "cannot write the header of $GATE_RUNS_LEDGER"; return 1; }
+  fi
+  printf '%s\n' "$row" >&8 \
+    || { gate_ledger_skip "cannot append to $GATE_RUNS_LEDGER"; return 1; }
+  return 0
+}
+# Initialized means this run's token-named log exists: the token is unique, so nothing but this run
+# can have created it. Before that, an exit cleans up only what it always did (the private copy),
+# and writes no row.
+gate_run_initialized() { [ -n "${log:-}" ] && [ -e "$log" ]; }
+gate_on_signal() { # $1 = the exit code the signal ends the run with
+  if gate_run_initialized; then remove_gate_device; release_gate_lock; fi
+  exit "$1"
+}
+gate_on_exit() {
+  local rc=$?
+  if gate_run_initialized; then remove_gate_device; release_gate_lock; fi
+  remove_run_copy
+  gate_run_initialized || exit "$rc"
+  ( exec 9>&-
+    gate_ledger_done=0
+    trap '[ "$gate_ledger_done" -eq 1 ] || gate_ledger_skip "the ledger append stopped before it finished"' EXIT
+    gate_ledger_append "$rc"
+    gate_ledger_done=1 ) 2>/dev/null
+  exit "$rc"
+}
+# The log is created here, after every function its exit path calls is defined, and the exit and
+# signal traps follow it at once: from the moment this run has a token-named log, every way out —
+# a signal during the stamps below included — goes through the cleanup and the run ledger.
+trap 'gate_on_exit' EXIT
+trap 'gate_on_signal 130' INT
+trap 'gate_on_signal 143' TERM
+trap 'gate_on_signal 129' HUP
+open_run_log
+if [ -n "$GATE_ESTATE_LOCK_REQUESTED" ]; then
+  say "estate lock : lock_requested=$GATE_ESTATE_LOCK_REQUESTED (taken by this run before its copy was made)"
+  say "estate lock : lock_acquired=$GATE_ESTATE_LOCK_ACQUIRED"
+fi
 
 # --- (5) provenance ---------------------------------------------------------------------------
 {
@@ -719,7 +926,7 @@ selftest_rc=0
 for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
-    "$selftest_script" 2>&1 | tee -a "$log"
+    "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
     [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
   else
     say "the gate's own test $selftest_script is missing or not executable"
@@ -732,7 +939,7 @@ for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
     fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
-  "$selftest_script" 2>&1 | tee -a "$log"
+  "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
   [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
 done
 record selftest "$selftest_rc"
@@ -830,6 +1037,7 @@ if [ "$CLASSIFY_VERDICT" = fastpath ] && [ "$QUICK" -eq 0 ]; then
   say "mac-gate PASS (fast path: docs-only) — base $CLASSIFY_BASE — changed: $(printf '%s' "$CLASSIFY_PATHS" | tr '\n' ' ')"
   say "fast path   : nothing was copied to a build host — $CLASSIFY_REASON"
   printf 'verdict : PASS (fast path: docs-only)\n' >> "$artifacts/classification.txt"
+  GATE_LEDGER_FASTPATH=1
   summary_and_exit
 fi
 # The fast path answers "does this change set owe a build". A quick run is not asking that: it is
@@ -859,6 +1067,7 @@ if [ "$ORIGIN_FETCHED" -eq 1 ]; then
       -e 's#^refs/remotes/origin/##' | sort -u)"
 fi
 preflight_out="$(
+  exec 9>&-
   {
     printf "branch='%s'\n" "$(esc "$branch")"
     printf "lock_owner='%s'\n" "$(esc "$LOCK_OWNER")"
@@ -1029,6 +1238,7 @@ else
   # about this branch proves nothing), once about this branch.
   branch_re="$(printf '%s' "$branch" | sed 's/[.[]/\\&/g')"
   probe_out="$(
+    exec 9>&-
     {
       printf "lock='%s'\n" "$(esc "$lockdir")"
       printf "branch_re='%s'\n" "$(esc "$branch_re")"
@@ -1077,6 +1287,7 @@ PROBE_EOF
   # so exactly one of them carries the old lock away and the other finds it gone. rm -rf followed
   # by mkdir is not — the second run's rm would delete the first run's fresh lock.
   takeover_out="$(
+    exec 9>&-
     {
       printf "lock='%s'\n" "$(esc "$lockdir")"
       printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
@@ -1139,9 +1350,18 @@ GATE_ADMISSION_SELF="$GATE_RUN_COPY/scripts/gate-admission.sh"
 . "$GATE_ADMISSION_SELF" 2>/dev/null \
   || die_refuse "cannot load the admission helper $GATE_ADMISSION_SELF — nothing was copied"
 gate_say() { say "$@"; }
+# The admission's poll sleep is a child of this run as well (GATE_SLEEP, set by the helper).
+gate_admission_sleep_cmd="$GATE_SLEEP"
+gate_admission_sleep() { "$gate_admission_sleep_cmd" "$@" 9>&-; }
+GATE_SLEEP=gate_admission_sleep
 gate_host_available_kb() {
   local out free own
+  # The admission calls this inside its own command substitution, a subshell that waits on the
+  # ssh below: it lets the estate lock go there. Never in this run's own shell, whose copy IS the
+  # lock (BASHPID equals $$ only there, and the fallback keeps it so where BASHPID is unknown).
+  [ "${BASHPID:-$$}" = "$$" ] || exec 9>&-
   out="$(
+    exec 9>&-
     {
       cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
       cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
@@ -1182,12 +1402,16 @@ rsync -a --delete \
   --exclude '*.xcresult' \
   --exclude '.gate-artifacts' \
   -e ssh \
-  "$repo_root"/ "$host:$target/" 2>&1 | tee -a "$log"
+  "$repo_root"/ "$host:$target/" 2>&1 9>&- | tee -a "$log" 9>&-
 record rsync "${PIPESTATUS[0]}"
 [ "$first_fail" -eq 0 ] || end_run
 
 # --- (4) the ordered, fail-fast checks on the build host --------------------------------------
 say "--- step: remote ---"
+# Where the remote's own output starts in the log: the run ledger reads the remote's clock from
+# here on, and from nothing printed before it.
+GATE_REMOTE_LOG_OFFSET="$(wc -c < "$log" | tr -d ' ')" || GATE_REMOTE_LOG_OFFSET="?"
+case "$GATE_REMOTE_LOG_OFFSET" in ''|*[!0-9]*) GATE_REMOTE_LOG_OFFSET="?" ;; esac
 {
   printf "GATE_TARGET='%s'\n" "$(esc "$target")"
   printf "GATE_ROOT='%s'\n" "$(esc "$gate_root")"
@@ -1207,6 +1431,46 @@ say "--- step: remote ---"
   cat "$GATE_ADMISSION_SELF"
   cat <<'REMOTE_EOF'
 set -uo pipefail
+
+# The build host's own clock, read twice: at the first line here and when the run ends. The end
+# is stamped once — just before the summary, so the summary's wall= is the run's, or on the way
+# out for every exit that has no summary (the ownership refusal right below, the quick run) — and
+# the controller's run ledger takes both from these lines.
+# A clock that cannot be read says so ("unreadable", t=-, wall=-) rather than print a number.
+gate_remote_now() {
+  local now
+  now="$(date +%s)" || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$now"
+}
+gate_remote_clock_start() {
+  GATE_REMOTE_START="$(gate_remote_now)" || GATE_REMOTE_START="unreadable"
+  GATE_REMOTE_END=""
+  echo "MAC_GATE_REMOTE_CLOCK start=$GATE_REMOTE_START"
+}
+gate_remote_clock_end() {
+  [ -z "${GATE_REMOTE_END:-}" ] || return 0
+  GATE_REMOTE_END="$(gate_remote_now)" || GATE_REMOTE_END="unreadable"
+  echo "MAC_GATE_REMOTE_CLOCK end=$GATE_REMOTE_END"
+}
+gate_remote_t() {
+  local now
+  case "$GATE_REMOTE_START" in unreadable) printf -- '-'; return 0 ;; esac
+  now="$(gate_remote_now)" || { printf -- '-'; return 0; }
+  printf '%s' "$((now - GATE_REMOTE_START))"
+}
+gate_remote_step_line() { # NAME RC — the step line; a timestamp that failed is said out loud
+  local t
+  t="$(gate_remote_t)"
+  echo "MAC_GATE_STEP $1 $2 t=$t"
+  [ "$t" != "-" ] || echo "MAC_GATE_REMOTE_CLOCK unreadable (the clock failed at step $1)"
+}
+gate_remote_wall() {
+  case "$GATE_REMOTE_START$GATE_REMOTE_END" in *unreadable*) printf -- '-'; return 0 ;; esac
+  printf '%s' "$((GATE_REMOTE_END - GATE_REMOTE_START))"
+}
+gate_remote_clock_start
+trap 'gate_remote_clock_end' EXIT
 
 # The first thing this shell does, before a directory is entered or a byte is removed: check that
 # the lock this run was given is still this run's. A controller can be killed between the copy and
@@ -1316,7 +1580,7 @@ gate_give_back() {
   fi
   return $rc
 }
-trap 'gate_give_back' EXIT
+trap 'gate_give_back; gate_remote_clock_end' EXIT
 trap 'gate_give_back; exit 130' INT
 trap 'gate_give_back; exit 143' TERM
 trap 'gate_give_back; exit 129' HUP
@@ -1538,7 +1802,7 @@ step() {
   "$@"
   local rc=$?
   summary="$summary $name=$rc"
-  echo "MAC_GATE_STEP $name $rc"
+  gate_remote_step_line "$name" "$rc"
   if [ "$rc" -ne 0 ] && [ "$first_fail" -eq 0 ]; then first_fail=$rc; fi
 }
 
@@ -2576,24 +2840,24 @@ QUICKCOUNT_PY
   echo "::: lint :::"
   s_format
   quick_lint_rc=$?
-  echo "MAC_GATE_STEP lint $quick_lint_rc"
+  gate_remote_step_line lint "$quick_lint_rc"
   quick_exit="$quick_lint_rc"
   if [ "$quick_lint_rc" -eq 0 ]; then
     echo "::: generate :::"
     s_quick_generate
     quick_build_rc=$?
-    echo "MAC_GATE_STEP generate $quick_build_rc"
+    gate_remote_step_line generate "$quick_build_rc"
     if [ "$quick_build_rc" -eq 0 ]; then
       echo "::: build :::"
       s_quick_build
       quick_build_rc=$?
-      echo "MAC_GATE_STEP build $quick_build_rc"
+      gate_remote_step_line build "$quick_build_rc"
     fi
     if [ "$quick_build_rc" -eq 0 ]; then
       echo "::: tests${quick_scope:+ ($quick_scope)} :::"
       s_quick_tests
       quick_tests_rc=$?
-      echo "MAC_GATE_STEP tests $quick_tests_rc"
+      gate_remote_step_line tests "$quick_tests_rc"
       quick_exit="$quick_tests_rc"
     else
       echo "::: tests skipped (the build failed) :::"
@@ -2629,10 +2893,11 @@ step testcount  s_testcount
 gate_drop_failed_rebuilds "$GATE_WORK" "$first_fail"
 # The slot went back inside the xcodebuild step, before this line, and said so on its own
 # MAC_GATE_SLOT line; the traps only repeat the release.
-echo "MAC_GATE_REMOTE_SUMMARY:$summary | exit=$first_fail"
+gate_remote_clock_end
+echo "MAC_GATE_REMOTE_SUMMARY:$summary wall=$(gate_remote_wall) | exit=$first_fail"
 exit "$first_fail"
 REMOTE_EOF
-} | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1 | tee -a "$log"
+} 9>&- | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1 9>&- | tee -a "$log" 9>&-
 remote_rc="${PIPESTATUS[1]}"
 record remote "$remote_rc"
 # The slot's fields, as the build host printed them after its close. A field that is not a run of
@@ -2696,14 +2961,14 @@ for abandoned in "$artifacts"/incoming-*; do
     [ "$copyback_rc" -ne 0 ] || copyback_rc=1
   fi
 done
-rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/incoming-$RUN_TOKEN/" 2>&1 | tee -a "$log"
+rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/incoming-$RUN_TOKEN/" 2>&1 9>&- | tee -a "$log" 9>&-
 rsync_rc="${PIPESTATUS[0]}"
 [ "$copyback_rc" -ne 0 ] || copyback_rc="$rsync_rc"
 staging="$artifacts/incoming-$RUN_TOKEN"
 say "copyback: staged in $staging (rsync exit $rsync_rc)"
 candidate_owner="$GATE_RUN_COPY/scripts/testcount-candidate-owner.sh"
 if [ -x "$candidate_owner" ]; then
-  "$candidate_owner" "$staging" "$artifacts" "$RUN_TOKEN" 2>&1 | tee -a "$log"
+  "$candidate_owner" "$staging" "$artifacts" "$RUN_TOKEN" 2>&1 9>&- | tee -a "$log" 9>&-
   owner_rc="${PIPESTATUS[0]}"
   [ "$copyback_rc" -ne 0 ] || copyback_rc="$owner_rc"
 else
