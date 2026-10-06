@@ -449,22 +449,20 @@ struct DockTests {
         #expect(dock.mode == .tabs, "a run of 30 up no longer unfolds")
     }
 
-    /// The Library's leading bar is drawn inside its own stack (MEMNG-690): its presses are the
-    /// tabs' presses, registered by the tabs, and nothing before they are.
-    @Test("a press in the Library's leading bar is the tabs' press")
-    func libraryBarPressesThroughTheTabs() {
-        let dock = AppDock()
-        dock.pressTab(.timeline)
-        let held = Held(MainTab.library)
-        let binding = Binding(get: { held.value }, set: { held.value = $0 })
-        dock.send(.selected(.library))
-        dock.whenTabPressed { Tabs.pressing(selection: binding, dock: dock).wrappedValue = $0 }
-        dock.pressTab(.library)
-        #expect(dock.mode == .scope, "the Library pressed where it shows is its scope")
-        #expect(held.value == .library)
-        dock.pressTab(.timeline)
-        #expect(held.value == .timeline)
-        #expect(dock.mode == .tabs)
+    /// Where the selection pill stands under each tab: one tab 86 pt along, the 94 pt pill
+    /// reaching 4 pt past its tab on either side (MEMNG-690 phase 3).
+    @Test(
+        "the pill stands centred under its tab, one tab apart",
+        arguments: [
+            (MainTab.library, CGFloat(-4)),
+            (.timeline, 82),
+            (.places, 168),
+        ] as [(MainTab, CGFloat)])
+    func pillOffset(tab: MainTab, expected: CGFloat) {
+        #expect(LeadingMainBar.pillOffset(for: tab) == expected)
+        let middle = LeadingMainBar.pillOffset(for: tab) + LeadingMainBar.pillWidth / 2
+        let index = CGFloat(MainTab.allCases.firstIndex(of: tab) ?? -1)
+        #expect(middle == (index + 0.5) * LeadingMainBar.itemWidth, "not centred on its tab")
     }
 
     /// Each root draws the bar inside its own stack (MEMNG-690): its shape there, nothing

@@ -35,7 +35,7 @@ private struct ChromeHarness: View {
             case .timeline:
                 NavigationStack(path: $nav.path) {
                     Text("the timeline")
-                        // As `TimelineView` draws it: the app's bar inside the stack (MEMNG-690).
+                        // As `TimelineView` keeps it: the bar's room inside the stack (MEMNG-690).
                         .leadingFootBar(on: .timeline)
                         .stackDestination(for: SettingsRoute.self) { _ in
                             Text("settings")

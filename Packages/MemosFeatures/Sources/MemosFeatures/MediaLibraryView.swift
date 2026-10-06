@@ -54,12 +54,11 @@ struct MediaLibraryView: View {
     /// The scope row's Library icon, which gives the tabs back (`LeadingMainBar`).
     static let tabsButton = "library-show-tabs"
 
-    /// What the Library draws at its foot, inside its own stack, for the dock's one `bar`: the
-    /// scope row where the bar is the scope, the capsule where the tabs stand — the bar the tabs
-    /// draw on the other roots (`leadingFootBar`) — and nothing under a claim, whose bar is the
-    /// claimant's. Here and not around the stack: a change of what a bar around the stack holds
-    /// moved the grid to its top (MEMNG-690), one inside it does not, and its height clears the
-    /// grid's foot.
+    /// What the app's bar draws under the Library for the dock's one `bar`: the scope row where the
+    /// bar is the scope, the capsule where the tabs stand, and nothing under a claim, whose bar is
+    /// the claimant's. The Library keeps the bar's room at its foot, inside its own stack, while
+    /// it draws either: a change of what a bar around the stack holds moved the grid to its top
+    /// (MEMNG-690), a room of one height inside it does not, and clears the grid's foot.
     static func footRow(_ bar: DockBar) -> LeadingMainBar.BarShape? {
         switch bar {
         case .scope: .scope
@@ -131,19 +130,11 @@ struct MediaLibraryView: View {
                     } message: {
                         Text(LibraryDeleteFlow.explanation)
                     }
-                } else if let dock {
-                    // The app's own glass at the Library's foot (`footRow`, MEMNG-690): the scope
-                    // row and the capsule, the two in one
-                    // container so the capsule morphs into the row and back. Built whatever the
-                    // shape, so the container outlives the swap and the glass appears and goes
-                    // inside the container's animation.
-                    LeadingMainBar(
-                        shape: Self.footRow(bottomBar),
-                        selection: .library,
-                        press: { dock.pressTab($0) },
-                        pressLibraryIcon: { dock.send(.pressedLibraryIcon) },
-                        scope: choice
-                    )
+                } else if dock != nil, Self.footRow(bottomBar) != nil {
+                    // The room of the app's bar (`footRow`, MEMNG-690), which `MainTabs` keeps
+                    // around every stack: the same height in both its shapes here, so the swap
+                    // between them changes no inset.
+                    LeadingMainBar.room
                 }
             }
             .toolbarVisibility(.hidden, for: .navigationBar)

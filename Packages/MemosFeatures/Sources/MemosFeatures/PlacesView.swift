@@ -21,7 +21,7 @@ struct PlacesView: View {
             PlacesScreen()
                 .id(session.state.user?.subject)
                 .tabRootTitle(MainTab.places.title)
-                // The app's main bar, inside the stack (MEMNG-690).
+                // The app's main bar's room, inside the stack (MEMNG-690).
                 .leadingFootBar(on: .places)
         }
     }

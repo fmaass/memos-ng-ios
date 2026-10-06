@@ -2450,6 +2450,8 @@ extension MediaImageLoaderTests {
 @Observable
 private final class BarLabShape {
     var shape: LeadingMainBar.BarShape? = .tabs
+    /// The tab drawn as pressed (`leadingBarHeldPress`).
+    var held: MainTab?
 }
 
 private struct BarLab: View {
@@ -2462,6 +2464,370 @@ private struct BarLab: View {
                     shape: box.shape, selection: .timeline, press: { _ in },
                     pressLibraryIcon: {}, scope: LibraryScopeChoice())
             }
+            .environment(\.leadingBarHeldPress, box.held)
+    }
+}
+
+/// The system's own tab bar, the reference the pill and the press are matched to (MEMNG-690
+/// phase 3): a plain `TabView` over the same three tabs, its selection written by the test.
+@MainActor
+@Observable
+private final class SystemTabLabSelection {
+    var selection: MainTab = .library
+}
+
+private struct SystemTabLab: View {
+    @Bindable var box: SystemTabLabSelection
+
+    var body: some View {
+        TabView(selection: $box.selection) {
+            ForEach(MainTab.allCases) { tab in
+                Tab(tab.title, systemImage: tab.symbol, value: tab) {
+                    Color(.systemGroupedBackground)
+                }
+            }
+        }
+    }
+}
+
+extension MediaImageLoaderTests {
+    /// A light window of the recording's size over `root`, made key.
+    fileprivate static func labWindow(_ root: UIViewController) -> UIWindow {
+        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
+        let window: UIWindow
+        if let scene = scene as? UIWindowScene {
+            window = UIWindow(windowScene: scene)
+            window.frame = frame
+        } else {
+            window = UIWindow(frame: frame)
+        }
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    /// The selection pill's frame on screen, nil when none is drawn.
+    /// How many of the main bar's glass markers, in any shape, the window draws on screen.
+    fileprivate static func mainBarMarkers(in window: UIWindow) -> Int {
+        let wanted = Set(
+            [LeadingMainBar.BarShape.tabs, .folded, .scope].map(LeadingMainBar.identifier(of:)))
+        var count = 0
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            var identifier: String?
+            if object.responds(to: Selector(("accessibilityIdentifier"))) {
+                identifier = object.value(forKey: "accessibilityIdentifier") as? String
+            }
+            if let identifier, wanted.contains(identifier) {
+                let frame = Self.frame(of: object)
+                if !frame.isEmpty, frame.intersects(window.bounds) { count += 1 }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return count
+    }
+
+    fileprivate static func pillFrame(in window: UIWindow) -> CGRect? {
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            var identifier: String?
+            if object.responds(to: Selector(("accessibilityIdentifier"))) {
+                identifier = object.value(forKey: "accessibilityIdentifier") as? String
+            }
+            if identifier == LeadingMainBar.pillIdentifier {
+                let frame = Self.frame(of: object)
+                if !frame.isEmpty, frame.intersects(window.bounds) { return frame }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
+    /// `tab`'s item in the bar at the window's foot, the leftmost if drawn twice.
+    fileprivate static func itemFrame(_ tab: MainTab, in window: UIWindow) -> CGRect? {
+        let foot = window.bounds.height * 0.8
+        return elements(labelled: tab.title, in: window).map { frame(of: $0) }
+            .filter { $0.minY >= foot && !$0.isEmpty && $0.intersects(window.bounds) }
+            .min { $0.minX < $1.minX }
+    }
+
+    /// The bounds of the saturated pixels drawn inside `area` — a selected tab's tinted icon and
+    /// title, whatever the tint — in points; nil when there are none.
+    fileprivate static func tinted(in area: CGRect, of window: UIWindow) -> CGRect? {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        let image = UIGraphicsImageRenderer(bounds: area, format: format).image { _ in
+            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        guard let drawn = image.cgImage else { return nil }
+        let width = drawn.width
+        let height = drawn.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        bytes.withUnsafeMutableBytes { raw in
+            let context = CGContext(
+                data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            context?.draw(drawn, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        var box: CGRect?
+        for row in 0..<height {
+            for column in 0..<width {
+                let at = (row * width + column) * 4
+                let channels = [bytes[at], bytes[at + 1], bytes[at + 2]].map(Int.init)
+                guard let high = channels.max(), let low = channels.min(), high - low > 60 else {
+                    continue
+                }
+                let dot = CGRect(
+                    x: CGFloat(column) / 2, y: CGFloat(row) / 2, width: 0.5, height: 0.5)
+                box = box.map { $0.union(dot) } ?? dot
+            }
+        }
+        return box
+    }
+
+    /// MEMNG-690 phase 3: ONE bar for every tab, laid over the stacks. Through each switch,
+    /// sampled every frame while the tab's content changes, the window holds exactly one main-bar
+    /// marker — a bar per stack held two while the tabs crossfaded — and the capsule's frame is
+    /// 40's on every tab: at the leading inset, its foot `bottomDrop` below the safe area.
+    @Test("one bar: a single main-bar marker through every switch, the capsule's frame unmoved")
+    func oneBarAcrossTheTabs() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            let first = await leadingGlass(.tabs, in: window)
+            let inset = window.safeAreaInsets.left + LeadingMainBar.leadingInset
+            let foot =
+                window.bounds.height - window.safeAreaInsets.bottom + LeadingMainBar.bottomDrop
+            var lines = ["Library: \(String(describing: first)) inset \(inset) foot \(foot)"]
+            #expect(abs((first?.minX ?? -100) - inset) <= 1, "\(lines[0])")
+            #expect(abs((first?.maxY ?? -100) - foot) <= 1, "\(lines[0])")
+            #expect(abs((first?.height ?? 0) - LeadingMainBar.height) <= 1, "\(lines[0])")
+            for tab in [MainTab.timeline, .places, .library] {
+                #expect(pressLeading(tab, in: window), "\(tab.title) took no press")
+                var counts: [Int] = []
+                for _ in 0..<30 {
+                    counts.append(Self.mainBarMarkers(in: window))
+                    await chromeSettle(window)
+                }
+                await tabChosen(tab, window)
+                let frame = await leadingGlass(.tabs, in: window)
+                lines.append("\(tab.title): \(String(describing: frame)) markers \(counts)")
+                #expect(counts.allSatisfy { $0 == 1 }, "\(lines.last ?? "")")
+                let moved = [
+                    (frame?.minX ?? 0) - (first?.minX ?? 0),
+                    (frame?.minY ?? 0) - (first?.minY ?? 0),
+                    (frame?.width ?? 0) - (first?.width ?? 0),
+                    (frame?.height ?? 0) - (first?.height ?? 0),
+                ]
+                #expect(
+                    frame != nil && moved.allSatisfy { abs($0) <= 1 },
+                    "the bar moved: \(lines.last ?? "")")
+            }
+            notes("690-one-bar", lines)
+        }
+    }
+
+    /// The one bar keeps 40's scroll edge effect: the content under it fades where it faded under
+    /// the bar in the stack's own bottom bar (`EdgeLab`, red rows under each), read beside the
+    /// capsule's leading edge as the row where the fade is half done. Hosted as `MainTabs` and a
+    /// root host it: the bottom bar of a `TabView` around the stack, a clear room in the stack. An
+    /// overlay with a clear room drew no effect at all (quick run 4), with any invisible room one
+    /// 32 pt low (quick runs 5-7); the other rooms are printed beside it, for what decides it.
+    @Test("one bar 2: the bar around the tabs fades the content under it where 40's bar did")
+    func roomKeepsTheEdgeEffect() async {
+        var middle: [CGFloat?] = []
+        var insets: [CGFloat?] = []
+        var lines: [String] = []
+        for room in 0...EdgeLab.rooms {
+            let window = Self.labWindow(UIHostingController(rootView: EdgeLab(room: room)))
+            await chromeSettle(window, turns: 40)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 2
+            let image = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+                _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            Attachment.record(image, named: "edge-lab-\(room)", as: .png)
+            let greens = Self.greens(of: image, x: 10, from: 700, to: 872)
+            middle.append(Self.fadeMiddle(greens, from: 700))
+            let inset = Self.mainScroll(in: window)?.adjustedContentInset.bottom
+            insets.append(inset)
+            let sampled = stride(from: 0, to: greens.count, by: 8).map { greens[$0] }
+            let at = String(describing: middle[room])
+            lines.append("\(room): middle \(at) inset \(String(describing: inset)) \(sampled)")
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        notes("690-edge-lab", lines)
+        let bar = middle[0]
+        #expect(bar != nil, "the bar faded nothing in the lab: \(lines)")
+        #expect(middle[EdgeLab.none] == nil, "no bar, and yet a fade: \(lines)")
+        let hosted = middle[EdgeLab.production]
+        #expect(
+            abs((hosted ?? -100) - (bar ?? 100)) <= 3,
+            "the fade around the tabs is not the bar's: \(lines)")
+        // The room insets the stack's scroll view as the bar in its place did: the TabView's
+        // bottom bar alone inset none (quick run 9, 34 pt).
+        #expect(
+            abs((insets[EdgeLab.production] ?? -100) - (insets[0] ?? 100)) <= 1,
+            "the room's inset is not the bar's: \(lines)")
+    }
+
+    /// The green of `image` at `x` on every point row from `from` to `to`: red content has
+    /// little, the scroll edge effect's fade to white more.
+    fileprivate static func greens(of image: UIImage, x: CGFloat, from: Int, to: Int) -> [Int] {
+        guard let cg = image.cgImage else { return [] }
+        let (width, height) = (cg.width, cg.height)
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            // RGBA in this order whatever the image's own layout, row 0 at the top.
+            guard
+                let context = CGContext(
+                    data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return [] }
+        let column = Int(x * image.scale)
+        return (from...to).compactMap { row in
+            let line = Int(CGFloat(row) * image.scale)
+            guard line < height, column < width else { return nil }
+            return Int(pixels[(line * width + column) * 4 + 1])
+        }
+    }
+
+    /// The first row, from `from` down, where `greens` has risen half way from its first value to
+    /// its largest; nil when it never rises by more than 20.
+    fileprivate static func fadeMiddle(_ greens: [Int], from: Int) -> CGFloat? {
+        guard let base = greens.first, let top = greens.max(), top - base > 20 else { return nil }
+        let half = base + (top - base) / 2
+        return greens.firstIndex { $0 >= half }.map { CGFloat(from + $0) }
+    }
+
+    /// MEMNG-690 phase 3, the owner on 40: the main bar's bubble. The pill stands under the
+    /// selected tab, and a press on another tab slides it there from the tab left — on the
+    /// tab's first visit too, Timeline and Places here — and the scope row draws none.
+    @Test("bubble 1: the selection pill stands under the tab pressed, and none on the scope row")
+    func pillFollowsThePress() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            _ = await leadingGlass(.tabs, in: window)
+            var lines: [String] = []
+            for tab in [MainTab.library, .timeline, .places, .library] {
+                if tab != .library || !lines.isEmpty {
+                    #expect(pressLeading(tab, in: window), "\(tab.title) took no press")
+                    await tabChosen(tab, window)
+                }
+                var seen: [Int] = []
+                for _ in 0..<40 {
+                    if let x = Self.pillFrame(in: window)?.midX { seen.append(Int(x)) }
+                    await chromeSettle(window)
+                }
+                let pill = Self.pillFrame(in: window)
+                let item = Self.itemFrame(tab, in: window)
+                let drawn = "item \(String(describing: item)) pill \(String(describing: pill))"
+                lines.append("\(tab.title): \(drawn) seen \(seen)")
+                #expect(
+                    abs((pill?.midX ?? -100) - (item?.midX ?? 100)) <= 2,
+                    "\(tab.title): the pill not under the tab: \(lines.last ?? "")")
+                #expect(
+                    abs((pill?.width ?? 0) - LeadingMainBar.pillWidth) <= 1,
+                    "\(tab.title): \(lines.last ?? "")")
+                // Pressed from another tab, the pill was seen on its way: away from the tab
+                // pressed by more than half a tab at some sample.
+                if !seen.isEmpty, tab != .library || lines.count > 1 {
+                    let home = Int(item?.midX ?? 0)
+                    #expect(
+                        seen.contains { abs($0 - home) > 40 },
+                        "\(tab.title): the pill did not travel: \(lines.last ?? "")")
+                }
+            }
+            let control = await pressIntoScope(window)
+            #expect(control != nil, "no scope row")
+            #expect(Self.pillFrame(in: window) == nil, "a pill on the scope row")
+            notes("690-bubble-1", lines)
+        }
+    }
+
+    /// The fold keeps the look 40 shipped: the folded icon has no pill, and the unfold brings it
+    /// back under the Timeline.
+    @Test("bubble 2: the folded capsule draws no pill; unfolded, the pill is back")
+    func foldDrawsNoPill() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await leadingTimeline(media)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            _ = await leadingGlass(.tabs, in: window)
+            #expect(Self.pillFrame(in: window) != nil, "no pill at rest")
+            await drag(window, by: 240)
+            #expect(await leadingGlass(.folded, in: window) != nil, "the drag did not fold")
+            #expect(Self.pillFrame(in: window) == nil, "a pill on the folded icon")
+            await drag(window, by: -80)
+            _ = await leadingGlass(.tabs, in: window)
+            let pill = Self.pillFrame(in: window)
+            let item = Self.itemFrame(.timeline, in: window)
+            #expect(
+                abs((pill?.midX ?? -100) - (item?.midX ?? 100)) <= 2,
+                "unfolded: pill \(String(describing: pill)) item \(String(describing: item))")
+        }
+    }
+
+    /// A press swells the tab under it and the release lets it go, read from the drawing: the
+    /// selected tab's tinted icon and title grow by the press's scale while it is held.
+    @Test("bubble 3: a held press swells the tab under it, and the release lets it go")
+    func pressSwellsTheTab() async {
+        let box = BarLabShape()
+        let window = Self.labWindow(UIHostingController(rootView: BarLab(box: box)))
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        await chromeSettle(window, turns: 20)
+        guard let item = Self.itemFrame(.timeline, in: window) else {
+            Issue.record("no Timeline item in the bar")
+            return
+        }
+        let area = item.insetBy(dx: -12, dy: -12)
+        let rest = Self.tinted(in: area, of: window)
+        box.held = .timeline
+        try? await Task.sleep(for: .milliseconds(700))
+        await chromeSettle(window, turns: 4)
+        let pressed = Self.tinted(in: area, of: window)
+        box.held = nil
+        try? await Task.sleep(for: .milliseconds(700))
+        await chromeSettle(window, turns: 4)
+        let back = Self.tinted(in: area, of: window)
+        let seen = [rest, pressed, back].map { String(describing: $0) }
+        notes("690-bubble-3", ["item \(item)", "rest/pressed/back \(seen)"])
+        let restHeight = rest?.height ?? 0
+        #expect(restHeight > 10, "no tinted tab drawn: \(seen)")
+        #expect((pressed?.height ?? 0) >= restHeight * 1.06, "the press did not swell: \(seen)")
+        #expect(abs((back?.height ?? 0) - restHeight) <= 1, "the release kept it: \(seen)")
     }
 }
 
@@ -2547,20 +2913,32 @@ extension MediaImageLoaderTests {
             }
             marks.append(await play("e-library-icon", turn: icon))
             #expect(Self.mainGlass(.tabs, in: window) != nil, "(e) the icon gave no capsule")
+            // (g) MEMNG-690 phase 3: the pill's travel, Library -> Timeline -> Places -> Library.
+            await chromeSettle(window, turns: 20)
+            let plan: [(MainTab, Int)] = [(.timeline, 300), (.places, 1100), (.library, 1900)]
+            let taps = plan.map { tap in
+                Self.once(at: .milliseconds(tap.1)) { _ = self.pressLeading(tap.0, in: window) }
+            }
+            marks.append(
+                await play("g-pill-travel", for: .milliseconds(2700)) { at in
+                    for tap in taps { tap(at) }
+                })
+            #expect(Self.pillFrame(in: window) != nil, "(g) no pill after the taps")
+            // (f2) Tab switches over three different screens: the bar is one view over them all,
+            // so it neither fades with the tab's content nor flickers.
+            await chromeSettle(window, turns: 20)
+            let switches: [(MainTab, Int)] = [(.places, 300), (.timeline, 900), (.library, 1500)]
+            let presses = switches.map { tap in
+                Self.once(at: .milliseconds(tap.1)) { _ = self.pressLeading(tap.0, in: window) }
+            }
+            marks.append(
+                await play("f2-tab-switches", for: .milliseconds(2100)) { at in
+                    for press in presses { press(at) }
+                })
+            #expect(Self.mainBarMarkers(in: window) == 1, "(f2) not one bar after the switches")
         }
         let box = BarLabShape()
-        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
-        let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
-        let window: UIWindow
-        if let scene = scene as? UIWindowScene {
-            window = UIWindow(windowScene: scene)
-            window.frame = frame
-        } else {
-            window = UIWindow(frame: frame)
-        }
-        window.overrideUserInterfaceStyle = .light
-        window.rootViewController = UIHostingController(rootView: BarLab(box: box))
-        window.makeKeyAndVisible()
+        let window = Self.labWindow(UIHostingController(rootView: BarLab(box: box)))
         await chromeSettle(window, turns: 20)
         let fold = Self.once(at: .milliseconds(400)) { box.shape = .folded }
         let unfold = Self.once(at: .milliseconds(1100)) { box.shape = .tabs }
@@ -2570,11 +2948,103 @@ extension MediaImageLoaderTests {
                 unfold($0)
             })
         #expect(Self.mainGlass(.tabs, in: window) != nil, "(lab) the bar did not come back")
+        // (h) A press held with no finger — the recording has no touch to give — on the selected
+        // tab, then on another.
+        let holds = [
+            Self.once(at: .milliseconds(400)) { box.held = .timeline },
+            Self.once(at: .milliseconds(1300)) { box.held = nil },
+            Self.once(at: .milliseconds(1800)) { box.held = .places },
+            Self.once(at: .milliseconds(2700)) { box.held = nil },
+        ]
+        marks.append(
+            await play("h-press-bulge", for: .milliseconds(3300)) { at in
+                for hold in holds { hold(at) }
+            })
         window.isHidden = true
         window.rootViewController = nil
+        // The reference: the system's own tab bar, a plain TabView, its selection moved by the
+        // test as a tap moves it.
+        let system = SystemTabLabSelection()
+        let reference = Self.labWindow(UIHostingController(rootView: SystemTabLab(box: system)))
+        await chromeSettle(reference, turns: 40)
+        let steps: [(MainTab, Int)] = [(.timeline, 400), (.places, 1200), (.library, 2000)]
+        let moves = steps.map { move in
+            Self.once(at: .milliseconds(move.1)) { system.selection = move.0 }
+        }
+        marks.append(
+            await play("s-system-tabs", for: .milliseconds(2800)) { at in
+                for move in moves { move(at) }
+            })
+        reference.isHidden = true
+        reference.rootViewController = nil
         try? marks.joined(separator: "\n").write(
             to: Self.recordingFile("rec690-done"), atomically: true, encoding: .utf8)
         // The recorder stops on that file; the device must outlive the stop.
         try? await Task.sleep(for: .seconds(3))
+    }
+}
+
+/// A stack's root with bright red rows under its bottom bar, the bar one of several: 0 the main
+/// bar as 40 drew it there, 1 a clear room, 2 the main bar in the bottom bar of a `TabView` around
+/// the stack with `LeadingMainBar.room` in the stack, as `MainTabs` and a root host them, 3 a
+/// fill of the bar's height alone (quick run 5's room), 4 the bar folded, 5 the scope row, 6 a
+/// glass no eye can see alone, 7 the bar no eye can see, 8 the tab labels no eye can see, 9 no
+/// bottom bar at all.
+private struct EdgeLab: View {
+    static let rooms = 9
+    static let production = 2
+    static let none = 9
+    let room: Int
+
+    var body: some View {
+        if room == Self.production {
+            TabView {
+                Tab("Timeline", systemImage: MainTab.timeline.symbol) {
+                    stack { LeadingMainBar.room }.toolbarVisibility(.hidden, for: .tabBar)
+                }
+            }
+            .tabBarMinimizeBehavior(.never)
+            .safeAreaBar(edge: .bottom) { bar(.tabs) }
+        } else {
+            stack { bottom }
+        }
+    }
+
+    private func stack(@ViewBuilder room: () -> some View) -> some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(0..<40, id: \.self) { _ in Color.red.frame(height: 60) }
+                }
+            }
+            .safeAreaBar(edge: .bottom, content: room)
+            .toolbarVisibility(.hidden, for: .navigationBar)
+        }
+    }
+
+    @ViewBuilder private var bottom: some View {
+        switch room {
+        case 0: bar(.tabs)
+        case 1: Color.clear.frame(height: LeadingMainBar.height)
+        case 3: Color.white.opacity(0.001).frame(height: LeadingMainBar.height)
+        case 4: bar(.folded)
+        case 5: bar(.scope)
+        case 6:
+            Color.clear.frame(width: 62, height: 62).glassEffect(.regular, in: .capsule)
+                .opacity(0.001)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case 7: bar(.tabs).opacity(0.001)
+        case 8:
+            HStack { ForEach(MainTab.allCases) { Text($0.title) } }
+                .frame(height: LeadingMainBar.height)
+                .opacity(0.001)
+        default: EmptyView()
+        }
+    }
+
+    private func bar(_ shape: LeadingMainBar.BarShape) -> some View {
+        LeadingMainBar(
+            shape: shape, selection: .timeline, press: { _ in }, pressLibraryIcon: {},
+            scope: LibraryScopeChoice())
     }
 }

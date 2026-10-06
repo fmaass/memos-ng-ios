@@ -163,21 +163,6 @@ final class AppDock {
         guard folds != mode.folds(on: tab) else { return }
         send(.scrolledTab(tab, folds: folds, showing: showing))
     }
-
-    /// What a press on a tab in a leading bar the tabs do not draw does — the Library's, inside
-    /// its own stack (`MediaLibraryView.footRow`): the press the tabs' own bar makes
-    /// (`MainTabs.pressing`). Registered by the tabs; the last registration wins. Not observed.
-    @ObservationIgnored private var pressAction: (@MainActor (MainTab) -> Void)?
-
-    func whenTabPressed(_ action: @escaping @MainActor (MainTab) -> Void) {
-        pressAction = action
-    }
-
-    /// A press on `tab` in a leading bar drawn inside a tab's stack; nothing before the tabs
-    /// registered what a press does.
-    func pressTab(_ tab: MainTab) {
-        pressAction?(tab)
-    }
 }
 
 /// Which of Years, Months and All the Library shows, and the year a Years card narrowed Months to.
@@ -313,24 +298,37 @@ struct MainTabs<Screen: View>: View {
                         .toolbarVisibility(.hidden, for: .tabBar)
                     // No bar of the app's is attached here, around the tab's stack: what
                     // such a bar held changed without its morph, cleared no content and moved
-                    // the Library's grid to its top (MEMNG-690, builds 38 and 39). Each root
-                    // draws the leading bar inside its own stack (`leadingFootBar`).
+                    // the Library's grid to its top (MEMNG-690, builds 38 and 39).
                 }
             }
         }
         // The hidden bar must not minimise either: its minimising is what the app's bar's fold
         // replaces.
         .tabBarMinimizeBehavior(.never)
+        // ONE bar for every tab, around the stacks rather than in any of them: a bar per stack
+        // was another view after each switch, faded with the tab's content and with a pill that
+        // could not slide (MEMNG-690 phase 3). A bottom bar, not an overlay: the scroll edge
+        // effect follows what a bar draws, and under an overlay with an invisible room in each
+        // stack the fade started 32 pt below 40's (quick runs 5-7, `EdgeLab`). The bar is 62 pt
+        // in every shape, so a fold or a swap to the scope changes no inset; under a claim it has
+        // none, select mode's toolbar standing in its place.
+        .safeAreaBar(edge: .bottom) {
+            LeadingMainBar(
+                shape: Self.leadingShape(dock, on: selection),
+                selection: selection,
+                // The press the selection's own binding makes, straight from the bar: a press
+                // relayed through a registration the tabs made on appearing was dropped when it
+                // came before that (MEMNG-690 phase 3, quick run 4).
+                press: { Self.pressing(selection: $selection, dock: dock).wrappedValue = $0 },
+                pressLibraryIcon: { dock.send(.pressedLibraryIcon) },
+                scope: scope
+            )
+        }
         .environment(dock)
         .environment(scope)
         // A move of the scope swaps the Library's scroll view: the dock hears of it first.
-        .onAppear { [dock, selection = $selection] in
+        .onAppear { [dock] in
             scope.whenScopeMoves { dock.pickedScope() }
-            // The leading bar is drawn inside each tab's stack (`leadingFootBar`); its presses
-            // are the tabs' presses.
-            dock.whenTabPressed {
-                Self.pressing(selection: selection, dock: dock).wrappedValue = $0
-            }
         }
         // Every way off the Library — a press in the bar or a jump to a memo — gives the tabs
         // back, so coming back finds them. Initially too, so the dock knows the tab it opens on.
@@ -348,8 +346,7 @@ struct MainTabs<Screen: View>: View {
         }
     }
 
-    /// The selection the `TabView` is handed, which only the app's bar writes (`whenTabPressed`,
-    /// above): a press on
+    /// The selection the `TabView` is handed, which only the app's bar writes (above): a press on
     /// another tab sets that tab, and a press on the tab already showing sets the value the
     /// selection already holds. Each press is told to the dock BEFORE the selection moves, so
     /// the one place that decides what a press does is `DockMode.after(_:)`.
@@ -364,15 +361,17 @@ struct MainTabs<Screen: View>: View {
     }
 }
 
-/// The app's main bar at the foot of a screen in `tab`'s stack (MEMNG-690): inside the stack,
-/// where a change of what it holds morphs, clears the content's foot and leaves the scroll view
-/// where it stands — none of which a bar around the tab's stack did. The Library draws its own
-/// beside select mode's toolbar (`MediaLibraryView.footRow`).
+/// The app's main bar's room at the foot of a screen in `tab`'s stack (MEMNG-690). The bar itself
+/// is the one `MainTabs` keeps around every stack, and that bottom bar insets none of the stacks'
+/// scroll views (quick run 9: their foot ran under the glass). This clear row of the bar's height,
+/// inside the stack, clears the content's foot and draws nothing, so the scroll edge effect stays
+/// the bar's. Its height is the bar's in every shape, so a fold or a swap to the scope changes no
+/// inset and leaves the scroll view where it stands. The Library keeps its own beside select
+/// mode's toolbar (`MediaLibraryView.footRow`).
 struct LeadingFootBar: ViewModifier {
     /// The stack's tab; nil for a screen pushed on whichever stack shows (`stackDestination`).
     let tab: MainTab?
     @Environment(AppDock.self) private var dock: AppDock?
-    @Environment(LibraryScopeChoice.self) private var scope: LibraryScopeChoice?
 
     /// What the bar draws under `tab` while `dock` says what stands: the bar's shape there, and
     /// nothing under a claim nor without a dock.
@@ -383,15 +382,8 @@ struct LeadingFootBar: ViewModifier {
 
     func body(content: Content) -> some View {
         content.safeAreaBar(edge: .bottom) {
-            let tab = tab ?? dock?.showing ?? .timeline
-            if let dock, let shape = Self.shape(dock, on: tab) {
-                LeadingMainBar(
-                    shape: shape,
-                    selection: tab,
-                    press: { dock.pressTab($0) },
-                    pressLibraryIcon: { dock.send(.pressedLibraryIcon) },
-                    scope: scope ?? LibraryScopeChoice()
-                )
+            if Self.shape(dock, on: tab ?? dock?.showing ?? .timeline) != nil {
+                LeadingMainBar.room
             }
         }
     }

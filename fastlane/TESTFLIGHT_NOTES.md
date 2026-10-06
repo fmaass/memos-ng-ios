@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.1 (41)
+
+- The selected tab now sits on a pill that slides to the tab you tap, with a small bounce, and a tab swells under your finger while you press it. I built both to match the system tab bar's own.
+- The bar is now drawn once over the whole app instead of once per tab, so switching tabs no longer redraws it.
+- Everything else is as in 40.
+- Please tap through the three tabs, press and hold a tab, and check the Timeline narrowing and the Library's Years | Months | All row once more.
+
 ## 2.2.1 (40)
 
 - The tab bar is now the app's own and the only one: the glass bar at the left edge that Leading drew. The System bar and the Settings → Appearance → Tab bar switch are gone.
