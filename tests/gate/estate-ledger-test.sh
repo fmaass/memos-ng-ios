@@ -69,7 +69,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh; do
     cat > "$work/tests/gate/$stub" <<STUB_EOF
 #!/usr/bin/env bash
 echo "selftest" >> "\${STUB_DIR:-/nonexistent}/calls"

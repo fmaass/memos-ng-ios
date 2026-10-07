@@ -971,10 +971,10 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These seven must be there; the main-bar freeze's is among them because the freeze is
-# the owner's (ADR-0008), and a freeze whose own test can vanish unnoticed is not one; the mount
-# guard's two because a run on the wrong disk looks exactly like a green one.
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh; do
+# directory. These eight must be there: the main-bar freeze's (ADR-0008 is the owner's, and a freeze
+# whose test can vanish unnoticed is not one), the mount guard's two (a run on the wrong disk looks
+# exactly like a green one) and the TestFlight cut's (the one other write path to the Mac).
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -987,7 +987,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-

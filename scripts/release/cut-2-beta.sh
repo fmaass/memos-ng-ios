@@ -1,7 +1,8 @@
 #!/bin/bash
 # The one upload: fastlane beta archives, uploads and reads App Store Connect back itself.
-# It uploads only on cut-0's proof marker for its exact pair and spends that marker first: a re-run, a
-# retried wrapper or an overlapping cut-2 finds nothing to spend and cannot consume a second build number.
+# It uploads only on cut-0's proof marker for its exact pair: `fastlane beta` claims that marker first
+# (scripts/release/cut-markers.sh, one lock shared with the lane-side cut), so a re-run, a retried
+# wrapper or an overlapping cut-2 finds nothing to spend and cannot consume a second build number.
 # Remote-stdin: scripts/release/run-cut-2.sh <version> <build> ships it to the build host.
 [ "$(hostname -s)" = merkur ] || { echo "REFUSED: cut scripts run on the build host merkur, not $(hostname -s)"; exit 2; }
 set -u
@@ -19,8 +20,6 @@ tree_build=$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*"?([^"[
 [ "$tree_version" = "$version" ] && [ "$tree_build" = "$build" ] || { echo "REFUSED: asked for $version ($build) but project.yml says ${tree_version:-nothing} (${tree_build:-nothing})"; exit 2; }
 set -a; source ~/.config/memosng-ci.env; set +a
 export PATH=/opt/homebrew/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-# mv is the claim: of two overlapping runs exactly one moves the marker, the other refuses.
-mv ~/.memosng-cut/"unused-$version-$build" ~/.memosng-cut/"spent-$version-$build-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || { echo "REFUSED: no unspent cut-0 proof for $version ($build) in ~/.memosng-cut; run cut-0 first"; exit 2; }
 echo "beta start $(date '+%H:%M %Z') at $(git log --oneline -1)"
 fastlane beta </dev/null; rc=$?
 echo "beta end $(date '+%H:%M %Z') fastlane_rc=$rc"

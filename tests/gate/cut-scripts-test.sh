@@ -52,15 +52,22 @@ cat > "$shims/hostname" <<'SH'
 #!/bin/sh
 echo "${FAKE_HOST:?}"
 SH
-# fastlane records every call; FAKE_FASTLANE picks the answer. `nosuch` is the read-back lane's
-# answer for a build App Store Connect does not hold, for the pair in FAKE_NOSUCH_FOR.
+# fastlane records every call; FAKE_FASTLANE picks the answer. `nosuch`: App Store Connect does not
+# hold the pair in FAKE_NOSUCH_FOR, so prove_unused proves it (exit 0) and every read-back lane
+# answers the no-such-build sentence (exit 1). `found`: the build exists, so prove_unused refuses.
+# The proof's own verdict and its marker are the Fastfile's and scripts/release/cut-markers.sh's
+# (tests/gate/cut-markers-test.sh); this shim only stands in for their exit code.
 cat > "$shims/fastlane" <<'SH'
 #!/bin/sh
 echo "$*" >> "${FAKE_CALLS:?}/fastlane"
 case "${FAKE_FASTLANE:-ok}" in
-  nosuch) echo "[!] ASC read-back FAILED for ${FAKE_NOSUCH_FOR:?}: App Store Connect has no such build"; exit 1 ;;
-  nosuch-rc0) echo "[!] ASC read-back FAILED for ${FAKE_NOSUCH_FOR:?}: App Store Connect has no such build"; exit 0 ;;
-  found) echo "ASC read-back: VALID, IN_BETA_TESTING"; exit 0 ;;
+  nosuch)
+    if [ "$1" = prove_unused ]; then echo "[+] UNUSED: ${FAKE_NOSUCH_FOR:?} is not in App Store Connect; proof written"; exit 0; fi
+    echo "[!] ASC read-back FAILED for ${FAKE_NOSUCH_FOR:?}: App Store Connect has no such build"; exit 1 ;;
+  found)
+    echo "ASC read-back: VALID, IN_BETA_TESTING"
+    if [ "$1" = prove_unused ]; then echo "[!] NOT PROVEN UNUSED: the build exists"; exit 1; fi
+    exit 0 ;;
   *) exit "${FAKE_FASTLANE_RC:-0}" ;;
 esac
 SH
@@ -155,9 +162,11 @@ expect() {
 }
 
 CUTS="cut-0-unused cut-1-refresh cut-2-beta cut-3-verify"
-# cut-0's proof marker, the one thing cut-2 uploads on. plant_proof stands in for a cut-0 that passed.
+# The proof and claim markers are the Fastfile's now (prove_unused, beta -> cut-markers.sh): the
+# shell scripts must never write, move or remove one. plant_proof stands in for a proof that exists.
 plant_proof() { mkdir -p "$1/.memosng-cut" && echo "20260927T060000Z 0000000" > "$1/.memosng-cut/unused-$2-$3"; }
 clear_proofs() { rm -rf "$1/.memosng-cut"; }
+no_markers() { [ ! -e "$1/.memosng-cut" ]; }
 # fact LABEL CMD...: one case judged by a command's own status.
 fact() {
   local label="$1"; shift
@@ -166,10 +175,10 @@ fact() {
     fails=$((fails + 1)); [ "$first_fail" -ne 0 ] || first_fail=1; echo "FAIL $label"; fi
 }
 # What an agreeing 2.0.0 (25) run hands on, per script: the fastlane line and the generate marker.
-want_fl() { case "$1" in cut-0-unused|cut-3-verify) echo "verify_attach version:$2 build:$3" ;; cut-2-beta) echo beta ;; *) echo "" ;; esac; }
+want_fl() { case "$1" in cut-0-unused) echo "prove_unused version:$2 build:$3" ;; cut-3-verify) echo "verify_attach version:$2 build:$3" ;; cut-2-beta) echo beta ;; *) echo "" ;; esac; }
 want_gen() { case "$1" in cut-1-refresh) echo generate ;; *) echo "" ;; esac; }
-# With fastlane answering 0, cut-0 has not been shown the no-such-build sentence, so it stops (20).
-want_rc() { case "$1" in cut-0-unused) echo 20 ;; *) echo 0 ;; esac; }
+# With fastlane answering 0, prove_unused proved the pair, so every script passes.
+want_rc() { echo 0; }
 
 h25="$(new_home t25 2.0.0 25)" || { echo "FAIL: cannot build the fake clone"; exit 1; }
 h24="$(new_home t24 1.5.5 24)" || { echo "FAIL: cannot build the fake clone"; exit 1; }
@@ -203,10 +212,8 @@ for s in $CUTS; do
   expect "$s version disagrees" 2 "" "" "project.yml says 2.0.0 (25)"
   run_cut merkur "$h25" "$s" 9.9.9 99
   expect "$s the second target's pair is not the app's" 2 "" "" "project.yml says 2.0.0 (25)"
-  [ "$s" != cut-2-beta ] || plant_proof "$h25" 2.0.0 25
   run_cut merkur "$h25" "$s" 2.0.0 25
   expect "$s agreeing pair 2.0.0 25" "$(want_rc "$s")" "$(want_fl "$s" 2.0.0 25)" "$(want_gen "$s")"
-  [ "$s" != cut-2-beta ] || plant_proof "$h24" 1.5.5 24
   run_cut merkur "$h24" "$s" 1.5.5 24
   expect "$s agreeing pair 1.5.5 24 (build 24's behaviour)" "$(want_rc "$s")" "$(want_fl "$s" 1.5.5 24)" "$(want_gen "$s")"
 done
@@ -230,53 +237,34 @@ rm -f "$h25/projects/memos-ng-ios/stray"
 FAKE_DF_AVAIL=2 run_cut merkur "$h25" cut-2-beta 2.0.0 25
 expect "cut-2-beta disk floor" 14 "" "" "DISK FLOOR: 2 GiB free, need 3"
 
-# --- (c) cut-0's verdict: only the no-such-build sentence for THIS pair is a pass -----------------
+# --- (c) cut-0's verdict is prove_unused's exit code: 0 = UNUSED, anything else = 20 -------------
 clear_proofs "$h25"
 FAKE_FASTLANE=nosuch FAKE_NOSUCH_FOR="2.0.0 (25)" run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 no such build 2.0.0 (25)" 0 "verify_attach version:2.0.0 build:25" "" "UNUSED: 2.0.0 (25) is not in App Store Connect"
-fact "  ...and leaves the proof marker: UTC stamp and the clone's HEAD" \
-  grep -qE "^[0-9]{8}T[0-9]{6}Z $(git -C "$h25/projects/memos-ng-ios" rev-parse HEAD)\$" "$h25/.memosng-cut/unused-2.0.0-25"
-clear_proofs "$h24"
+expect "cut-0 prove_unused proves 2.0.0 (25)" 0 "prove_unused version:2.0.0 build:25" "" "UNUSED: 2.0.0 (25) is not in App Store Connect"
+fact "  ...and the script itself writes no marker (the Fastfile's cut-markers.sh does)" no_markers "$h25"
 FAKE_FASTLANE=nosuch FAKE_NOSUCH_FOR="1.5.5 (24)" run_cut merkur "$h24" cut-0-unused 1.5.5 24
-expect "cut-0 no such build 1.5.5 (24)" 0 "verify_attach version:1.5.5 build:24" "" "UNUSED: 1.5.5 (24) is not in App Store Connect"
-fact "  ...and leaves the 1.5.5-24 proof marker" test -s "$h24/.memosng-cut/unused-1.5.5-24"
-clear_proofs "$h25"
-FAKE_FASTLANE=nosuch FAKE_NOSUCH_FOR="1.5.5 (24)" run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 the sentence names another pair" 20 "verify_attach version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
-fact "  ...and leaves no proof marker" test ! -e "$h25/.memosng-cut/unused-2.0.0-25"
-clear_proofs "$h25"
-FAKE_FASTLANE=nosuch FAKE_NOSUCH_FOR="2.0.0 (250)" run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 the sentence names a longer build" 20 "verify_attach version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
-fact "  ...and leaves no proof marker" test ! -e "$h25/.memosng-cut/unused-2.0.0-25"
-clear_proofs "$h25"
+expect "cut-0 prove_unused proves 1.5.5 (24)" 0 "prove_unused version:1.5.5 build:24" "" "UNUSED: 1.5.5 (24) is not in App Store Connect"
 FAKE_FASTLANE=found run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 the build exists" 20 "verify_attach version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
-fact "  ...and leaves no proof marker" test ! -e "$h25/.memosng-cut/unused-2.0.0-25"
-clear_proofs "$h25"
-FAKE_FASTLANE=nosuch-rc0 FAKE_NOSUCH_FOR="2.0.0 (25)" run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 the sentence with a zero exit" 20 "verify_attach version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
-fact "  ...and leaves no proof marker" test ! -e "$h25/.memosng-cut/unused-2.0.0-25"
-clear_proofs "$h25"
+expect "cut-0 the build exists" 20 "prove_unused version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
 FAKE_FASTLANE=ok FAKE_FASTLANE_RC=1 run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 an error without the sentence" 20 "verify_attach version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
-fact "  ...and leaves no proof marker" test ! -e "$h25/.memosng-cut/unused-2.0.0-25"
+expect "cut-0 prove_unused refuses (a spent claim, an API error)" 20 "prove_unused version:2.0.0 build:25" "" "NOT PROVEN UNUSED"
+FAKE_FASTLANE=ok FAKE_FASTLANE_RC=20 run_cut merkur "$h25" cut-0-unused 2.0.0 25
+expect "cut-0 any non-zero is 20" 20 "prove_unused version:2.0.0 build:25" "" "prove_rc=20"
+fact "  ...and no refusal leaves a marker behind" no_markers "$h25"
+# The read-back lane is still cut-3's; its no-such-build answer is a failure there.
+FAKE_FASTLANE=nosuch FAKE_NOSUCH_FOR="2.0.0 (25)" run_cut merkur "$h25" cut-3-verify 2.0.0 25
+expect "cut-3 hands the read-back's exit on" 1 "verify_attach version:2.0.0 build:25" "" "verify_rc=1"
 
-# --- (e) one proof, one upload: cut-2 spends cut-0's marker before fastlane beta -----------------
+# --- (e) the claim is beta's: cut-2 reaches beta whatever the markers say, and never touches them -
 clear_proofs "$h25"
 run_cut merkur "$h25" cut-2-beta 2.0.0 25
-expect "cut-2 without a proof marker" 2 "" "" "REFUSED: no unspent cut-0 proof for 2.0.0 (25)"
-plant_proof "$h25" 2.0.0 24
-run_cut merkur "$h25" cut-2-beta 2.0.0 25
-expect "cut-2 with a proof for another pair only" 2 "" "" "REFUSED: no unspent cut-0 proof for 2.0.0 (25)"
-clear_proofs "$h25"
-FAKE_FASTLANE=nosuch FAKE_NOSUCH_FOR="2.0.0 (25)" run_cut merkur "$h25" cut-0-unused 2.0.0 25
-expect "cut-0 proves 2.0.0 (25) unused" 0 "verify_attach version:2.0.0 build:25" "" "UNUSED: 2.0.0 (25)"
-run_cut merkur "$h25" cut-2-beta 2.0.0 25
-expect "cut-2 on cut-0's proof reaches beta once" 0 beta "" "beta end"
-fact "  ...and the proof is spent" test ! -e "$h25/.memosng-cut/unused-2.0.0-25"
-fact "  ...into spent-2.0.0-25-<utc>" sh -c 'ls "$1"/.memosng-cut/spent-2.0.0-25-*Z >/dev/null 2>&1' _ "$h25"
-run_cut merkur "$h25" cut-2-beta 2.0.0 25
-expect "cut-2 run again right after" 2 "" "" "REFUSED: no unspent cut-0 proof for 2.0.0 (25)"
+expect "cut-2 without a proof marker still hands the claim to beta" 0 beta "" "beta end"
+fact "  ...and makes no marker" no_markers "$h25"
+plant_proof "$h25" 2.0.0 25
+FAKE_FASTLANE_RC=1 run_cut merkur "$h25" cut-2-beta 2.0.0 25
+expect "cut-2 hands beta's refusal (no unspent proof, a failed upload) on" 1 beta "" "fastlane_rc=1"
+fact "  ...and leaves a planted proof where it was" test -f "$h25/.memosng-cut/unused-2.0.0-25"
+fact "  ...unspent" sh -c '! ls "$1"/.memosng-cut/spent-* >/dev/null 2>&1' _ "$h25"
 clear_proofs "$h25"
 
 # cut-1: a failed generate stops the train at once; nothing after it runs.
@@ -299,7 +287,6 @@ wrap() { # $1 N, then the wrapper's arguments; FAKE_HOST=merkur is what the "rem
 }
 for n in 0 1 2 3; do
   case $n in 0) s=cut-0-unused ;; 1) s=cut-1-refresh ;; 2) s=cut-2-beta ;; 3) s=cut-3-verify ;; esac
-  [ $n != 2 ] || plant_proof "$h25" 2.0.0 25
   wrap $n 2.0.0 25
   # The fastlane shim answers "no such build" with exit 1, which cut-2 and cut-3 hand straight on.
   wfl="$(want_fl $s 2.0.0 25)"; case $n in 2|3) wrc=1 ;; *) wrc=0 ;; esac

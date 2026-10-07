@@ -258,6 +258,14 @@ GUI, no Mac login password:
   before archiving with `fastlane testflight_notes version:<marketing> build:<n>`, which prints the
   text `beta` would send and uploads nothing. The derivation is `fastlane/lib/release_notes.rb`,
   tested by `ruby -Ifastlane/lib fastlane/test/release_notes_test.rb`.
+- **The cut's guards are one tested module.** `fastlane/lib/cut_guard.rb` takes every decision that
+  keeps a cut from building the wrong commit or spending a number twice — provenance, the claim,
+  the archive's pair against the claimed pair, and `prove_unused`'s "prove only on no such build" —
+  and `archive_ipa`, `prove_unused` and `beta` call it as their first statement, handing it the
+  archive and the upload as callables it reaches only after every check has passed. Its refusal
+  ends in `CUT-GUARD-VERDICT=<verdict>`. Tested, with each refusal shown to stop before the archive
+  and the upload: `ruby -Ifastlane/lib fastlane/test/cut_guard_test.rb` (minitest; on a machine
+  without Ruby, a throwaway `micromamba create -p <scratch>/ruby -c conda-forge ruby` provides one).
 
 Secrets live only on merkur: `~/.config/memosng-ci.env` (0600, holds the key id / issuer / `.p8`
 path / CI keychain password) and the `.p8` itself (0600). Nothing signing-related is committed.
@@ -272,6 +280,101 @@ all** — nothing copied them and nothing complained, so their crash reports cou
 symbolicated. 7 was recovered afterwards from a surviving local archive; 8 and 9 are gone for good.
 Standalone: `fastlane preserve_dsyms archive:<path> [version:<v> build:<n>]`, where the numbers
 default to what the archive's own `Info.plist` carries.
+
+### 8c. Lane cut — `bin/testflight-cut.sh` (2026-10-07)
+
+A work-package lane cuts its milestone's TestFlight build itself, from its own Linux clone, with
+no orchestrator session and without touching the hands-on clone on the Mac. Both variables are
+required on both commands (neither has a default; `env … bin/mac-gate.sh` exports nothing back):
+
+    env MAC_GATE_HOST=merkur MAC_GATE_ESTATE_LOCK=/home/fabian/projects/worktrees/.wp13-gate.lock bin/testflight-cut.sh --archive-only
+    env MAC_GATE_HOST=merkur MAC_GATE_ESTATE_LOCK=/home/fabian/projects/worktrees/.wp13-gate.lock bin/testflight-cut.sh
+
+- **Preconditions (local).** A clean tree whose HEAD equals `origin/main` after a fetch. `--sha
+  <40-hex>` replaces that with "HEAD is this sha" — it authorises the checked-out commit, it never
+  selects another. Every refusal ends `state=REFUSED(<reason>) … | exit=2` with nothing pushed.
+- **Paths on the Mac.** `/Users/fabian/build/memos-ng-ios/release/repo.git` — a bare repo that
+  takes each commit as the create-only ref `refs/cuts/<sha>` (its `update` hook refuses a rewrite
+  or a delete of `refs/cuts/*`; `receive.denyDeletes`); `release/work` — the release checkout the
+  commit is checked out in, detached, and regenerated (`bin/generate.sh`). Nothing else on the Mac
+  is written, and the hands-on clone `~/projects/memos-ng-ios` is never read or written.
+- **What runs there** (`bin/testflight-cut-remote.sh`, one ssh call): fetch and detached checkout,
+  HEAD = sha and a clean tree, the 3 GiB floor on the volume holding `release/work`, the version
+  pair read from that commit's `project.yml`, `~/.config/memosng-ci.env` sourced silently, then
+  `fastlane prove_unused version:<v> build:<b>` → `fastlane beta expected_sha:<sha>` →
+  `fastlane verify_attach version:<v> build:<b>`. A `prove_unused` refusal ends the run before
+  anything is archived: `state=REFUSED(build-number-spent) … | exit=20` only when the lane's
+  verdict is `spent` (the number is claimed already, or App Store Connect holds it), and
+  `state=REFUSED(unused-unproven) … | exit=21` for any other failure (App Store Connect could not
+  be read, no such app, the markers' lock) — the number may still be free; nothing was proved. `--archive-only` runs `fastlane archive_ipa expected_sha:<sha>` alone:
+  no proof, no claim, no upload — the dry run every first cut of a new setup starts with.
+- **Provenance.** `archive_ipa` and `beta` both run `CutGuard.provenance!` first whenever they are
+  given `expected_sha:` — the release checkout must be clean and at exactly that commit. The
+  owner's train (`scripts/release/cut-*`) passes no sha and is not affected.
+- **One build number, one upload, across both trains.** `fastlane prove_unused` (used by this cut
+  and by `cut-0-unused.sh`) writes `~/.memosng-cut/unused-<v>-<b>` only on App Store Connect's
+  "no such build", and `fastlane beta` claims it first thing — after provenance, before any
+  archive — by renaming it to `spent-<v>-<b>-<utc>`, refusing with `no unspent proof` without one.
+  Both go through `scripts/release/cut-markers.sh`, whose one lock (`flock` on
+  `~/.memosng-cut/.lock`, Homebrew's `/opt/homebrew/bin/flock` on the Mac) makes a claim landing
+  between a proof's query and its write win: the write refuses. A spent number is never proved
+  again by any script; a failed upload's number is released only by the owner removing its
+  `spent-*` marker by hand. A `fastlane beta` run by hand therefore needs `fastlane prove_unused`
+  for the same pair first.
+- **The three locks, outermost first.** (1) The estate gate lock `MAC_GATE_ESTATE_LOCK`, taken on
+  the Linux side before the push and released after the Mac half has reported (logged
+  `cut lock: waited <s> s`, ceiling `MEMOS_CUT_LOCK_WAIT_S`, default 21600 s). When the ssh leg
+  ends with ssh's 255 or without the Mac half's report line, the Mac may still be cutting: the lock
+  stays held until D + G + skew (see **Timing**), logged `cut lock: holding until <utc> (remote
+  outcome unknown)`, and the run ends `state=UNKNOWN(ssh-lost)` with ssh's code (1 for 0). Nothing
+  asks the Mac again; read `release/work`'s state and App Store Connect before cutting again. A cut, every
+  lane's gate, another lane's cut and a build-root cutover window exclude each other. The cut
+  runs no gate, so this is not a lock wrapped around one. (2) The release checkout's own lock
+  `release/.cut.lock`, taken on the Mac inside the budget. (3) The estate-wide release lock
+  `~/.release-lock`, taken by the Fastfile itself around signing and the archive, shared with the
+  other apps' pipelines. The markers' lock is separate and held for milliseconds only.
+- **Budget.** `MEMOS_CUT_TIMEOUT_MIN` (default 120) bounds the Mac half, its lock wait included;
+  past it the cut's process group is stopped and the run reports `TIMEOUT` (the Mac half's own
+  `stage=budget` report; a release-checkout lock still held at the deadline reports `stage=lock`,
+  `LOCK-TIMEOUT`). 120 is a placeholder
+  until the first `--archive-only` run is timed; that measurement goes here.
+- **Timing.** ONE absolute deadline, `D` = the start of the ssh leg + the budget (UTC epoch
+  seconds), is computed on the Linux side and passed to the Mac half, so a late start (script
+  delivery, a slow login) shortens the cut instead of moving its end. The constants live in one
+  place, the top of `bin/testflight-cut.sh`, and travel to the Mac half as arguments:
+
+  | constant | value | meaning |
+  |---|---|---|
+  | `CUT_MIN_WINDOW_S` | 300 s | the Mac half refuses to start (`REMOTE-REFUSED`, exit 3) unless more than this is left before `D`: checkout, generate and the proof alone take minutes |
+  | `CUT_STOP_GRACE_S` | 60 s | the cut's process group gets TERM at `D` and KILL at `D` + 60 |
+  | `CUT_REAP_S` | 10 s | the killed group is waited for until `D` + 70 at most; `G` = 70 s |
+  | `CUT_CLOCK_SKEW_S` | 120 s | both hosts are NTP-synced; the most their clocks may disagree |
+  | (polling) | ≤ 1 s | the wrapper notices `D` within one 0.5 s poll and reaps in 0.2 s steps; the TERM is dated `D` itself, so polling never moves the KILL or the reap's end, and the rest fits inside the skew allowance |
+
+  The wrapper checks `D` once more after it holds the checkout lock and before it launches
+  anything: past `D` it launches nothing and reports `stage=expired`, exit 76,
+  `state=REFUSED(deadline-passed)`. A signal to the wrapper never moves the stop past `D`.
+  Everything of the cut is gone by `D + G` on the Mac's clock, so after an unknown outcome the
+  estate lock is held until `D + G + skew` = `D` + 190 s on this host's. The outer `timeout` around
+  the ssh leg is a backstop only and ends 60 s after that. `MEMOS_CUT_TEST_TIMING="<budget_s>
+  <grace_s> <reap_s> <skew_s> <min_window_s>"` replaces all five for the selftest only; a real cut
+  never sets it.
+- **The last line is the verdict:**
+
+      testflight-cut SUMMARY: version=<v> build=<n> sha=<40> state=<state> group=<group> | exit=<rc>
+
+  `state` is `VALID` (uploaded, and the read-back found it valid, attached to the group and in
+  testing), `archive-only`, `FAILED`, `TIMEOUT`, `LOCK-TIMEOUT` (the release checkout's lock),
+  `ESTATE-LOCK-TIMEOUT`, `REMOTE-REFUSED`, `REFUSED(deadline-passed)`, `PUSH-FAILED`, `NO-REPORT` (exit 0 without the report of
+  a finished lane), `UNKNOWN(ssh-lost)` or `REFUSED(<reason>)`. Only `| exit=0` with `VALID` (or `archive-only` for the dry run) is a cut.
+- **Tests.** `tests/gate/testflight-cut-test.sh` (a named gate selftest: the local half on real
+  git repositories with a fake ssh that probes the estate lock, the Mac half's body against a
+  throwaway release root, and the Fastfile's wiring: each lane's first statement hands it to
+  `CutGuard`), `fastlane/test/cut_guard_test.rb` (the guards themselves), `fastlane/test/cut_wrapper_test.rb` (the Mac
+  half's real lock-and-deadline wrapper, read out of the script and run: `ruby
+  fastlane/test/cut_wrapper_test.rb`), `tests/gate/cut-markers-test.sh` (the proof
+  and claim, the replayed race, two concurrent claims, the lock ceiling) and
+  `tests/gate/cut-scripts-test.sh` (the owner's train).
 
 ---
 

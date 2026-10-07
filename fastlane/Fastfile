@@ -3,9 +3,11 @@
 # (the login keychain is unreachable over SSH -> errSecInternalComponent; that is the whole
 # reason this pipeline exists rather than `xcodebuild archive` over ssh).
 
+require "open3"
 require "shellwords"
 require "spaceship"
 require File.expand_path("lib/asc_readback", __dir__)
+require File.expand_path("lib/cut_guard", __dir__)
 require File.expand_path("lib/dsym_store", __dir__)
 require File.expand_path("lib/release_notes", __dir__)
 require File.expand_path("lib/timed_probe", __dir__)
@@ -68,6 +70,40 @@ def with_release_lock
       UI.message("release lock: released")
     end
   end
+end
+
+# The cut's safety decisions live in fastlane/lib/cut_guard.rb, tested without fastlane, git or
+# Apple by fastlane/test/cut_guard_test.rb: provenance whenever a lane is passed expected_sha: (the
+# lane-side cut, bin/testflight-cut.sh, always passes it; the owner's scripts/release train passes
+# none), the build-number proof and claim, and the archive's pair against the claimed one. The lanes
+# below call it as their first statement and hand it the side effects as callables; its refusal is
+# the lane's refusal, its message (CUT-GUARD-VERDICT=<verdict>) included.
+def guarded
+  yield
+rescue CutGuard::Refusal => e
+  UI.user_error!(e.message)
+end
+
+def git_head
+  sh("git -C #{ROOT.shellescape} rev-parse HEAD", log: false).strip
+end
+
+def git_status
+  sh("git -C #{ROOT.shellescape} status --porcelain", log: false)
+end
+
+def project_yml_text
+  File.read("#{ROOT}/project.yml")
+end
+
+# The build-number proof and claim live in ONE script shared by both trains
+# (scripts/release/cut-markers.sh owns the marker directory and one flock(1) mutex around both).
+CUT_MARKERS = "#{ROOT}/scripts/release/cut-markers.sh"
+
+def run_cut_markers(*argv)
+  output, status = Open3.capture2e("/bin/bash", CUT_MARKERS, *argv)
+  UI.message(output.strip) unless output.strip.empty?
+  [status.exitstatus, output]
 end
 
 def prepare_signing(key)
@@ -156,7 +192,8 @@ platform :ios do
   # itself copies fine with ditto), so we archive only and assemble the IPA by hand from the
   # already-distribution-signed .app -- a plain Payload/ zip is a valid App Store IPA.
   desc "Archive and package a signed app-store IPA (no upload)"
-  lane :archive_ipa do
+  lane :archive_ipa do |options|
+    guarded { CutGuard.provenance!(expected_sha: options[:expected_sha], head: method(:git_head), status: method(:git_status)) } if options.key?(:expected_sha)
     key = api_key
     with_release_lock do
       prepare_signing(key)
@@ -265,25 +302,53 @@ platform :ios do
     puts(testflight_changelog(version, build_number))
   end
 
+  # The proof half of the one-number-one-upload rule, shared by both trains: only App Store
+  # Connect's "no such build" for this exact pair publishes a proof, and cut-markers.sh refuses to
+  # publish one while any spent marker of the pair exists. The query stays outside the markers'
+  # lock; the spent re-check inside it is what makes a claim landing in between win.
+  desc "Prove version:<v> build:<b> unused on App Store Connect and write the proof marker"
+  lane :prove_unused do |options|
+    guarded do
+      CutGuard.prove(
+        version: options[:version].to_s, build: options[:build].to_s,
+        # api_key also installs the Spaceship token the read-back queries with
+        asc: -> { api_key; asc_attach_status(version: options[:version].to_s, build_number: options[:build].to_s) },
+        head: method(:git_head), runner: method(:run_cut_markers),
+      )
+    end
+    UI.success("UNUSED: #{options[:version]} (#{options[:build]}) is not in App Store Connect; proof written")
+  end
+
   desc "Build and upload to TestFlight (headless)"
-  lane :beta do
-    archive_ipa
-    version, build_number = archive_version(ARCHIVE)
-    changelog = testflight_changelog(version, build_number)
-    preserve_dsyms(archive: ARCHIVE, version: version, build: build_number)
-    # No skip_waiting here: leaving before ASC finishes processing means the groups:
-    # assignment silently never runs, and with an internal group that cannot be
-    # hasAccessToAllBuilds (the API refuses to enable it post-creation), an unattached
-    # build is INVISIBLE to every tester -- 1.0.2 (8) sat processed and unseen until a
-    # manual API attach. Waiting costs minutes and makes distribution real.
-    # submit_beta_review defaults to TRUE and posts a Beta App Review submission -- an
-    # EXTERNAL-testing requirement the internal household group neither needs nor satisfies
-    # (no beta description is filled in), so the lane died there AFTER processing and BEFORE
-    # the group assign, leaving 1.0.3 (9) processed and unattached until a manual API attach.
-    upload_to_testflight(
-      api_key: api_key, ipa: IPA, groups: [GROUP],
-      distribute_external: false, submit_beta_review: false, changelog: changelog,
-    )
-    verify_attach(version: version, build: build_number)
+  lane :beta do |options|
+    # Provenance, then the claim (one unspent proof buys exactly one upload, whichever train asks),
+    # then the archive, then the archive's pair against the claimed pair, and only then the upload.
+    guarded do
+      CutGuard.beta(
+        expected_sha: options.key?(:expected_sha) ? options[:expected_sha].to_s : nil,
+        head: method(:git_head), status: method(:git_status), project_yml: method(:project_yml_text),
+        runner: method(:run_cut_markers),
+        archive: -> { archive_ipa(options.key?(:expected_sha) ? { expected_sha: options[:expected_sha] } : {}) },
+        archived_pair: -> { archive_version(ARCHIVE) },
+        upload: lambda do |version, build_number|
+          changelog = testflight_changelog(version, build_number)
+          preserve_dsyms(archive: ARCHIVE, version: version, build: build_number)
+          # No skip_waiting here: leaving before ASC finishes processing means the groups:
+          # assignment silently never runs, and with an internal group that cannot be
+          # hasAccessToAllBuilds (the API refuses to enable it post-creation), an unattached
+          # build is INVISIBLE to every tester -- 1.0.2 (8) sat processed and unseen until a
+          # manual API attach. Waiting costs minutes and makes distribution real.
+          # submit_beta_review defaults to TRUE and posts a Beta App Review submission -- an
+          # EXTERNAL-testing requirement the internal household group neither needs nor satisfies
+          # (no beta description is filled in), so the lane died there AFTER processing and BEFORE
+          # the group assign, leaving 1.0.3 (9) processed and unattached until a manual API attach.
+          upload_to_testflight(
+            api_key: api_key, ipa: IPA, groups: [GROUP],
+            distribute_external: false, submit_beta_review: false, changelog: changelog,
+          )
+          verify_attach(version: version, build: build_number)
+        end,
+      )
+    end
   end
 end

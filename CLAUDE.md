@@ -276,7 +276,9 @@ code (`tests/gate/estate-ledger-test.sh`, case 22).
 
 **Git is the only medium between the two machines.** The gate directory is a mirror, never a
 checkout, and it is never opened in Xcode. A hands-on clone on the Mac lives at
-`~/projects/memos-ng-ios`, is never an rsync target, and nothing writes there.
+`~/projects/memos-ng-ios`, is never an rsync target, and nothing writes there. The lane's TestFlight
+cut (`bin/testflight-cut.sh`) pushes commits to `~/build/memos-ng-ios/release/repo.git` (create-only
+`refs/cuts/*`) and builds in `release/work` — the only other write path to the Mac.
 
 ## The dependency rule
 
