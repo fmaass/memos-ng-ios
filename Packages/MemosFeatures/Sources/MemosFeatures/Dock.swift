@@ -278,7 +278,7 @@ struct LibraryScopePicker: View {
     static let identifier = "library-scope"
 }
 
-/// The three tabs, each with its own navigation stack and scroll position (MEMNG-666). The bar is
+/// The four tabs, each with its own navigation stack and scroll position (MEMNG-666). The bar is
 /// the app's own (`LeadingMainBar`, MEMNG-690): one Liquid Glass capsule at the leading edge that
 /// narrows to the selected tab's icon on the Timeline's scroll and morphs into the Library's scope
 /// row. The `TabView` keeps the stacks; its own bar is never drawn.

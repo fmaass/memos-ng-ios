@@ -1068,7 +1068,7 @@ extension MediaImageLoaderTests {
     func otherRootsHaveNoScope() async {
         let media = PaintedMedia(palette: Self.palette())
         await withTransport(media) {
-            for tab in [MainTab.timeline, .places] {
+            for tab in [MainTab.collections, .timeline, .places] {
                 let window = await chromeHost(opening: tab)
                 await tabChosen(tab, window)
                 await chromeSettle(window, turns: 80)
@@ -1947,7 +1947,9 @@ extension MediaImageLoaderTests {
             let inset = window.safeAreaInsets.left + LeadingMainBar.leadingInset
             let at = String(describing: capsule)
             #expect(abs((capsule?.minX ?? -100) - inset) <= 1, "capsule at \(at)")
-            #expect((capsule?.width ?? 0) > 200, "the capsule holds three tabs")
+            #expect(
+                (capsule?.width ?? 0) >= 4 * LeadingMainBar.itemWidth,
+                "the capsule holds four tabs: \(at)")
         }
     }
 
@@ -2474,7 +2476,7 @@ private struct BarLab: View {
 }
 
 /// The system's own tab bar, the reference the pill and the press are matched to (MEMNG-690
-/// phase 3): a plain `TabView` over the same three tabs, its selection written by the test.
+/// phase 3): a plain `TabView` over the same tabs, its selection written by the test.
 @MainActor
 @Observable
 private final class SystemTabLabSelection {
@@ -2621,7 +2623,7 @@ extension MediaImageLoaderTests {
             #expect(abs((first?.minX ?? -100) - inset) <= 1, "\(lines[0])")
             #expect(abs((first?.maxY ?? -100) - foot) <= 1, "\(lines[0])")
             #expect(abs((first?.height ?? 0) - LeadingMainBar.height) <= 1, "\(lines[0])")
-            for tab in [MainTab.timeline, .places, .library] {
+            for tab in [MainTab.collections, .timeline, .places, .library] {
                 #expect(pressLeading(tab, in: window), "\(tab.title) took no press")
                 var counts: [Int] = []
                 for _ in 0..<30 {
@@ -2793,7 +2795,7 @@ extension MediaImageLoaderTests {
             await libraryServed(media, window)
             _ = await leadingGlass(.tabs, in: window)
             var lines: [String] = []
-            for tab in [MainTab.library, .timeline, .places, .library] {
+            for tab in [MainTab.library, .collections, .timeline, .places, .library] {
                 if tab != .library || !lines.isEmpty {
                     #expect(pressLeading(tab, in: window), "\(tab.title) took no press")
                     await tabChosen(tab, window)

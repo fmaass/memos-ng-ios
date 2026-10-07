@@ -33,6 +33,8 @@ struct DockModeTests {
         check([
             Row(from: .tabs, event: .pressedTab(.library, showing: .library), to: .scope),
             Row(from: .scope, event: .pressedTab(.library, showing: .library), to: .scope),
+            Row(from: .tabs, event: .pressedTab(.library, showing: .collections), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.library, showing: .collections), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.library, showing: .timeline), to: .tabs),
             Row(from: .scope, event: .pressedTab(.library, showing: .timeline), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.library, showing: .places), to: .tabs),
@@ -43,14 +45,26 @@ struct DockModeTests {
     @Test("a press on Timeline or Places gives the tabs, whatever was showing")
     func otherPressGivesTheTabs() {
         check([
+            Row(from: .tabs, event: .pressedTab(.collections, showing: .library), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.collections, showing: .library), to: .tabs),
+            Row(from: .tabs, event: .pressedTab(.collections, showing: .collections), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.collections, showing: .collections), to: .tabs),
+            Row(from: .tabs, event: .pressedTab(.collections, showing: .timeline), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.collections, showing: .timeline), to: .tabs),
+            Row(from: .tabs, event: .pressedTab(.collections, showing: .places), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.collections, showing: .places), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.timeline, showing: .library), to: .tabs),
             Row(from: .scope, event: .pressedTab(.timeline, showing: .library), to: .tabs),
+            Row(from: .tabs, event: .pressedTab(.timeline, showing: .collections), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.timeline, showing: .collections), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.timeline, showing: .timeline), to: .tabs),
             Row(from: .scope, event: .pressedTab(.timeline, showing: .timeline), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.timeline, showing: .places), to: .tabs),
             Row(from: .scope, event: .pressedTab(.timeline, showing: .places), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.places, showing: .library), to: .tabs),
             Row(from: .scope, event: .pressedTab(.places, showing: .library), to: .tabs),
+            Row(from: .tabs, event: .pressedTab(.places, showing: .collections), to: .tabs),
+            Row(from: .scope, event: .pressedTab(.places, showing: .collections), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.places, showing: .timeline), to: .tabs),
             Row(from: .scope, event: .pressedTab(.places, showing: .timeline), to: .tabs),
             Row(from: .tabs, event: .pressedTab(.places, showing: .places), to: .tabs),
@@ -71,6 +85,8 @@ struct DockModeTests {
         check([
             Row(from: .tabs, event: .selected(.library), to: .tabs),
             Row(from: .scope, event: .selected(.library), to: .scope),
+            Row(from: .tabs, event: .selected(.collections), to: .tabs),
+            Row(from: .scope, event: .selected(.collections), to: .tabs),
             Row(from: .tabs, event: .selected(.timeline), to: .tabs),
             Row(from: .scope, event: .selected(.timeline), to: .tabs),
             Row(from: .tabs, event: .selected(.places), to: .tabs),
@@ -148,14 +164,14 @@ struct DockModeTests {
     @Test("a scroll while Timeline or Places shows changes nothing")
     func scrollOffTheLibrary() {
         var rows: [Row] = []
-        for showing in [MainTab.timeline, .places] {
+        for showing in [MainTab.collections, .timeline, .places] {
             for y in [25.0, 24, 0, -10] {
                 let event = DockEvent.scrolled(y: y, showing: showing, by: .scroll)
                 rows.append(Row(from: .tabs, event: event, to: .tabs))
                 rows.append(Row(from: .scope, event: event, to: .scope))
             }
         }
-        #expect(rows.count == 16)
+        #expect(rows.count == 24)
         check(rows)
     }
 
@@ -367,7 +383,7 @@ struct DockModeTests {
             "a swing past the second release's settling counted")
     }
 
-    /// The one bottom bar (MEMNG-684), for every mode x tab x claim: 3 x 3 x 3 rows, written out.
+    /// The one bottom bar (MEMNG-684), for every mode x tab x claim: 3 x 4 x 3 rows, written out.
     /// Folded is a shape of the tabs (MEMNG-690): it stands the tabs wherever `tabs` would.
     /// A takeover leaves nothing anywhere; select mode its toolbar on the Library and nothing
     /// elsewhere; with no claim the scope stands on the Library in `scope`, the tabs otherwise.
@@ -377,6 +393,9 @@ struct DockModeTests {
             (.tabs, .timeline, nil, .tabs),
             (.tabs, .timeline, .select, .none),
             (.tabs, .timeline, .takeover, .none),
+            (.tabs, .collections, nil, .tabs),
+            (.tabs, .collections, .select, .none),
+            (.tabs, .collections, .takeover, .none),
             (.tabs, .places, nil, .tabs),
             (.tabs, .places, .select, .none),
             (.tabs, .places, .takeover, .none),
@@ -386,6 +405,9 @@ struct DockModeTests {
             (.scope, .timeline, nil, .tabs),
             (.scope, .timeline, .select, .none),
             (.scope, .timeline, .takeover, .none),
+            (.scope, .collections, nil, .tabs),
+            (.scope, .collections, .select, .none),
+            (.scope, .collections, .takeover, .none),
             (.scope, .places, nil, .tabs),
             (.scope, .places, .select, .none),
             (.scope, .places, .takeover, .none),
@@ -395,6 +417,9 @@ struct DockModeTests {
             (.folded, .timeline, nil, .tabs),
             (.folded, .timeline, .select, .none),
             (.folded, .timeline, .takeover, .none),
+            (.folded, .collections, nil, .tabs),
+            (.folded, .collections, .select, .none),
+            (.folded, .collections, .takeover, .none),
             (.folded, .places, nil, .tabs),
             (.folded, .places, .select, .none),
             (.folded, .places, .takeover, .none),
@@ -561,6 +586,8 @@ struct DockModeTests {
         #expect(DockMode.scope.after(.selected(.library)) == .scope, "the scope is kept")
         #expect(DockMode.folded.folds(on: .timeline))
         #expect(DockMode.folded.folds(on: .places))
+        #expect(DockMode.folded.folds(on: .collections))
+        #expect(DockMode.folded.after(.selected(.collections)) == .tabs)
         #expect(!DockMode.folded.folds(on: .library))
         #expect(!DockMode.tabs.folds(on: .timeline))
         #expect(!DockMode.scope.folds(on: .timeline))

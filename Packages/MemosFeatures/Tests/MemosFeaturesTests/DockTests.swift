@@ -455,8 +455,9 @@ struct DockTests {
         "the pill stands centred under its tab, one tab apart",
         arguments: [
             (MainTab.library, CGFloat(-4)),
-            (.timeline, 82),
-            (.places, 168),
+            (.collections, 82),
+            (.timeline, 168),
+            (.places, 254),
         ] as [(MainTab, CGFloat)])
     func pillOffset(tab: MainTab, expected: CGFloat) {
         #expect(LeadingMainBar.pillOffset(for: tab) == expected)

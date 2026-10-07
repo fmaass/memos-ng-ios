@@ -58,10 +58,10 @@ private final class TabOrderCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// The signed-in app's bar as a person meets it at launch: Library, Timeline, Places from left
-/// to right, with the Timeline chosen (page 3929 decision 11). The bar is the app's own capsule
-/// (MEMNG-690), so it is read off what the capsule draws, and the selection off the controller
-/// UIKit built for the `TabView`.
+/// The signed-in app's bar as a person meets it at launch: Library, Collections, Timeline, Places
+/// from left to right (MEMNG-709), with the Timeline chosen (page 3929 decision 11). The bar is
+/// the app's own capsule (MEMNG-690), so it is read off what the capsule draws, and the selection
+/// off the controller UIKit built for the `TabView`.
 ///
 /// The real `MainTabView` over a real `SessionStore` and the real generated client, rather than a
 /// harness that builds its own `TabView`: the order and the default are both decided inside that
@@ -99,7 +99,7 @@ struct MainTabOrderRenderTests {
             window.rootViewController = nil
         }
 
-        let expected = ["Library", "Timeline", "Places"]
+        let expected = ["Library", "Collections", "Timeline", "Places"]
         var drawn: [String] = []
         for _ in 0..<120 {
             await Self.settle(window)
@@ -125,7 +125,7 @@ struct MainTabOrderRenderTests {
     /// instead (MEMNG-690), and UIKit's must not minimise under it.
     @Test(
         "the hosted tab controller never minimises, on any tab or after a move",
-        arguments: [MainTab.library, MainTab.timeline, MainTab.places]
+        arguments: [MainTab.library, MainTab.collections, MainTab.timeline, MainTab.places]
     )
     func minimiseBehaviourReachesUIKit(tab: MainTab) async {
         let window = await Self.signedInWindow(opening: tab)
@@ -164,7 +164,7 @@ struct MainTabOrderRenderTests {
     /// Timeline and Places it changes nothing the app draws.
     @Test(
         "a press on the chosen tab gives the Library its scope toolbar and leaves the others be",
-        arguments: [MainTab.library, MainTab.timeline, MainTab.places]
+        arguments: [MainTab.library, MainTab.collections, MainTab.timeline, MainTab.places]
     )
     func pressOnTheChosenTab(tab: MainTab) async {
         let window = await Self.signedInWindow(opening: tab)
@@ -197,6 +197,77 @@ struct MainTabOrderRenderTests {
             #expect(control == nil, "a press on \(tab.title) drew the scope: \(pressed)")
             #expect(ScopeBarProbe.tabsShow(in: window), "a press on \(tab.title) took the bar")
         }
+    }
+
+    /// MEMNG-709: a press on each tab, in the order the bar draws them, lands the selection pill
+    /// under that tab's item. Both places are read off the rendered capsule — the items' middles
+    /// from the frames of its buttons, the pill's from its own frame — and never from
+    /// `LeadingMainBar.pillOffset`, so a bar whose drawing and enum disagree on the order is
+    /// caught where a person sees it: Collections pressed must light the SECOND item from the
+    /// left. The capsule is also held inside the window it stands in: four tabs at the frozen
+    /// widths and inset must not run past the trailing edge (ADR-0008).
+    @Test("the selection pill lands under each of the four items, in the bar's order")
+    func pillLandsUnderEachItemInBarOrder() async {
+        // On the Timeline, as at launch, so every press below comes from another tab: the Library
+        // pressed where it shows would be the way into its scope, not a selection.
+        let window = await Self.signedInWindow(opening: .timeline)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
+        let expected = ["Library", "Collections", "Timeline", "Places"]
+        var items: [(title: String, midX: CGFloat)] = []
+        for _ in 0..<120 {
+            await Self.settle(window)
+            items = ScopeBarProbe.tabItemsLeftToRight(in: window)
+            if items.count == expected.count { break }
+        }
+        let read = items.map { $0.title }
+        #expect(read == expected, "the bar reads \(read)")
+
+        let capsule = ScopeBarProbe.tabsFrame(in: window)
+        let edge = window.bounds.maxX - window.safeAreaInsets.right
+        let fits = "capsule \(String(describing: capsule)), trailing edge \(edge)"
+        #expect((capsule?.maxX ?? .infinity) <= edge, "the capsule runs past the window: \(fits)")
+
+        for (position, title) in expected.enumerated() {
+            guard let tab = MainTab.allCases.first(where: { $0.title == title }) else {
+                Issue.record("no tab is named \(title)")
+                continue
+            }
+            #expect(ScopeBarProbe.pressTab(tab, in: window), "the bar's \(title) took no press")
+            for _ in 0..<120 where Self.chosenTitle(in: window) != title {
+                await Self.settle(window)
+            }
+            let pill = await Self.restingPill(in: window)
+            let drawn = ScopeBarProbe.tabItemsLeftToRight(in: window)
+            let home: (title: String, midX: CGFloat)? =
+                drawn.indices.contains(position) ? drawn[position] : nil
+            let seen = "pill \(String(describing: pill)), items \(drawn), \(fits)"
+            #expect(
+                home?.title == title,
+                "\(title) pressed: item \(position + 1) from the left reads \(home?.title ?? "-")")
+            #expect(
+                abs((pill?.midX ?? -100) - (home?.midX ?? 100)) <= 2,
+                "\(title) pressed: the pill is not under item \(position + 1): \(seen)")
+        }
+    }
+
+    /// The selection pill once its spring has come to rest (the same middle, to the point, on six
+    /// readings running), or as it stands at the last reading.
+    private static func restingPill(in window: UIWindow) async -> CGRect? {
+        var last: CGRect?
+        var alike = 0
+        for _ in 0..<160 {
+            await settle(window)
+            let now = ScopeBarProbe.pillFrame(in: window)
+            let same = now != nil && now.map { Int($0.midX) } == last.map { Int($0.midX) }
+            alike = same ? alike + 1 : 0
+            last = now
+            if alike >= 6 { break }
+        }
+        return last
     }
 
     /// Signs in over the tab-order wire and hosts the app on `tab`, chosen.

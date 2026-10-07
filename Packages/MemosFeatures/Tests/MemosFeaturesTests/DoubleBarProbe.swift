@@ -44,6 +44,7 @@ struct DockWitnessTabs: View {
         switch tab {
         case .timeline: TimelineView()
         case .library: MediaLibraryView()
+        case .collections: CollectionsRootView()
         case .places: PlacesView()
         }
     }

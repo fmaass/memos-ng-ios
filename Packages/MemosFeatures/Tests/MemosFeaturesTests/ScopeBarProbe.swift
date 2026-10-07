@@ -139,6 +139,12 @@ enum ScopeBarProbe {
     /// row's Library icon excepted. A title found at two places is one item drawn twice and is
     /// measured at the leftmost. Empty when the capsule is not on screen.
     static func tabTitlesLeftToRight(in window: UIWindow) -> [String] {
+        tabItemsLeftToRight(in: window).map { $0.title }
+    }
+
+    /// The capsule's items as `tabTitlesLeftToRight` reads them, each with the middle it is drawn
+    /// at in the window's coordinates: where a person sees the tab, not where the enum puts it.
+    static func tabItemsLeftToRight(in window: UIWindow) -> [(title: String, midX: CGFloat)] {
         guard let capsule = tabsFrame(in: window) else { return [] }
         let titles = MainTab.allCases.map(\.title)
         var drawnAt: [String: CGFloat] = [:]
@@ -157,7 +163,25 @@ enum ScopeBarProbe {
             stack.append(contentsOf: object.accessibilityElements ?? [])
             if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
         }
-        return drawnAt.keys.sorted { (drawnAt[$0] ?? 0) < (drawnAt[$1] ?? 0) }
+        return drawnAt.map { (title: $0.key, midX: $0.value) }.sorted { $0.midX < $1.midX }
+    }
+
+    /// Where the capsule's selection pill is drawn (`LeadingMainBar.pillIdentifier`), in the
+    /// window's coordinates; nil when no pill is on screen — the folded icon and the scope row
+    /// draw none.
+    static func pillFrame(in window: UIWindow) -> CGRect? {
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            if identifier(of: object) == LeadingMainBar.pillIdentifier {
+                let frame = windowFrame(of: object, in: window)
+                if !frame.isEmpty, frame.intersects(window.bounds) { return frame }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
     }
 
     /// The tab the `TabView` has selected, read off the controller UIKit built for it: its own

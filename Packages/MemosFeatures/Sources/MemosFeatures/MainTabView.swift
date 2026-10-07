@@ -18,8 +18,9 @@ struct MainTabView: View {
     /// the environment (MEMNG-191).
     @State private var jump = MemoJump()
 
-    /// Opens on the Timeline, the middle tab (plan page 3929 decision 11). A test that is about
-    /// another tab's screen under the real bar opens there instead.
+    /// Opens on the Timeline (plan page 3929 decision 11), third of the four since Collections
+    /// came in beside the Library (MEMNG-709). A test that is about another tab's screen under the
+    /// real bar opens there instead.
     init(opening tab: MainTab = .timeline) {
         _selection = State(initialValue: tab)
     }
@@ -86,6 +87,7 @@ struct MainTabView: View {
         switch tab {
         case .timeline: TimelineView()
         case .library: MediaLibraryView()
+        case .collections: CollectionsRootView()
         case .places: PlacesView()
         }
     }

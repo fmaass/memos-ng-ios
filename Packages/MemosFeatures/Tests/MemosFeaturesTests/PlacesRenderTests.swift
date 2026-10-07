@@ -15,8 +15,9 @@ struct PlacesRenderTests {
     /// touches.
     @Test("the app offers a third way in, named Places, last in the bar after the timeline")
     func placesIsInTheTabBar() {
-        #expect(MainTab.allCases.count == 3)
-        #expect(MainTab.allCases.map(\.rawValue) == ["library", "timeline", "places"])
-        #expect(MainTab.allCases.map(\.title) == ["Library", "Timeline", "Places"])
+        #expect(MainTab.allCases.count == 4)
+        let raw = MainTab.allCases.map(\.rawValue)
+        #expect(raw == ["library", "collections", "timeline", "places"])
+        #expect(MainTab.allCases.map(\.title) == ["Library", "Collections", "Timeline", "Places"])
     }
 }

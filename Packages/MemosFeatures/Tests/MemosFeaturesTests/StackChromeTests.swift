@@ -46,6 +46,8 @@ private struct ChromeHarness: View {
                 }
             case .library:
                 Text("the library")
+            case .collections:
+                Text("the collections")
             case .places:
                 Text("the places")
             }
