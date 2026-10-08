@@ -6,12 +6,12 @@
 # builds land silently on the internal disk), another volume named merkur_build, the image mounted
 # without ownership, a repo root symlinked off the volume — refuses before the first remote write.
 #
-# Source this file and call gate_mount_guard, or run it: `bash gate-mount-guard.sh <mode> [sub…]`.
+# Source this file and call gate_mount_guard, or run it: `bash gate-mount-guard.sh <mode> <sub…|->`.
 # Vendored BYTE-IDENTICAL into every project that gates on the host; each records the reference
 # commit and this file's sha256 in scripts/GATE_MOUNT_GUARD_SOURCE. It runs under the build host's
 # /bin/bash 3.2 (no associative arrays, no mapfile, no case-changing expansions).
 #
-# gate_mount_guard <mode> [subtree…]
+# gate_mount_guard <mode> <subtree…|->
 #   mode enforce  the predicate decides: OK -> 0, anything else -> 16.
 #   mode report   the predicate is evaluated the same way, but while a valid pending marker exists
 #                 a refusal is REPORTED (rc 0) instead of enforced; without a valid marker, report
@@ -20,8 +20,9 @@
 #                 valid only when this host's UUID, created <= now < expires and the window is at
 #                 most 72 h. Missing, unreadable, malformed, another host's or expired = enforce.
 #   subtree…      repo subtrees under the root whose EXISTING components must stay on the volume
-#                 (relative paths); none = every project's (GATE_MG_SUBTREES, the list the mount
-#                 wrapper proves too); a single "-" = the volume identity only.
+#                 (relative paths), at least one; a single "-" = the volume identity only. The
+#                 helper holds no inventory: each caller names what it proves, and a mode with
+#                 neither is refused as a usage error (16, never softened by a marker).
 # Output: exactly one verdict line, `MOUNT OK uuid=<uuid> dev=<device>` or `MOUNT REFUSE <reason>`,
 # then one state line `mountguard=<enforced|pending:OK|pending:REFUSE> marker=<state>`.
 #
@@ -46,7 +47,6 @@ GATE_MG_BUNDLE=/Volumes/lexosaurus/caches/merkur_build.sparsebundle
 GATE_MG_SENTINEL=.NOT-MOUNTED-merkur_build
 GATE_MG_LABEL=live.discomarder.merkur-build-image
 GATE_MG_MAX_PENDING_S=259200
-GATE_MG_SUBTREES="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex"
 # The readers, so a test can make each one fail, hang or lie with plausible output.
 GATE_MG_STAT="${GATE_MG_STAT:-stat}"
 GATE_MG_DISKUTIL="${GATE_MG_DISKUTIL:-diskutil}"
@@ -158,7 +158,7 @@ gate_mg_predicate() {
   [ "$rc" -ne 2 ] || { GATE_MG_WHY="image attachment unmeasured: $GATE_MG_WHY"; return 1; }
   [ "$rc" -eq 0 ] || { GATE_MG_WHY="$GATE_MG_BUNDLE is not attached"; return 1; }
   printf '%s' "$GATE_MG_ENTS" | awk -F '\t' -v d="$devnode" '$1 == d { f = 1 } END { exit !f }' \
-    || { GATE_MG_WHY="$devnode is not an entity of $GATE_MG_BUNDLE"; return 1; }
+    || { GATE_MG_WHY="$devnode is not an entity of $GATE_MG_BUNDLE"; return 1; } # ALLOWANCE: awk exits only in END, so the pipe's status is awk's own
   # (c) a mount boundary between the root and the home directory.
   mdev="$(gate_mg_dev_of "$M")" || { GATE_MG_WHY="stat of $M failed"; return 1; }
   hdev="$(gate_mg_dev_of "$HOME")" || { GATE_MG_WHY="stat of $HOME failed"; return 1; }
@@ -235,13 +235,14 @@ gate_mount_guard() {
   [ "$#" -eq 0 ] || shift
   case "$mode" in
     enforce|report) ;;
-    *) echo "MOUNT REFUSE usage: gate_mount_guard <enforce|report> [subtree…|-] (got '$mode')"
+    *) echo "MOUNT REFUSE usage: gate_mount_guard <enforce|report> <subtree…|-> (got '$mode')"
        echo "mountguard=enforced marker=not-read"
        return 16 ;;
   esac
   if [ "$#" -eq 0 ]; then
-    # shellcheck disable=SC2086
-    set -- $GATE_MG_SUBTREES
+    echo "MOUNT REFUSE usage: gate_mount_guard <enforce|report> <subtree…|-> (no subtree given)"
+    echo "mountguard=enforced marker=not-read"
+    return 16
   elif [ "$#" -eq 1 ] && [ "$1" = - ]; then
     set --
   fi

@@ -84,12 +84,14 @@ EOF
 done
 # stat -f %d <path>: the device of the path itself (BSD stat does not follow the last symlink).
 # $F/dev/<path with / as _> overrides one path; under the root while $F/mounted exists the image's
-# device; otherwise the internal volume's. $F/stat-fail fails every call.
+# device; otherwise the internal volume's. $F/stat-fail fails every call; $F/stat-fail-path fails
+# the one path it names, after printing that path's plausible device.
 cat > "$tmp/bin/stat" <<EOF
 #!/usr/bin/env bash
 [ "\$1" = -f ] && [ "\$2" = %d ] || { echo "fake stat: unsupported \$*" >&2; exit 2; }
 [ ! -e "$F/stat-fail" ] || { echo 16777234; exit 1; }
 p="\$3"
+[ ! -e "$F/stat-fail-path" ] || [ "\$p" != "\$(cat "$F/stat-fail-path")" ] || { echo 16777247; exit 1; }
 [ -e "\$p" ] || [ -L "\$p" ] || { echo "stat: \$p: stat: No such file or directory" >&2; exit 1; }
 o="$F/dev/\$(printf '%s' "\$p" | tr / _)"
 if [ -e "\$o" ]; then cat "\$o"
@@ -130,10 +132,17 @@ marker() {    # marker <host> <created offset s> <expires offset s> [extra line]
   [ -z "${4:-}" ] || printf '%s\n' "$4" >> "$H/.config/build-mount-guard/pending"
 }
 OUT=""; RC=""
-run() {
+# The helper holds no inventory; the build host's mount wrapper hands it this one
+# (scripts/merkur/build-image-mount.sh, BUILD_IMAGE_SUBTREES), so the cases below prove it too.
+INV="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate"
+raw() {       # raw <arguments…>: the helper run with exactly these arguments
   OUT="$(env HOME="$H" GATE_MG_STAT="$tmp/bin/stat" GATE_MG_DISKUTIL="$tmp/bin/diskutil" \
     GATE_MG_HDIUTIL="$tmp/bin/hdiutil" GATE_MG_IOREG="$tmp/bin/ioreg" GATE_MG_PLUTIL="$tmp/bin/plutil" \
     GATE_MG_READ_S="${READ_S:-10}" bash "$tmp/guard.sh" "$@" 2>&1)"; RC=$?
+}
+run() {       # run <mode> [subtree…]: a mode alone is handed $INV, as the wrapper hands it
+  # shellcheck disable=SC2086
+  if [ "$#" -eq 1 ]; then raw "$1" $INV; else raw "$@"; fi
 }
 line() { printf '%s\n' "$OUT" | sed -n "${1}p"; }
 expect() {    # expect <name> <rc> <line-1 glob> <line-2 glob>
@@ -223,8 +232,12 @@ healthy; printf 'not a plist\n' > "$F/hdiutil.plist"; run enforce
 expect "(g) hdiutil prints garbage -> refuse" 16 "MOUNT REFUSE image attachment unmeasured*" "mountguard=enforced*"
 healthy; touch "$F/stat-fail"; run enforce
 expect "(g) stat fails -> refuse" 16 "MOUNT REFUSE stat of*failed*" "mountguard=enforced*"
+healthy; printf '%s' "$M" > "$F/stat-fail-path"; run enforce -
+expect "(g) the stat of the root alone fails, volume identity only ('-') -> refuse" 16 "MOUNT REFUSE stat of $M failed*" "mountguard=enforced*"
+healthy; printf '%s' "$M" > "$F/stat-fail-path"; run enforce
+expect "(g) the stat of the root alone fails, the inventory named -> refuse at the root's stat" 16 "MOUNT REFUSE stat of $M failed*" "mountguard=enforced*"
 healthy; OUT="$(env HOME="$H" GATE_MG_STAT="$tmp/bin/stat" GATE_MG_DISKUTIL="$tmp/bin/diskutil" GATE_MG_HDIUTIL="$tmp/bin/hdiutil" \
-  GATE_MG_PLUTIL="$tmp/no-such-plutil" bash "$tmp/guard.sh" enforce 2>&1)"; RC=$?
+  GATE_MG_PLUTIL="$tmp/no-such-plutil" bash "$tmp/guard.sh" enforce $INV 2>&1)"; RC=$?
 expect "(g) the plist reader missing -> refuse" 16 "MOUNT REFUSE *no VolumeUUID*" "mountguard=enforced*"
 
 # --- the pending marker (report mode) -----------------------------------------------------------------
@@ -275,6 +288,16 @@ plain; run bogus
 expect "an unknown mode -> refuse 16" 16 "MOUNT REFUSE usage*" "mountguard=enforced marker=not-read"
 plain; run
 expect "no mode -> refuse 16" 16 "MOUNT REFUSE usage*" "mountguard=enforced marker=not-read"
+USAGE_NONE="MOUNT REFUSE usage: gate_mount_guard <enforce|report> <subtree…|-> (no subtree given)"
+healthy; raw enforce
+expect "a mode with no subtree and no '-' -> usage refusal 16 even on a healthy mount (no default inventory)" 16 "$USAGE_NONE" "mountguard=enforced marker=not-read"
+plain; marker "$HOST_UUID" -60 86400; raw report
+expect "report with no subtree and a valid marker -> usage refusal 16, never softened to pending" 16 "$USAGE_NONE" "mountguard=enforced marker=not-read"
+healthy; raw enforce ''
+expect "an empty subtree argument -> refuse 16 (not read as 'none given', not as the root)" 16 "MOUNT REFUSE subtree '' is not a plain relative path*" "mountguard=enforced*"
+n="$(grep -cE 'memos|img-manager|repaso|mardermusic' "$GUARD")"; c="$(grep -c '^GATE_MG_UUID=EE4304C8-021C-489D-B57B-6D846E76B1CF$' "$GUARD")"
+OUT="project names: $n, control GATE_MG_UUID lines: $c"
+if [ "$n" = 0 ] && [ "$c" = 1 ]; then ok "the helper names no project, so every repo vendors it byte-identical (control: its UUID literal found once)"; else bad "the helper names a project"; fi
 
 # --- the mount-point reading: only a key ABSENT from the entity means "not mounted" ---------------
 # real plutil answers a missing key, a bad index and unparsable input with one text and exit 1, so a
@@ -323,7 +346,7 @@ OUT="$( { cat "$tmp/guard.sh"; echo 'gate_mount_guard enforce memos-ng-ios/gate 
 if [ "$(line 1)" = "MOUNT OK uuid=$UUID dev=/dev/disk8s1" ] && [ "$(line 3)" = "rc=0" ] && [ -z "$(line 4)" ]; then ok "piped into bash -s with the call appended: one verdict, no standalone run"; else bad "bash -s form"; fi
 OUT="$(env HOME="$H" bash -c ". '$tmp/guard.sh'; type gate_mount_guard >/dev/null && echo sourced" 2>&1)"
 if [ "$OUT" = sourced ]; then ok "sourcing defines the function and runs nothing"; else bad "sourced form"; fi
-plain; OUT="$( { cat "$tmp/guard.sh"; echo 'set -e; gate_mount_guard enforce; echo "rc=$?"'; } \
+plain; OUT="$( { cat "$tmp/guard.sh"; echo 'set -e; gate_mount_guard enforce memos-ng-ios/gate; echo "rc=$?"'; } \
   | env HOME="$H" GATE_MG_STAT="$tmp/bin/stat" GATE_MG_DISKUTIL="$tmp/bin/diskutil" GATE_MG_HDIUTIL="$tmp/bin/hdiutil" \
     GATE_MG_PLUTIL="$tmp/bin/plutil" bash -s 2>&1)"; RC=$?
 if [ "$RC" = 16 ] && [[ "$(line 1)" == "MOUNT REFUSE"* ]] && [ -z "$(line 3)" ]; then ok "under set -e the refusal still prints both lines and ends the caller with 16"; else bad "set -e form (rc $RC)"; fi

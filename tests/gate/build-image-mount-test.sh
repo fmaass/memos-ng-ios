@@ -228,6 +228,21 @@ reset mounted populated; rm -rf "$M/memos-ng-ios"; ln -s "$M.under/memos-ng-ios"
 if [ "$RC" = 1 ] && [ -z "$(calls)" ] && [ "$(state)" = mounted ] && grep -qF "not proved: MOUNT REFUSE $M/memos-ng-ios is a symlink" "$LOG"; then ok "step 1: an image mounted at the root whose memos-ng-ios is a symlink onto internal storage -> not proved, exit 1, neither detached nor re-attached"; else bad "step 1 symlinked repo root (rc $RC)"; fi
 reset mounted populated; ln -s "$M.under" "$M/repaso-es-ios"; run
 if [ "$RC" = 1 ] && [ -z "$(calls)" ] && grep -qF "not proved: MOUNT REFUSE $M/repaso-es-ios is a symlink" "$LOG"; then ok "step 1: every project's subtrees are proved, not memos's alone (repaso-es-ios a symlink -> exit 1)"; else bad "step 1 symlinked repaso root (rc $RC)"; fi
+reset mounted populated; ln -s "$M.under" "$M/mardermusic-ios"; run
+if [ "$RC" = 1 ] && [ -z "$(calls)" ] && grep -qF "not proved: MOUNT REFUSE $M/mardermusic-ios is a symlink" "$LOG"; then ok "step 1: the newest root is in the inventory too (mardermusic-ios a symlink -> exit 1)"; else bad "step 1 symlinked mardermusic root (rc $RC)"; fi
+# The helper names no project: the wrapper hands it the inventory, the same seven roots at step 1
+# and at step 6, each its own argument. A spy wraps the real helper function in the installed copy.
+cp "$tmp/inst/gate-mount-guard.sh" "$tmp/guard.unspied"
+cat >> "$tmp/inst/gate-mount-guard.sh" <<EOF
+eval "unspied_\$(declare -f gate_mount_guard)"
+gate_mount_guard() { printf '<%s>' "\$@" >> "$F/guard-args"; echo >> "$F/guard-args"; unspied_gate_mount_guard "\$@"; }
+EOF
+reset detached sentinel; run; mv "$tmp/guard.unspied" "$tmp/inst/gate-mount-guard.sh"
+want='<enforce><memos-ng-ios/gate><memos-ng-ios/work><img-manager-ios/gate><repaso-es-ios/gate.noindex><repaso-es-ios/work.noindex><repaso-es-ios/scratch.noindex><mardermusic-ios/gate>'
+got="$(cat "$F/guard-args" 2>/dev/null)"
+if [ "$RC" = 0 ] && [ "$got" = "$want
+$want" ]; then ok "both proofs hand the helper exactly the seven roots, mardermusic-ios/gate included"; else OUT="$OUT
+--- guard args: $got"; bad "inventory handed to the helper (rc $RC)"; fi
 reset detached sentinel; echo symlink > "$F/attach-mode"; run
 if [ "$RC" = 1 ] && [ "$(state)" = mounted ] && tail -1 "$LOG" | grep -qF "exit 1: attach returned 0 but the predicate fails: MOUNT REFUSE $M/memos-ng-ios is a symlink"; then ok "step 6: a fresh mount whose memos-ng-ios is a symlink off the volume -> exit 1"; else bad "step 6 symlinked repo root (rc $RC)"; fi
 
