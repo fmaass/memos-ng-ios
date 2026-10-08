@@ -17,6 +17,13 @@ struct MainTabView: View {
     /// tab bar is the only thing that can put the app on the other one. Both ends read it out of
     /// the environment (MEMNG-191).
     @State private var jump = MemoJump()
+    /// A tag asked for from the Collections root, which the Library narrows its grid to.
+    @State private var tagJump = LibraryTagJump()
+    /// The session's collections and their memberships: one of each for as long as this view
+    /// shows a session, built once its identity can be read, moved to a new identity beside the
+    /// timeline (`TimelineView`), and read by every tab through the environment.
+    @State private var collections: CollectionStore?
+    @State private var trips: TripMembershipStore?
 
     /// Opens on the Timeline (plan page 3929 decision 11), third of the four since Collections
     /// came in beside the Library (MEMNG-709). A test that is about another tab's screen under the
@@ -34,6 +41,20 @@ struct MainTabView: View {
             notice
             tabs
         }
+        .task { makeCollectionStores() }
+    }
+
+    /// Builds the collection and membership stores, once, under the identity signed in now.
+    private func makeCollectionStores() {
+        guard collections == nil else { return }
+        let store = CollectionStore(identity: session.snapshotIdentity)
+        let members = TripMembershipStore(
+            collections: store,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) }
+        )
+        members.reports(to: session)
+        collections = store
+        trips = members
     }
 
     /// The one card the session is entitled to, and never two: which of them is on screen is
@@ -75,10 +96,17 @@ struct MainTabView: View {
             screen(for: tab)
         }
         .environment(jump)
+        .environment(tagJump)
+        .environment(collections)
+        .environment(trips)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
         // Timeline is what reads that and pushes it, because it owns both the list and the stack.
         .onChange(of: jump.pending) { _, pending in
             selection = MemoJumpRouting.tab(showing: selection, whenJumping: pending)
+        }
+        // The same for a tag asked for from Collections: the Library applies it.
+        .onChange(of: tagJump.pending) { _, pending in
+            selection = LibraryTagJumpRouting.tab(showing: selection, whenOpening: pending)
         }
     }
 

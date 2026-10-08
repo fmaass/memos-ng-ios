@@ -30,6 +30,8 @@ struct MediaLibraryView: View {
     /// The dock: whether the scope row stands in the tab bar's place, and the claim select
     /// mode takes so that its toolbar is the only bottom chrome.
     @Environment(AppDock.self) private var dock: AppDock?
+    /// A tag asked for from the Collections root, applied to this grid's store.
+    @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -208,6 +210,15 @@ struct MediaLibraryView: View {
             )
         ) {
             await loadBuckets()
+        }
+        // A tag asked for from Collections narrows the grid, once the store exists to take it —
+        // the Library may never have been opened before the request switched to it. An `onChange`
+        // and an unstructured read, as the tag menu's: taking the request changes the key, and a
+        // `.task` keyed on it would cancel the very read the request started.
+        .onChange(of: TagJumpKey(tag: tagJump?.pending, ready: library != nil), initial: true) {
+            guard let tagJump, let library, LibraryTagJumpRouting.apply(tagJump, to: library)
+            else { return }
+            Task { await load() }
         }
         // The tag list is read when the Library appears, again whenever the kind changes — its
         // counts are counts under that kind — and again for whoever is signed in now.
@@ -596,6 +607,12 @@ struct MediaLibraryView: View {
     private func rowsBelong(to subject: String?) {
         guard let library, gridAccount.claim(subject) else { return }
         library.sessionIdentityChanged()
+    }
+
+    /// What the tag request's read is keyed on: the request, and whether there is a store yet.
+    private struct TagJumpKey: Equatable {
+        let tag: String?
+        let ready: Bool
     }
 
     private func load() async {

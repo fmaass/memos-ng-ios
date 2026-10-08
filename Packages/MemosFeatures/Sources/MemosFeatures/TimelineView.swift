@@ -24,6 +24,9 @@ public struct TimelineView: View {
     /// A memo the Library asked this tab to open. Optional for the same reason the outbox is: a
     /// preview or a test host has no router.
     @Environment(MemoJump.self) private var jump: MemoJump?
+    /// The session's collections and memberships, moved to a new identity beside the timeline.
+    @Environment(CollectionStore.self) private var collections: CollectionStore?
+    @Environment(TripMembershipStore.self) private var trips: TripMembershipStore?
     /// The tabs' dock, which the list's scrolls are told to; nil when hosted without the tabs.
     @Environment(AppDock.self) private var dock: AppDock?
     @State private var timeline: TimelineStore?
@@ -219,9 +222,12 @@ public struct TimelineView: View {
         }
         // A snapshot on screen belongs to the identity that wrote it. If the session becomes
         // somebody else's — or nobody's — while it is up, it goes; a list the server has since
-        // sent is left alone.
-        .onChange(of: session.state.user?.subject) {
-            timeline?.sessionIdentityChanged(to: snapshotIdentity)
+        // sent is left alone. The identity is the whole pair: the same subject on another server
+        // is another account, and its collections are filed apart.
+        .onSessionIdentityChange(snapshotIdentity) { identity in
+            timeline?.sessionIdentityChanged(to: identity)
+            CollectionsSession.identityChanged(
+                to: identity, collections: collections, trips: trips)
         }
         // The live media channel, and its single owner.
         //
@@ -790,12 +796,7 @@ public struct TimelineView: View {
     /// Nil until there is both a server and a user, which is also the only state in which nothing
     /// should be read off the disk: a snapshot with no signed-in identity to match against is
     /// somebody's memos and no way to tell whose.
-    private var snapshotIdentity: TimelineSnapshotIdentity? {
-        guard let server = session.serverBaseURL, let subject = session.state.user?.subject else {
-            return nil
-        }
-        return TimelineSnapshotIdentity(server: server, subject: subject)
-    }
+    private var snapshotIdentity: TimelineSnapshotIdentity? { session.snapshotIdentity }
 
     /// Everything this screen reads from the server, on the one signal that already means "read
     /// it again": the screen appearing, a pull, and a queued capture becoming a memo.
@@ -940,5 +941,14 @@ extension ComposeView.Mode: Identifiable {
         case .create: "create"
         case .edit(let uid, _, _, _): "edit-\(uid)"
         }
+    }
+}
+
+extension SessionStore {
+    /// Whose data this session reads — the pair a timeline snapshot and the collections file are
+    /// filed under. Nil until there is both a server and a user.
+    var snapshotIdentity: TimelineSnapshotIdentity? {
+        guard let server = serverBaseURL, let subject = state.user?.subject else { return nil }
+        return TimelineSnapshotIdentity(server: server, subject: subject)
     }
 }
