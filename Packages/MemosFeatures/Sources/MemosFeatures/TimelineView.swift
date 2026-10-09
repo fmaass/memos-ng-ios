@@ -142,6 +142,8 @@ public struct TimelineView: View {
                     mode: mode,
                     isAsking: memoDelete.deleteStage == .asking,
                     failure: memoDelete.lastError,
+                    // Read from the store as the sheet opens; the sheet keeps the first answer.
+                    pinnedTrip: ComposePinnedTrip.offered(by: collections, now: Date()),
                     send: { event in
                         memoDelete.sendDelete(event) { uid in
                             await delete(uid: uid, in: timeline)
@@ -535,10 +537,14 @@ public struct TimelineView: View {
     /// list, and the sheet is drawn over the list — so a delete the server refused was answered
     /// where nobody with the sheet open could see it. Nothing comes back through `ComposeDelete`
     /// for the sheet to say for itself.
+    ///
+    /// `pinnedTrip` reaches a NEW memo only: the pin is for captures, and an edit is never
+    /// offered it.
     static func editSheet(
         mode: ComposeView.Mode,
         isAsking: Bool,
         failure: String?,
+        pinnedTrip: ComposePinnedTrip? = nil,
         send: @escaping @MainActor (MemoEditFlow.DeleteEvent) -> Void,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) -> some View {
@@ -557,7 +563,7 @@ public struct TimelineView: View {
                     submit: submit
                 )
             } else {
-                ComposeView(mode: mode, submit: submit)
+                ComposeView(mode: mode, pinnedTrip: pinnedTrip, submit: submit)
             }
         }
     }

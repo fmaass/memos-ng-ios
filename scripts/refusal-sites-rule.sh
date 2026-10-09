@@ -316,7 +316,9 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # real repository on a directory of its own. 36: WholeLaneEngineTests adds two — its rig, fed the
 # credential predicate, and the legacy-manifest rebase, which no drain is behind. 37: the pilot
 # checklist's line-16 witness in MemosCoreTests composes the real outbox, fed the same predicate.
-pin "'OutboxRepository(' constructions" 37 \
+# 38: the composer trip chip's wire witness in MemosFeaturesTests puts a real Post through the
+# timeline's enqueue into the real outbox, fed its signed-in provider's predicate.
+pin "'OutboxRepository(' constructions" 38 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

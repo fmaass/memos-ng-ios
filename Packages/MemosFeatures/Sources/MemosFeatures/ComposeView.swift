@@ -197,14 +197,21 @@ public struct ComposeView: View {
     @State private var stage = ComposeStage()
     /// Whether the draft this sheet was restored from has already been put on the row.
     @State private var hasRestoredPictures = false
+    /// The pinned trip's chip, and whether its ✕ was pressed in THIS sheet (`ComposeTripChip`).
+    @State private var tripChip: ComposeTripChip
     @FocusState private var editorFocused: Bool
 
+    /// - Parameter pinnedTrip: the trip a new memo is offered, decided by the presenter when the
+    ///   sheet opens (`ComposePinnedTrip.offered(by:now:)`). Ignored on an edit.
     public init(
         mode: Mode,
         delete: ComposeDelete? = nil,
+        pinnedTrip: ComposePinnedTrip? = nil,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) {
-        self.init(mode: mode, delete: delete, imports: ComposeImports(), submit: submit)
+        self.init(
+            mode: mode, delete: delete, imports: ComposeImports(), pinnedTrip: pinnedTrip,
+            submit: submit)
     }
 
     /// The same sheet with its import list handed in from outside.
@@ -216,12 +223,14 @@ public struct ComposeView: View {
         mode: Mode,
         delete: ComposeDelete? = nil,
         imports: ComposeImports,
+        pinnedTrip: ComposePinnedTrip? = nil,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) {
         self.mode = mode
         self.delete = delete
         self.submit = submit
         _imports = State(initialValue: imports)
+        _tripChip = State(initialValue: ComposeTripChip(mode: mode, offered: pinnedTrip))
         _content = State(
             initialValue: {
                 if case .edit(_, let content, _, _) = mode { return content }
@@ -309,6 +318,11 @@ public struct ComposeView: View {
     public var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 0) {
+                if let trip = tripChip.shown {
+                    ComposeTripChipView(trip: trip) { tripChip.dismiss() }
+                        .padding(.horizontal, DesignTokens.Space.roomy)
+                        .padding(.top, DesignTokens.Space.snug)
+                }
                 editor
                 Divider()
                 controls
@@ -695,7 +709,9 @@ public struct ComposeView: View {
         Task {
             defer { imports.endSubmission() }
             let submission = ComposeSubmission(
-                content: content,
+                // The pinned trip's tag is added here, to what is SENT, and never to the
+                // editor: a failed post tried again builds this from the same unmodified words.
+                content: tripChip.submittedContent(content),
                 visibility: visibility,
                 attachments: imports.attachments,
                 createdAt: resolvedDate,
