@@ -19,6 +19,12 @@ struct TripRoute: Hashable {
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
+/// A trip stands inside the Collections tab (MEMNG-715): the main bar stays under it, with its
+/// room at the screen's foot, as under a memo pushed on the Timeline.
+extension TripRoute: @MainActor StackRoute {
+    static let chrome = ScreenChrome.withinTab
+}
+
 /// A trip, in Photos mode (MEMNG-714): its hero — the cover, the title, the span and the count —
 /// the `Photos | Journal | Map` chips, and every one of its pictures oldest first, under the
 /// Library's own day headings.
@@ -59,6 +65,8 @@ struct TripView: View {
     /// Optional: a test hosts the screen without a session, and has nothing to download with.
     @Environment(SessionStore.self) private var session: SessionStore?
     @Environment(\.locale) private var locale
+    /// The app's bottom chrome, which the grid's scroll folds and unfolds; nil in a harness.
+    @Environment(AppDock.self) private var dock: AppDock?
     @Environment(\.timeZone) private var timeZone
     /// The picture a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
@@ -258,6 +266,9 @@ struct TripView: View {
             }
         )
         .environment(\.signedURLRefresher, refresher)
+        // The reader's scroll folds and unfolds the main bar, as the Timeline's does: told as the
+        // Collections tab's, so it counts only while that tab is on screen (MEMNG-715).
+        .feedsDock(dock, on: .collections)
     }
 
     private func hero(_ live: CollectionRecord, members: [LibraryRow]) -> some View {

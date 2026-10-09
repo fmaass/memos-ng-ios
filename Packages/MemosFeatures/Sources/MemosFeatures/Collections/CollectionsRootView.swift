@@ -126,8 +126,9 @@ struct CollectionsScreen: View {
                 Button(Self.newTripButton, systemImage: "plus") { newTrip = NewTripFlow() }
             }
         }
-        // A card opens its trip inside the tab's stack (MEMNG-714).
-        .navigationDestination(for: TripRoute.self) { route in
+        // A card opens its trip inside the tab's stack (MEMNG-714), under the main bar, with
+        // its room (MEMNG-715).
+        .stackDestination(for: TripRoute.self) { route in
             TripView(
                 record: collections.records.first { $0.id == route.id } ?? route.opened,
                 collections: collections, trips: trips, subject: subject, access: access,

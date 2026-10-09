@@ -609,6 +609,161 @@ struct TripScreenRenderTests {
         }
         #expect(wire.transport.listReads.filter { $0["cursor"] == nil }.count == 1)
     }
+
+    // MARK: The viewer over the members, and the main bar (MEMNG-715)
+
+    /// The trip with p2 or p4 excluded, its grid drawn, and a tile's tap opening the viewer: the
+    /// pager and the trip's members, for the viewer tests below.
+    private func openViewer(
+        excluding excluded: String, at tile: Int, jump: MemoJump,
+        _ body: (PressProbe.Screen, UIScrollView?, TripMediaServer, [String]) async -> Void
+    ) async {
+        let wire = TripWire()
+        wire.transport.nameNoOriginal()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        stores.0.exclude(id: record.id, uid: excluded)
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        let view = trip(stores, wire, record, viewer: media).environment(jump)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let live = { stores.0.records.first { $0.id == record.id } ?? record }
+            let drained = await TripProbe.settled(seconds: 10) {
+                stores.1.state(for: live()) == .complete
+                    && TripProbe.photos(in: screen.window).count == 4
+            }
+            let members = stores.1.members(for: live()).map(\.id)
+            #expect(drained, "the trip was not drawn: \(members)")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(
+                photos.indices.contains(tile) && TripProbe.pressAtOnce(photos[tile]),
+                "tile \(tile) of \(photos.count) took no press")
+            var pager: UIScrollView?
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, pager == nil {
+                pager = TripProbe.pager(over: screen.host)
+                if pager == nil { await screen.settle(turns: 5) }
+            }
+            await screen.settle(turns: 20)
+            await body(screen, pager, media, members)
+        }
+    }
+
+    /// The viewer's pages are the members the grid shows, never the drained list with the
+    /// excluded picture back in it: four pages, and the page after p1 is p3 — read by the one
+    /// thing a page says about which file it is, the memo its "Show Memo" asks `MemoJump` for.
+    @Test("the trip's viewer pages over its members: after p1 comes p3, never the excluded p2")
+    func theViewerSkipsTheExcluded() async {
+        let jump = MemoJump()
+        await openViewer(excluding: "p2", at: 1, jump: jump) { screen, pager, media, members in
+            #expect(members == ["p0", "p1", "p3", "p4"], "the members: \(members)")
+            let pages = pager.map(TripProbe.pageCount)
+            let raw = pager.map { "\($0.contentSize) in \($0.bounds.size)" } ?? "no pager"
+            let counted = pages.map(String.init) ?? "none"
+            #expect(pages == members.count, "the viewer's pages: \(counted), \(raw)")
+            // From p1's page — the member before the excluded one — one page on.
+            if let pager { await TripProbe.page(pager, to: 1, on: screen) }
+            #expect(pager.map(TripProbe.pageIndex) == 1, "the pager is not on p1's page")
+            if let pager { await TripProbe.page(pager, to: 2, on: screen) }
+            #expect(pager.map(TripProbe.pageIndex) == 2, "the pager did not move one page on")
+            let pressed = await TripProbe.pressMenuItem(
+                MediaTileAction.showMemo(uid: "").title, under: "More", on: screen)
+            #expect(pressed.took, "Show Memo took no press: \(pressed.seen)")
+            #expect(
+                jump.pending == "m-p3",
+                "the page after p1 belongs to \(jump.pending ?? "nothing") — the drained list?")
+            let asked = await media.asked("p2", "mobile", sig: "v1")
+            let log = await media.log()
+            #expect(asked == 0, "the viewer drew the excluded p2: \(log)")
+        }
+    }
+
+    /// The edge of the list: the last picture excluded, the viewer opened on the last member has
+    /// no page after it — the pager ends where the grid does.
+    @Test("a trip whose last picture is excluded ends its viewer at the last member")
+    func theViewerEndsAtTheLastMember() async {
+        let jump = MemoJump()
+        await openViewer(excluding: "p4", at: 3, jump: jump) { screen, pager, _, members in
+            #expect(members == ["p0", "p1", "p2", "p3"], "the members: \(members)")
+            let raw = pager.map { "\($0.contentSize) in \($0.bounds.size)" } ?? "no pager"
+            #expect(pager.map(TripProbe.pageCount) == 4, "the viewer's pages: \(raw)")
+            let opened = await TripProbe.settled(seconds: 5) { pager.map(TripProbe.pageIndex) == 3 }
+            #expect(opened, "the viewer is not on its last page")
+            let pressed = await TripProbe.pressMenuItem(
+                MediaTileAction.showMemo(uid: "").title, under: "More", on: screen)
+            #expect(pressed.took, "Show Memo took no press: \(pressed.seen)")
+            #expect(jump.pending == "m-p3", "Show Memo asked for \(jump.pending ?? "nothing")")
+        }
+    }
+
+    /// The Collections root with its dock, a trip pushed from its card the way a finger does.
+    private func pushedTrip(
+        dock: AppDock, _ body: (PressProbe.Screen, UIScrollView?) async -> Void
+    ) async {
+        let wire = TripWire()
+        let stores = stores()
+        stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let access = wire.access
+        let stack = TripStackLog()
+        let view = TripStack(log: stack) { trail in
+            CollectionsScreen(
+                collections: stores.0, trips: stores.1, tags: LibraryTagStore(), subject: "alice",
+                access: { access }, openTag: { _ in }, trail: trail)
+        }
+        .environment(dock)
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+        await CollectionsHost.with(view, height: 700) { screen in
+            #expect(await screen.until { screen.element(labelled: "Portugal 2026") != nil })
+            #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, stack.paths.last?.count != 1 {
+                await screen.settle(turns: 5)
+            }
+            let pushed = stack.paths.last?.count == 1
+            #expect(pushed, "the trip was not pushed: \(stack.paths.map(\.count))")
+            await screen.settle(turns: 40)
+            await body(screen, TripProbe.mainScroll(in: screen.window))
+        }
+    }
+
+    /// The Trip screen stands in the Collections tab's stack under the one main bar: its foot
+    /// clears the bar, and its scroll folds and unfolds the bar the way the Timeline's does,
+    /// through the dock's existing fold reading.
+    @Test("the Trip screen clears the main bar, and its scroll folds and unfolds it")
+    func theTripScreenFoldsTheBar() async {
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        await pushedTrip(dock: dock) { screen, scroller in
+            #expect(scroller != nil, "no scroll view on the Trip screen")
+            let foot = scroller?.adjustedContentInset.bottom ?? 0
+            #expect(foot >= LeadingMainBar.height, "the trip's foot runs under the bar: \(foot)")
+            var shapes = [MainTabs<EmptyView>.leadingShape(dock, on: .collections)]
+            if let scroller { await TripProbe.drag(scroller, by: 240, on: screen) }
+            shapes.append(MainTabs<EmptyView>.leadingShape(dock, on: .collections))
+            if let scroller {
+                let top = -scroller.adjustedContentInset.top
+                await TripProbe.drag(scroller, by: top - scroller.contentOffset.y, on: screen)
+            }
+            shapes.append(MainTabs<EmptyView>.leadingShape(dock, on: .collections))
+            #expect(shapes == [.tabs, .folded, .tabs], "the bar went \(shapes)")
+            #expect(dock.mode == .tabs)
+        }
+    }
+
+    /// The trip's scroll is the Collections tab's: while the dock says another tab is on screen —
+    /// its own feed the one that counts — the trip's drag folds nothing.
+    @Test("a trip scroll heard while another tab shows folds nothing")
+    func aTripScrollUnderAnotherTabFoldsNothing() async {
+        let dock = AppDock()
+        dock.send(.selected(.timeline))
+        await pushedTrip(dock: dock) { screen, scroller in
+            #expect(scroller != nil, "no scroll view on the Trip screen")
+            if let scroller { await TripProbe.drag(scroller, by: 240, on: screen) }
+            #expect(dock.mode == .tabs, "the trip's drag moved the dock to \(dock.mode)")
+        }
+    }
 }
 
 // MARK: - Probes
@@ -772,6 +927,129 @@ enum TripProbe {
         }
         return nil
     }
+
+    /// The viewer's pager: the horizontal scroll view of the cover presented over `host`.
+    static func pager(over host: UIViewController) -> UIScrollView? {
+        guard let root = host.presentedViewController?.view else { return nil }
+        var stack: [UIView] = [root]
+        var best: UIScrollView?
+        while let view = stack.popLast() {
+            if let scroller = view as? UIScrollView, scroller.window != nil,
+                scroller.bounds.width > 0,
+                scroller.contentSize.width > scroller.bounds.width * 1.5,
+                scroller.contentSize.width > (best?.contentSize.width ?? 0)
+            {
+                best = scroller
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return best
+    }
+
+    /// How many pages the pager holds, a page being its own width.
+    static func pageCount(_ pager: UIScrollView) -> Int {
+        Int((pager.contentSize.width / pager.bounds.width).rounded())
+    }
+
+    /// The page the pager stands on.
+    static func pageIndex(_ pager: UIScrollView) -> Int {
+        Int((pager.contentOffset.x / pager.bounds.width).rounded())
+    }
+
+    /// Swipes the pager to page `index`: the moves a finger makes, told to the delegate as a drag
+    /// that begins and ends around them, so the pager settles where a swipe would leave it.
+    static func page(_ pager: UIScrollView, to index: Int, on screen: PressProbe.Screen) async {
+        let from = pager.contentOffset.x
+        let to = CGFloat(index) * pager.bounds.width
+        pager.delegate?.scrollViewWillBeginDragging?(pager)
+        for step in 1...5 {
+            let x = from + (to - from) * CGFloat(step) / 5
+            pager.setContentOffset(CGPoint(x: x, y: pager.contentOffset.y), animated: false)
+            await screen.settle(turns: 2)
+        }
+        var target = pager.contentOffset
+        pager.delegate?.scrollViewWillEndDragging?(
+            pager, withVelocity: .zero, targetContentOffset: &target)
+        pager.setContentOffset(target, animated: false)
+        pager.delegate?.scrollViewDidEndDragging?(pager, willDecelerate: false)
+        await screen.settle(turns: 30)
+    }
+
+    /// The tallest scroll view on screen that scrolls up and down: the pushed screen's own.
+    static func mainScroll(in window: UIWindow) -> UIScrollView? {
+        var best: UIScrollView?
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let scroller = view as? UIScrollView, scroller.window != nil,
+                !(scroller is UITextView), !view.isHidden,
+                scroller.contentSize.width <= scroller.bounds.width + 1,
+                scroller.bounds.height > (best?.bounds.height ?? window.bounds.height / 2)
+            {
+                best = scroller
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return best
+    }
+
+    /// Drags `scroller` by `distance` from where it stands, as `LibraryChromeRenderTests` drags
+    /// the Timeline: the moves a finger makes, told to the delegate as a drag that begins and
+    /// ends around them, so the scroll phase is the reader's and not the layout's.
+    static func drag(
+        _ scroller: UIScrollView, by distance: CGFloat, on screen: PressProbe.Screen
+    ) async {
+        let from = scroller.contentOffset.y
+        scroller.delegate?.scrollViewWillBeginDragging?(scroller)
+        for step in 1...5 {
+            let y = from + distance * CGFloat(step) / 5
+            scroller.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+            await screen.settle(turns: 2)
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        var target = scroller.contentOffset
+        scroller.delegate?.scrollViewWillEndDragging?(
+            scroller, withVelocity: .zero, targetContentOffset: &target)
+        scroller.delegate?.scrollViewDidEndDragging?(scroller, willDecelerate: false)
+        await screen.settle(turns: 40)
+    }
+
+    /// Presses `item`: drawn as itself when it is the one action, else a row of the `menu` the
+    /// control opens. Answers what the windows showed when nothing took the press.
+    static func pressMenuItem(
+        _ item: String, under menu: String, on screen: PressProbe.Screen
+    ) async -> (took: Bool, seen: String) {
+        if let direct = screen.element(labelled: item) {
+            return (direct.accessibilityActivate(), "direct")
+        }
+        guard let opener = screen.element(labelled: menu) else {
+            return (false, "no \(menu): \(labels(in: screen.window))")
+        }
+        let opened = opener.accessibilityActivate()
+        let windows = { screen.window.windowScene?.windows ?? [screen.window] }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            for window in windows() {
+                if let row = node(labelled: item, in: window), row.accessibilityActivate() {
+                    return (true, "menu")
+                }
+            }
+            await screen.settle(turns: 5)
+        }
+        let seen = windows().map { labels(in: $0).joined(separator: ",") }
+        return (false, "opened=\(opened) \(seen)")
+    }
+
+    /// The first node that reads as `label`, a button or not: a menu's rows answer as rows.
+    private static func node(labelled label: String, in window: UIWindow) -> NSObject? {
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.accessibilityLabel == label { return object }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
 }
 
 // MARK: - Fixtures
@@ -800,6 +1078,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var held = false
     private nonisolated(unsafe) var signature = "v1"
     private nonisolated(unsafe) var emptied = false
+    private nonisolated(unsafe) var unoriginal = false
     private nonisolated(unsafe) var dropped: Set<String> = []
 
     /// Every list read so far, as its query.
@@ -812,6 +1091,9 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func resign(_ next: String) { lock.withLock { signature = next } }
     /// The trip's tag leaves every picture: from here on its reads answer empty.
     nonisolated func empty() { lock.withLock { emptied = true } }
+    /// The trip's pictures name no original: nothing to share, so "Show Memo" is the viewer's one
+    /// action, drawn as a button of its own rather than a row of a menu a test cannot open.
+    nonisolated func nameNoOriginal() { lock.withLock { unoriginal = true } }
     /// The trip's tag leaves one picture: from here on its reads answer without it.
     nonisolated func drop(_ uid: String) { lock.withLock { _ = dropped.insert(uid) } }
 
@@ -829,8 +1111,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
                 return (HTTPResponse(status: .internalServerError), nil)
             }
             if lock.withLock({ emptied }) { return Self.json("[]", next: nil) }
-            let (sig, gone) = lock.withLock { (signature, dropped) }
-            return Self.page(query, signed: sig, without: gone)
+            let (sig, gone, bare) = lock.withLock { (signature, dropped, unoriginal) }
+            return Self.page(query, signed: sig, without: gone, bare: bare)
         case "attachment_tags_api_attachments_tags_get":
             return Self.json("[]", next: nil)
         default:
@@ -839,7 +1121,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     }
 
     private nonisolated static func page(
-        _ query: [String: String], signed sig: String, without gone: Set<String>
+        _ query: [String: String], signed sig: String, without gone: Set<String>,
+        bare: Bool = false
     ) -> (HTTPResponse, HTTPBody?) {
         if query["tag"] == "spain2025" {
             return json("[\(item("s0", taken: "2025-05-01T12:00:00Z", sig: sig))]", next: nil)
@@ -848,7 +1131,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         let days = ["12", "14", "16", "18", "20"].map { "2026-03-\($0)T12:00:00Z" }
         let rows = days.enumerated().map { day in
             let uid = "p\(day.offset)"
-            return gone.contains(uid) ? nil : item(uid, taken: day.element, sig: sig)
+            return gone.contains(uid) ? nil : item(uid, taken: day.element, sig: sig, bare: bare)
         }
         func list(_ picks: Int...) -> String {
             "[" + picks.compactMap { rows[$0] }.joined(separator: ",") + "]"
@@ -862,8 +1145,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
 
     /// `v1` is signed with an `exp` long past, so a refusal of it reads as a lapse; any other
     /// signature with one far ahead.
-    private nonisolated static func item(_ uid: String, taken: String, sig: String) -> String {
+    private nonisolated static func item(
+        _ uid: String, taken: String, sig: String, bare: Bool = false
+    ) -> String {
         let query = "?exp=\(sig == "v1" ? 1_000_000_000 : 4_000_000_000)&scope=1&sig=\(sig)"
+        let download = bare ? "" : "/api/attachments/\(uid)/download\(query)"
         return """
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
@@ -873,7 +1159,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
             "webUrl":"/api/attachments/\(uid)/web\(query)",\
             "posterUrl":"/api/attachments/\(uid)/poster\(query)",\
-            "downloadUrl":"/api/attachments/\(uid)/download\(query)",\
+            "downloadUrl":"\(download)",\
             "printUrl":"/api/attachments/\(uid)/print\(query)"}
             """
     }
