@@ -577,6 +577,33 @@ struct TripMembershipStoreTests {
         #expect(superseded.lastError == nil, "a stale refusal wrote a sentence")
     }
 
+    @Test("a refusal the session decides after a forget writes nothing over the photos")
+    func aRefusalDecidedAfterForgetSaysNothing() async {
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(
+            collections: collections,
+            onUnauthorized: { (_: CredentialRefusal) in
+                entered.signal()
+                await release.wait()
+                return .endedSession
+            })
+
+        let inFlight = Task {
+            await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the refusal never reached the session")
+        store.forget(record.id)
+        release.signal()
+        await inFlight.value
+
+        let said = store.lastError
+        #expect(said == nil, "a forgotten drain said its refusal: \(said ?? "")")
+    }
+
     // MARK: - the New trip sheet
 
     @Test("the sheet's count is the image count when the tag also carries a video")
@@ -865,5 +892,376 @@ private final class TripHold: @unchecked Sendable {
         guard held.contains(index) else { return }
         entered[index].signal()
         await release[index].wait()
+    }
+}
+
+/// A trip's journal: `GET /api/memos?tag=<t>&sort=created_at`, drained page after page through the
+/// REAL generated client over a scripted transport, oldest first as the server orders it — fenced,
+/// joined and forgotten the way the membership is (MEMNG-718).
+@MainActor
+@Suite("Trip journal")
+struct TripJournalTests {
+    private nonisolated static let listOperation = "list_memos_api_memos_get"
+    private nonisolated static let tag = "portugal2026"
+
+    private let root = FileManager.default.temporaryDirectory
+        .appending(path: "trip-journal")
+        .appending(path: UUID().uuidString)
+    private let alice = TimelineSnapshotIdentity(
+        server: URL(string: "https://memos.example.org")!,
+        subject: "alice"
+    )
+
+    private func collections() -> CollectionStore {
+        CollectionStore(identity: alice, root: root)
+    }
+
+    /// The n-th memo of the trip, one day apart from 2026-03-12.
+    private nonisolated static func memo(_ index: Int) -> String {
+        Stub.memo(
+            uid: "m\(index)",
+            content: "Day \(index)",
+            createdAt: "2026-03-\(12 + index)T12:00:00Z"
+        )
+    }
+
+    private nonisolated static func page(_ range: Range<Int>, nextCursor: String? = nil) -> (
+        HTTPResponse, HTTPBody?
+    ) {
+        Stub.json(Stub.page(range.map(memo), nextCursor: nextCursor))
+    }
+
+    /// The query a request carried, by name; a repeated name keeps its first value.
+    private nonisolated static func query(_ request: HTTPRequest) -> [String: String] {
+        let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
+        return Dictionary(
+            items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Three memos over two pages: m0 m1, then m2 after the cursor `c1`.
+    private nonisolated static func twoPages(_ request: HTTPRequest) -> (HTTPResponse, HTTPBody?) {
+        query(request)["cursor"] == "c1" ? page(2..<3) : page(0..<2, nextCursor: "c1")
+    }
+
+    @Test("the journal reads every page oldest first, the third memo after the second")
+    func pagesInOrder() async {
+        let client = Stub.client { request, _, operation in
+            #expect(operation == Self.listOperation)
+            return Self.twoPages(request)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections, pageSize: 2)
+
+        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.journal(for: record).map(\.uid) == ["m0", "m1", "m2"])
+        #expect(store.journalState(for: record) == .complete)
+        #expect(store.journalError(for: record) == nil)
+        #expect(store.members(for: record).isEmpty, "the journal wrote the membership")
+    }
+
+    @Test("every journal request carries tag=<t> and sort=created_at, and follows nextCursor")
+    func theJournalsRequests() async {
+        let reads = LockedValue<[[String: String]]>([])
+        let client = Stub.client { request, _, _ in
+            reads.set(reads.get() + [Self.query(request)])
+            return Self.twoPages(request)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections, pageSize: 2)
+
+        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+
+        let queries = reads.get()
+        #expect(queries.count == 2, "one read per page: \(queries)")
+        for query in queries {
+            #expect(query["tag"] == Self.tag, "\(query)")
+            #expect(query["sort"] == "created_at", "\(query)")
+            #expect(query["limit"] == "2", "\(query)")
+            #expect(query["created_before"] == nil, "\(query)")
+            #expect(query["created_after"] == nil, "\(query)")
+        }
+        #expect(queries.map { $0["cursor"] } == [nil, "c1"])
+    }
+
+    @Test("a tag holding the query's own syntax travels as one value, the sort untouched")
+    func aTagWithQuerySyntax() async {
+        let reads = LockedValue<[[String: String]]>([])
+        let client = Stub.client { request, _, _ in
+            reads.set(reads.get() + [Self.query(request)])
+            return Self.page(0..<1)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Odd", tags: ["a&sort=-created_at"])
+        let store = TripMembershipStore(collections: collections)
+
+        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+
+        let first = reads.get().first
+        #expect(first?["tag"] == "a&sort=-created_at")
+        #expect(first?["sort"] == "created_at")
+    }
+
+    @Test("a tag no memo carries is an empty journal that is complete, not still loading")
+    func anEmptyJournal() async {
+        let client = Stub.client { _, _, _ in Self.page(0..<0) }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        #expect(store.journalState(for: record) == .notLoaded)
+
+        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.journal(for: record).isEmpty)
+        #expect(store.journalState(for: record) == .complete)
+    }
+
+    @Test("a journal stops at the cap and says it was truncated")
+    func theCap() async {
+        let client = Stub.client { request, _, _ in Self.twoPages(request) }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections, pageSize: 2, memberCap: 2)
+
+        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.journal(for: record).map(\.uid) == ["m0", "m1"])
+        #expect(store.journalState(for: record) == .truncated)
+    }
+
+    @Test("a journal page answered for a session that has ended is dropped whole")
+    func aStaleGenerationIsDropped() async {
+        let calls = LockedValue<Int>(0)
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { request, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            return Self.twoPages(request)
+        }
+        let issued = SessionHandle(client: client, generation: 1)
+        let session = TripSession(for: issued)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections, pageSize: 2)
+        store.reports(to: session)
+
+        let inFlight = Task {
+            await store.loadJournal(record, using: issued, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no request was sent")
+        session.activeHandle = SessionHandle(client: client, generation: 2)
+        release.signal()
+        await inFlight.value
+
+        #expect(store.journal(for: record).isEmpty, "a stale answer was applied")
+        #expect(store.journalState(for: record) == .notLoaded)
+        #expect(calls.get() == 1, "the stale load read on: \(calls.get()) pages")
+    }
+
+    @Test("a journal that outlived a change of identity is dropped whole")
+    func anIdentityChangeDropsTheJournal() async {
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { request, _, _ in
+            entered.signal()
+            await release.wait()
+            return Self.page(0..<1)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+
+        let inFlight = Task {
+            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no request was sent")
+        store.sessionIdentityChanged()
+        release.signal()
+        await inFlight.value
+
+        #expect(store.journal(for: record).isEmpty, "somebody else's journal was applied")
+        #expect(store.journalState(for: record) == .notLoaded)
+    }
+
+    @Test("a second journal load of a trip in flight waits for the first and sends nothing")
+    func twoLoadsAreOneChain() async {
+        let calls = LockedValue<Int>(0)
+        let entered = TripSignal()
+        let release = TripSignal()
+        let joined = TripSignal()
+        let client = Stub.client { request, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            return Self.twoPages(request)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections, pageSize: 2)
+        store.onJournalJoin = { joined.signal() }
+        let secondDone = LockedValue<Bool>(false)
+
+        let first = Task {
+            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the first load sent nothing")
+        let second = Task {
+            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+            secondDone.set(true)
+            return store.journal(for: record).count
+        }
+        #expect(await joined.wait(), "the second load never reached the join")
+        #expect(!secondDone.get(), "the second load returned while the first was still out")
+        #expect(store.journalState(for: record) == .draining)
+        release.signal()
+        await first.value
+        let secondSaw = await second.value
+
+        #expect(calls.get() == 2, "two overlapping loads were \(calls.get()) requests, not 2")
+        #expect(secondSaw == 3, "the joined caller did not see the chain's result: \(secondSaw)")
+    }
+
+    @Test("a journal held across a forget of a trip that stays lands nothing")
+    func aForgottenJournalLandsNothing() async {
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { request, _, _ in
+            entered.signal()
+            await release.wait()
+            return Self.page(0..<1)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+
+        let inFlight = Task {
+            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no request was sent")
+        store.forget(record.id)
+        #expect(store.journalState(for: record) == .notLoaded, "a forgotten load still reads on")
+        release.signal()
+        await inFlight.value
+
+        #expect(store.journal(for: record).isEmpty, "the load in flight landed after a forget")
+        #expect(store.journalState(for: record) == .notLoaded)
+    }
+
+    @Test("a journal answered for a trip deleted while it was out publishes nothing")
+    func aDeletedTripsJournalIsDropped() async {
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { _, _, _ in
+            entered.signal()
+            await release.wait()
+            return Self.page(0..<1)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+
+        let inFlight = Task {
+            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no request was sent")
+        collections.delete(id: record.id)
+        release.signal()
+        await inFlight.value
+
+        #expect(store.journal(for: record).isEmpty, "a deleted trip's journal came back")
+        #expect(store.journalState(for: record) == .notLoaded)
+    }
+
+    @Test("a refused credential on the journal goes to the session, said on the journal alone")
+    func aRefusalReachesTheSession() async {
+        let handled = LockedValue<Int>(0)
+        let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let ended = TripMembershipStore(
+            collections: collections,
+            onUnauthorized: { (_: CredentialRefusal) in
+                handled.set(handled.get() + 1)
+                return .endedSession
+            })
+
+        await ended.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(handled.get() == 1, "the refusal did not reach the session")
+        #expect(
+            ended.journalError(for: record) != nil, "an ended session said nothing on the journal")
+        #expect(ended.lastError == nil, "the journal's refusal was said over the photos")
+        #expect(ended.journalState(for: record) == .notLoaded)
+
+        let superseded = TripMembershipStore(
+            collections: collections, onUnauthorized: { _ in .superseded })
+        await superseded.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        #expect(superseded.journalError(for: record) == nil, "a stale refusal wrote a sentence")
+    }
+
+    @Test("a refusal the session decides after a forget writes nothing on the journal")
+    func aRefusalDecidedAfterForgetSaysNothing() async {
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { _, _, _ in Stub.empty(.unauthorized) }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(
+            collections: collections,
+            onUnauthorized: { (_: CredentialRefusal) in
+                entered.signal()
+                await release.wait()
+                return .endedSession
+            })
+
+        let inFlight = Task {
+            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the refusal never reached the session")
+        store.forget(record.id)
+        release.signal()
+        await inFlight.value
+
+        let said = store.journalError(for: record)
+        #expect(said == nil, "a forgotten journal said its refusal: \(said ?? "")")
+    }
+
+    @Test("a trip's journal failure is said on that trip alone, never on another")
+    func aFailureStaysWithItsTrip() async {
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { request, _, _ in
+            guard Self.query(request)["tag"] == "a2026" else { return Self.page(0..<0) }
+            entered.signal()
+            await release.wait()
+            return Stub.empty(.internalServerError)
+        }
+        let collections = collections()
+        let first = collections.create(title: "A", tags: ["a2026"])
+        let second = collections.create(title: "B", tags: ["b2026"])
+        let store = TripMembershipStore(collections: collections)
+
+        let held = Task {
+            await store.loadJournal(first, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "A's read was not sent")
+        await store.loadJournal(second, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.journalState(for: second) == .complete, "precondition: B was read")
+        release.signal()
+        await held.value
+
+        #expect(store.journalError(for: first) != nil, "A's failure was not said on A")
+        let leaked = store.journalError(for: second)
+        #expect(leaked == nil, "A's failure was said on B: \(leaked ?? "")")
+        #expect(store.journal(for: second).isEmpty)
+        #expect(store.journalState(for: second) == .complete)
     }
 }

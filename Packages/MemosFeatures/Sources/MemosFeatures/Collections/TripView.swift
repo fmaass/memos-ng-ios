@@ -52,6 +52,13 @@ extension TripRoute: @MainActor StackRoute {
 /// (`CollectionStore.activePin(now:)`), so a pin that has expired offers Pin again. A trip that
 /// is no longer in the store — deleted here or anywhere — leaves the stack by the stack's own
 /// state (`trail`, the Collections tab's path), drawn as it last was on the way out.
+///
+/// **Journal** (MEMNG-718). The `Journal` chip swaps the grid for the trip's memos, oldest first
+/// as the server read them (`TripMembershipStore.loadJournal`), as the Timeline's `MemoCard`s under
+/// the Timeline's own day headings. A card opens its memo through `MemoJump`, the request the
+/// Library and this screen's viewer already make: `MemoDetailView` edits through the Timeline's
+/// store, which lives on the Timeline's stack alone, so the memo is pushed there as the same
+/// `MemoRoute` a Timeline card pushes — never a second detail screen on this stack.
 struct TripView: View {
     let record: CollectionRecord
     let collections: CollectionStore
@@ -63,6 +70,8 @@ struct TripView: View {
     /// The stack this screen was pushed onto, which it leaves once its trip is gone.
     let trail: Binding<[TripRoute]>
     @State private var manage: TripManage
+    /// The chip that is chosen: Photos until somebody picks another.
+    @State private var mode = TripMode.photos
 
     /// Optional: a test hosts the screen without a session, and has nothing to download with.
     @Environment(SessionStore.self) private var session: SessionStore?
@@ -70,6 +79,8 @@ struct TripView: View {
     /// The app's bottom chrome, which the grid's scroll folds and unfolds; nil in a harness.
     @Environment(AppDock.self) private var dock: AppDock?
     @Environment(\.timeZone) private var timeZone
+    /// Where a journal card's memo is asked for; nil in a harness without the tabs.
+    @Environment(MemoJump.self) private var jump: MemoJump?
     /// The picture a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// What the open viewer has been handed since it opened, beyond its own pages; emptied
@@ -120,6 +131,8 @@ struct TripView: View {
     static let renameTitle = "Rename Trip"
     /// What a drained trip with no picture left says.
     static let emptyTitle = "No photos in this trip"
+    /// What a journal read with no memo under the trip's tag says.
+    static let journalEmptyTitle = "No memos in this trip"
     /// The hero's cover, read by VoiceOver.
     static let coverLabel = "Cover"
     /// What the delete dialog says under its question.
@@ -136,6 +149,13 @@ struct TripView: View {
         -> String?
     {
         state == .truncated ? "Showing the first \(cap) photos of this trip" : nil
+    }
+
+    /// The footer of a journal that stopped at the cap: it counts memos, not photos.
+    static func journalCapNote(
+        _ state: TripMembershipState, cap: Int = TripMembershipStore.memberCap
+    ) -> String? {
+        state == .truncated ? "Showing the first \(cap) memos of this trip" : nil
     }
 
     /// What the viewer pages through: the trip's members as the store holds them NOW, as pages —
@@ -193,7 +213,7 @@ struct TripView: View {
         // Read here, in the body, so a drain that lands re-presents the viewer's source as well.
         let members = trips.members(for: shown)
         let loaded = trips.summary(for: shown) != nil
-        grid(shown)
+        modeContent(shown)
             .background(Color(.systemGroupedBackground))
             // On the grid; the rename alert, the file sheet and the viewer's cover each on a view
             // of their own: one presentation per view. An alert rather than a confirmation dialog,
@@ -238,6 +258,16 @@ struct TripView: View {
             .task(id: DrainKey(subject: subject, id: record.id, tag: live?.tags.first)) {
                 await drain()
             }
+            // Read when the chip is chosen, and again whenever it is chosen anew, the account or
+            // the tag changes; a load already on the wire is joined.
+            .task(
+                id: JournalKey(
+                    subject: subject, id: record.id, tag: live?.tags.first,
+                    shown: mode == .journal)
+            ) {
+                guard mode == .journal else { return }
+                await loadJournal()
+            }
             // Asked here, on the screen that is up: the root under it is off the window, and hears
             // of the change only once it is back. And asked a beat later: the trip's own Delete is
             // answered from an alert that is still on its way out, and a stack asked to pop while a
@@ -251,6 +281,75 @@ struct TripView: View {
                 let kept = CollectionsPresentation.trail(trail.wrappedValue, keeping: ids)
                 if kept != trail.wrappedValue { trail.wrappedValue = kept }
             }
+    }
+
+    /// The chosen mode's content: the journal, or the grid (Map is drawn disabled, never chosen).
+    @ViewBuilder
+    private func modeContent(_ live: CollectionRecord) -> some View {
+        switch mode {
+        case .journal: journal(live)
+        case .photos, .map: grid(live)
+        }
+    }
+
+    /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
+    private func journal(_ live: CollectionRecord) -> some View {
+        let memos = trips.journal(for: live)
+        let state = trips.journalState(for: live)
+        let calendar = journalCalendar
+        return List {
+            hero(live, members: trips.members(for: live))
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+            if let error = trips.journalError(for: live) {
+                NoticeCard(text: error, tone: .error).cardRow()
+            }
+            ForEach(TimelineGrouping.sections(for: memos, calendar: calendar)) { section in
+                Section {
+                    ForEach(section.memos) { memo in
+                        MemoCard(
+                            memo: memo,
+                            openMemo: { jump?.request(memo.uid) },
+                            // The trip has no viewer over a memo's own pictures: a tile opens the
+                            // memo, so a tap on a card never does nothing.
+                            openAttachment: { _ in jump?.request(memo.uid) }
+                        )
+                        .cardRow()
+                    }
+                } header: {
+                    SectionHeading(
+                        title: TimelineGrouping.title(for: section.day, calendar: calendar))
+                }
+            }
+            if state == .draining, memos.isEmpty {
+                ProgressView().frame(maxWidth: .infinity).cardRow()
+            }
+            if let text = journalFooter(live, state: state, empty: memos.isEmpty) {
+                TripFooter(text: text).cardRow()
+            }
+        }
+        .listStyle(.plain)
+        .feedsDock(dock, on: .collections)
+    }
+
+    /// The day a memo falls on, cut where the screen is: its zone and its language.
+    private var journalCalendar: Calendar {
+        var calendar = Calendar.current
+        calendar.timeZone = timeZone
+        calendar.locale = locale
+        return calendar
+    }
+
+    /// What stands under the last memo: the cap note when the load stopped at the cap, else the
+    /// empty line when a load answered with nothing — never over a failure, which says its own.
+    private func journalFooter(
+        _ live: CollectionRecord, state: TripMembershipState, empty: Bool
+    ) -> String? {
+        if let note = Self.journalCapNote(state, cap: trips.memberCap) { return note }
+        let read = state == .complete || state == .truncated
+        let failed = trips.journalError(for: live) != nil
+        return read && empty && !failed ? Self.journalEmptyTitle : nil
     }
 
     private func grid(_ live: CollectionRecord) -> some View {
@@ -294,7 +393,7 @@ struct TripView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            TripModeRow()
+            TripModeRow(chosen: mode) { mode = $0 }
                 .padding(.top, DesignTokens.Space.tight)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -360,6 +459,11 @@ struct TripView: View {
         await trips.drain(live, using: access.handle, baseURL: access.baseURL)
     }
 
+    private func loadJournal() async {
+        guard let live, let access = access() else { return }
+        await trips.loadJournal(live, using: access.handle, baseURL: access.baseURL)
+    }
+
     /// What decides whether an open viewer still fits the trip.
     private struct ViewerFit: Equatable {
         let members: [String]
@@ -370,6 +474,13 @@ struct TripView: View {
         let subject: String?
         let id: UUID
         let tag: String?
+    }
+
+    private struct JournalKey: Equatable {
+        let subject: String?
+        let id: UUID
+        let tag: String?
+        let shown: Bool
     }
 }
 
@@ -421,8 +532,8 @@ struct TripFooter: View {
     }
 }
 
-/// A trip's modes. Photos is the one this screen is; Journal and Map come later (WPN-9), drawn
-/// and disabled until then.
+/// A trip's modes. Photos and Journal are open; Map comes later (WPN-9), drawn and disabled until
+/// then.
 enum TripMode: CaseIterable, Hashable {
     case photos, journal, map
 
@@ -434,16 +545,19 @@ enum TripMode: CaseIterable, Hashable {
         }
     }
 
-    var isAvailable: Bool { self == .photos }
+    var isAvailable: Bool { self != .map }
 }
 
-/// The `Photos | Journal | Map` chips under the hero.
+/// The `Photos | Journal | Map` chips under the hero: the chosen one marked, a press choosing.
 struct TripModeRow: View {
+    let chosen: TripMode
+    let choose: (TripMode) -> Void
+
     var body: some View {
         HStack(spacing: DesignTokens.Space.snug) {
             ForEach(TripMode.allCases, id: \.self) { mode in
-                let chosen = mode == .photos
-                Button(mode.title) {}
+                let chosen = mode == self.chosen
+                Button(mode.title) { choose(mode) }
                     .buttonStyle(.plain)
                     .font(.subheadline.weight(.medium))
                     .padding(.horizontal, DesignTokens.Space.regular)

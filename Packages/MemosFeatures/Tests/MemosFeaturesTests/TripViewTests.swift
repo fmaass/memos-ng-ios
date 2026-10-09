@@ -277,10 +277,10 @@ struct TripManageTests {
         #expect(unread == ["trip-holds-opened"], "an unread list was held: \(unread.sorted())")
     }
 
-    @Test("Photos is the one mode open; Journal and Map wait")
+    @Test("Photos and Journal are open; Map waits")
     func modes() {
         #expect(TripMode.allCases.map(\.title) == ["Photos", "Journal", "Map"])
-        #expect(TripMode.allCases.filter(\.isAvailable) == [.photos])
+        #expect(TripMode.allCases.filter(\.isAvailable) == [.photos, .journal])
     }
 }
 
@@ -417,7 +417,7 @@ struct TripScreenRenderTests {
         }
     }
 
-    @Test("the chip row offers Photos, with Journal and Map drawn and disabled")
+    @Test("the chip row offers Photos and Journal, with Map drawn and disabled")
     func theChipRow() async {
         let wire = TripWire()
         let stores = stores()
@@ -426,11 +426,111 @@ struct TripScreenRenderTests {
             #expect(await screen.until { screen.element(labelled: "Photos") != nil })
             let journal = screen.element(labelled: "Journal")
             let map = screen.element(labelled: "Map")
-            #expect(journal?.accessibilityTraits.contains(.notEnabled) == true)
+            #expect(journal?.accessibilityTraits.contains(.notEnabled) == false)
             #expect(map?.accessibilityTraits.contains(.notEnabled) == true)
             #expect(
                 screen.element(labelled: "Photos")?.accessibilityTraits.contains(.selected) == true)
             #expect(screen.element(labelled: TripView.manageButton) != nil, "no Manage menu")
+            #expect(wire.transport.memoReads.isEmpty, "Photos read the journal")
+        }
+    }
+
+    // MARK: - Journal (MEMNG-718)
+
+    /// The calendar the screen cuts days on in these tests: UTC, in British English.
+    private static var journalCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        calendar.locale = Locale(identifier: "en_GB")
+        return calendar
+    }
+
+    /// The heading the journal draws over the day of `stamp`.
+    private static func journalHeading(_ stamp: String) -> String {
+        let day = (try? Date(stamp, strategy: .iso8601)) ?? .distantPast
+        return TimelineGrouping.title(for: day, calendar: journalCalendar)
+    }
+
+    @Test("Journal lists the trip's memos oldest first, as cards under a heading per day")
+    func theJournalIsOldestFirst() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let texts = TripTransport.journal.map(\.text)
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let shown = await screen.until {
+                TripProbe.tops(of: texts, in: screen.window).count == texts.count
+            }
+            #expect(shown, "the journal never drew: \(TripProbe.labels(in: screen.window))")
+            #expect(
+                TripProbe.tops(of: texts, in: screen.window) == texts,
+                "the journal is not oldest first")
+            let days = [TripTransport.journal[0].stamp, TripTransport.journal[2].stamp]
+                .map(Self.journalHeading)
+            #expect(
+                TripProbe.tops(of: days, in: screen.window, exact: true) == days,
+                "the day headings are not oldest first: \(TripProbe.labels(in: screen.window))")
+            let journal = screen.element(labelled: "Journal")
+            #expect(journal?.accessibilityTraits.contains(.selected) == true)
+        }
+        let reads = wire.transport.memoReads
+        #expect(reads.count == 2, "one read per page: \(reads)")
+        for query in reads {
+            #expect(query["tag"] == "portugal2026")
+            #expect(query["sort"] == "created_at")
+        }
+    }
+
+    @Test("a journal stopped at the cap counts memos under the list, not photos")
+    func theJournalCapFooter() async {
+        let wire = TripWire()
+        let stores = stores(memberCap: 2)
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let note = TripView.journalCapNote(.truncated, cap: 2) ?? "?"
+            let said = await screen.until { screen.says(note) }
+            #expect(said, "no memo cap note: \(TripProbe.labels(in: screen.window))")
+            #expect(!screen.says(TripView.capNote(.truncated, cap: 2) ?? "?"), "it counts photos")
+            #expect(stores.1.journalState(for: record) == .truncated)
+        }
+    }
+
+    @Test("a trip whose tag no memo carries says its journal is empty")
+    func anEmptyJournal() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = stores.0.create(title: "Spain 2025", tags: ["spain2025"])
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let said = await screen.until { screen.says(TripView.journalEmptyTitle) }
+            #expect(said, "no empty line: \(TripProbe.labels(in: screen.window))")
+            #expect(stores.1.journalState(for: record) == .complete)
+        }
+    }
+
+    @Test("a journal card asks for its memo, the way the Library's Show Memo does")
+    func aJournalCardOpensItsMemo() async {
+        let wire = TripWire()
+        let stores = stores()
+        let jump = MemoJump()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let second = TripTransport.journal[1]
+        let view = trip(stores, wire, record).environment(jump)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let drawn = await screen.until {
+                TripProbe.card(saying: second.text, in: screen.window) != nil
+            }
+            #expect(drawn, "no card says \(second.text)")
+            let card = TripProbe.card(saying: second.text, in: screen.window)
+            #expect(card?.accessibilityActivate() == true, "the card took no press")
+            #expect(jump.pending == second.uid, "the card asked for \(jump.pending ?? "nothing")")
         }
     }
 
@@ -948,6 +1048,41 @@ enum TripProbe {
         return found.sorted { $0.value < $1.value }.map(\.key)
     }
 
+    /// Which of `needles` are on screen, top to bottom: a node whose label holds one (or IS one,
+    /// `exact`) stands at its highest such node.
+    static func tops(of needles: [String], in window: UIWindow, exact: Bool = false) -> [String] {
+        var found: [String: CGFloat] = [:]
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if let label = object.accessibilityLabel {
+                for needle in needles where exact ? label == needle : label.contains(needle) {
+                    let top = object.accessibilityFrame.minY
+                    found[needle] = min(found[needle] ?? top, top)
+                }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found.sorted { $0.value < $1.value }.map(\.key)
+    }
+
+    /// The memo card whose label holds `text`: the node that is a button, as a card reads.
+    static func card(saying text: String, in window: UIWindow) -> NSObject? {
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if let label = object.accessibilityLabel, label.contains(text),
+                object.accessibilityTraits.contains(.button)
+            {
+                return object
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
     /// Whether a node on screen carries `identifier`, read after its label as VoiceOver would:
     /// a pushed screen's nodes answered their identifier only once their label had been asked.
     static func identified(_ identifier: String, in window: UIWindow) -> Bool {
@@ -1148,6 +1283,7 @@ final class TripWire {
 final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated let lock = NSLock()
     private nonisolated(unsafe) var reads: [[String: String]] = []
+    private nonisolated(unsafe) var journalReads: [[String: String]] = []
     private nonisolated(unsafe) var failing = false
     private nonisolated(unsafe) var held = false
     private nonisolated(unsafe) var signature = "v1"
@@ -1157,6 +1293,15 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
 
     /// Every list read so far, as its query.
     nonisolated var listReads: [[String: String]] { lock.withLock { reads } }
+    /// Every memo list read so far, as its query.
+    nonisolated var memoReads: [[String: String]] { lock.withLock { journalReads } }
+
+    /// `portugal2026`'s memos, oldest first: two on the 12th, one on the 14th.
+    nonisolated static let journal: [(uid: String, text: String, stamp: String)] = [
+        ("j0", "Arrived in Lisbon", "2026-03-12T09:00:00Z"),
+        ("j1", "Tram up to the castle", "2026-03-12T18:00:00Z"),
+        ("j2", "A day out in Sintra", "2026-03-14T10:00:00Z"),
+    ]
 
     nonisolated func fail() { lock.withLock { failing = true } }
     nonisolated func hold() { lock.withLock { held = true } }
@@ -1189,6 +1334,12 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             return Self.page(query, signed: sig, without: gone, bare: bare)
         case "attachment_tags_api_attachments_tags_get":
             return Self.json("[]", next: nil)
+        case "list_memos_api_memos_get":
+            let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
+            let query = Dictionary(
+                items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
+            lock.withLock { journalReads.append(query) }
+            return Self.memoPage(query)
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
@@ -1215,6 +1366,29 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         case "c1": return json(list(2, 3), next: "c2")
         default: return json(list(4), next: nil)
         }
+    }
+
+    /// A page of `portugal2026`'s memos, two at a time, in the order the query's `sort` asks for:
+    /// oldest first under `created_at`, newest first under anything else — the server's default.
+    private nonisolated static func memoPage(_ query: [String: String]) -> (
+        HTTPResponse, HTTPBody?
+    ) {
+        let all = query["tag"] == "portugal2026" ? journal : []
+        let ordered = query["sort"] == "created_at" ? all : all.reversed()
+        let rows = ordered.map { memo in
+            """
+            {"uid":"\(memo.uid)","owner":"fabian","mine":true,"content":"\(memo.text)",\
+            "visibility":"PRIVATE","pinned":false,"created_at":"\(memo.stamp)",\
+            "updated_at":"\(memo.stamp)","archived_at":null,"tags":["portugal2026"],\
+            "attachments":[]}
+            """
+        }
+        let first = query["cursor"] == nil
+        let picked = first ? Array(rows.prefix(2)) : Array(rows.dropFirst(2))
+        let next = first && rows.count > 2 ? "\"k1\"" : "null"
+        let items = picked.joined(separator: ",")
+        let body = "{\"items\":[\(items)],\"nextCursor\":\(next),\"totalCount\":null}"
+        return json(body, next: nil)
     }
 
     /// `v1` is signed with an `exp` long past, so a refusal of it reads as a lapse; any other

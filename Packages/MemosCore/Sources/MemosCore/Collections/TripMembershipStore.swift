@@ -65,6 +65,22 @@ public struct TripTagSpan: Sendable, Equatable {
 /// (the length of the image list under each tag, so a tagged video is not counted) and
 /// `loadSpan(ofTag:)` reads the first picture of `taken_asc` and of `taken_desc`, `limit=1`, both
 /// `type=image`. Each is refused while the same read is already in flight, and fenced the same way.
+///
+/// **The journal is the trip's memos, oldest first** (MEMNG-718): `GET /api/memos?tag=<t>&sort=
+/// created_at` read page after page through the generated client, following the list's
+/// `nextCursor`. Ascending is the server's own keyset (`sort` without a leading `-` compares
+/// `created_at > cursor` and orders `created_at, id` ascending), so nothing is reversed here. It
+/// lives beside the membership because it is the same trip's slot: a journal load JOINS one of the
+/// same record already in flight under the same session and tag, is fenced by the same generation
+/// and session, is dropped by the same `forget` and `sessionIdentityChanged`, publishes nothing for
+/// a trip deleted while its pages were out, and stops at `memberCap` memos as `truncated`. Its
+/// failures are said per trip in `journalError(for:)`, never in `lastError`, so a journal that
+/// could not be read stands over neither the photos nor another trip's journal.
+///
+/// **A failure is said only by the read that still owns its slot.** Saying a refusal waits for the
+/// session's decision; the slot (and the generation) are asked again AFTER that wait, immediately
+/// before the sentence is written, so a read forgotten or outlived while the session decided
+/// writes nothing — on either lane.
 @MainActor
 @Observable
 public final class TripMembershipStore {
@@ -97,8 +113,25 @@ public final class TripMembershipStore {
         var tag: String
     }
 
+    private struct Journal {
+        var tag: String
+        var memos: [Memo]
+        var truncated: Bool
+    }
+
+    /// Which of the two reads a failure belongs to, and so which sentence it writes.
+    private enum Lane {
+        case membership
+        case journal(UUID)
+    }
+
     private var drained: [UUID: Drained] = [:]
     private var inFlight: [UUID: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
+    private var journals: [UUID: Journal] = [:]
+    /// What the last journal load of each trip could not do, by trip.
+    private var journalErrors: [UUID: String] = [:]
+    private var journalFlights: [UUID: (lineage: Lineage, token: Int, task: Task<Void, Never>)] =
+        [:]
     /// The token the next drain's slot is given; never reused.
     private var nextToken = 0
     private var countsInFlight = false
@@ -109,6 +142,8 @@ public final class TripMembershipStore {
     /// Called when a caller joins a drain already in flight, before it waits for it. A seam for
     /// tests only: it is how a test knows the second caller has reached the join.
     @ObservationIgnored var onJoin: (@MainActor () -> Void)?
+    /// `onJoin`, for a journal load joining one in flight. A seam for tests only.
+    @ObservationIgnored var onJournalJoin: (@MainActor () -> Void)?
 
     private let collections: CollectionStore
     private let pageSize: Int
@@ -232,7 +267,9 @@ public final class TripMembershipStore {
                 MemosLog.api.info("a trip's page failed for a list that has moved on")
                 return
             }
-            await report(error, issuedUnder: handle)
+            await report(error, issuedUnder: handle) {
+                lineage.generation == self.generation && self.owns(id, token)
+            }
             return
         }
         // The record as it is NOW, asked before anything is written: a trip deleted while its pages
@@ -269,11 +306,126 @@ public final class TripMembershipStore {
     public func forget(_ id: UUID) {
         drained[id] = nil
         inFlight.removeValue(forKey: id)?.task.cancel()
+        journals[id] = nil
+        journalErrors[id] = nil
+        journalFlights.removeValue(forKey: id)?.task.cancel()
     }
 
     /// Whether the record's slot still holds the drain that was given `token`.
     private func owns(_ id: UUID, _ token: Int) -> Bool {
         inFlight[id]?.token == token
+    }
+
+    // MARK: - The journal
+
+    /// What the record's last journal load could not do — said the way `lastError` is, for this
+    /// trip alone.
+    public func journalError(for record: CollectionRecord) -> String? {
+        journalErrors[record.id]
+    }
+
+    /// Where the record's journal stands, in the membership's terms.
+    public func journalState(for record: CollectionRecord) -> TripMembershipState {
+        if journalFlights[record.id] != nil { return .draining }
+        guard let journal = journal(record) else { return .notLoaded }
+        return journal.truncated ? .truncated : .complete
+    }
+
+    /// The memos carrying the record's tag, oldest first, as the server ordered them. Empty until
+    /// a journal load for the record's tag has applied, and for a trip the store no longer holds.
+    public func journal(for record: CollectionRecord) -> [Memo] {
+        journal(record)?.memos ?? []
+    }
+
+    /// Reads the record's whole journal. Joins a load of the same record already in flight under
+    /// the same session and tag (see the type's doc); a record with no tag sends nothing.
+    public func loadJournal(
+        _ record: CollectionRecord, using handle: SessionHandle, baseURL: URL
+    ) async {
+        guard let tag = record.tags.first else { return }
+        let lineage = Lineage(generation: generation, session: handle.generation, tag: tag)
+        if let running = journalFlights[record.id], running.lineage == lineage {
+            onJournalJoin?()
+            await running.task.value
+            return
+        }
+        let id = record.id
+        nextToken += 1
+        let token = nextToken
+        let task = Task {
+            await self.runJournal(
+                id, lineage: lineage, token: token, handle: handle, baseURL: baseURL)
+        }
+        journalFlights[id] = (lineage, token, task)
+        await task.value
+    }
+
+    private func runJournal(
+        _ id: UUID, lineage: Lineage, token: Int, handle: SessionHandle, baseURL: URL
+    ) async {
+        defer {
+            if ownsJournal(id, token) { journalFlights[id] = nil }
+        }
+        let query = MemoQuery(tags: [lineage.tag])
+        var memos: [Memo] = []
+        var cursor: String?
+        var truncated = false
+        do {
+            repeat {
+                // `.newer` with no bound is the query read oldest first: `sort=created_at`, no
+                // `created_before`, no `created_after` (`MemoQuery.parameters(in:direction:)`).
+                let page = try await TimelineStore.page(
+                    handle.client,
+                    query: query,
+                    calendar: .current,
+                    direction: .newer,
+                    cursor: cursor,
+                    limit: pageSize,
+                    baseURL: baseURL
+                )
+                guard stillCurrent(lineage, handle), ownsJournal(id, token), isLive(id, lineage)
+                else {
+                    MemosLog.api.info("a trip's journal page answered for a list that has moved on")
+                    return
+                }
+                memos += page.memos
+                cursor = page.nextCursor
+                if memos.count >= memberCap {
+                    truncated = memos.count > memberCap || cursor != nil
+                    memos = Array(memos.prefix(memberCap))
+                    break
+                }
+            } while cursor != nil
+        } catch {
+            guard lineage.generation == generation, ownsJournal(id, token) else {
+                MemosLog.api.info("a trip's journal page failed for a list that has moved on")
+                return
+            }
+            await report(error, issuedUnder: handle, lane: .journal(id)) {
+                lineage.generation == self.generation && self.ownsJournal(id, token)
+            }
+            return
+        }
+        guard ownsJournal(id, token), isLive(id, lineage) else {
+            MemosLog.api.info("a trip's journal answered for a trip that is gone")
+            return
+        }
+        journals[id] = Journal(tag: lineage.tag, memos: memos, truncated: truncated)
+        journalErrors[id] = nil
+        session?.noteTransportSuccess(issuedUnder: handle.generation)
+    }
+
+    /// Only for a trip the collection store still holds, under the tag it was read for.
+    private func journal(_ record: CollectionRecord) -> Journal? {
+        guard let journal = journals[record.id], journal.tag == record.tags.first,
+            collections.records.contains(where: { $0.id == record.id })
+        else { return nil }
+        return journal
+    }
+
+    /// Whether the record's journal slot still holds the load that was given `token`.
+    private func ownsJournal(_ id: UUID, _ token: Int) -> Bool {
+        journalFlights[id]?.token == token
     }
 
     // MARK: - The New trip sheet
@@ -353,6 +505,9 @@ public final class TripMembershipStore {
         countsInFlight = false
         spansInFlight = []
         lastError = nil
+        journals = [:]
+        journalFlights = [:]
+        journalErrors = [:]
         generation += 1
     }
 
@@ -361,19 +516,28 @@ public final class TripMembershipStore {
     }
 
     /// The same funnel, in the same order, as `MediaLibraryStore.report`.
-    private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
+    /// `lane` says which sentence the failure writes: the membership's or a trip's journal's.
+    /// `owned` is asked synchronously immediately before each write — after the session's decision
+    /// on a refusal, with nothing awaited in between — so a read forgotten while it waited says
+    /// nothing.
+    private func report(
+        _ error: any Error, issuedUnder handle: SessionHandle, lane: Lane = .membership,
+        while owned: () -> Bool = { true }
+    ) async {
         guard sessionStillCurrent(handle) else {
             MemosLog.api.info("a failure for a session that has ended is not reported")
             return
         }
         if let failure = StoreFailure.transportFailure(error) {
-            lastError = nil
+            if owned() { say(nil, on: lane) }
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
         if let refusal = StoreFailure.refusal(error) {
-            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle) {
-                lastError = refusal.errorDescription
+            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle),
+                owned()
+            {
+                say(refusal.errorDescription, on: lane)
             }
             return
         }
@@ -381,7 +545,14 @@ public final class TripMembershipStore {
             MemosLog.api.info("a cancelled request is not a failure and is not reported")
             return
         }
-        lastError = apiError.errorDescription
+        if owned() { say(apiError.errorDescription, on: lane) }
+    }
+
+    private func say(_ sentence: String?, on lane: Lane) {
+        switch lane {
+        case .membership: lastError = sentence
+        case .journal(let id): journalErrors[id] = sentence
+        }
     }
 
     private func sessionStillCurrent(_ handle: SessionHandle) -> Bool {
