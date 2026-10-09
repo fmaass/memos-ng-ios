@@ -277,10 +277,10 @@ struct TripManageTests {
         #expect(unread == ["trip-holds-opened"], "an unread list was held: \(unread.sorted())")
     }
 
-    @Test("Photos and Journal are open; Map waits")
+    @Test("Photos, Journal and Map are all open")
     func modes() {
         #expect(TripMode.allCases.map(\.title) == ["Photos", "Journal", "Map"])
-        #expect(TripMode.allCases.filter(\.isAvailable) == [.photos, .journal])
+        #expect(TripMode.allCases.filter(\.isAvailable) == [.photos, .journal, .map])
     }
 }
 
@@ -417,7 +417,7 @@ struct TripScreenRenderTests {
         }
     }
 
-    @Test("the chip row offers Photos and Journal, with Map drawn and disabled")
+    @Test("the chip row offers Photos, Journal and Map, every one enabled")
     func theChipRow() async {
         let wire = TripWire()
         let stores = stores()
@@ -427,7 +427,7 @@ struct TripScreenRenderTests {
             let journal = screen.element(labelled: "Journal")
             let map = screen.element(labelled: "Map")
             #expect(journal?.accessibilityTraits.contains(.notEnabled) == false)
-            #expect(map?.accessibilityTraits.contains(.notEnabled) == true)
+            #expect(map?.accessibilityTraits.contains(.notEnabled) == false)
             #expect(
                 screen.element(labelled: "Photos")?.accessibilityTraits.contains(.selected) == true)
             #expect(screen.element(labelled: TripView.manageButton) != nil, "no Manage menu")

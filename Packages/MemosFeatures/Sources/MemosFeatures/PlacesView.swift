@@ -42,16 +42,9 @@ private struct PlacesScreen: View {
     /// The map's delegate, held by the screen because Zoom-in is an action ON the map taken from a
     /// sheet the map does not present.
     @State private var map = PlacesMapCoordinator()
-    /// The photographs a tap on a crowded pin or a cluster listed.
-    @State private var sheet: PlaceSheet?
-    /// The viewer opened from the map with no sheet up, by a pin that holds one photograph.
-    @State private var viewing: MediaViewerSelection?
-    /// The viewer opened while the sheet is up — by a photograph inside it, or by a pin tapped on
-    /// the map behind it — presented by the sheet itself. A second state rather than the one
-    /// above because both covers would be live at once while the sheet is up, and a photograph
-    /// tapped in the sheet must not need the sheet dismissed first: dismissing and presenting in
-    /// one turn is how the second presentation gets dropped.
-    @State private var viewingFromSheet: MediaViewerSelection?
+    /// The sheet and the two viewers a tap on the map opens (`PlacesPresenting`, shared with a
+    /// trip's Map since MEMNG-719).
+    @State private var presenting = PlacesPresenting()
 
     var body: some View {
         Group {
@@ -80,11 +73,7 @@ private struct PlacesScreen: View {
         // Outside the view that presents the sheet, for the reason the library's cover is outside
         // its navigation stack: two presentations declared on one view is how one of them silently
         // stops appearing.
-        .fullScreenCover(item: $viewing) { selection in
-            // The photographs of that moment, paged as a value: this screen's list is what the
-            // reader was looking at, not a window onto a store that keeps loading.
-            MediaViewerView(selection: selection, source: .fixed(selection.pages))
-        }
+        .placesViewer($presenting.viewing)
         .tint(DesignTokens.accent)
         .task {
             if places == nil {
@@ -113,19 +102,10 @@ private struct PlacesScreen: View {
             ProgressView()
         case .ready:
             wholeMap(places)
-                .sheet(item: $sheet) { sheet in
-                    sheetContents(sheet)
-                        .presentationDetents([.medium, .large])
-                        // At half height the sheet is a drawer under the map, not a dialog over
-                        // it: the map stays live, so the reader can pan, or tap another place and
-                        // have its photographs replace these. Pulled to full height it covers the
-                        // map and is modal again.
-                        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-                }
         case .empty, .error:
-            notice(
-                PlacesPresentation.notice(for: state, error: places.lastError),
-                retry: state == .error
+            PlacesNoticeView(
+                notice: PlacesPresentation.notice(for: state, error: places.lastError),
+                retry: state == .error ? retry : nil
             )
         }
     }
@@ -139,112 +119,13 @@ private struct PlacesScreen: View {
     /// rather than a panel between two bars — a thing to look at on a device, not one anything
     /// here depends on.
     private func wholeMap(_ places: PlacesStore) -> some View {
-        PlacesMapView(
-            pins: PlacesPresentation.pins(for: places.markers),
-            region: PlacesPresentation.fitRegion(for: places.markers),
-            markers: places.markers,
-            onTap: { open($0) },
-            control: map
-        )
-        .ignoresSafeArea()
+        // The map and its sheet are `PlacesMapStage`, shared with a trip's Map (MEMNG-719).
+        PlacesMapStage(markers: places.markers, control: map, presenting: $presenting)
     }
 
-    /// One tappable square per photograph, in the order the list is already in.
-    @ViewBuilder
-    private func tiles(
-        _ markers: [PlaceMarker],
-        opening viewer: Binding<MediaViewerSelection?>
-    ) -> some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 96), spacing: DesignTokens.Space.hair)],
-            spacing: DesignTokens.Space.hair
-        ) {
-            ForEach(markers, id: \.uid) { marker in
-                // `AttachmentThumbnail` is the one image path: it evicts a lapsed signature before
-                // its cache read and re-checks the media generation inside its task, which is why
-                // nothing here paints a marker's URL by hand.
-                AttachmentThumbnail(
-                    attachment: MemoAttachment(marker),
-                    tier: .thumb,
-                    slot: MemoPresentation.gridSlot
-                )
-                .contentShape(.rect)
-                .onTapGesture {
-                    viewer.wrappedValue = PlacesPresentation.open(marker.uid, in: markers)
-                }
-                .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("Photo")
-                .accessibilityHint("Opens full screen")
-            }
-        }
-        .padding(.horizontal, DesignTokens.Space.hair)
-    }
-
-    /// What a crowded pin or a cluster listed, and the one action that can still separate it.
-    @ViewBuilder
-    private func sheetContents(_ listed: PlaceSheet) -> some View {
-        NavigationStack {
-            ScrollView {
-                tiles(listed.markers, opening: $viewingFromSheet)
-            }
-            // The sheet opens for two photographs or more — one photograph is the viewer, not a
-            // list — so the plural is not a case that has to be chosen.
-            .navigationTitle("\(listed.markers.count) Photos")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Done") { sheet = nil }
-                }
-                if listed.canZoomIn {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Zoom In") {
-                            map.zoomIn(to: listed.members)
-                            sheet = nil
-                        }
-                    }
-                }
-            }
-        }
-        // On the sheet itself: a photograph tapped in the list opens over it, rather than the
-        // sheet dismissing and something else presenting a turn later.
-        .fullScreenCover(item: $viewingFromSheet) { selection in
-            MediaViewerView(selection: selection, source: .fixed(selection.pages))
-        }
-    }
-
-    /// Where a tap on the map goes. The rule is `PlacesPresentation`'s; this is the presentation
-    /// its answer asks for.
-    private func open(_ action: PlaceTapAction) {
-        switch action {
-        case .viewer(let selection):
-            // The map stays live under a half-height sheet, so a pin of one photograph can be
-            // tapped while the sheet is up. Whatever is on top is what presents: a cover asked of
-            // the screen underneath a live sheet is the presentation that gets dropped.
-            if sheet == nil {
-                viewing = selection
-            } else {
-                viewingFromSheet = selection
-            }
-        case .sheet(let listed):
-            sheet = listed
-        }
-    }
-
-    @ViewBuilder
-    private func notice(_ notice: PlacesNotice?, retry: Bool) -> some View {
-        if let notice {
-            ContentUnavailableView {
-                Label(notice.title, systemImage: notice.symbol)
-            } description: {
-                Text(notice.message)
-            } actions: {
-                if retry {
-                    Button("Try Again") {
-                        Task { await load() }
-                    }
-                }
-            }
-        }
+    /// Try Again on the error card.
+    private var retry: @MainActor () async -> Void {
+        { await load() }
     }
 
     private func load() async {

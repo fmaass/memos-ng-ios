@@ -59,6 +59,10 @@ extension TripRoute: @MainActor StackRoute {
 /// Library and this screen's viewer already make: `MemoDetailView` edits through the Timeline's
 /// store, which lives on the Timeline's stack alone, so the memo is pushed there as the same
 /// `MemoRoute` a Timeline card pushes — never a second detail screen on this stack.
+///
+/// **Map** (MEMNG-719). The `Map` chip swaps the grid for the trip's located members on the Places
+/// map (`TripMapScreen`): every marker the account can see, kept only where its uid is one of the
+/// drained members (`TripMapPresentation`), with the Places tab's own map, sheet and viewers.
 struct TripView: View {
     let record: CollectionRecord
     let collections: CollectionStore
@@ -283,13 +287,25 @@ struct TripView: View {
             }
     }
 
-    /// The chosen mode's content: the journal, or the grid (Map is drawn disabled, never chosen).
+    /// The chosen mode's content: the grid, the journal, or the map.
     @ViewBuilder
     private func modeContent(_ live: CollectionRecord) -> some View {
         switch mode {
+        case .photos: grid(live)
         case .journal: journal(live)
-        case .photos, .map: grid(live)
+        case .map: tripMap(live)
         }
+    }
+
+    /// The trip's members that know where they were taken, on the Places map (MEMNG-719): the
+    /// hero above it, so the chips stay in reach. Keyed on the account, so a change of account
+    /// drops the map's markers, sheet and viewer with its store (`TripMapScreen`).
+    private func tripMap(_ live: CollectionRecord) -> some View {
+        TripMapScreen(
+            record: live, trips: trips, access: access, redrain: { await drain() },
+            hero: { hero(live, members: trips.members(for: live)) }
+        )
+        .id(subject)
     }
 
     /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
@@ -532,8 +548,7 @@ struct TripFooter: View {
     }
 }
 
-/// A trip's modes. Photos and Journal are open; Map comes later (WPN-9), drawn and disabled until
-/// then.
+/// A trip's modes: Photos, Journal (MEMNG-718) and Map (MEMNG-719), every one open.
 enum TripMode: CaseIterable, Hashable {
     case photos, journal, map
 
@@ -545,7 +560,7 @@ enum TripMode: CaseIterable, Hashable {
         }
     }
 
-    var isAvailable: Bool { self != .map }
+    var isAvailable: Bool { true }
 }
 
 /// The `Photos | Journal | Map` chips under the hero: the chosen one marked, a press choosing.
