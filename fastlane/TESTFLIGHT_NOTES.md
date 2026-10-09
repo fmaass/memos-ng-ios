@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.2 (43)
+
+- I added a fourth tab, Collections, for trips. A trip is made from a tag: New trip lists my tags that have photos, and puts the short, recent ones I would call a journey under Suggested.
+- When I open a trip I see its photos oldest first, grouped by day, under a header with the cover, the title, the dates and the count.
+- Tapping a photo opens the viewer across that trip's photos only, and Show Memo still takes me to the memo it belongs to.
+- From a trip's menu I can rename it, move it up or down in the list, or delete it. Deleting a trip only removes the trip: its photos and memos stay.
+- On a trip's screen the main bar folds when I scroll down, just as it does on the Timeline.
+- Please make a trip from one of your tags, scroll through it, open a few photos and swipe across them, then rename the trip and delete it again.
+
 ## 2.2.1 (42)
 
 - Pressing a tab no longer loses the main bar to a scroll reading that arrives late from a list you had already left: the bar now stays where the press put it.
