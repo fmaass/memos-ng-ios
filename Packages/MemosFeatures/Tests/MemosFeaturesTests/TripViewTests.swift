@@ -1466,3 +1466,25 @@ actor TripMediaServer: MediaTransport {
         return (refused ? Data() : payload, response)
     }
 }
+
+extension TripScreenRenderTests {
+    /// The trip's viewer offers Use as Cover; pressing it makes the page on screen the cover, and
+    /// the hero draws it once the viewer has closed (MEMNG-720).
+    @Test("Use as Cover in the trip's viewer makes that picture the hero's cover")
+    func useAsCoverReachesTheHero() async {
+        let jump = MemoJump()
+        await openViewer(excluding: "p4", at: 2, jump: jump) { screen, _, _, members in
+            #expect(members == ["p0", "p1", "p2", "p3"], "the members: \(members)")
+            let offered = await screen.until {
+                screen.element(labelled: TripView.useAsCoverButton) != nil
+            }
+            #expect(offered, "the trip's viewer offers no Use as Cover")
+            #expect(TripProbe.pressAtOnce(TripView.useAsCoverButton, on: screen))
+            let shown = await screen.until(seconds: 10) {
+                CollectionsHost.identified(TripView.coverIdentifier("p2"), in: screen.window)
+            }
+            #expect(shown, "the hero does not draw the chosen p2")
+            #expect(!CollectionsHost.identified(TripView.coverIdentifier("p0"), in: screen.window))
+        }
+    }
+}

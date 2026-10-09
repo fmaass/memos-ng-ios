@@ -74,6 +74,9 @@ struct PlacesMapStage: View {
     /// sheet the map does not present.
     let control: PlacesMapCoordinator
     @Binding var presenting: PlacesPresenting
+    /// What the viewer over the sheet offers beside its own actions: a trip's "Use as Cover" on a
+    /// trip's Map, nothing on the Places tab's (MEMNG-720).
+    var viewerAction: MediaViewerHostAction? = nil
 
     var body: some View {
         // The map runs under the status bar and the tab bar so that it is the screen rather than
@@ -93,13 +96,15 @@ struct PlacesMapStage: View {
         .onChange(of: markers.map(\.uid), initial: true) { _, uids in probe?.staged = uids }
         .onAppear { probe?.tap = { presenting.open($0) } }
         .sheet(item: $presenting.sheet) { sheet in
-            PlaceSheetContents(listed: sheet, control: control, presenting: $presenting)
-                .presentationDetents([.medium, .large])
-                // At half height the sheet is a drawer under the map, not a dialog over it: the
-                // map stays live, so the reader can pan, or tap another place and have its
-                // photographs replace these. Pulled to full height it covers the map and is modal
-                // again.
-                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+            PlaceSheetContents(
+                listed: sheet, control: control, presenting: $presenting,
+                viewerAction: viewerAction
+            )
+            .presentationDetents([.medium, .large])
+            // At half height the sheet is a drawer under the map, not a dialog over it: the map
+            // stays live, so the reader can pan, or tap another place and have its photographs
+            // replace these. Pulled to full height it covers the map and is modal again.
+            .presentationBackgroundInteraction(.enabled(upThrough: .medium))
         }
     }
 }
@@ -109,6 +114,7 @@ struct PlaceSheetContents: View {
     let listed: PlaceSheet
     let control: PlacesMapCoordinator
     @Binding var presenting: PlacesPresenting
+    var viewerAction: MediaViewerHostAction? = nil
 
     var body: some View {
         NavigationStack {
@@ -136,7 +142,8 @@ struct PlaceSheetContents: View {
         // On the sheet itself: a photograph tapped in the list opens over it, rather than the
         // sheet dismissing and something else presenting a turn later.
         .fullScreenCover(item: $presenting.viewingFromSheet) { selection in
-            MediaViewerView(selection: selection, source: .fixed(selection.pages))
+            MediaViewerView(
+                selection: selection, source: .fixed(selection.pages), hostAction: viewerAction)
         }
     }
 
@@ -197,10 +204,14 @@ extension View {
     /// the view that presents the sheet (`PlacesMapStage`).
     ///
     /// The photographs of that moment, paged as a value: the list is what the reader was looking
-    /// at, not a window onto a store that keeps loading.
-    func placesViewer(_ viewing: Binding<MediaViewerSelection?>) -> some View {
+    /// at, not a window onto a store that keeps loading. `action` is a trip Map's "Use as Cover",
+    /// nil on the Places tab (MEMNG-720).
+    func placesViewer(
+        _ viewing: Binding<MediaViewerSelection?>, action: MediaViewerHostAction? = nil
+    ) -> some View {
         fullScreenCover(item: viewing) { selection in
-            MediaViewerView(selection: selection, source: .fixed(selection.pages))
+            MediaViewerView(
+                selection: selection, source: .fixed(selection.pages), hostAction: action)
         }
     }
 }

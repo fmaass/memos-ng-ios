@@ -19,6 +19,8 @@ struct MainTabView: View {
     @State private var jump = MemoJump()
     /// A tag asked for from the Collections root, which the Library narrows its grid to.
     @State private var tagJump = LibraryTagJump()
+    /// A year asked for from the Collections root, which the Library shows in Months (MEMNG-720).
+    @State private var yearJump = LibraryYearJump()
     /// The session's collections and their memberships: one of each for as long as this view
     /// shows a session, built once its identity can be read, moved to a new identity beside the
     /// timeline (`TimelineView`), and read by every tab through the environment.
@@ -97,6 +99,7 @@ struct MainTabView: View {
         }
         .environment(jump)
         .environment(tagJump)
+        .environment(yearJump)
         .environment(collections)
         .environment(trips)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
@@ -107,6 +110,10 @@ struct MainTabView: View {
         // The same for a tag asked for from Collections: the Library applies it.
         .onChange(of: tagJump.pending) { _, pending in
             selection = LibraryTagJumpRouting.tab(showing: selection, whenOpening: pending)
+        }
+        // And for a year asked for from Collections: the Library shows it.
+        .onChange(of: yearJump.pending) { _, pending in
+            selection = LibraryYearJumpRouting.tab(showing: selection, whenOpening: pending)
         }
     }
 

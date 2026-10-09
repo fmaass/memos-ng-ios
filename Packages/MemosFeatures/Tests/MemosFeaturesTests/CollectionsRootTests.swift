@@ -344,13 +344,16 @@ struct CollectionsRootRenderTests {
         _ stores: (CollectionStore, TripMembershipStore, LibraryTagStore),
         _ wire: CollectionsWire,
         openTag: @escaping (String) -> Void = { _ in },
+        years: LibraryBucketStore? = nil,
+        openYear: @escaping (String) -> Void = { _ in },
         now: Date = Self.now
     ) -> some View {
         let access = wire.access
         return NavigationStack {
             CollectionsScreen(
-                collections: stores.0, trips: stores.1, tags: stores.2, subject: "alice",
-                access: { access }, openTag: openTag, now: { now })
+                collections: stores.0, trips: stores.1, tags: stores.2, years: years,
+                subject: "alice", access: { access }, openTag: openTag, openYear: openYear,
+                now: { now })
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -759,6 +762,11 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var requests: [String] = []
     private nonisolated(unsafe) var heldTag: String?
     private nonisolated(unsafe) var released = false
+    private nonisolated(unsafe) var noYears = false
+    private nonisolated(unsafe) var refusesYears = false
+    private nonisolated(unsafe) var holdsYears = false
+    private nonisolated(unsafe) var releasedYears: [String] = []
+    private nonisolated(unsafe) var answeredYears: [String] = []
 
     /// Every request sent so far, as `<operation id> <path and query>`.
     nonisolated var sent: [String] { lock.withLock { requests } }
@@ -771,6 +779,30 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
 
     nonisolated func release() {
         lock.withLock { released = true }
+    }
+
+    /// Answers every year read with no year at all.
+    nonisolated func answerNoYears() {
+        lock.withLock { noYears = true }
+    }
+
+    /// Holds every year read until `releaseYears(of:)` names its token's owner. A held read
+    /// answers even when its task is cancelled, as a response already on its way does.
+    nonisolated func holdYears() {
+        lock.withLock { holdsYears = true }
+    }
+
+    /// Lets the held year reads of `owner`'s token (`fabian` or `bob`) answer.
+    nonisolated func releaseYears(of owner: String) {
+        lock.withLock { releasedYears.append(owner) }
+    }
+
+    /// Whose year reads have answered, in order.
+    nonisolated var yearsAnswered: [String] { lock.withLock { answeredYears } }
+
+    /// Answers every year read 401: the token, as far as that read is concerned, is dead.
+    nonisolated func refuseYears() {
+        lock.withLock { refusesYears = true }
     }
 
     nonisolated func send(
@@ -790,6 +822,32 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
         case "attachment_tags_api_attachments_tags_get":
             return Self.json(
                 #"[{"name":"portugal2026","count":3},{"name":"family","count":40}]"#)
+        case "attachment_buckets_api_attachments_buckets_get":
+            // Years only (MEMNG-720): 2026 three pictures, 2019 forty. Every other size stays
+            // unanswered, as it was before the Years row.
+            let query = URLComponents(string: path)?.queryItems ?? []
+            guard query.contains(where: { $0.name == "size" && $0.value == "year" }) else {
+                return (HTTPResponse(status: .notFound), nil)
+            }
+            if lock.withLock({ refusesYears }) {
+                return (HTTPResponse(status: .unauthorized), nil)
+            }
+            // Bob has no year; fabian has the two below.
+            let token = request.headerFields[.authorization] ?? ""
+            let owner = token.hasSuffix("memos_pat_bob") ? "bob" : "fabian"
+            while lock.withLock({ holdsYears && !releasedYears.contains(owner) }) {
+                if Task.isCancelled {
+                    usleep(20_000)
+                } else {
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+            }
+            lock.withLock { answeredYears.append(owner) }
+            if owner == "bob" || lock.withLock({ noYears }) { return Self.json("[]") }
+            let thumb = #""coverThumbnailUrl":"/api/attachments/p0/thumb""#
+            return Self.json(
+                #"[{"key":"2026","count":3,"coverUid":"p0","# + thumb + "},"
+                    + #"{"key":"2019","count":40,"coverUid":"p0","# + thumb + "}]")
         case "list_attachments_api_attachments_get":
             if isHeld(path) {
                 while !lock.withLock({ released }) {
@@ -991,5 +1049,215 @@ extension PressProbe.Screen {
             try? await Task.sleep(for: .milliseconds(10))
         }
         return ready()
+    }
+}
+
+// MARK: - Use as Cover on the card, and the Years row (MEMNG-720)
+
+extension CollectionsRootRenderTests {
+    @Test("the card follows a cover chosen after its drain, and falls back when it leaves the trip")
+    func theCardFollowsTheCover() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            let drained = await screen.until {
+                CollectionsHost.identified(TripCard.coverIdentifier("p0"), in: screen.window)
+            }
+            #expect(drained, "precondition: the drained card draws its first member p0")
+            // What the trip's viewer's Use as Cover does (`TripView.useAsCover`).
+            stores.0.setCover(id: record.id, uid: "p2")
+            let chosen = await screen.until {
+                CollectionsHost.identified(TripCard.coverIdentifier("p2"), in: screen.window)
+            }
+            #expect(chosen, "the card kept the cover its drain wrote, not the chosen p2")
+            stores.0.exclude(id: record.id, uid: "p2")
+            let fellBack = await screen.until {
+                CollectionsHost.identified(TripCard.coverIdentifier("p0"), in: screen.window)
+            }
+            #expect(fellBack, "the card kept an excluded cover instead of the first member")
+        }
+    }
+
+    @Test("the Years row lists the scripted years with their counts, and a chip asks for its year")
+    func theYearsRow() async {
+        let wire = CollectionsWire()
+        let opened = Box<String?>(nil)
+        let years = LibraryBucketStore()
+        let view = screen(stores(), wire, years: years) { opened.value = $0 }
+        await CollectionsHost.with(view) { screen in
+            #expect(await screen.until { screen.says(CollectionsScreen.yearsHeader) })
+            #expect(screen.element(labelled: "2026")?.accessibilityValue == "3 items")
+            #expect(screen.element(labelled: "2019")?.accessibilityValue == "40 items")
+            #expect(screen.press("2019"), "the chip took no press")
+            #expect(opened.value == "2019")
+            // An account change empties the store: its years leave the screen with it.
+            years.sessionIdentityChanged()
+            #expect(await screen.until { !screen.says(CollectionsScreen.yearsHeader) })
+            #expect(screen.element(labelled: "2026") == nil, "another account's years stayed")
+        }
+        let reads = wire.transport.sent.filter { $0.hasPrefix("attachment_buckets") }
+        #expect(reads.count == 1, "one year read: \(reads)")
+        #expect(reads.first?.contains("size=year") == true)
+        #expect(reads.first?.contains("tag=") == false, "the row counts every tag")
+    }
+
+    @Test("no years, no Years row")
+    func noYearsNoRow() async {
+        let wire = CollectionsWire()
+        wire.transport.answerNoYears()
+        let years = LibraryBucketStore()
+        await CollectionsHost.with(screen(stores(), wire, years: years)) { screen in
+            #expect(await screen.until { years.loadedRequest != nil }, "the years were not read")
+            #expect(await screen.until { screen.element(labelled: "#portugal2026") != nil })
+            #expect(!screen.says(CollectionsScreen.yearsHeader), "a Years row with no year")
+        }
+    }
+
+    @Test(
+        "a year chip on the Collections root opens the Library in Months at that year",
+        arguments: ["2026", "2019"])
+    func aYearChipReachesTheLibrary(year: String) async {
+        let transport = CollectionsTransport()
+        let session = signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let tabs = MainTabView(opening: .collections).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let chip = await screen.until { screen.element(labelled: year) != nil }
+            #expect(chip, "the Years row never appeared")
+            // The control: Months narrowed to a year says so with its All Years button.
+            #expect(screen.element(labelled: "All Years") == nil)
+            #expect(screen.press(year), "the chip took no press")
+            let reached = await screen.until(seconds: 10) {
+                screen.element(labelled: "All Years") != nil
+            }
+            #expect(reached, "the Library never showed Months at \(year)")
+            // The year it landed on is the one tapped, and no other scripted year.
+            let heading = { (key: String) in
+                let id = LibraryMonthsMosaic.yearIdentifier(key)
+                return CollectionsHost.identified(id, in: screen.window)
+            }
+            #expect(heading(year), "Months is not narrowed to \(year)")
+            let other = year == "2026" ? "2019" : "2026"
+            #expect(!heading(other), "Months landed on \(other), not the tapped \(year)")
+        }
+    }
+
+    @Test("a year read refused 401 under the current credential ends the session")
+    func aRefusedYearReadReachesTheSession() async {
+        let transport = CollectionsTransport()
+        transport.refuseYears()
+        let session = signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let tabs = MainTabView(opening: .collections).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let ended = await screen.until(seconds: 10) { session.state.user == nil }
+            #expect(ended, "the year read's refusal never reached the session")
+        }
+        #expect(transport.sent.contains { $0.hasPrefix("attachment_buckets") }, "no year read")
+    }
+
+    @Test("a year read still in flight when the account changes never fills the new one's row")
+    func aLateYearReadIsDropped() async {
+        let transport = CollectionsTransport()
+        transport.holdYears()
+        let session = signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let tabs = MainTabView(opening: .collections).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let asked = await screen.until { Self.yearReads(transport) == 1 }
+            #expect(asked, "fabian's year read was never sent: \(transport.sent)")
+            await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_bob")
+            #expect(session.state.user?.subject == "bob", "precondition: bob signed in")
+            // Bob's own read stays held: only fabian's late answer can reach the row.
+            transport.releaseYears(of: "fabian")
+            let answered = await screen.until { transport.yearsAnswered == ["fabian"] }
+            #expect(answered, "fabian's held read never answered: \(transport.yearsAnswered)")
+            _ = await screen.until(seconds: 1.5) { false }
+            #expect(!screen.says(CollectionsScreen.yearsHeader), "fabian's years filled bob's row")
+            #expect(screen.element(labelled: "2026") == nil, "fabian's 2026 is on bob's root")
+            // Bob's read goes too, so no held read outlives the case.
+            transport.releaseYears(of: "bob")
+            _ = await screen.until { transport.yearsAnswered.count == 2 }
+        }
+    }
+
+    private static func yearReads(_ transport: CollectionsTransport) -> Int {
+        transport.sent.filter { $0.hasPrefix("attachment_buckets") && $0.contains("size=year") }
+            .count
+    }
+
+    @Test("a viewer opened from the Library offers no Use as Cover")
+    func theLibrarysViewerHasNoCoverAction() async {
+        let transport = CollectionsTransport()
+        let session = signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let tabs = MainTabView(opening: .library).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let tiles = await screen.until { !TripProbe.photos(in: screen.window).isEmpty }
+            #expect(tiles, "the Library drew no tile")
+            let photos = TripProbe.photos(in: screen.window)
+            let pressed = photos.first.map { TripProbe.pressAtOnce($0) } ?? false
+            #expect(pressed, "the tile took no press")
+            // The control: the viewer is up, its own Close drawn.
+            let open = await screen.until(seconds: 10) { screen.element(labelled: "Close") != nil }
+            #expect(open, "no viewer opened")
+            await screen.settle(turns: 10)
+            #expect(
+                screen.element(labelled: TripView.useAsCoverButton) == nil,
+                "the Library's viewer offers a trip's Use as Cover")
+        }
+    }
+}
+
+/// The year request and the root's two requests, as values (MEMNG-720).
+@MainActor
+@Suite("Library year jump")
+struct LibraryYearJumpTests {
+    @Test("a year request widens the tag, shows that year in Months, and is applied once")
+    func appliedOnce() {
+        let jump = LibraryYearJump()
+        let scope = LibraryScopeChoice()
+        let library = MediaLibraryStore()
+        library.setTag("portugal2026")
+        #expect(LibraryYearJumpRouting.tab(showing: .collections, whenOpening: nil) == .collections)
+        jump.request("2026")
+        let tab = LibraryYearJumpRouting.tab(showing: .collections, whenOpening: jump.pending)
+        #expect(tab == .library)
+        #expect(LibraryYearJumpRouting.apply(jump, to: library, scope: scope), "no re-read")
+        #expect(library.tag == nil, "the tag was kept")
+        #expect(scope.scope == .months)
+        #expect(scope.year == "2026")
+        #expect(jump.pending == nil)
+        scope.choose(.all)
+        #expect(!LibraryYearJumpRouting.apply(jump, to: library, scope: scope), "applied twice")
+        #expect(scope.scope == .all, "a taken request moved the scope again")
+        #expect(scope.year == nil)
+        // With no tag to widen, the scope still moves and nothing is read again.
+        jump.request("2019")
+        #expect(!LibraryYearJumpRouting.apply(jump, to: library, scope: scope))
+        #expect(scope.scope == .months)
+        #expect(scope.year == "2019")
+    }
+
+    @Test("the later of a tag request and a year request is the one left pending")
+    func theLaterRequestWins() {
+        let tags = LibraryTagJump()
+        let years = LibraryYearJump()
+        LibraryJumpRequests.openTag("family", tags: tags, years: years)
+        LibraryJumpRequests.openYear("2026", tags: tags, years: years)
+        #expect(tags.pending == nil, "a tag asked for before the year stayed pending")
+        #expect(years.pending == "2026")
+        LibraryJumpRequests.openTag("family", tags: tags, years: years)
+        #expect(years.pending == nil, "a year asked for before the tag stayed pending")
+        #expect(tags.pending == "family")
     }
 }

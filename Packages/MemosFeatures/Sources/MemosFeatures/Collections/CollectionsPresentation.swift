@@ -82,8 +82,16 @@ enum CollectionsPresentation {
 
     /// The cover a trip card shows: the member its summary names, once the membership has been
     /// drained on this device. Nil draws the placeholder, never a broken tile.
-    static func cover(of record: CollectionRecord, members: [LibraryRow]) -> MemoAttachment? {
-        guard let uid = record.lastSummary?.coverUid else { return nil }
+    ///
+    /// `live` is the summary over the membership as it stands NOW (`TripMembershipStore.summary`),
+    /// which reads the record's chosen cover at every call; the record's `lastSummary` is only
+    /// what the last drain wrote, so a cover chosen in the trip's viewer — or excluded — after that
+    /// drain would not reach the card until the next one (MEMNG-720). The written summary stands
+    /// in while nothing has been drained on this device.
+    static func cover(
+        of record: CollectionRecord, live: TripSummary? = nil, members: [LibraryRow]
+    ) -> MemoAttachment? {
+        guard let uid = (live ?? record.lastSummary)?.coverUid else { return nil }
         return members.first { $0.id == uid }?.attachment
     }
 

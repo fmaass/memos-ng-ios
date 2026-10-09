@@ -60,6 +60,9 @@ struct LibraryMonthsMosaic: View {
     let months: [LibraryMosaicMonth]
     /// The year a Years card narrowed the days to, or nil for every year.
     let year: String?
+
+    /// The year heading's identifier when Months is narrowed to `year`.
+    static func yearIdentifier(_ year: String) -> String { "library-months-year-\(year)" }
     let errorText: String?
     /// Widens the days back to every year.
     let clearYear: () -> Void
@@ -106,6 +109,7 @@ struct LibraryMonthsMosaic: View {
                 if let year {
                     HStack {
                         Text(year).font(.title3.bold())
+                            .accessibilityIdentifier(Self.yearIdentifier(year))
                         Spacer(minLength: 0)
                         Button("All Years", action: clearYear)
                     }

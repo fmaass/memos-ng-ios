@@ -39,6 +39,10 @@ struct MediaViewerView: View {
     /// memo these pictures hang on. `nil` is a viewer that cannot delete — the media library's —
     /// and it is what makes a control with nothing behind it impossible rather than merely absent.
     let delete: (@MainActor (String) async -> Bool)?
+    /// One more thing the presenting screen lets the reader do with the page on screen, or nil —
+    /// which is every viewer but a trip's ("Use as Cover", MEMNG-720). Passed in, as `delete` is:
+    /// the viewer knows nothing of trips, only that a host handed it an action.
+    let hostAction: MediaViewerHostAction?
     /// What every page's still is fetched through. The app's own session everywhere but a test
     /// that watches a page's next request go out.
     let transport: any MediaTransport
@@ -84,11 +88,13 @@ struct MediaViewerView: View {
         selection: MediaViewerSelection,
         source: MediaViewerSource,
         delete: (@MainActor (String) async -> Bool)? = nil,
+        hostAction: MediaViewerHostAction? = nil,
         transport: any MediaTransport = MediaSession.shared
     ) {
         self.selection = selection
         self.source = source
         self.delete = delete
+        self.hostAction = hostAction
         self.transport = transport
         _currentPage = State(initialValue: selection.startPage.id)
         _shown = State(initialValue: selection.pages)
@@ -219,6 +225,10 @@ struct MediaViewerView: View {
             if selection.deletable, delete != nil, let page {
                 deleteButton(for: page)
             }
+            // Beside the shared list for the same reason: only the host that injected it offers it.
+            if let hostAction, let page {
+                hostButton(hostAction, for: page)
+            }
             MediaViewerActions(
                 control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
                 showMemo: { uid in
@@ -246,6 +256,21 @@ struct MediaViewerView: View {
                 .padding()
         }
         .accessibilityLabel(AttachmentDeleteFlow.title(for: page.attachment))
+    }
+
+    /// The host's action on the page on screen, drawn as the delete is. It acts, then closes the
+    /// viewer: what it changed is the screen underneath's to show (a trip's hero, its card).
+    private func hostButton(_ action: MediaViewerHostAction, for page: MediaPage) -> some View {
+        Button {
+            action.perform(page.attachment)
+            dismiss()
+        } label: {
+            Image(systemName: action.symbol)
+                .font(.system(size: 30))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding()
+        }
+        .accessibilityLabel(action.title)
     }
 
     /// What a refused delete says, on the one screen with nowhere else to say it.
@@ -453,6 +478,17 @@ struct MediaTileActionItem: View {
             Label(action.title, systemImage: action.symbol)
         }
     }
+}
+
+/// An action a screen adds to the viewers it presents, on the page on screen (MEMNG-720).
+///
+/// The viewer draws it and calls it; what it means is the host's. A trip's screen is the one host
+/// that hands one in ("Use as Cover"); every other presenter passes nil, so the control does not
+/// exist there rather than existing and doing nothing.
+struct MediaViewerHostAction {
+    let title: String
+    let symbol: String
+    let perform: @MainActor (MemoAttachment) -> Void
 }
 
 /// The deliberate way out of a full-screen black surface.

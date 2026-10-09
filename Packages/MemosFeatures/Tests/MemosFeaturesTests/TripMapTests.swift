@@ -548,3 +548,27 @@ final class TripMapTransport: ClientTransport, @unchecked Sendable {
         return (response, HTTPBody(text))
     }
 }
+
+extension TripMapTests {
+    /// The Map's viewer is the trip's too (MEMNG-720): a pin's viewer offers Use as Cover, and it
+    /// sets the trip's cover.
+    @Test("a trip Map pin's viewer offers Use as Cover, and it makes that picture the cover")
+    func aMapViewerUsesAsCover() async throws {
+        let wire = TripMapWire(members: 3, located: ["t0", "t1"])
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let probe = PlacesStageProbe()
+        let selection = try #require(PlacesPresentation.open("t1", in: [Self.marker("t1")]))
+        let view = host(stores, wire, record, probe: probe)
+        await CollectionsHost.with(view, height: 1400) { screen in
+            #expect(await onMap(screen, probe, staged: ["t0", "t1"]), "staged \(probe.staged)")
+            probe.tap?(.viewer(selection))
+            let offered = await screen.until {
+                screen.element(labelled: TripView.useAsCoverButton) != nil
+            }
+            #expect(offered, "the Map's viewer offers no Use as Cover")
+            #expect(TripProbe.pressAtOnce(TripView.useAsCoverButton, on: screen))
+            #expect(stores.0.records.first?.coverUid == "t1", "the press chose no cover")
+        }
+    }
+}

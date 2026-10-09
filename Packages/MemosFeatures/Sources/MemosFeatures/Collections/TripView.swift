@@ -145,6 +145,19 @@ struct TripView: View {
     /// The hero cover's identifier when it draws `uid`.
     static func coverIdentifier(_ uid: String) -> String { "trip-cover-\(uid)" }
 
+    /// The viewer's action on a trip's picture, read by VoiceOver (MEMNG-720).
+    static let useAsCoverButton = "Use as Cover"
+
+    /// What a viewer opened from trip `id` — its grid, or its Map's pins and sheet — offers on the
+    /// page on screen: that picture becomes the trip's cover (`CollectionStore.setCover`). The
+    /// trip's viewers are the only ones handed it; the Library's, the Timeline's, a memo's and the
+    /// Places tab's are handed nil.
+    static func useAsCover(_ id: UUID, in collections: CollectionStore) -> MediaViewerHostAction {
+        MediaViewerHostAction(title: useAsCoverButton, symbol: "photo.badge.checkmark") {
+            collections.setCover(id: id, uid: $0.uid)
+        }
+    }
+
     /// The delete dialog's question.
     static func deleteQuestion(_ title: String) -> String { "Delete “\(title)”?" }
 
@@ -246,7 +259,10 @@ struct TripView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) { manageMenu }
             }
-            .gridViewer($viewing, refresher: refresher, zoom: zoom, transport: viewerTransport) {
+            .gridViewer(
+                $viewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
+                action: Self.useAsCover(record.id, in: collections)
+            ) {
                 Self.viewerSource(for: $0, members: members, loaded: loaded)
             }
             .onChange(of: viewing) { _, _ in held = [] }
@@ -303,6 +319,7 @@ struct TripView: View {
     private func tripMap(_ live: CollectionRecord) -> some View {
         TripMapScreen(
             record: live, trips: trips, access: access, redrain: { await drain() },
+            viewerAction: Self.useAsCover(record.id, in: collections),
             hero: { hero(live, members: trips.members(for: live)) }
         )
         .id(subject)

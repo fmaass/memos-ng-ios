@@ -122,6 +122,9 @@ struct TripMapScreen<Hero: View>: View {
     let access: () -> CollectionsAccess?
     /// Reads the trip's membership again, for Try Again after a drain that failed.
     let redrain: () async -> Void
+    /// What the Map's viewers — a pin's, and the one over a sheet — offer on a picture: the trip's
+    /// "Use as Cover" (MEMNG-720). The Places tab's map hands its viewers nothing.
+    var viewerAction: MediaViewerHostAction? = nil
     @ViewBuilder let hero: () -> Hero
 
     /// Optional: a test hosts the screen without a session.
@@ -144,7 +147,7 @@ struct TripMapScreen<Hero: View>: View {
             content(status, markers: markers, membership: membership)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .placesViewer($presenting.viewing)
+        .placesViewer($presenting.viewing, action: viewerAction)
         .onAppear { probe?.presenting = { presenting } }
         .onChange(of: TripMapPresentation.kept(markers, members: members)) { _, kept in
             presenting.keep(only: kept)
@@ -171,14 +174,17 @@ struct TripMapScreen<Hero: View>: View {
             // not earned "no places".
             ProgressView()
         case .ready:
-            PlacesMapStage(markers: markers, control: map, presenting: $presenting)
-                .background {
-                    Color.clear
-                        .allowsHitTesting(false)
-                        .accessibilityElement()
-                        .accessibilityLabel(TripMapPresentation.mapLabel)
-                        .accessibilityIdentifier(TripMapPresentation.mapIdentifier)
-                }
+            PlacesMapStage(
+                markers: markers, control: map, presenting: $presenting,
+                viewerAction: viewerAction
+            )
+            .background {
+                Color.clear
+                    .allowsHitTesting(false)
+                    .accessibilityElement()
+                    .accessibilityLabel(TripMapPresentation.mapLabel)
+                    .accessibilityIdentifier(TripMapPresentation.mapIdentifier)
+            }
         case .empty, .error:
             PlacesNoticeView(
                 notice: notice(status, membership: membership), retry: retryAction(status))

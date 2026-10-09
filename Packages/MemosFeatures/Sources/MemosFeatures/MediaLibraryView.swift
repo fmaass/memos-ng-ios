@@ -32,6 +32,8 @@ struct MediaLibraryView: View {
     @Environment(AppDock.self) private var dock: AppDock?
     /// A tag asked for from the Collections root, applied to this grid's store.
     @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
+    /// A year asked for from the Collections root, shown in Months (MEMNG-720).
+    @Environment(LibraryYearJump.self) private var yearJump: LibraryYearJump?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -213,6 +215,15 @@ struct MediaLibraryView: View {
         // `.task` keyed on it would cancel the very read the request started.
         .onChange(of: TagJumpKey(tag: tagJump?.pending, ready: library != nil), initial: true) {
             guard let tagJump, let library, LibraryTagJumpRouting.apply(tagJump, to: library)
+            else { return }
+            Task { await load() }
+        }
+        // A year asked for from Collections: Months at that year, as a Years card's tap, once the
+        // store exists to widen its tag. The scope moves inside the apply; the grid is read again
+        // only when a tag was widened, unstructured for the tag request's reason.
+        .onChange(of: YearJumpKey(year: yearJump?.pending, ready: library != nil), initial: true) {
+            guard let yearJump, let library,
+                LibraryYearJumpRouting.apply(yearJump, to: library, scope: choice)
             else { return }
             Task { await load() }
         }
@@ -603,6 +614,11 @@ struct MediaLibraryView: View {
     /// What the tag request's read is keyed on: the request, and whether there is a store yet.
     private struct TagJumpKey: Equatable {
         let tag: String?
+        let ready: Bool
+    }
+
+    private struct YearJumpKey: Equatable {
+        let year: String?
         let ready: Bool
     }
 
