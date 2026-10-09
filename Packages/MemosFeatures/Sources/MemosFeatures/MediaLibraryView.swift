@@ -147,14 +147,10 @@ struct MediaLibraryView: View {
         }
         // Outside the stack, for the reason the timeline's cover is: two presentations on one view
         // is how one of them silently stops appearing.
-        .fullScreenCover(item: $viewing) { selection in
-            // The viewer pages over the STORE, not over the rows that happened to be loaded when
-            // the tile was tapped: swiping to the end of them is where the swiping used to stop,
-            // on a library of over a thousand files (MEMNG-189).
-            MediaViewerView(selection: selection, source: viewerSource)
-                .environment(\.signedURLRefresher, refresher)
-                .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
-        }
+        // The viewer pages over the STORE, not over the rows that happened to be loaded when the
+        // tile was tapped: swiping to the end of them is where the swiping used to stop, on a
+        // library of over a thousand files (MEMNG-189).
+        .gridViewer($viewing, refresher: refresher, zoom: mediaZoom) { _ in viewerSource }
         .tint(DesignTokens.accent)
         // Keyed on the account, as the tag and bucket lists below are: when the session becomes
         // somebody else's, this reads the incoming account's first page (MEMNG-591). Everything
@@ -523,19 +519,14 @@ struct MediaLibraryView: View {
     /// were loaded at the moment of the tap.
     private func open(_ attachment: MemoAttachment) {
         guard let library else { return }
-        viewing = MediaViewerPresentation.viewer(
-            for: library.items.map(\.attachment),
-            startingAt: attachment.uid
-        )
+        viewing = MediaGridHosting.viewing(attachment, in: library.items)
     }
 
     /// Fetches the named file of a tile's attachment and offers it to the share sheet. The
     /// credential the original tier needs is the session's, and it stays there (see
     /// `OriginalMedia`).
     private func fetch(_ attachment: MemoAttachment, _ rendition: AttachmentRendition) async {
-        await saving.save(attachment) { [session] file in
-            try await session.download(file, rendition)
-        }
+        await MediaGridHosting.fetch(attachment, rendition, saving: saving, session: session)
     }
 
     /// Select mode's Share: the chosen rows, in the order they were chosen, each fetched as its
@@ -755,6 +746,11 @@ struct LibraryGrid: View {
     var dayBuckets: [LibraryBucket]?
     /// The date pill's tap: Months at this `YYYY-MM` month (plan page 3929 decision 13).
     var showMonth: (String) -> Void = { _ in }
+    /// What the host draws at the top of the scroll, above the first month — a trip's hero
+    /// (MEMNG-714). The Library has none: its header stands over the grid, not in it.
+    var above: AnyView?
+    /// What the host draws at the foot of the scroll, under the last picture — a trip's cap note.
+    var below: AnyView?
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
@@ -896,6 +892,9 @@ struct LibraryGrid: View {
     private func scroll(inset: CGFloat) -> some View {
         ScrollView {
             LazyVStack(spacing: DesignTokens.Space.tight) {
+                if let above {
+                    above
+                }
                 if let error = errorText {
                     NoticeCard(text: error, tone: .error)
                         .padding(.horizontal, DesignTokens.Space.roomy)
@@ -904,6 +903,9 @@ struct LibraryGrid: View {
                 // The next page is on its way; this is what says so at the bottom of the scroll.
                 if loadingMore {
                     ProgressView().padding(DesignTokens.Space.roomy)
+                }
+                if let below {
+                    below
                 }
             }
             .padding(.vertical, DesignTokens.Space.tight)

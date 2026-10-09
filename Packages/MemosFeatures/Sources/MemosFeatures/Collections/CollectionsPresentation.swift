@@ -86,4 +86,11 @@ enum CollectionsPresentation {
         guard let uid = record.lastSummary?.coverUid else { return nil }
         return members.first { $0.id == uid }?.attachment
     }
+
+    /// The pushed trips that still exist: the stack up to the first trip `ids` no longer holds,
+    /// since a screen pushed from a trip that is gone has nothing to stand on either.
+    static func trail(_ routes: [TripRoute], keeping ids: [UUID]) -> [TripRoute] {
+        let kept = Set(ids)
+        return Array(routes.prefix { kept.contains($0.id) })
+    }
 }

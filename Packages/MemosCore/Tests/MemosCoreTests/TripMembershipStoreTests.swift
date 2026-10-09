@@ -313,6 +313,176 @@ struct TripMembershipStoreTests {
         #expect(calls.get() == 1, "the stale drain read on: \(calls.get()) pages")
     }
 
+    @Test("a page answered for a trip deleted while it was out publishes nothing")
+    func aDeletedTripsPageIsDropped() async {
+        let calls = LockedValue<Int>(0)
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            return calls.get() == 1 ? Self.page(0..<60, nextCursor: "c1") : Self.page(60..<61)
+        }
+        let handle = SessionHandle(client: client, generation: 1)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+
+        let inFlight = Task { await store.drain(record, using: handle, baseURL: Stub.baseURL) }
+        #expect(await entered.wait(), "no request was sent")
+        collections.delete(id: record.id)
+        release.signal()
+        await inFlight.value
+
+        // The snapshot the caller still holds is the only way left to ask about the trip.
+        #expect(store.members(for: record).isEmpty, "a deleted trip's members came back")
+        #expect(store.summary(for: record) == nil, "a deleted trip's summary came back")
+        #expect(store.state(for: record) == .notLoaded)
+        #expect(calls.get() == 1, "the drain read on for a trip that is gone: \(calls.get())")
+    }
+
+    @Test("a trip deleted after its drain keeps no readable membership")
+    func aDeletedTripsMembershipIsForgotten() async {
+        let client = Stub.client { _, _, _ in Self.page(0..<3) }
+        let handle = SessionHandle(client: client, generation: 1)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: handle, baseURL: Stub.baseURL)
+        #expect(store.members(for: record).count == 3, "precondition: the drain applied")
+
+        collections.delete(id: record.id)
+
+        #expect(store.members(for: record).isEmpty, "a deleted trip's members are still readable")
+        #expect(store.summary(for: record) == nil)
+        #expect(store.state(for: record) == .notLoaded)
+    }
+
+    @Test("a forgotten trip's membership is gone, and its drain in flight lands nothing")
+    func aForgottenTripHoldsNothing() async {
+        let calls = LockedValue<Int>(0)
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 2 {
+                entered.signal()
+                await release.wait()
+            }
+            return Self.page(0..<3)
+        }
+        let handle = SessionHandle(client: client, generation: 1)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: handle, baseURL: Stub.baseURL)
+        #expect(store.members(for: record).count == 3, "precondition: the drain applied")
+
+        let again = Task { await store.drain(record, using: handle, baseURL: Stub.baseURL) }
+        #expect(await entered.wait(), "the second drain was not sent")
+        store.forget(record.id)
+        #expect(store.members(for: record).isEmpty, "a forgotten trip's members are readable")
+        #expect(store.state(for: record) == .notLoaded, "a forgotten trip still reads as draining")
+        collections.delete(id: record.id)
+        release.signal()
+        await again.value
+        #expect(
+            store.members(for: record).isEmpty, "the drain in flight landed for a forgotten trip")
+    }
+
+    @Test("a drain held across a forget of a trip that stays publishes nothing")
+    func aForgottenDrainOfAKeptTripPublishesNothing() async {
+        let calls = LockedValue<Int>(0)
+        let entered = TripSignal()
+        let release = TripSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            return Self.page(0..<3)
+        }
+        let handle = SessionHandle(client: client, generation: 1)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+
+        let held = Task { await store.drain(record, using: handle, baseURL: Stub.baseURL) }
+        #expect(await entered.wait(), "no request was sent")
+        store.forget(record.id)
+        release.signal()
+        await held.value
+
+        // The trip is still in the store: only the forget can refuse what the drain brought.
+        #expect(collections.records.contains { $0.id == record.id }, "precondition: kept")
+        #expect(store.members(for: record).isEmpty, "a forgotten drain repopulated the trip")
+        #expect(store.summary(for: record) == nil)
+        #expect(store.state(for: record) == .notLoaded)
+    }
+
+    @Test("a drain after a forget supersedes the held one, which neither publishes nor clears it")
+    func aDrainAfterForgetSupersedes() async {
+        let calls = LockedValue<Int>(0)
+        let firstIn = TripSignal()
+        let firstOut = TripSignal()
+        let secondIn = TripSignal()
+        let secondOut = TripSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            switch calls.get() {
+            case 1:
+                firstIn.signal()
+                await firstOut.wait()
+                return Self.page(0..<3)
+            default:
+                secondIn.signal()
+                await secondOut.wait()
+                return Self.page(0..<5)
+            }
+        }
+        let handle = SessionHandle(client: client, generation: 1)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+
+        let old = Task { await store.drain(record, using: handle, baseURL: Stub.baseURL) }
+        #expect(await firstIn.wait(), "the first drain sent nothing")
+        store.forget(record.id)
+        let new = Task { await store.drain(record, using: handle, baseURL: Stub.baseURL) }
+        #expect(await secondIn.wait(), "the drain after the forget sent nothing")
+        firstOut.signal()
+        await old.value
+
+        #expect(store.members(for: record).isEmpty, "the superseded drain published")
+        #expect(store.state(for: record) == .draining, "the superseded drain cleared the new slot")
+        secondOut.signal()
+        await new.value
+        #expect(store.members(for: record).count == 5, "the drain after the forget did not land")
+        #expect(store.state(for: record) == .complete)
+    }
+
+    @Test("forgetting one trip leaves every other trip's membership as it was")
+    func forgettingIsPerTrip() async {
+        let client = Stub.client { _, _, _ in Self.page(0..<3) }
+        let handle = SessionHandle(client: client, generation: 1)
+        let collections = collections()
+        let gone = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let kept = collections.create(title: "Spain 2025", tags: ["spain2025"])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(gone, using: handle, baseURL: Stub.baseURL)
+        await store.drain(kept, using: handle, baseURL: Stub.baseURL)
+
+        store.forget(gone.id)
+
+        #expect(store.members(for: gone).isEmpty)
+        #expect(store.members(for: kept).count == 3, "forgetting one trip took another's")
+        #expect(store.state(for: kept) == .complete)
+    }
+
     @Test("a drain that outlived a change of identity is dropped whole")
     func anIdentityChangeDropsTheDrain() async {
         let entered = TripSignal()

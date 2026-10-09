@@ -804,8 +804,10 @@ struct IdentityWatchProbe: View {
 /// screen over it, with a bounded wait.
 @MainActor
 enum CollectionsHost {
-    static func with(_ view: some View, _ body: (PressProbe.Screen) async -> Void) async {
-        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+    static func with(
+        _ view: some View, height: CGFloat = 874, _ body: (PressProbe.Screen) async -> Void
+    ) async {
+        let frame = CGRect(x: 0, y: 0, width: 402, height: height)
         let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
         let window: UIWindow
         if let scene = scene as? UIWindowScene {

@@ -48,6 +48,14 @@ public struct TripTagSpan: Sendable, Equatable {
 /// and it reads no further page. A drain applies its list once, at the end, so a half-read
 /// membership is never on screen as if it were the trip.
 ///
+/// **Owned by its slot.** Each drain holds a token of its own, the one its record's slot was
+/// given when it started, and publishes only while the slot still holds that token: asked before
+/// every page is used and before the list is written, and again before its cleanup, so a drain
+/// never clears a slot a newer one holds. `forget` empties the slot and cancels the drain in it. A
+/// drain asked after a forget never JOINS the forgotten one — there is nothing left to join — it
+/// SUPERSEDES it: its own read, in its own slot, while whatever the forgotten one still brings
+/// back is refused at its arrival.
+///
 /// **A refusal is one typed value.** The server refusing the credential arrives as
 /// `CredentialRefusal` (`StoreFailure.refusal`) and goes to `onUnauthorized`, the session's one
 /// decision rule; the funnel is `MediaLibraryStore.report`'s, in its order.
@@ -90,7 +98,9 @@ public final class TripMembershipStore {
     }
 
     private var drained: [UUID: Drained] = [:]
-    private var inFlight: [UUID: (lineage: Lineage, task: Task<Void, Never>)] = [:]
+    private var inFlight: [UUID: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
+    /// The token the next drain's slot is given; never reused.
+    private var nextToken = 0
     private var countsInFlight = false
     private var spansInFlight: Set<String> = []
     /// Bumped by `sessionIdentityChanged`: everything read before it belongs to somebody else.
@@ -102,7 +112,8 @@ public final class TripMembershipStore {
 
     private let collections: CollectionStore
     private let pageSize: Int
-    private let memberCap: Int
+    /// How many members this store gathers before a drain stops as `truncated`.
+    public let memberCap: Int
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
 
@@ -174,14 +185,20 @@ public final class TripMembershipStore {
             return
         }
         let id = record.id
-        let task = Task { await self.run(id, lineage: lineage, handle: handle, baseURL: baseURL) }
-        inFlight[id] = (lineage, task)
+        nextToken += 1
+        let token = nextToken
+        let task = Task {
+            await self.run(id, lineage: lineage, token: token, handle: handle, baseURL: baseURL)
+        }
+        inFlight[id] = (lineage, token, task)
         await task.value
     }
 
-    private func run(_ id: UUID, lineage: Lineage, handle: SessionHandle, baseURL: URL) async {
+    private func run(
+        _ id: UUID, lineage: Lineage, token: Int, handle: SessionHandle, baseURL: URL
+    ) async {
         defer {
-            if inFlight[id]?.lineage == lineage { inFlight[id] = nil }
+            if owns(id, token) { inFlight[id] = nil }
         }
         let client = handle.client
         var rows: [LibraryRow] = []
@@ -198,7 +215,7 @@ public final class TripMembershipStore {
                     limit: pageSize,
                     baseURL: baseURL
                 )
-                guard stillCurrent(lineage, handle) else {
+                guard stillCurrent(lineage, handle), owns(id, token), isLive(id, lineage) else {
                     MemosLog.api.info("a trip's page answered for a list that has moved on")
                     return
                 }
@@ -211,26 +228,52 @@ public final class TripMembershipStore {
                 }
             } while cursor != nil
         } catch {
-            guard lineage.generation == generation else {
+            guard lineage.generation == generation, owns(id, token) else {
                 MemosLog.api.info("a trip's page failed for a list that has moved on")
                 return
             }
             await report(error, issuedUnder: handle)
             return
         }
+        // The record as it is NOW, asked before anything is written: a trip deleted while its pages
+        // were out publishes nothing, and an exclusion or a cover chosen meanwhile counts.
+        guard owns(id, token), let record = collections.records.first(where: { $0.id == id }),
+            record.tags.first == lineage.tag
+        else {
+            MemosLog.api.info("a trip's drain answered for a trip that is gone")
+            return
+        }
         drained[id] = Drained(tag: lineage.tag, rows: rows, truncated: truncated)
         lastError = nil
         session?.noteTransportSuccess(issuedUnder: handle.generation)
-        // The record as it is NOW: an exclusion or a cover chosen while the pages were out counts.
-        guard let record = collections.records.first(where: { $0.id == id }),
-            let summary = summary(for: record), summary != record.lastSummary
-        else { return }
+        guard let summary = summary(for: record), summary != record.lastSummary else { return }
         collections.setSummary(id: id, summary)
     }
 
+    /// Only for a trip the collection store still holds: a snapshot of a deleted one, which its
+    /// screen keeps drawing on the way out, reads nothing.
     private func drained(_ record: CollectionRecord) -> Drained? {
-        guard let drained = drained[record.id], drained.tag == record.tags.first else { return nil }
+        guard let drained = drained[record.id], drained.tag == record.tags.first,
+            collections.records.contains(where: { $0.id == record.id })
+        else { return nil }
         return drained
+    }
+
+    /// Whether the trip a drain is reading is still there, under the tag the drain reads.
+    private func isLive(_ id: UUID, _ lineage: Lineage) -> Bool {
+        collections.records.first { $0.id == id }?.tags.first == lineage.tag
+    }
+
+    /// Drops what this store holds for a trip that was deleted, and lets go of its drain: what that
+    /// drain still brings back is refused at its arrival (`run`), and nothing it read is kept.
+    public func forget(_ id: UUID) {
+        drained[id] = nil
+        inFlight.removeValue(forKey: id)?.task.cancel()
+    }
+
+    /// Whether the record's slot still holds the drain that was given `token`.
+    private func owns(_ id: UUID, _ token: Int) -> Bool {
+        inFlight[id]?.token == token
     }
 
     // MARK: - The New trip sheet

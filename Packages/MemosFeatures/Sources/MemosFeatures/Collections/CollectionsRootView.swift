@@ -15,9 +15,11 @@ struct CollectionsRootView: View {
     @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
     /// The Tags row's names and counts, every kind of file counted.
     @State private var tags: LibraryTagStore?
+    /// The trips pushed onto the tab's stack (MEMNG-714).
+    @State private var trail: [TripRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $trail) {
             content
                 // The app's main bar's room, inside the stack (MEMNG-690).
                 .leadingFootBar(on: .collections)
@@ -37,7 +39,8 @@ struct CollectionsRootView: View {
                     else { return nil }
                     return CollectionsAccess(handle: handle, baseURL: baseURL)
                 },
-                openTag: { tag in tagJump?.request(tag) }
+                openTag: { tag in tagJump?.request(tag) },
+                trail: $trail
             )
             .onChange(of: session.state.user?.subject) { tags.sessionIdentityChanged() }
         } else {
@@ -64,7 +67,8 @@ struct CollectionsRootView: View {
 /// record's `lastSummary`, so a card renders before anything is read; the cover is the member that
 /// summary names, once the membership has been drained here. Every trip on screen is drained when
 /// the root appears and whenever the list of trips changes — `TripMembershipStore` joins a drain
-/// already in flight, and writes a summary that changed back to the record.
+/// already in flight, and writes a summary that changed back to the record. A card opens its trip
+/// (`TripView`), pushed onto the tab's stack.
 struct CollectionsScreen: View {
     let collections: CollectionStore
     let trips: TripMembershipStore
@@ -76,6 +80,13 @@ struct CollectionsScreen: View {
     /// A tag chip was tapped: the Library opens narrowed to it.
     let openTag: (String) -> Void
     var now: () -> Date = { Date() }
+    /// The trips pushed onto the stack this screen is the root of. A trip that leaves the store —
+    /// deleted from its own screen, or filed under an identity that has gone — leaves the stack
+    /// with it, here, by the stack's own state: a trip's screen popping itself as its delete
+    /// alert goes away is a dismissal the going alert takes for its own.
+    var trail: Binding<[TripRoute]> = .constant([])
+    /// What a pushed trip's Manage menu runs through; a test hands in its own to drive it.
+    var tripManage: () -> TripManage = { TripManage() }
 
     @State private var newTrip: NewTripFlow?
     @Environment(\.locale) private var locale
@@ -114,6 +125,13 @@ struct CollectionsScreen: View {
             ToolbarItem(placement: .primaryAction) {
                 Button(Self.newTripButton, systemImage: "plus") { newTrip = NewTripFlow() }
             }
+        }
+        // A card opens its trip inside the tab's stack (MEMNG-714).
+        .navigationDestination(for: TripRoute.self) { route in
+            TripView(
+                record: collections.records.first { $0.id == route.id } ?? route.opened,
+                collections: collections, trips: trips, subject: subject, access: access,
+                trail: trail, manage: tripManage())
         }
         .sheet(item: $newTrip) { flow in
             NewTripSheet(
@@ -154,13 +172,16 @@ struct CollectionsScreen: View {
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: DesignTokens.Space.regular) {
                     ForEach(collections.records) { record in
-                        TripCard(
-                            record: record,
-                            cover: CollectionsPresentation.cover(
-                                of: record, members: trips.members(for: record)),
-                            detail: CollectionsPresentation.cardDetail(
-                                record.lastSummary, locale: locale, timeZone: timeZone)
-                        )
+                        NavigationLink(value: TripRoute(record)) {
+                            TripCard(
+                                record: record,
+                                cover: CollectionsPresentation.cover(
+                                    of: record, members: trips.members(for: record)),
+                                detail: CollectionsPresentation.cardDetail(
+                                    record.lastSummary, locale: locale, timeZone: timeZone)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, DesignTokens.Space.roomy)

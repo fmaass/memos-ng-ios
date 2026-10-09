@@ -196,3 +196,38 @@ extension MediaViewerSource {
         )
     }
 }
+
+/// A trip's pictures, re-signed by reading the trip again (MEMNG-714).
+///
+/// The membership is one drained list with no page to walk back to, so the way to fresh
+/// signatures is the drain itself: it reads every page again and applies the whole list at once,
+/// joining a drain of the same trip already on the wire. The trip is looked up when the ask
+/// arrives, so a trip deleted meanwhile is not read.
+@MainActor
+final class TripURLRefresher: SignedURLRefreshing {
+    let trips: TripMembershipStore
+    let collections: CollectionStore
+    let id: UUID
+    let session: IssuingSession
+
+    init(
+        trips: TripMembershipStore, collections: CollectionStore, id: UUID, session: IssuingSession
+    ) {
+        self.trips = trips
+        self.collections = collections
+        self.id = id
+        self.session = session
+    }
+
+    var owner: AnyObject { trips }
+
+    /// The session is read in the turn that enters the store, for `MemoURLRefresher`'s reason.
+    func signatureExpired(uid: String) {
+        Task { [trips, collections, id, session] in
+            guard let record = collections.records.first(where: { $0.id == id }),
+                let handle = session.handle(), let baseURL = session.baseURL()
+            else { return }
+            await trips.drain(record, using: handle, baseURL: baseURL)
+        }
+    }
+}

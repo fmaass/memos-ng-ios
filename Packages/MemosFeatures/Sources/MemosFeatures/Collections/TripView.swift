@@ -1,0 +1,542 @@
+import MemosCore
+import SwiftUI
+
+/// What the Collections root pushes for a trip card: the trip, known by its id.
+struct TripRoute: Hashable {
+    let id: UUID
+    /// The trip as it was when its card was opened. Its screen draws this once the trip has left
+    /// the store, while the stack lets the screen go: a destination that drew nothing for a trip
+    /// that is gone would take the screen's own way off the stack with it.
+    let opened: CollectionRecord
+
+    init(_ record: CollectionRecord) {
+        id = record.id
+        opened = record
+    }
+
+    static func == (lhs: TripRoute, rhs: TripRoute) -> Bool { lhs.id == rhs.id }
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+/// A trip, in Photos mode (MEMNG-714): its hero — the cover, the title, the span and the count —
+/// the `Photos | Journal | Map` chips, and every one of its pictures oldest first, under the
+/// Library's own day headings.
+///
+/// **The grid is the Library's.** `LibraryGrid` is hosted over the trip's DRAINED members
+/// (`TripMembershipStore.members(for:)`), which are already the record's pictures minus its
+/// exclusions, so an excluded picture is absent from the grid, the hero, the count and the viewer
+/// alike. No second `MediaLibraryStore` is built: the drain reads the whole trip before anything is
+/// shown, so the grid never asks for a next page and its `loadMore` is a no-op. A drain that
+/// stopped at the cap says so under the last picture.
+///
+/// **What the host owes the grid** comes from `MediaGridHosting`, the helpers extracted from
+/// `MediaLibraryView`: the viewer a tap opens (`.fixed` over the same filtered members, never
+/// `.library`, whose store would bring an excluded picture back) and the session's download lane
+/// for a tile's menu. Re-signing a lapsed picture reads the trip again (`TripURLRefresher`).
+/// Reporting and the identity reset are the session's, not this screen's: the membership store
+/// reports to the session from the moment it is built (`MainTabView`) and is moved with the
+/// identity beside the timeline (`CollectionsSession`), so a trip read as somebody else drops.
+///
+/// **The drain refreshes on appear**, and again when the account or the trip's tag changes; a
+/// drain of the same trip already on the wire — the root's — is joined, never repeated.
+///
+/// **Manage.** Rename, Move Up, Move Down and Delete Trip, through `TripManage`. A trip that is no
+/// longer in the store — deleted here or anywhere — leaves the stack by the stack's own state
+/// (`trail`, the Collections tab's path), drawn as it last was on the way out.
+struct TripView: View {
+    let record: CollectionRecord
+    let collections: CollectionStore
+    let trips: TripMembershipStore
+    /// Whose trip this is; a change reads it again.
+    let subject: String?
+    /// The session's handle and server when a read is issued, or nil when there is none.
+    let access: () -> CollectionsAccess?
+    /// The stack this screen was pushed onto, which it leaves once its trip is gone.
+    let trail: Binding<[TripRoute]>
+    @State private var manage: TripManage
+
+    /// Optional: a test hosts the screen without a session, and has nothing to download with.
+    @Environment(SessionStore.self) private var session: SessionStore?
+    @Environment(\.locale) private var locale
+    @Environment(\.timeZone) private var timeZone
+    /// The picture a tile tap opened, full screen.
+    @State private var viewing: MediaViewerSelection?
+    /// What the open viewer has been handed since it opened, beyond its own pages; emptied
+    /// whenever the viewer changes, so it only ever speaks for the one open now.
+    @State private var held: Set<String> = []
+    /// The download a tile's menu starts, and the sheet it ends in.
+    @State private var saving = MediaSaveFlow()
+    @Namespace private var zoom
+    /// What the viewer fetches its stills through; a test hands in one it can watch.
+    private let viewerTransport: any MediaTransport
+
+    init(
+        record: CollectionRecord,
+        collections: CollectionStore,
+        trips: TripMembershipStore,
+        subject: String?,
+        access: @escaping () -> CollectionsAccess?,
+        trail: Binding<[TripRoute]> = .constant([]),
+        manage: TripManage = TripManage(),
+        viewerTransport: any MediaTransport = MediaSession.shared
+    ) {
+        self.record = record
+        self.collections = collections
+        self.trips = trips
+        self.subject = subject
+        self.access = access
+        self.trail = trail
+        _manage = State(initialValue: manage)
+        self.viewerTransport = viewerTransport
+    }
+
+    /// The toolbar menu's name, read by VoiceOver.
+    static let manageButton = "Manage"
+    static let renameButton = "Rename"
+    static let moveUpButton = "Move Up"
+    static let moveDownButton = "Move Down"
+    /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
+    /// to go.
+    static let leavingDelay = Duration.milliseconds(600)
+    static let deleteButton = "Delete Trip"
+    /// What the rename alert asks.
+    static let renameTitle = "Rename Trip"
+    /// What a drained trip with no picture left says.
+    static let emptyTitle = "No photos in this trip"
+    /// The hero's cover, read by VoiceOver.
+    static let coverLabel = "Cover"
+    /// What the delete dialog says under its question.
+    static let deleteExplanation = "The trip goes. Its photos and memos stay."
+
+    /// The hero cover's identifier when it draws `uid`.
+    static func coverIdentifier(_ uid: String) -> String { "trip-cover-\(uid)" }
+
+    /// The delete dialog's question.
+    static func deleteQuestion(_ title: String) -> String { "Delete “\(title)”?" }
+
+    /// The footer under the grid: the cap, only when the drain stopped at it.
+    static func capNote(_ state: TripMembershipState, cap: Int = TripMembershipStore.memberCap)
+        -> String?
+    {
+        state == .truncated ? "Showing the first \(cap) photos of this trip" : nil
+    }
+
+    /// What the viewer pages through: the trip's members as the store holds them NOW, as pages —
+    /// so a trip read again for fresh signatures reaches a viewer already open over it, each page
+    /// taking the copy signed last. The pages it was opened with stand in only while the store
+    /// holds no reading of the trip (`loaded` false); a reading that is EMPTY is the answer, and
+    /// brings none of them back. `.fixed` over the filtered members, never `.library`: that would
+    /// bring excluded ones back.
+    static func viewerSource(
+        for selection: MediaViewerSelection, members: [LibraryRow], loaded: Bool
+    ) -> MediaViewerSource {
+        guard loaded else { return .fixed(selection.pages) }
+        return .fixed(MediaViewerPresentation.pages(for: members.map(\.attachment)))
+    }
+
+    /// Every picture the viewer open on `selection` may be holding: the pages it opened with,
+    /// `earlier`, and — once the store holds a reading of the trip — that reading's members. The
+    /// viewer is handed nothing else (`viewerSource`), and it keeps a page it was handed when its
+    /// source changes under it (`MediaViewerPager.extended`), so any of these can be on screen.
+    static func viewerHolds(
+        _ selection: MediaViewerSelection, earlier: Set<String>, members: [LibraryRow],
+        loaded: Bool
+    ) -> Set<String> {
+        var held = earlier.union(selection.pages.map(\.id))
+        if loaded { held.formUnion(members.map(\.id)) }
+        return held
+    }
+
+    /// Whether the viewer open on `selection` has outlived what it shows: the trip has been read,
+    /// and a picture the viewer may be holding — one it opened with, or one of `holding`, what it
+    /// was handed since — is not among the members: the trip read empty, or a picture excluded or
+    /// untagged. ANY such picture, not only the one it opened on: the reader may have paged to
+    /// another. Such a viewer is closed rather than left showing pictures that are no longer the
+    /// trip's — it keeps the pages in front of somebody when its source changes under them
+    /// (`MediaViewerPager.extended`), so only closing takes them away.
+    static func viewerOutlived(
+        _ selection: MediaViewerSelection, holding: Set<String>, members: [LibraryRow],
+        loaded: Bool
+    ) -> Bool {
+        guard loaded else { return false }
+        let now = Set(members.map(\.id))
+        return !holding.union(selection.pages.map(\.id)).isSubset(of: now)
+    }
+
+    /// The record as the store holds it now, or nil once it is gone.
+    private var live: CollectionRecord? {
+        collections.records.first { $0.id == record.id }
+    }
+
+    var body: some View {
+        // The trip as it was while its screen leaves: a delete takes it out of the store before
+        // the stack has popped, and a body that dropped the grid would drop the alert on it in
+        // the middle of the alert's own exit — after which the stack never popped.
+        let shown = live ?? record
+        // Read here, in the body, so a drain that lands re-presents the viewer's source as well.
+        let members = trips.members(for: shown)
+        let loaded = trips.summary(for: shown) != nil
+        grid(shown)
+            .background(Color(.systemGroupedBackground))
+            // On the grid; the rename alert, the file sheet and the viewer's cover each on a view
+            // of their own: one presentation per view. An alert rather than a confirmation dialog,
+            // for the reason `ComposeView.deleteRow` records: the dialog put its Cancel neither on
+            // screen nor in the accessibility tree.
+            .alert(Self.deleteQuestion(shown.title), isPresented: asking(.delete)) {
+                Button(Self.deleteButton, role: .destructive) {
+                    manage.confirmDelete(record.id, in: collections, forgetting: trips)
+                }
+                Button("Cancel", role: .cancel) { manage.cancel() }
+            } message: {
+                Text(Self.deleteExplanation)
+            }
+            .background {
+                Color.clear.alert(Self.renameTitle, isPresented: asking(.rename)) {
+                    TextField(Self.renameTitle, text: $manage.draft)
+                    Button(Self.renameButton) {
+                        manage.confirmRename(record.id, in: collections)
+                    }
+                    Button("Cancel", role: .cancel) { manage.cancel() }
+                }
+            }
+            .background { Color.clear.fetchingFile(saving) }
+            .navigationTitle(shown.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) { manageMenu }
+            }
+            .gridViewer($viewing, refresher: refresher, zoom: zoom, transport: viewerTransport) {
+                Self.viewerSource(for: $0, members: members, loaded: loaded)
+            }
+            .onChange(of: viewing) { _, _ in held = [] }
+            .onChange(of: ViewerFit(members: members.map(\.id), loaded: loaded)) { _, fit in
+                guard let open = viewing else { return }
+                let now = trips.members(for: shown)
+                if Self.viewerOutlived(open, holding: held, members: now, loaded: fit.loaded) {
+                    viewing = nil
+                } else {
+                    held = Self.viewerHolds(open, earlier: held, members: now, loaded: fit.loaded)
+                }
+            }
+            .task(id: DrainKey(subject: subject, id: record.id, tag: live?.tags.first)) {
+                await drain()
+            }
+            // Asked here, on the screen that is up: the root under it is off the window, and hears
+            // of the change only once it is back. And asked a beat later: the trip's own Delete is
+            // answered from an alert that is still on its way out, and a stack asked to pop while a
+            // presentation is moving refuses ("the navigation stack will not be updated") while
+            // its path says it did — leaving this screen up over a path that no longer holds it.
+            .task(id: live == nil) {
+                guard live == nil else { return }
+                try? await Task.sleep(for: Self.leavingDelay)
+                guard !Task.isCancelled else { return }
+                let ids = collections.records.map(\.id)
+                let kept = CollectionsPresentation.trail(trail.wrappedValue, keeping: ids)
+                if kept != trail.wrappedValue { trail.wrappedValue = kept }
+            }
+    }
+
+    private func grid(_ live: CollectionRecord) -> some View {
+        let members = trips.members(for: live)
+        let state = trips.state(for: live)
+        return LibraryGrid(
+            items: members,
+            errorText: trips.lastError,
+            loadingMore: state == .draining,
+            zoom: zoom,
+            // The drain read the whole trip: there is never a next page to ask for.
+            wantsMore: { _ in false },
+            open: { viewing = MediaGridHosting.viewing($0, in: members) },
+            fetch: { file, rendition in
+                await MediaGridHosting.fetch(file, rendition, saving: saving, session: session)
+            },
+            loadMore: {},
+            above: AnyView(hero(live, members: members)),
+            below: footerText(state: state, empty: members.isEmpty).map {
+                AnyView(TripFooter(text: $0))
+            }
+        )
+        .environment(\.signedURLRefresher, refresher)
+    }
+
+    private func hero(_ live: CollectionRecord, members: [LibraryRow]) -> some View {
+        let summary = trips.summary(for: live)
+        let cover = summary?.coverUid.flatMap { uid in members.first { $0.id == uid } }
+        return VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+            TripCover(cover: cover)
+            Text(live.title)
+                .font(.largeTitle.bold())
+                .lineLimit(2)
+            if let detail = CollectionsPresentation.cardDetail(
+                summary ?? live.lastSummary, locale: locale, timeZone: timeZone)
+            {
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            TripModeRow()
+                .padding(.top, DesignTokens.Space.tight)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, DesignTokens.Space.roomy)
+        .padding(.bottom, DesignTokens.Space.regular)
+    }
+
+    /// What stands under the last picture: the cap note when the drain stopped at the cap, else
+    /// the empty line when a drain answered with nothing left — never over a failure, whose
+    /// notice is the grid's own.
+    private func footerText(state: TripMembershipState, empty: Bool) -> String? {
+        if let note = Self.capNote(state, cap: trips.memberCap) { return note }
+        let drained = state == .complete || state == .truncated
+        return drained && empty && trips.lastError == nil ? Self.emptyTitle : nil
+    }
+
+    private var manageMenu: some View {
+        Menu(Self.manageButton, systemImage: "ellipsis.circle") {
+            Button(Self.renameButton, systemImage: "pencil") {
+                manage.askRename(current: live?.title ?? record.title)
+            }
+            Button(Self.moveUpButton, systemImage: "arrow.up") {
+                manage.move(record.id, .up, in: collections)
+            }
+            .disabled(TripManage.moveTarget(of: record.id, .up, in: collections.records) == nil)
+            Button(Self.moveDownButton, systemImage: "arrow.down") {
+                manage.move(record.id, .down, in: collections)
+            }
+            .disabled(TripManage.moveTarget(of: record.id, .down, in: collections.records) == nil)
+            Divider()
+            Button(Self.deleteButton, systemImage: "trash", role: .destructive) {
+                manage.askDelete()
+            }
+        }
+    }
+
+    /// Whether `question` is on screen. Its going away — a button, or a tap outside — takes it
+    /// off the screen only; what the answer may still do is the flow's (`TripManage`).
+    private func asking(_ question: TripManage.Question) -> Binding<Bool> {
+        Binding(
+            get: { manage.question == question },
+            set: { if !$0 { manage.dismissed(question) } }
+        )
+    }
+
+    /// Who re-signs a lapsed picture of the trip: a read of the trip again.
+    private var refresher: TripURLRefresher {
+        let access = access
+        return TripURLRefresher(
+            trips: trips,
+            collections: collections,
+            id: record.id,
+            session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL })
+        )
+    }
+
+    private func drain() async {
+        guard let live, let access = access() else { return }
+        await trips.drain(live, using: access.handle, baseURL: access.baseURL)
+    }
+
+    /// What decides whether an open viewer still fits the trip.
+    private struct ViewerFit: Equatable {
+        let members: [String]
+        let loaded: Bool
+    }
+
+    private struct DrainKey: Equatable {
+        let subject: String?
+        let id: UUID
+        let tag: String?
+    }
+}
+
+/// The hero's picture: the trip's cover, or a placeholder until there is one.
+struct TripCover: View {
+    let cover: LibraryRow?
+
+    static let height: CGFloat = 240
+
+    var body: some View {
+        Group {
+            if let cover {
+                AttachmentThumbnail(
+                    attachment: cover.attachment,
+                    tier: .mobile,
+                    slot: AttachmentSlot(aspectRatio: 4 / 3, contentMode: .fill),
+                    cornerRadius: 0
+                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(TripView.coverLabel)
+                .accessibilityIdentifier(TripView.coverIdentifier(cover.id))
+            } else {
+                ZStack {
+                    Rectangle().fill(.quaternary)
+                    Image(systemName: "suitcase")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityHidden(true)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: Self.height)
+        .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+    }
+}
+
+/// The line under a trip's grid.
+struct TripFooter: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(DesignTokens.Space.roomy)
+    }
+}
+
+/// A trip's modes. Photos is the one this screen is; Journal and Map come later (WPN-9), drawn
+/// and disabled until then.
+enum TripMode: CaseIterable, Hashable {
+    case photos, journal, map
+
+    var title: String {
+        switch self {
+        case .photos: "Photos"
+        case .journal: "Journal"
+        case .map: "Map"
+        }
+    }
+
+    var isAvailable: Bool { self == .photos }
+}
+
+/// The `Photos | Journal | Map` chips under the hero.
+struct TripModeRow: View {
+    var body: some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            ForEach(TripMode.allCases, id: \.self) { mode in
+                let chosen = mode == .photos
+                Button(mode.title) {}
+                    .buttonStyle(.plain)
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, DesignTokens.Space.regular)
+                    .padding(.vertical, DesignTokens.Space.snug)
+                    .background(
+                        chosen
+                            ? AnyShapeStyle(DesignTokens.accent.opacity(0.2))
+                            : AnyShapeStyle(.quaternary),
+                        in: .capsule
+                    )
+                    .disabled(!mode.isAvailable)
+                    .accessibilityAddTraits(chosen ? .isSelected : [])
+            }
+        }
+    }
+}
+
+/// Which way Move Up and Move Down move a trip in the order.
+enum TripMoveDirection {
+    case up, down
+}
+
+/// The Trip screen's Manage menu, as a flow: the question on screen, and what its answer may do.
+///
+/// **An answer is claimed once.** Asking arms the question; the first yes takes it, and a second
+/// yes — a double tap, or a yes nobody was asked for — does nothing. The dialog going off the
+/// screen does not disarm it, because SwiftUI puts the binding down as the button is tapped, so
+/// the order of the two is not this flow's to rely on; a new question re-arms, and Cancel disarms.
+@MainActor
+@Observable
+final class TripManage {
+    enum Question: Equatable {
+        case rename, delete
+    }
+
+    /// The question on screen.
+    private(set) var question: Question?
+    /// The rename field's text.
+    var draft = ""
+    /// The question whose yes has not been given yet.
+    private var armed: Question?
+
+    func askRename(current: String) {
+        draft = current
+        ask(.rename)
+    }
+
+    func askDelete() { ask(.delete) }
+
+    /// The dialog went off the screen, by whatever means.
+    func dismissed(_ question: Question) {
+        if self.question == question { self.question = nil }
+    }
+
+    func cancel() {
+        armed = nil
+        question = nil
+    }
+
+    /// Rename's yes: the trimmed title, written once. A blank or unchanged title writes nothing.
+    @discardableResult
+    func confirmRename(_ id: UUID, in collections: CollectionStore) -> Bool {
+        guard take(.rename),
+            let current = collections.records.first(where: { $0.id == id })?.title,
+            let title = Self.renamed(draft, from: current)
+        else { return false }
+        collections.rename(id: id, to: title)
+        return true
+    }
+
+    /// Delete's yes: that trip, and only it, once.
+    @discardableResult
+    func confirmDelete(
+        _ id: UUID, in collections: CollectionStore, forgetting trips: TripMembershipStore? = nil
+    ) -> Bool {
+        guard take(.delete), collections.records.contains(where: { $0.id == id }) else {
+            return false
+        }
+        collections.delete(id: id)
+        trips?.forget(id)
+        return true
+    }
+
+    /// Moves the trip one place up or down the order; at the end it stays.
+    func move(_ id: UUID, _ direction: TripMoveDirection, in collections: CollectionStore) {
+        guard let target = Self.moveTarget(of: id, direction, in: collections.records) else {
+            return
+        }
+        collections.move(id: id, to: target)
+    }
+
+    /// Where a move would put the trip, or nil when it is already at that end (or not a trip).
+    static func moveTarget(
+        of id: UUID, _ direction: TripMoveDirection, in records: [CollectionRecord]
+    ) -> Int? {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return nil }
+        let target = direction == .up ? index - 1 : index + 1
+        return records.indices.contains(target) ? target : nil
+    }
+
+    /// The title a rename writes: the draft trimmed, or nil when that is blank or unchanged.
+    static func renamed(_ draft: String, from current: String) -> String? {
+        let title = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != current else { return nil }
+        return title
+    }
+
+    private func ask(_ next: Question) {
+        armed = next
+        question = next
+    }
+
+    private func take(_ answer: Question) -> Bool {
+        guard armed == answer else { return false }
+        armed = nil
+        question = nil
+        return true
+    }
+}
