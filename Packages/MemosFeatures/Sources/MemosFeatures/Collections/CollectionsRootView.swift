@@ -132,7 +132,7 @@ struct CollectionsScreen: View {
             TripView(
                 record: collections.records.first { $0.id == route.id } ?? route.opened,
                 collections: collections, trips: trips, subject: subject, access: access,
-                trail: trail, manage: tripManage())
+                trail: trail, manage: tripManage(), now: now)
         }
         .sheet(item: $newTrip) { flow in
             NewTripSheet(
@@ -172,6 +172,7 @@ struct CollectionsScreen: View {
                 .padding(.horizontal, DesignTokens.Space.roomy)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: DesignTokens.Space.regular) {
+                    let pinned = collections.activePin(now: now())?.id
                     ForEach(collections.records) { record in
                         NavigationLink(value: TripRoute(record)) {
                             TripCard(
@@ -179,7 +180,8 @@ struct CollectionsScreen: View {
                                 cover: CollectionsPresentation.cover(
                                     of: record, members: trips.members(for: record)),
                                 detail: CollectionsPresentation.cardDetail(
-                                    record.lastSummary, locale: locale, timeZone: timeZone)
+                                    record.lastSummary, locale: locale, timeZone: timeZone),
+                                pinned: record.id == pinned
                             )
                         }
                         .buttonStyle(.plain)
@@ -228,19 +230,33 @@ struct CollectionsScreen: View {
     }
 }
 
-/// One trip: its cover, then its title, then its span and count.
+/// One trip: its cover, then its title, then its span and count. While the trip is the scope's
+/// active pin a `pin.fill` badge stands in the cover's top trailing corner, and VoiceOver hears
+/// "Pinned" before the detail. Whether it is pinned is the host's to say (`activePin(now:)` on the
+/// host's clock); the card reads no clock.
 struct TripCard: View {
     let record: CollectionRecord
     let cover: MemoAttachment?
     let detail: String?
+    var pinned = false
 
     static let width: CGFloat = 160
+    /// What VoiceOver hears for a pinned card, ahead of its detail.
+    static let pinnedValue = "Pinned"
+
+    /// The card's accessibility value: "Pinned" (when pinned) and the detail, in that order.
+    static func accessibilityValue(detail: String?, pinned: Bool) -> String {
+        [pinned ? pinnedValue : nil, detail].compactMap { $0 }.joined(separator: ", ")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.hair) {
             coverImage
                 .frame(width: Self.width, height: Self.width)
                 .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+                .overlay(alignment: .topTrailing) {
+                    if pinned { pinBadge }
+                }
                 .padding(.bottom, DesignTokens.Space.tight)
             Text(record.title)
                 .font(.headline)
@@ -255,7 +271,17 @@ struct TripCard: View {
         .frame(width: Self.width, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(record.title)
-        .accessibilityValue(detail ?? "")
+        .accessibilityValue(Self.accessibilityValue(detail: detail, pinned: pinned))
+    }
+
+    /// The pin glyph, white on the accent in a small circle, inset from the cover's corner.
+    private var pinBadge: some View {
+        Image(systemName: "pin.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(DesignTokens.Space.tight)
+            .background(DesignTokens.accent, in: .circle)
+            .padding(DesignTokens.Space.tight)
     }
 
     @ViewBuilder

@@ -183,6 +183,56 @@ struct TripRulesTests {
     }
 }
 
+/// The trip card's pin: what VoiceOver hears, and the glyph it draws.
+@MainActor
+@Suite("Trip card pin")
+struct TripCardPinTests {
+    @Test(
+        "a pinned card's value is Pinned, then its detail; an unpinned card's is its detail",
+        arguments: [
+            (nil, false, ""),
+            (nil, true, "Pinned"),
+            ("3 photos", false, "3 photos"),
+            ("3 photos", true, "Pinned, 3 photos"),
+        ] as [(String?, Bool, String)]
+    )
+    func accessibilityValue(detail: String?, pinned: Bool, expected: String) {
+        #expect(TripCard.accessibilityValue(detail: detail, pinned: pinned) == expected)
+    }
+
+    @Test("a pinned card draws its glyph in the cover's top trailing corner, and nothing else")
+    func theGlyph() throws {
+        let record = CollectionRecord(
+            id: UUID(), kind: .trip, title: "Lisbon", tags: ["lisbon"], order: 0,
+            createdAt: Date(timeIntervalSince1970: 1_791_460_800))
+        let size = CGSize(width: TripCard.width, height: TripCard.width + 60)
+        func render(_ pinned: Bool) throws -> [[(r: UInt8, g: UInt8, b: UInt8)]] {
+            let card = TripCard(record: record, cover: nil, detail: "3 photos", pinned: pinned)
+                .environment(\.colorScheme, .light)
+            return try #require(PixelGrid.of(card, size: size), "the card did not render")
+        }
+        let plain = try render(false)
+        let pinned = try render(true)
+        let corner = 44  // the badge's square, measured from the cover's top trailing corner
+        var inCorner = 0
+        var elsewhere = 0
+        for y in plain.indices {
+            for x in plain[y].indices {
+                let a = plain[y][x]
+                let b = pinned[y][x]
+                guard a.r != b.r || a.g != b.g || a.b != b.b else { continue }
+                if y < corner && x >= plain[y].count - corner {
+                    inCorner += 1
+                } else {
+                    elsewhere += 1
+                }
+            }
+        }
+        #expect(inCorner > 30, "the pinned card drew no glyph in its corner (\(inCorner) px)")
+        #expect(elsewhere == 0, "the glyph moved something outside its corner (\(elsewhere) px)")
+    }
+}
+
 // MARK: - Create, and the tag request
 
 @MainActor
@@ -293,13 +343,14 @@ struct CollectionsRootRenderTests {
     private func screen(
         _ stores: (CollectionStore, TripMembershipStore, LibraryTagStore),
         _ wire: CollectionsWire,
-        openTag: @escaping (String) -> Void = { _ in }
+        openTag: @escaping (String) -> Void = { _ in },
+        now: Date = Self.now
     ) -> some View {
         let access = wire.access
         return NavigationStack {
             CollectionsScreen(
                 collections: stores.0, trips: stores.1, tags: stores.2, subject: "alice",
-                access: { access }, openTag: openTag, now: { Self.now })
+                access: { access }, openTag: openTag, now: { now })
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -328,6 +379,54 @@ struct CollectionsRootRenderTests {
             #expect(!screen.says(CollectionsScreen.emptyTitle))
         }
         #expect(stores.0.records.first?.lastSummary?.count == 3)
+    }
+
+    @Test("the active pin's card says Pinned; an expired pin's card and an unpinned one do not")
+    func pinnedCards() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        // The scripted trip's last picture is 28 March, noon: a pin from it ends on 4 April, so
+        // on the 10th, the screen's clock here, it has expired.
+        let april10 = Date(timeIntervalSince1970: 1_775_822_400)  // 2026-04-10T12:00:00Z
+        let april4 = Date(timeIntervalSince1970: 1_775_304_000)  // 2026-04-04T12:00:00Z
+        let trip = stores.0.create(title: "Pinned", tags: ["portugal2026"])
+        let expired = stores.0.create(title: "Expired", tags: ["portugal2026"])
+        stores.0.create(title: "Plain", tags: ["portugal2026"])
+        // Pinned before any picture is known: seven days from the 10th, which the drain's
+        // summary (28 March + 7 d) does not shorten.
+        stores.0.pin(id: trip.id, now: april10)
+        let detail = "\(range) · 3 photos"
+        // A trip TITLED "Pinned": a check that searched the screen for the word would pass on the
+        // title alone, so every card is read by its exact accessibility value.
+        await CollectionsHost.with(screen(stores, wire, now: april10)) { screen in
+            #expect(
+                await screen.until {
+                    Self.value(of: "Pinned", on: screen) == "Pinned, \(detail)"
+                })
+            #expect(await screen.until { Self.value(of: "Expired", on: screen) == detail })
+            #expect(await screen.until { Self.value(of: "Plain", on: screen) == detail })
+
+            // Pin moves to `expired`, from its last picture: it ended on 4 April, so no card
+            // says Pinned now.
+            stores.0.pin(id: expired.id, now: april10)
+            #expect(stores.0.records.first { $0.id == expired.id }?.pinnedUntil == april4)
+            #expect(await screen.until { Self.value(of: "Pinned", on: screen) == detail })
+            #expect(Self.value(of: "Expired", on: screen) == detail)
+            #expect(Self.value(of: "Plain", on: screen) == detail)
+        }
+    }
+
+    /// The accessibility value of the node labelled `title`, whatever its traits: a card is one
+    /// element whose label is its title.
+    private static func value(of title: String, on screen: PressProbe.Screen) -> String? {
+        var stack: [Any] = [screen.window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.accessibilityLabel == title { return object.accessibilityValue ?? "" }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
     }
 
     @Test("a tag chip opens the Library narrowed to it")

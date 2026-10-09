@@ -190,8 +190,37 @@ public final class CollectionStore {
         update(id) { $0.pinnedUntil = nil }
     }
 
+    /// Stores the trip's summary and, for a pinned trip, re-derives its pin in the same write.
+    ///
+    /// The rule is "seven days after its last picture": when the new summary's `lastTaken` plus
+    /// `pinDuration` is LATER than the record's `pinnedUntil`, the pin takes it — an expired pin
+    /// included, since a picture taken later moves the expiry with it. It never shortens a pin (a
+    /// refresh that dropped pictures, or an exclusion that moved `lastTaken` earlier, leaves the
+    /// expiry as it is) and never pins a trip that is not pinned.
     public func setSummary(id: UUID, _ summary: TripSummary?) {
-        update(id) { $0.lastSummary = summary }
+        update(id) { record in
+            record.lastSummary = summary
+            guard let pinned = record.pinnedUntil, let last = summary?.lastTaken else { return }
+            let derived = last.addingTimeInterval(Self.pinDuration)
+            if derived > pinned { record.pinnedUntil = derived }
+        }
+    }
+
+    // MARK: - Reading the pin
+
+    /// The trip pinned at `now`: the record whose `pinnedUntil` lies strictly after `now` — a pin
+    /// that ends exactly at `now` has expired — or nil.
+    ///
+    /// `pin` keeps at most one pin in the scope, so there is at most one. A file edited by hand
+    /// can hold several: the one that lasts longest wins, and on a tie the first in `order`.
+    public func activePin(now: Date) -> CollectionRecord? {
+        var best: (record: CollectionRecord, until: Date)?
+        for record in records {
+            guard let until = record.pinnedUntil, until > now else { continue }
+            if let current = best, until <= current.until { continue }
+            best = (record, until)
+        }
+        return best?.record
     }
 
     // MARK: - File

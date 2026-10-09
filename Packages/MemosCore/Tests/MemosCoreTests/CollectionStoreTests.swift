@@ -260,6 +260,162 @@ struct CollectionStoreTests {
         #expect(store().records.first?.lastSummary == nil)
     }
 
+    // MARK: - The pin rule: seven days after the trip's last picture
+
+    private let april11 = Date(timeIntervalSince1970: 1_775_930_400)  // 2026-04-11T18:00:00Z
+
+    private func summary(lastTaken: Date?, count: Int = 3) -> TripSummary {
+        TripSummary(count: count, firstTaken: march12, lastTaken: lastTaken, coverUid: "c")
+    }
+
+    @Test("a later last picture through setSummary moves the pin out, in one write")
+    func setSummaryExtendsThePin() {
+        let writes = Box(0)
+        let writer = store(writeBytes: { data, url in
+            writes.value += 1
+            try data.write(to: url)
+        })
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.setSummary(id: trip.id, summary(lastTaken: march28))
+        writer.pin(id: trip.id, now: october7)
+        #expect(store().records.first?.pinnedUntil == april4, "precondition: march28 + 7 d")
+        let before = writes.value
+        // april4 is already behind the store's clock (october7): an expired pin is re-derived
+        // too, because the rule is "seven days after its last picture".
+        writer.setSummary(id: trip.id, summary(lastTaken: april4, count: 4))
+        #expect(writes.value == before + 1, "the summary and the pin are one write")
+        #expect(store().records.first?.pinnedUntil == april11)
+        #expect(store().records.first?.lastSummary == summary(lastTaken: april4, count: 4))
+    }
+
+    @Test("an earlier last picture, or none, never shortens the pin")
+    func setSummaryNeverShortens() {
+        let writer = store()
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.setSummary(id: trip.id, summary(lastTaken: april4))
+        writer.pin(id: trip.id, now: october7)
+        #expect(store().records.first?.pinnedUntil == april11, "precondition: april4 + 7 d")
+        writer.setSummary(id: trip.id, summary(lastTaken: march28, count: 2))
+        #expect(store().records.first?.pinnedUntil == april11, "an exclusion moved it earlier")
+        writer.setSummary(id: trip.id, summary(lastTaken: nil, count: 0))
+        #expect(store().records.first?.pinnedUntil == april11, "a refresh dropped every picture")
+        writer.setSummary(id: trip.id, nil)
+        #expect(store().records.first?.pinnedUntil == april11, "the summary was cleared")
+        #expect(store().records.first?.lastSummary == nil)
+    }
+
+    @Test("setSummary on an unpinned trip never pins it")
+    func setSummaryNeverPins() {
+        let writer = store()
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.setSummary(id: trip.id, summary(lastTaken: october7))
+        #expect(store().records.first?.pinnedUntil == nil)
+        #expect(store().records.first?.lastSummary == summary(lastTaken: october7))
+    }
+
+    @Test("another trip's summary leaves the pinned trip's expiry as it is")
+    func anotherTripsSummary() {
+        let writer = store()
+        let pinned = writer.create(title: "Pinned", tags: ["pinned"])
+        let other = writer.create(title: "Other", tags: ["other"])
+        writer.setSummary(id: pinned.id, summary(lastTaken: march28))
+        writer.pin(id: pinned.id, now: october7)
+        writer.setSummary(id: other.id, summary(lastTaken: october7))
+        #expect(store().records.map(\.pinnedUntil) == [april4, nil])
+    }
+
+    @Test("a summary whose write failed extends nothing, in memory or on disk")
+    func aFailedSummaryWriteExtendsNothing() {
+        let writer = store()
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.setSummary(id: trip.id, summary(lastTaken: march28))
+        writer.pin(id: trip.id, now: october7)
+        let dying = store(writeBytes: { _, _ in throw WriteDied() })
+        dying.setSummary(id: trip.id, summary(lastTaken: april4))
+        #expect(dying.records.first?.pinnedUntil == april4)
+        #expect(dying.records.first?.lastSummary == summary(lastTaken: march28))
+        #expect(store().records.first?.pinnedUntil == april4)
+    }
+
+    @Test("a pin is active strictly before its end: at the end it has expired, a second before not")
+    func activePinBoundary() {
+        let writer = store()
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.pin(id: trip.id, now: october7)
+        #expect(writer.activePin(now: october14) == nil, "pinnedUntil == now is expired")
+        #expect(writer.activePin(now: october14.addingTimeInterval(-1))?.id == trip.id)
+        #expect(store().activePin(now: october14.addingTimeInterval(-1))?.id == trip.id)
+    }
+
+    @Test("a trip with no pictures is pinned until seven days after the moment of pinning")
+    func activePinWithoutPictures() {
+        let writer = store()
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.pin(id: trip.id, now: october7)
+        #expect(store().records.first?.pinnedUntil == october14)
+        #expect(writer.activePin(now: october7)?.id == trip.id)
+    }
+
+    @Test("pinning a second trip makes it the only active pin; pinning twice changes nothing")
+    func activePinOneAtATime() {
+        let writer = store()
+        let one = writer.create(title: "One", tags: ["one"])
+        let two = writer.create(title: "Two", tags: ["two"])
+        writer.pin(id: one.id, now: october7)
+        writer.pin(id: two.id, now: october7)
+        writer.pin(id: two.id, now: october7)
+        #expect(writer.activePin(now: october7)?.id == two.id)
+        #expect(store().records.map(\.pinnedUntil) == [nil, october14])
+    }
+
+    @Test("an unpinned trip, and an expired pin, are no active pin")
+    func activePinAfterUnpin() {
+        let writer = store()
+        let trip = writer.create(title: "Trip", tags: ["trip"])
+        writer.setSummary(id: trip.id, summary(lastTaken: march28))
+        writer.pin(id: trip.id, now: october7)
+        #expect(writer.activePin(now: october7) == nil, "april4 is behind october7: expired")
+        #expect(writer.activePin(now: march28)?.id == trip.id)
+        writer.unpin(id: trip.id)
+        #expect(writer.activePin(now: march28) == nil)
+        #expect(store().activePin(now: march28) == nil)
+    }
+
+    @Test("a hand-edited file with several pins: the longest wins, the first in order on a tie")
+    func activePinOfSeveral() throws {
+        let writer = store()
+        let made = ["A", "B", "C"].map { writer.create(title: $0, tags: [$0]) }
+        struct HandFile: Encodable {
+            var formatVersion: Int
+            var records: [CollectionRecord]
+        }
+        var records = writer.records
+        records[0].pinnedUntil = april4
+        records[1].pinnedUntil = april11
+        records[2].pinnedUntil = april11
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(HandFile(formatVersion: 1, records: records))
+        try data.write(to: fileURL(alice))
+
+        let reader = store()
+        #expect(reader.records.compactMap(\.pinnedUntil).count == 3, "precondition: read back")
+        #expect(reader.activePin(now: march28)?.id == made[1].id)
+        #expect(reader.activePin(now: april4)?.id == made[1].id)
+        #expect(reader.activePin(now: april11) == nil)
+    }
+
+    @Test("the active pin is the signed-in scope's: B sees none of A's, A gets it back")
+    func activePinIsScoped() {
+        let session = store(alice)
+        let trip = session.create(title: "Portugal 2026", tags: ["portugal2026"])
+        session.pin(id: trip.id, now: october7)
+        session.sessionIdentityChanged(to: bob)
+        #expect(session.activePin(now: october7) == nil)
+        session.sessionIdentityChanged(to: alice)
+        #expect(session.activePin(now: october7)?.id == trip.id)
+    }
+
     // MARK: - Failure
 
     @Test("a file that will not decode is set aside as .bad-<utc> and the store starts empty")

@@ -107,6 +107,80 @@ struct TripManageTests {
         #expect(manage.question == nil)
     }
 
+    /// 2026-10-08T12:00:00Z, and seven days on.
+    private static let october8 = Date(timeIntervalSince1970: 1_791_460_800)
+    private static let october15 = october8.addingTimeInterval(7 * 24 * 60 * 60)
+
+    @Test("Pin pins the trip and the item turns to Unpin; Unpin unpins it and it offers Pin")
+    func pinThenUnpin() {
+        let (store, made) = three()
+        let manage = TripManage()
+        let now = Self.october8
+        let offered = TripManage.pinAction(of: made[1].id, in: store, now: now)
+        #expect(offered == .pin)
+        #expect(offered.title == TripView.pinButton && offered.symbol == "pin")
+        manage.apply(offered, to: made[1].id, in: store, now: now)
+        #expect(store.activePin(now: now)?.id == made[1].id)
+        #expect(store.records.first { $0.id == made[1].id }?.pinnedUntil == Self.october15)
+
+        let then = TripManage.pinAction(of: made[1].id, in: store, now: now)
+        #expect(then == .unpin)
+        #expect(then.title == TripView.unpinButton && then.symbol == "pin.slash")
+        #expect(TripManage.pinAction(of: made[0].id, in: store, now: now) == .pin, "another trip")
+        manage.apply(then, to: made[1].id, in: store, now: now)
+        #expect(store.activePin(now: now) == nil)
+        #expect(TripManage.pinAction(of: made[1].id, in: store, now: now) == .pin)
+    }
+
+    @Test("Pin on another trip moves the pin there")
+    func pinMoves() {
+        let (store, made) = three()
+        let manage = TripManage()
+        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
+        manage.apply(.pin, to: made[2].id, in: store, now: Self.october8)
+        #expect(store.activePin(now: Self.october8)?.id == made[2].id)
+        #expect(store.records.map(\.pinnedUntil) == [nil, nil, Self.october15])
+    }
+
+    @Test("an expired pin offers Pin again, and Pin starts a new one from now")
+    func anExpiredPinOffersPin() {
+        let (store, made) = three()
+        let manage = TripManage()
+        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
+        #expect(
+            TripManage.pinAction(of: made[0].id, in: store, now: Self.october15) == .pin,
+            "it ended exactly now")
+        #expect(
+            TripManage.pinAction(
+                of: made[0].id, in: store, now: Self.october15.addingTimeInterval(-1)) == .unpin)
+        manage.apply(.pin, to: made[0].id, in: store, now: Self.october15)
+        #expect(
+            store.records.first?.pinnedUntil
+                == Self.october15.addingTimeInterval(7 * 24 * 60 * 60))
+    }
+
+    @Test("the item does what it offered: two Pins pin once, two Unpins leave it unpinned")
+    func twoTapsAreNotAToggle() {
+        let (store, made) = three()
+        let manage = TripManage()
+        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
+        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
+        #expect(store.activePin(now: Self.october8)?.id == made[0].id)
+        #expect(store.records.first?.pinnedUntil == Self.october15)
+        manage.apply(.unpin, to: made[0].id, in: store, now: Self.october8)
+        manage.apply(.unpin, to: made[0].id, in: store, now: Self.october8)
+        #expect(store.activePin(now: Self.october8) == nil)
+    }
+
+    @Test("Pin for a trip that has left the store writes nothing")
+    func pinAGoneTrip() {
+        let (store, made) = three()
+        let manage = TripManage()
+        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
+        manage.apply(.pin, to: UUID(), in: store, now: Self.october8)
+        #expect(store.activePin(now: Self.october8)?.id == made[0].id, "the pin stayed")
+    }
+
     @Test("the footer names the cap only when the drain stopped at it")
     func capNote() {
         #expect(

@@ -47,9 +47,11 @@ extension TripRoute: @MainActor StackRoute {
 /// **The drain refreshes on appear**, and again when the account or the trip's tag changes; a
 /// drain of the same trip already on the wire — the root's — is joined, never repeated.
 ///
-/// **Manage.** Rename, Move Up, Move Down and Delete Trip, through `TripManage`. A trip that is no
-/// longer in the store — deleted here or anywhere — leaves the stack by the stack's own state
-/// (`trail`, the Collections tab's path), drawn as it last was on the way out.
+/// **Manage.** Rename, Pin or Unpin, Move Up, Move Down and Delete Trip, through `TripManage`.
+/// Pin or Unpin is one item, named by whether this trip is the scope's active pin now
+/// (`CollectionStore.activePin(now:)`), so a pin that has expired offers Pin again. A trip that
+/// is no longer in the store — deleted here or anywhere — leaves the stack by the stack's own
+/// state (`trail`, the Collections tab's path), drawn as it last was on the way out.
 struct TripView: View {
     let record: CollectionRecord
     let collections: CollectionStore
@@ -78,6 +80,8 @@ struct TripView: View {
     @Namespace private var zoom
     /// What the viewer fetches its stills through; a test hands in one it can watch.
     private let viewerTransport: any MediaTransport
+    /// The clock Pin and Unpin are judged and written by.
+    private let now: () -> Date
 
     init(
         record: CollectionRecord,
@@ -87,7 +91,8 @@ struct TripView: View {
         access: @escaping () -> CollectionsAccess?,
         trail: Binding<[TripRoute]> = .constant([]),
         manage: TripManage = TripManage(),
-        viewerTransport: any MediaTransport = MediaSession.shared
+        viewerTransport: any MediaTransport = MediaSession.shared,
+        now: @escaping () -> Date = { Date() }
     ) {
         self.record = record
         self.collections = collections
@@ -97,11 +102,14 @@ struct TripView: View {
         self.trail = trail
         _manage = State(initialValue: manage)
         self.viewerTransport = viewerTransport
+        self.now = now
     }
 
     /// The toolbar menu's name, read by VoiceOver.
     static let manageButton = "Manage"
     static let renameButton = "Rename"
+    static let pinButton = "Pin"
+    static let unpinButton = "Unpin"
     static let moveUpButton = "Move Up"
     static let moveDownButton = "Move Down"
     /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
@@ -308,6 +316,10 @@ struct TripView: View {
             Button(Self.renameButton, systemImage: "pencil") {
                 manage.askRename(current: live?.title ?? record.title)
             }
+            let pinAction = TripManage.pinAction(of: record.id, in: collections, now: now())
+            Button(pinAction.title, systemImage: pinAction.symbol) {
+                manage.apply(pinAction, to: record.id, in: collections, now: now())
+            }
             Button(Self.moveUpButton, systemImage: "arrow.up") {
                 manage.move(record.id, .up, in: collections)
             }
@@ -454,6 +466,15 @@ enum TripMoveDirection {
     case up, down
 }
 
+/// What the Manage menu's pin item offers: Pin for a trip that is not the active pin (an expired
+/// pin included), Unpin for the one that is.
+enum TripPinAction: Equatable {
+    case pin, unpin
+
+    var title: String { self == .pin ? TripView.pinButton : TripView.unpinButton }
+    var symbol: String { self == .pin ? "pin" : "pin.slash" }
+}
+
 /// The Trip screen's Manage menu, as a flow: the question on screen, and what its answer may do.
 ///
 /// **An answer is claimed once.** Asking arms the question; the first yes takes it, and a second
@@ -521,6 +542,27 @@ final class TripManage {
             return
         }
         collections.move(id: id, to: target)
+    }
+
+    /// What the pin item offers for the trip at `now`: Unpin when it is the scope's active pin,
+    /// else Pin.
+    static func pinAction(
+        of id: UUID, in collections: CollectionStore, now: Date
+    ) -> TripPinAction {
+        collections.activePin(now: now)?.id == id ? .unpin : .pin
+    }
+
+    /// Does what the item offered, never the opposite: a Pin tapped twice pins once (the second
+    /// write is the same pin), and an Unpin tapped twice leaves the trip unpinned. Not a toggle,
+    /// so a second tap cannot undo the first. A trip that has left the store is not written.
+    func apply(
+        _ action: TripPinAction, to id: UUID, in collections: CollectionStore, now: Date
+    ) {
+        guard collections.records.contains(where: { $0.id == id }) else { return }
+        switch action {
+        case .pin: collections.pin(id: id, now: now)
+        case .unpin: collections.unpin(id: id)
+        }
     }
 
     /// Where a move would put the trip, or nil when it is already at that end (or not a trip).
