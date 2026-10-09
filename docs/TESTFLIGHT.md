@@ -336,8 +336,10 @@ required on both commands (neither has a default; `env … bin/mac-gate.sh` expo
 - **Budget.** `MEMOS_CUT_TIMEOUT_MIN` (default 120) bounds the Mac half, its lock wait included;
   past it the cut's process group is stopped and the run reports `TIMEOUT` (the Mac half's own
   `stage=budget` report; a release-checkout lock still held at the deadline reports `stage=lock`,
-  `LOCK-TIMEOUT`). 120 is a placeholder
-  until the first `--archive-only` run is timed; that measurement goes here.
+  `LOCK-TIMEOUT`). The first timed `--archive-only` run, 2.2.2 (43) at 13000a1 on 2026-10-09 with the
+  lock free (`cut lock: waited 0 s`), took 253 s from the start of `bin/testflight-cut.sh` to its
+  SUMMARY, so the 120-minute default leaves the archive about 28 times its measured length; the
+  default stays, because it also covers a wait on a release lock another pipeline holds.
 - **Timing.** ONE absolute deadline, `D` = the start of the ssh leg + the budget (UTC epoch
   seconds), is computed on the Linux side and passed to the Mac half, so a late start (script
   delivery, a slow login) shortens the cut instead of moving its end. The constants live in one
