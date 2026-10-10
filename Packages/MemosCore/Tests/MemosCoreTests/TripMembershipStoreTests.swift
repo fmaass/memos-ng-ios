@@ -1484,3 +1484,256 @@ extension TripMembershipStoreTests {
         #expect(store.members(for: record).count == 3)
     }
 }
+
+// MARK: - Select mode's Remove from trip (MEMNG-722)
+
+/// The Trip screen's Remove: an exclusion on this device's record, never a write to the server —
+/// the memo keeps its text and its tag — and what it took leaves the members, the summary and the
+/// viewer of that trip alone, until Add Back returns it.
+extension TripMembershipStoreTests {
+    /// A server holding pictures 0..<3 under the trip's tag, recording every request as its method
+    /// and operation, so a test can say the removal sent nothing but reads.
+    private nonisolated static func recordingClient(
+        seen: LockedValue<[String]>
+    ) -> any APIProtocol {
+        Stub.client { request, _, operation in
+            seen.set(seen.get() + ["\(request.method) \(operation)"])
+            return Self.page(0..<3)
+        }
+    }
+
+    /// Every request `seen` holds that is not a read: what a removal must never send.
+    private nonisolated static func writes(_ seen: LockedValue<[String]>) -> [String] {
+        seen.get().filter { !$0.hasPrefix("GET ") }
+    }
+
+    @Test("a removal outlives a reload: a fresh store reads the trip without the removed pictures")
+    func aRemovalOutlivesAReload() async throws {
+        let seen = LockedValue<[String]>([])
+        let client = Self.recordingClient(seen: seen)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.members(for: record).count == 3, "control: the drain landed")
+
+        store.remove([Self.uid(2), Self.uid(0)], from: record.id)
+
+        let reloaded = self.collections()
+        let again = try #require(current(record, in: reloaded))
+        #expect(again.excludedUids == [Self.uid(2), Self.uid(0)], "the file lost the removal")
+        let fresh = TripMembershipStore(collections: reloaded)
+        await fresh.drain(again, using: client.handle, baseURL: Stub.baseURL)
+        #expect(fresh.members(for: again).map(\.id) == [Self.uid(1)])
+        #expect(fresh.removedMembers(for: again).map(\.id) == [Self.uid(0), Self.uid(2)])
+        #expect(seen.get().count == 2, "control: two drains were read, \(seen.get())")
+        #expect(Self.writes(seen).isEmpty, "a removal wrote to the server: \(Self.writes(seen))")
+    }
+
+    @Test("the summary is written again at the removal, the chosen cover giving way, and back")
+    func theSummaryAfterARemoval() async throws {
+        let seen = LockedValue<[String]>([])
+        let client = Self.recordingClient(seen: seen)
+        let collections = collections()
+        var record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        collections.setCover(id: record.id, uid: Self.uid(0))
+        record = try #require(current(record, in: collections))
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        #expect(current(record, in: collections)?.lastSummary?.count == 3, "control")
+
+        store.remove([Self.uid(0)], from: record.id)
+
+        // Read from the RECORD, which the root's card draws, with no second drain.
+        let summary = try #require(current(record, in: collections)?.lastSummary)
+        #expect(summary.count == 2, "the record still counts the removed picture")
+        #expect(summary.firstTaken == Self.taken(1), "the span still begins at the removed one")
+        #expect(summary.lastTaken == Self.taken(2))
+        #expect(summary.coverUid == Self.uid(1), "the removed picture is still the cover")
+        // The choice itself stands: Add Back makes it the cover again.
+        #expect(current(record, in: collections)?.coverUid == Self.uid(0))
+        store.addBack(Self.uid(0), to: record.id)
+        let back = try #require(current(record, in: collections)?.lastSummary)
+        #expect(back.count == 3)
+        #expect(back.coverUid == Self.uid(0), "Add Back did not bring the chosen cover back")
+        #expect(Self.writes(seen).isEmpty, "\(Self.writes(seen))")
+    }
+
+    @Test("Add Back returns the picture to the members, the list of removed ones and the file")
+    func addBackReturnsAPicture() async throws {
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        store.remove([Self.uid(1), Self.uid(2)], from: record.id)
+        var live = try #require(current(record, in: collections))
+        #expect(store.members(for: live).map(\.id) == [Self.uid(0)])
+
+        store.addBack(Self.uid(2), to: record.id)
+
+        live = try #require(current(record, in: collections))
+        #expect(store.members(for: live).map(\.id) == [Self.uid(0), Self.uid(2)])
+        #expect(store.removedMembers(for: live).map(\.id) == [Self.uid(1)])
+        #expect(self.collections().records.first?.excludedUids == [Self.uid(1)])
+    }
+
+    @Test("the removed list is the drain's own rows, oldest first, and only those it still holds")
+    func theRemovedList() async throws {
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = collections()
+        var record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        // Removed before anything was read: the list has no row to show for it yet.
+        collections.exclude(id: record.id, uid: Self.uid(2))
+        // Removed once, and no longer under the tag: the drain holds no row for it.
+        collections.exclude(id: record.id, uid: "p-untagged")
+        record = try #require(current(record, in: collections))
+        let store = TripMembershipStore(collections: collections)
+        #expect(store.removedMembers(for: record).isEmpty, "an unread trip listed removed rows")
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+
+        store.remove([Self.uid(0)], from: record.id)
+
+        record = try #require(current(record, in: collections))
+        #expect(store.removedMembers(for: record).map(\.id) == [Self.uid(0), Self.uid(2)])
+        // The stray stays excluded — a picture tagged again stays out of the trip — unlisted.
+        #expect(record.excludedUids.contains("p-untagged"))
+    }
+
+    @Test("a removal of nothing, or of a picture that is not a member, writes nothing")
+    func aRemovalOfNothingWritesNothing() async throws {
+        let writes = LockedValue(0)
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = CollectionStore(
+            identity: alice, root: root, now: { Self.taken(0) },
+            writeBytes: { data, url in
+                writes.set(writes.get() + 1)
+                try data.write(to: url)
+            })
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        let before = writes.get()
+
+        store.remove([], from: record.id)
+        store.remove(["p-stranger"], from: record.id)
+        store.remove([Self.uid(0)], from: UUID())
+
+        #expect(writes.get() == before, "a removal of nothing wrote the file")
+        #expect(current(record, in: collections)?.excludedUids == [])
+        #expect(store.members(for: record).count == 3)
+    }
+
+    @Test("two removals of the same picture in one turn exclude it once and write once")
+    func twoRemovalsInOneTurn() async throws {
+        let writes = LockedValue(0)
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = CollectionStore(
+            identity: alice, root: root, now: { Self.taken(0) },
+            writeBytes: { data, url in
+                writes.set(writes.get() + 1)
+                try data.write(to: url)
+            })
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        let before = writes.get()
+
+        store.remove([Self.uid(1), Self.uid(1)], from: record.id)
+        store.remove([Self.uid(1)], from: record.id)
+
+        #expect(current(record, in: collections)?.excludedUids == [Self.uid(1)])
+        // One write carries the exclusion and the summary it changed; the repeats wrote nothing.
+        #expect(writes.get() - before == 1, "wrote \(writes.get() - before) times")
+    }
+
+    @Test("a removal from one trip leaves another trip of the same tag whole")
+    func aRemovalIsThatTripsAlone() async throws {
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = collections()
+        let kept = collections.create(title: "Kept", tags: [Self.tag])
+        let cut = collections.create(title: "Cut", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(kept, using: client.handle, baseURL: Stub.baseURL)
+        await store.drain(cut, using: client.handle, baseURL: Stub.baseURL)
+
+        store.remove([Self.uid(0)], from: cut.id)
+
+        let liveCut = try #require(current(cut, in: collections))
+        let liveKept = try #require(current(kept, in: collections))
+        #expect(store.members(for: liveCut).count == 2, "control: the removal took")
+        #expect(store.members(for: liveKept).count == 3, "the other trip lost the picture")
+        #expect(liveKept.lastSummary?.count == 3)
+        #expect(store.removedMembers(for: liveKept).isEmpty)
+    }
+
+    @Test("a removal whose write fails changes nothing on screen or on disk")
+    func aRemovalWhoseWriteFails() async throws {
+        struct WriteDied: Error {}
+        let failing = LockedValue(false)
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = CollectionStore(
+            identity: alice, root: root, now: { Self.taken(0) },
+            writeBytes: { data, url in
+                if failing.get() { throw WriteDied() }
+                try data.write(to: url)
+            })
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        failing.set(true)
+
+        store.remove([Self.uid(0)], from: record.id)
+
+        let live = try #require(current(record, in: collections))
+        #expect(live.excludedUids.isEmpty)
+        #expect(store.members(for: live).count == 3, "a removal the file refused took effect")
+        #expect(self.collections().records.first?.excludedUids == [])
+    }
+
+    /// Whether the file holds an exclusion list and a summary that agree: the summary counts the
+    /// three drained pictures minus the excluded ones, and its cover is not one of them.
+    private func fileAgrees() -> Bool {
+        guard let record = self.collections().records.first, let summary = record.lastSummary
+        else { return false }
+        let coverOut = summary.coverUid.map { record.excludedUids.contains($0) } ?? false
+        return summary.count == 3 - record.excludedUids.count && !coverOut
+    }
+
+    @Test("a removal and an Add Back are ONE write: a failing next write never splits them")
+    func aRemovalIsOneWrite() async throws {
+        struct WriteDied: Error {}
+        let writes = LockedValue(0)
+        let failing = LockedValue<Int?>(nil)
+        let client = Self.recordingClient(seen: LockedValue([]))
+        let collections = CollectionStore(
+            identity: alice, root: root, now: { Self.taken(0) },
+            writeBytes: { data, url in
+                writes.set(writes.get() + 1)
+                if writes.get() == failing.get() { throw WriteDied() }
+                try data.write(to: url)
+            })
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        #expect(fileAgrees(), "control: the drain's summary is on file")
+
+        // The write after the removal's first one dies: whatever reached the file agrees.
+        failing.set(writes.get() + 2)
+        store.remove([Self.uid(0)], from: record.id)
+        #expect(fileAgrees(), "the exclusion reached the file without its summary")
+        #expect(self.collections().records.first?.excludedUids == [Self.uid(0)], "control")
+
+        failing.set(writes.get() + 2)
+        store.addBack(Self.uid(0), to: record.id)
+        #expect(fileAgrees(), "the Add Back reached the file without its summary")
+        #expect(self.collections().records.first?.excludedUids == [], "control")
+
+        // The one write dies: both stay as they were, in memory and on file.
+        failing.set(writes.get() + 1)
+        store.remove([Self.uid(1)], from: record.id)
+        let live = try #require(current(record, in: collections))
+        #expect(live.excludedUids == [] && live.lastSummary?.count == 3)
+        #expect(fileAgrees() && self.collections().records.first?.excludedUids == [])
+    }
+}

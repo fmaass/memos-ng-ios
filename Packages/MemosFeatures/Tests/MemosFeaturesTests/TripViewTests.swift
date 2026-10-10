@@ -485,11 +485,12 @@ struct TripScreenRenderTests {
     /// pictures are on screen when `body` runs.
     private func selectingTrip(
         _ wire: TripWire, shareLane: TripShareLane? = nil,
+        stores given: (CollectionStore, TripMembershipStore)? = nil,
         _ body: (PressProbe.Screen, AppDock) async -> Void
     ) async {
         let dock = AppDock()
         dock.send(.selected(.collections))
-        let stores = stores()
+        let stores = given ?? stores()
         let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
         let view = trip(stores, wire, record, shareLane: shareLane).environment(dock)
         await CollectionsHost.with(view, height: 3000) { screen in
@@ -1572,6 +1573,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var others: Set<String> = []
     private nonisolated(unsafe) var films: Set<String> = []
     private nonisolated(unsafe) var deleted: [String] = []
+    private nonisolated(unsafe) var sent: [String] = []
 
     /// Every list read so far, as its query.
     nonisolated var listReads: [[String: String]] { lock.withLock { reads } }
@@ -1579,6 +1581,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated var memoReads: [[String: String]] { lock.withLock { journalReads } }
     /// Every DELETE sent so far, as its path.
     nonisolated var deletes: [String] { lock.withLock { deleted } }
+    /// Every request sent so far that is not a read, as its method and operation.
+    nonisolated var writes: [String] { lock.withLock { sent.filter { !$0.hasPrefix("GET ") } } }
 
     /// `portugal2026`'s memos, oldest first: two on the 12th, one on the 14th.
     nonisolated static let journal: [(uid: String, text: String, stamp: String)] = [
@@ -1607,6 +1611,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func send(
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
+        lock.withLock { sent.append("\(request.method) \(operationID)") }
         switch operationID {
         case "list_attachments_api_attachments_get":
             let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
@@ -1789,6 +1794,110 @@ extension TripScreenRenderTests {
             }
             #expect(shown, "the hero does not draw the chosen p2")
             #expect(!CollectionsHost.identified(TripView.coverIdentifier("p0"), in: screen.window))
+        }
+    }
+}
+
+// MARK: - Select mode's Remove from trip (MEMNG-722)
+
+/// Remove from Trip: the chosen pictures leave this trip on this device — the grid, the hero, the
+/// selection and the viewer at once — and nothing is sent that could change a memo; the Trip's
+/// Show Removed list gives each one back.
+extension TripScreenRenderTests {
+    @Test("Remove from Trip takes the chosen out of the grid and the hero, and writes nothing")
+    func removeFromATrip() async {
+        let wire = TripWire()
+        let stores = stores()
+        await selectingTrip(wire, stores: stores) { screen, _ in
+            let entered = await pressBar("Select", on: screen) {
+                screen.says("0 Items Selected")
+            }
+            #expect(entered, "Select stood no toolbar")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]), "p1 took no press")
+            #expect(await screen.until { screen.says("2 Items Selected") })
+
+            let remove = screen.element(labelled: LibrarySelectToolbar.removeLabel)
+            #expect(remove?.accessibilityActivate() == true, "Remove from Trip took no press")
+
+            let gone = await screen.until { TripProbe.photos(in: screen.window).count == 3 }
+            #expect(gone, "the removed pictures stayed in the grid")
+            #expect(screen.says("3 photos"), "the hero still counts the removed pictures")
+            // Select mode stays, holding nothing: the removed pictures left the selection with
+            // the trip.
+            let emptied = await screen.until { screen.says("0 Items Selected") }
+            #expect(emptied, "a removed picture stayed chosen")
+            #expect(stores.0.records.first?.excludedUids == ["p0", "p1"])
+            #expect(wire.transport.writes.isEmpty, "a removal wrote: \(wire.transport.writes)")
+            #expect(wire.transport.deletes.isEmpty)
+        }
+    }
+
+    @Test("the viewer pages through the trip without a removed picture, and one open on it closes")
+    func theViewerAfterARemoval() async throws {
+        let wire = TripWire()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
+        let all = stores.1.members(for: record)
+        #expect(all.count == 5, "control: the drain landed")
+        let opened = try #require(
+            MediaViewerPresentation.viewer(for: all.map(\.attachment), startingAt: "p1"))
+
+        stores.1.remove(["p1"], from: record.id)
+
+        let live = try #require(stores.0.records.first { $0.id == record.id })
+        let members = stores.1.members(for: live)
+        let loaded = stores.1.summary(for: live) != nil
+        let pages = TripView.viewerSource(for: opened, members: members, loaded: loaded).pages
+        #expect(pages.map(\.attachment.uid) == ["p0", "p2", "p3", "p4"])
+        #expect(
+            TripView.viewerOutlived(opened, holding: [], members: members, loaded: loaded),
+            "a viewer holding the removed picture stayed open")
+        #expect(wire.transport.writes.isEmpty, "\(wire.transport.writes)")
+    }
+
+    @Test("Show Removed lists the removed pictures, and Add Back returns one to the trip")
+    func addBackFromTheRemovedList() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
+        stores.1.remove(["p3"], from: record.id)
+        let view = NavigationStack {
+            TripRemovedList(record: record, collections: stores.0, trips: stores.1)
+        }
+        await CollectionsHost.with(view) { screen in
+            let listed = await screen.until {
+                screen.element(labelled: TripRemovedList.addBackButton) != nil
+            }
+            #expect(listed, "the removed picture was not listed")
+            #expect(!screen.says(TripRemovedList.emptyTitle))
+            #expect(screen.press(TripRemovedList.addBackButton), "Add Back took no press")
+            let back = await screen.until {
+                stores.0.records.first?.excludedUids == []
+            }
+            #expect(back, "Add Back left the picture removed")
+            #expect(stores.0.records.first.map { stores.1.members(for: $0).count } == 5)
+            #expect(await screen.until { screen.says(TripRemovedList.emptyTitle) })
+        }
+        #expect(wire.transport.writes.isEmpty, "\(wire.transport.writes)")
+    }
+
+    @Test("the Library's toolbar offers no Remove; the trip's does")
+    func onlyTheTripOffersRemove() async {
+        let library = LibrarySelectToolbar(
+            count: 1, ownCount: 1, isSharing: false, isDeleting: false, share: {}, delete: {})
+        await CollectionsHost.with(library) { screen in
+            #expect(screen.element(labelled: "Delete") != nil, "control: the toolbar stood")
+            #expect(screen.element(labelled: LibrarySelectToolbar.removeLabel) == nil)
+        }
+        let trip = LibrarySelectToolbar(
+            count: 1, ownCount: 1, isSharing: false, isDeleting: false, share: {}, delete: {},
+            remove: {})
+        await CollectionsHost.with(trip) { screen in
+            #expect(screen.element(labelled: LibrarySelectToolbar.removeLabel) != nil)
         }
     }
 }

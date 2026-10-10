@@ -70,6 +70,13 @@ extension TripRoute: @MainActor StackRoute {
 /// toolbar stands where the main bar stood because select mode claims the dock (`DockClaim.select`)
 /// and the dock's one bottom bar on Collections is then select mode's (`DockBar.standing`) — the
 /// same value the main bar is drawn from, so the two never stand together.
+///
+/// **Remove from Trip** (MEMNG-722). Select mode's toolbar gains Remove on a trip: the chosen
+/// pictures leave this trip on this device (`TripMembershipStore.remove`, the record's
+/// exclusions), and the grid, the hero, the viewer and the root's card all recompute from the
+/// same filtered members. Nothing is sent — the memo keeps its text and its tag. Manage's Show
+/// Removed lists the removed pictures the trip's drain still holds (`TripRemovedList`), each with
+/// Add Back.
 struct TripView: View {
     let record: CollectionRecord
     let collections: CollectionStore
@@ -109,6 +116,8 @@ struct TripView: View {
     @State private var deleting = LibraryDeleteFlow()
     /// This screen's claim on the dock while select mode's toolbar stands in the main bar's place.
     @State private var dockClaim = UUID()
+    /// Manage's Show Removed is up.
+    @State private var showingRemoved = false
     @Namespace private var zoom
     /// What the viewer fetches its stills through; a test hands in one it can watch.
     private let viewerTransport: any MediaTransport
@@ -152,6 +161,7 @@ struct TripView: View {
     static let unpinButton = "Unpin"
     static let moveUpButton = "Move Up"
     static let moveDownButton = "Move Down"
+    static let showRemovedButton = "Show Removed"
     /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
     /// to go.
     static let leavingDelay = Duration.milliseconds(600)
@@ -279,6 +289,13 @@ struct TripView: View {
                 }
             }
             .background { Color.clear.fetchingFile(saving) }
+            .background {
+                Color.clear.sheet(isPresented: $showingRemoved) {
+                    NavigationStack {
+                        TripRemovedList(record: shown, collections: collections, trips: trips)
+                    }
+                }
+            }
             .navigationTitle(shown.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -538,7 +555,8 @@ struct TripView: View {
                 isDeleting: deleteRunning,
                 share: { shareSelection() },
                 // Only the chosen pictures that are mine, as in the Library.
-                delete: { deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers)) }
+                delete: { deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers)) },
+                remove: { removeSelection() }
             )
             .sharingFiles(sharing)
         }
@@ -593,6 +611,14 @@ struct TripView: View {
         }
     }
 
+    /// Select mode's Remove from Trip: the chosen pictures leave this trip at once, and the
+    /// selection with them — select mode stays, holding nothing, as after a Delete.
+    private func removeSelection() {
+        let chosen = selection.rows(in: currentMembers).map(\.id)
+        trips.remove(chosen, from: record.id)
+        selection.prune(keeping: currentMembers)
+    }
+
     /// Select mode ended: a share still fetching stops being the live one and its task is
     /// cancelled, an open question closes, and the dock is given back.
     private func endSelect() {
@@ -620,6 +646,8 @@ struct TripView: View {
                 manage.move(record.id, .down, in: collections)
             }
             .disabled(TripManage.moveTarget(of: record.id, .down, in: collections.records) == nil)
+            Button(Self.showRemovedButton, systemImage: "eye.slash") { showingRemoved = true }
+                .disabled(trips.removedMembers(for: live ?? record).isEmpty)
             Divider()
             Button(Self.deleteButton, systemImage: "trash", role: .destructive) {
                 manage.askDelete()
@@ -708,6 +736,67 @@ struct TripCover: View {
         .frame(maxWidth: .infinity)
         .frame(height: Self.height)
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+    }
+}
+
+/// Manage's Show Removed: the trip's removed pictures its drain still holds, oldest first
+/// (`TripMembershipStore.removedMembers`), each with Add Back. A removed picture the drain no
+/// longer holds — deleted, or its memo no longer tagged — is not listed, and stays removed.
+struct TripRemovedList: View {
+    let record: CollectionRecord
+    let collections: CollectionStore
+    let trips: TripMembershipStore
+
+    @Environment(\.dismiss) private var dismiss
+
+    static let title = "Removed"
+    static let addBackButton = "Add Back"
+    static let emptyTitle = "No removed photos"
+    /// A removed picture's thumbnail side.
+    static let thumbnail: CGFloat = 56
+
+    var body: some View {
+        let live = collections.records.first { $0.id == record.id } ?? record
+        let rows = trips.removedMembers(for: live)
+        List {
+            if rows.isEmpty {
+                Text(Self.emptyTitle)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(rows) { row in
+                HStack(spacing: DesignTokens.Space.regular) {
+                    AttachmentThumbnail(
+                        attachment: row.attachment,
+                        tier: .thumb,
+                        slot: AttachmentSlot(aspectRatio: 1, contentMode: .fill),
+                        cornerRadius: DesignTokens.Radius.tile
+                    )
+                    .frame(width: Self.thumbnail, height: Self.thumbnail)
+                    .accessibilityHidden(true)
+                    Group {
+                        if let taken = row.takenAt {
+                            Text(taken, format: .dateTime.day().month().year().hour().minute())
+                        } else {
+                            Text(row.filename)
+                        }
+                    }
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    Spacer(minLength: DesignTokens.Space.snug)
+                    // Borderless: a default-styled button in a row is pressed by a tap anywhere
+                    // in that row.
+                    Button(Self.addBackButton) { trips.addBack(row.id, to: record.id) }
+                        .buttonStyle(.borderless)
+                }
+            }
+        }
+        .navigationTitle(Self.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
     }
 }
 

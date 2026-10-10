@@ -380,6 +380,53 @@ public final class TripMembershipStore {
         }
     }
 
+    // MARK: - Select mode's Remove from trip (MEMNG-722)
+
+    /// Removes the chosen pictures from trip `id` ON THIS DEVICE: each one that is still a member
+    /// joins the record's exclusions, and the record's summary is computed over what is left and
+    /// written in the SAME write (`CollectionStore.setExclusions`), so the root's card counts what
+    /// the trip screen shows without waiting for another drain, and a write that fails leaves both
+    /// as they were. Nothing is sent: the memo keeps its text and its tag, and the picture stays in
+    /// the Library and in every other trip of that tag.
+    ///
+    /// Synchronous on the main actor, with no suspension anywhere, so two removals in one turn
+    /// run one after the other, the second finding the first's pictures no longer members. A
+    /// picture that is not a member — already removed, deleted, or never drained — is skipped,
+    /// so a removal of nothing writes nothing. The chosen cover is left as it is: while it is
+    /// removed the summary falls back to the first member, and Add Back makes it the cover again.
+    public func remove(_ uids: [String], from id: UUID) {
+        guard let record = collections.records.first(where: { $0.id == id }) else { return }
+        let held = Set(members(for: record).map(\.id))
+        var next = record.excludedUids
+        for uid in uids where held.contains(uid) && !next.contains(uid) { next.append(uid) }
+        exclude(next, from: record)
+    }
+
+    /// Gives a removed picture back to trip `id`, its summary in the same write.
+    public func addBack(_ uid: String, to id: UUID) {
+        guard let record = collections.records.first(where: { $0.id == id }) else { return }
+        exclude(record.excludedUids.filter { $0 != uid }, from: record)
+    }
+
+    /// The record's removed pictures that its drained list still holds, oldest first as the drain
+    /// read them — what Show Removed lists. Empty before a drain has applied. An exclusion the
+    /// drain holds no row for (the picture deleted, or its memo no longer carrying the tag) is not
+    /// listed and stays in the record, so a picture tagged again stays out of this trip.
+    public func removedMembers(for record: CollectionRecord) -> [LibraryRow] {
+        guard let drained = drained(record) else { return [] }
+        let excluded = Set(record.excludedUids)
+        return drained.rows.filter { excluded.contains($0.id) && !removed.contains($0.id) }
+    }
+
+    /// One write: the record's exclusions become `next`, beside the summary they leave when the
+    /// trip has been drained. Nothing is written when the exclusions do not move.
+    private func exclude(_ next: [String], from record: CollectionRecord) {
+        guard next != record.excludedUids else { return }
+        var changed = record
+        changed.excludedUids = next
+        collections.setExclusions(id: record.id, next, summary: summary(for: changed))
+    }
+
     // MARK: - The journal
 
     /// What the record's last journal load could not do — said the way `lastError` is, for this

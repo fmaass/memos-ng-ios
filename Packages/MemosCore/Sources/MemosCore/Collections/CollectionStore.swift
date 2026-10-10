@@ -198,12 +198,26 @@ public final class CollectionStore {
     /// refresh that dropped pictures, or an exclusion that moved `lastTaken` earlier, leaves the
     /// expiry as it is) and never pins a trip that is not pinned.
     public func setSummary(id: UUID, _ summary: TripSummary?) {
+        update(id) { Self.apply(summary, to: &$0) }
+    }
+
+    /// Sets the record's exclusions and, when one is given, its summary in ONE write, so the file
+    /// never holds a removal without the count, span and cover it changed
+    /// (`TripMembershipStore.remove`). The summary re-derives a pin as `setSummary` does; a write
+    /// that fails changes neither.
+    public func setExclusions(id: UUID, _ excludedUids: [String], summary: TripSummary?) {
         update(id) { record in
-            record.lastSummary = summary
-            guard let pinned = record.pinnedUntil, let last = summary?.lastTaken else { return }
-            let derived = last.addingTimeInterval(Self.pinDuration)
-            if derived > pinned { record.pinnedUntil = derived }
+            record.excludedUids = excludedUids
+            if let summary { Self.apply(summary, to: &record) }
         }
+    }
+
+    /// `setSummary`'s rule, on a record about to be written.
+    private static func apply(_ summary: TripSummary?, to record: inout CollectionRecord) {
+        record.lastSummary = summary
+        guard let pinned = record.pinnedUntil, let last = summary?.lastTaken else { return }
+        let derived = last.addingTimeInterval(pinDuration)
+        if derived > pinned { record.pinnedUntil = derived }
     }
 
     // MARK: - Reading the pin

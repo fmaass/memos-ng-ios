@@ -86,7 +86,8 @@ struct SelectableTile: ViewModifier {
 
 /// Select mode's bottom bar, in the dock's place (plan page 3929 decision 6): a flat toolbar, as
 /// in the Photos app, with a round glass share button on the left, the count in the middle and a
-/// round glass delete button on the right.
+/// round glass delete button on the right — over a trip, with a round glass remove button before
+/// it.
 struct LibrarySelectToolbar: View {
     let count: Int
     /// How many of the chosen pictures are mine, the only ones Delete may take (MEMNG-684).
@@ -97,6 +98,12 @@ struct LibrarySelectToolbar: View {
     let isDeleting: Bool
     let share: () -> Void
     let delete: () -> Void
+    /// Remove from Trip (MEMNG-722): drawn beside Delete only where the toolbar stands over a
+    /// trip. The Library passes nil and has no such button.
+    var remove: (() -> Void)? = nil
+
+    /// Remove from Trip's name, read by VoiceOver.
+    static let removeLabel = "Remove from Trip"
 
     /// The smallest target a finger is promised, the header's round controls' size.
     private static var control: CGFloat { 44 }
@@ -138,6 +145,18 @@ struct LibrarySelectToolbar: View {
                 .font(.headline)
                 .lineLimit(1)
             Spacer(minLength: DesignTokens.Space.snug)
+            // Asks nothing: what it takes is only this trip's on this device, and the trip's Show
+            // Removed gives it back.
+            if let remove {
+                Button(action: remove) {
+                    Image(systemName: "minus.circle")
+                        .font(.body.weight(.semibold))
+                        .frame(width: Self.control, height: Self.control)
+                }
+                .glassEffect(.regular.interactive(), in: .circle)
+                .disabled(!enabled)
+                .accessibilityLabel(Self.removeLabel)
+            }
             // Asks first (`LibraryDeleteFlow`); only the alert's yes deletes, one picture at a time
             // through the single-picture endpoint (MEMNG-589), and only the chosen pictures that
             // are mine (MEMNG-684).
