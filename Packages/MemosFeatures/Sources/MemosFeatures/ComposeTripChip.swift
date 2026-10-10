@@ -67,6 +67,55 @@ struct ComposeTripChip: Equatable {
     }
 }
 
+/// The visibility one compose sheet posts with, and whether the pin or the person put it there.
+///
+/// A trip post is for the two of us and never for the digest, so a NEW memo opened while a trip
+/// is offered starts on "Just us" (protected) instead of the account default. The account default
+/// itself stays what it is: most posts are not trip posts. That start is the pin's SUGGESTION and
+/// it is kept apart from a CHOICE — the chip's ✕ takes an untouched suggestion back to the account
+/// default along with the tag, but once the person has set the pill, to anything, "Default"
+/// included, it is theirs and nothing the chip does overrides it.
+///
+/// Only a fresh capture is preselected. An edit states no visibility at all — who sees a memo is
+/// changed on purpose, never as a side effect of a pin — and a restored capture keeps the one it
+/// was stopped with, which was decided when it was first written.
+struct ComposeVisibilityPick: Equatable {
+    /// What the post states, or nil for the account default.
+    private(set) var selection: MemoVisibility?
+    /// Whether `selection` is still the pin's suggestion rather than the person's choice.
+    private(set) var isSuggested = false
+
+    init(mode: ComposeView.Mode, offered: ComposePinnedTrip?) {
+        switch mode {
+        case .create(.some(let restored)):
+            selection = restored.visibility
+        case .create(.none):
+            if offered != nil {
+                selection = .protected
+                isSuggested = true
+            }
+        case .edit:
+            selection = nil
+        }
+    }
+
+    /// What the pill shows and writes. Every write is the person choosing.
+    var chosen: MemoVisibility? {
+        get { selection }
+        set {
+            selection = newValue
+            isSuggested = false
+        }
+    }
+
+    /// The chip's ✕: a suggestion nobody touched goes back to the account default; a choice stays.
+    mutating func tripRemoved() {
+        guard isSuggested else { return }
+        selection = nil
+        isSuggested = false
+    }
+}
+
 /// The chip itself: the pinned trip's title and the ✕ that leaves its tag off this memo.
 struct ComposeTripChipView: View {
     let trip: ComposePinnedTrip

@@ -80,7 +80,8 @@ public struct ComposeDelete {
 ///
 /// Visibility offers "server default" as the unmarked choice on a NEW memo: the account already
 /// has an answer for who sees things, and a compose screen that demands the decision every time
-/// teaches people to stop reading it. An EDIT never touches visibility here — that is its own
+/// teaches people to stop reading it — unless a trip is pinned, when a new memo starts on "Just
+/// us" instead (`ComposeVisibilityPick`). An EDIT never touches visibility here — that is its own
 /// deliberate action on the memo, not a side effect of fixing a typo.
 ///
 /// Media comes from two places, both of them originals. The LIBRARY, through the system picker,
@@ -179,7 +180,8 @@ public struct ComposeView: View {
     // visibility is the only thing it needs from there.
     @Environment(SessionStore.self) private var session: SessionStore?
     @State private var content: String
-    @State private var visibility: MemoVisibility?
+    /// What the visibility pill holds, and whether the pinned trip or the person chose it.
+    @State private var visibilityPick: ComposeVisibilityPick
     /// The chosen display date, or nil while the capture is simply "now" (an edit starts holding
     /// the memo's own date, so on that path it is never nil).
     @State private var date: Date?
@@ -231,6 +233,8 @@ public struct ComposeView: View {
         self.submit = submit
         _imports = State(initialValue: imports)
         _tripChip = State(initialValue: ComposeTripChip(mode: mode, offered: pinnedTrip))
+        _visibilityPick = State(
+            initialValue: ComposeVisibilityPick(mode: mode, offered: pinnedTrip))
         _content = State(
             initialValue: {
                 if case .edit(_, let content, _, _) = mode { return content }
@@ -243,11 +247,6 @@ public struct ComposeView: View {
                 // The instant the capture was taken, not the instant it was cancelled: a photo
                 // rescued out of the queue an hour later is still a photo taken an hour ago.
                 if case .create(let restored?) = mode { return restored.capturedAt }
-                return nil
-            }())
-        _visibility = State(
-            initialValue: {
-                if case .create(let restored?) = mode { return restored.visibility }
                 return nil
             }())
     }
@@ -319,9 +318,12 @@ public struct ComposeView: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 0) {
                 if let trip = tripChip.shown {
-                    ComposeTripChipView(trip: trip) { tripChip.dismiss() }
-                        .padding(.horizontal, DesignTokens.Space.roomy)
-                        .padding(.top, DesignTokens.Space.snug)
+                    ComposeTripChipView(trip: trip) {
+                        tripChip.dismiss()
+                        visibilityPick.tripRemoved()
+                    }
+                    .padding(.horizontal, DesignTokens.Space.roomy)
+                    .padding(.top, DesignTokens.Space.snug)
                 }
                 editor
                 Divider()
@@ -678,7 +680,7 @@ public struct ComposeView: View {
             isImporting: imports.isImporting,
             date: $date,
             auto: auto,
-            visibility: $visibility,
+            visibility: $visibilityPick.chosen,
             accountDefault: session?.defaultVisibility
         )
     }
@@ -712,7 +714,7 @@ public struct ComposeView: View {
                 // The pinned trip's tag is added here, to what is SENT, and never to the
                 // editor: a failed post tried again builds this from the same unmodified words.
                 content: tripChip.submittedContent(content),
-                visibility: visibility,
+                visibility: visibilityPick.selection,
                 attachments: imports.attachments,
                 createdAt: resolvedDate,
                 // The row IS the memo's picture list on an edit, so what it shows is what the
