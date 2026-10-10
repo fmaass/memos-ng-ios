@@ -62,6 +62,18 @@ public struct TripTagSpan: Sendable, Equatable {
 /// `CredentialRefusal` (`StoreFailure.refusal`) and goes to `onUnauthorized`, the session's one
 /// decision rule; the funnel is `MediaLibraryStore.report`'s, in its order.
 ///
+/// **A span is a second rule** (MEMNG-737). A record with a span (`CollectionRecord.span`) also
+/// counts every file TAKEN in its window, whatever its memo's tags. There is no server filter for
+/// a window, so the span is walked down from the newest file: `GET /api/attachments?order=
+/// taken_desc&limit=60`, no tag and no type, page after page — a row taken after the end is
+/// skipped, a row in the window is kept, and the walk stops at the first row taken before the
+/// start. It costs one request per page of files newer than the start: cheap for the trip under
+/// way, a long walk for an old one. The membership is the UNION of the two lanes, each file once
+/// (by uid), oldest first, and the exclusions apply to both. A trip may have either rule or both;
+/// one with neither sends nothing. The rule — tag AND span — is the drain's lineage: a drain of
+/// the same rule joins, a drain of a changed rule supersedes, and a list read under a rule the
+/// record no longer has is neither applied nor shown.
+///
 /// **The New trip sheet reads less.** For one tag without exclusions a count and two extrema are
 /// enough, so the sheet never drains: `loadTagCounts` reads `GET /api/attachments/tags` (the
 /// length of every kind's list under each tag, a tagged video counted as a member is) and
@@ -72,7 +84,13 @@ public struct TripTagSpan: Sendable, Equatable {
 /// **The journal is the trip's memos, oldest first** (MEMNG-718): `GET /api/memos?tag=<t>&sort=
 /// created_at` read page after page through the generated client, following the list's
 /// `nextCursor`. Ascending is the server's own keyset (`sort` without a leading `-` compares
-/// `created_at > cursor` and orders `created_at, id` ascending), so nothing is reversed here. It
+/// `created_at > cursor` and orders `created_at, id` ascending). A span adds the memos it places in
+/// its window: `GET /api/memos?created_after=<start>&sort=created_at`, no tag, to the end of the
+/// chain — a memo posted after the trip is still read — each memo kept when its journal instant
+/// (`journalInstant(of:)`: its earliest picture's taken instant, its own date only without one)
+/// lies in the window. The union is ordered by that instant, so a memo stands in the day its
+/// pictures were taken, as the grid has them. A span memo whose every file the owner removed from
+/// the trip leaves the journal with them; a memo of the tag keeps its place. It
 /// lives beside the membership because it is the same trip's slot: a journal load JOINS one of the
 /// same record already in flight under the same session and tag, is fenced by the same generation
 /// and session, is dropped by the same `forget` and `sessionIdentityChanged`, publishes nothing for
@@ -103,8 +121,20 @@ public final class TripMembershipStore {
     /// The span of every tag the sheet has asked about, by tag.
     public private(set) var spans: [String: TripTagSpan] = [:]
 
+    /// What a trip's membership is read by: its tag, its span, or both — never neither.
+    private struct Rule: Equatable {
+        var tag: String?
+        var span: TripSpan?
+
+        init?(_ record: CollectionRecord) {
+            guard record.tags.first != nil || record.span != nil else { return nil }
+            tag = record.tags.first
+            span = record.span
+        }
+    }
+
     private struct Drained {
-        var tag: String
+        var rule: Rule
         var rows: [LibraryRow]
         var truncated: Bool
     }
@@ -113,12 +143,14 @@ public final class TripMembershipStore {
     private struct Lineage: Equatable {
         var generation: Int
         var session: Int
-        var tag: String
+        var rule: Rule
     }
 
     private struct Journal {
-        var tag: String
+        var rule: Rule
         var memos: [Memo]
+        /// The memos the tag lane read, which keep their place whatever was removed.
+        var tagged: Set<String>
         var truncated: Bool
     }
 
@@ -141,7 +173,11 @@ public final class TripMembershipStore {
     /// The token the next drain's slot is given; never reused.
     private var nextToken = 0
     private var countsInFlight = false
-    private var spansInFlight: Set<String> = []
+    /// Each tag's span read in flight: the store generation and the credential it was issued
+    /// under, and its token, so only that read's own end clears its slot.
+    private var spansInFlight: [String: (generation: Int, credential: Int, token: Int)] = [:]
+    /// The callers that joined a span read, by its token; let go when it ends or on a reset.
+    @ObservationIgnored private var spanJoiners: [Int: [CheckedContinuation<Void, Never>]] = [:]
     /// Bumped by `sessionIdentityChanged`: everything read before it belongs to somebody else.
     private var generation = 0
 
@@ -150,6 +186,8 @@ public final class TripMembershipStore {
     @ObservationIgnored var onJoin: (@MainActor () -> Void)?
     /// `onJoin`, for a journal load joining one in flight. A seam for tests only.
     @ObservationIgnored var onJournalJoin: (@MainActor () -> Void)?
+    /// `onJoin`, for a span read joining one of the same tag in flight. A seam for tests only.
+    @ObservationIgnored var onSpanJoin: (@MainActor () -> Void)?
 
     private let collections: CollectionStore
     private let pageSize: Int
@@ -216,10 +254,10 @@ public final class TripMembershipStore {
     }
 
     /// Reads the record's whole membership and writes its summary to the record. Joins a drain of
-    /// the same record already in flight under the same session and tag (see the type's doc).
+    /// the same record already in flight under the same session and rule (see the type's doc).
     public func drain(_ record: CollectionRecord, using handle: SessionHandle, baseURL: URL) async {
-        guard let tag = record.tags.first else { return }
-        let lineage = Lineage(generation: generation, session: handle.generation, tag: tag)
+        guard let rule = Rule(record) else { return }
+        let lineage = Lineage(generation: generation, session: handle.generation, rule: rule)
         if let running = inFlight[record.id], running.lineage == lineage {
             onJoin?()
             await running.task.value
@@ -241,70 +279,116 @@ public final class TripMembershipStore {
         defer {
             if owns(id, token) { inFlight[id] = nil }
         }
-        let client = handle.client
-        var rows: [LibraryRow] = []
-        var cursor: String?
-        var truncated = false
+        let gathered: (rows: [LibraryRow], truncated: Bool)?
         do {
-            repeat {
-                let page = try await MediaLibraryStore.page(
-                    client,
-                    filter: .all,
-                    order: .oldestFirst,
-                    tag: lineage.tag,
-                    cursor: cursor,
-                    limit: pageSize,
-                    baseURL: baseURL
-                )
-                guard stillCurrent(lineage, handle), owns(id, token), isLive(id, lineage) else {
-                    MemosLog.api.info("a trip's page answered for a list that has moved on")
-                    return
-                }
-                rows = MediaLibraryStore.merged(rows, with: page.items, filter: .all)
-                cursor = page.nextCursor
-                if rows.count >= memberCap {
-                    truncated = rows.count > memberCap || cursor != nil
-                    rows = Array(rows.prefix(memberCap))
-                    break
-                }
-            } while cursor != nil
+            gathered = try await gather(id, lineage: lineage, token: token, handle, baseURL)
         } catch {
             guard lineage.generation == generation, owns(id, token) else {
                 MemosLog.api.info("a trip's page failed for a list that has moved on")
                 return
             }
+            // A refusal still reaches the session whatever the rule; a sentence is said only for
+            // the rule the trip still has, asked again after the session's decision.
             await report(error, issuedUnder: handle) {
                 lineage.generation == self.generation && self.owns(id, token)
+                    && self.isLive(id, lineage)
             }
+            return
+        }
+        guard let gathered else {
+            MemosLog.api.info("a trip's page answered for a list that has moved on")
             return
         }
         // The record as it is NOW, asked before anything is written: a trip deleted while its pages
         // were out publishes nothing, and an exclusion or a cover chosen meanwhile counts.
         guard owns(id, token), let record = collections.records.first(where: { $0.id == id }),
-            record.tags.first == lineage.tag
+            Rule(record) == lineage.rule
         else {
             MemosLog.api.info("a trip's drain answered for a trip that is gone")
             return
         }
-        drained[id] = Drained(tag: lineage.tag, rows: rows, truncated: truncated)
+        drained[id] = Drained(
+            rule: lineage.rule, rows: gathered.rows, truncated: gathered.truncated)
         lastError = nil
         session?.noteTransportSuccess(issuedUnder: handle.generation)
         guard let summary = summary(for: record), summary != record.lastSummary else { return }
         collections.setSummary(id: id, summary)
     }
 
-    /// Only for a trip the collection store still holds: a snapshot of a deleted one, which its
-    /// screen keeps drawing on the way out, reads nothing.
+    /// Both lanes of one drain, or nil once a page answered for a list that has moved on: the tag's
+    /// files oldest first, then the span's walk newest first, as one list oldest first with each
+    /// file once, cut at the cap.
+    private func gather(
+        _ id: UUID, lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
+    ) async throws -> (rows: [LibraryRow], truncated: Bool)? {
+        var rows: [LibraryRow] = []
+        if let tag = lineage.rule.tag {
+            var cursor: String?
+            repeat {
+                let page = try await MediaLibraryStore.page(
+                    handle.client, filter: .all, order: .oldestFirst, tag: tag, cursor: cursor,
+                    limit: pageSize, baseURL: baseURL)
+                guard stillCurrent(lineage, handle), owns(id, token), isLive(id, lineage) else {
+                    return nil
+                }
+                rows = MediaLibraryStore.merged(rows, with: page.items, filter: .all)
+                cursor = page.nextCursor
+                if rows.count >= memberCap {
+                    let more = rows.count > memberCap || cursor != nil
+                    // Exactly the cap, read through: the span may still add a member past it.
+                    if more || lineage.rule.span == nil {
+                        return (Array(rows.prefix(memberCap)), more)
+                    }
+                }
+            } while cursor != nil
+        }
+        guard let span = lineage.rule.span else { return (rows, false) }
+        var window: [LibraryRow] = []
+        var cursor: String?
+        var more = false
+        repeat {
+            let page = try await MediaLibraryStore.page(
+                handle.client, filter: .all, order: .newestFirst, tag: nil, cursor: cursor,
+                limit: pageSize, baseURL: baseURL)
+            guard stillCurrent(lineage, handle), owns(id, token), isLive(id, lineage) else {
+                return nil
+            }
+            // Newest first: everything from the first row taken before the start on is older still.
+            let before = page.items.firstIndex { $0.takenAt.map { $0 < span.start } ?? false }
+            let read = page.items[..<(before ?? page.items.endIndex)]
+            let inside = read.filter { $0.takenAt.map(span.contains) ?? false }
+            window = MediaLibraryStore.merged(window, with: Array(inside), filter: .all)
+            cursor = page.nextCursor
+            more = before == nil && cursor != nil
+        } while more && Set(rows.map(\.id)).union(window.map(\.id)).count < memberCap
+        let union = Self.oldestFirst(MediaLibraryStore.merged(rows, with: window, filter: .all))
+        let truncated = union.count > memberCap || (more && union.count >= memberCap)
+        return (Array(union.prefix(memberCap)), truncated)
+    }
+
+    /// Oldest taken first; a row without a taken date last; rows taken at the same instant in the
+    /// order they were gathered.
+    private static func oldestFirst(_ rows: [LibraryRow]) -> [LibraryRow] {
+        rows.enumerated().sorted { lhs, rhs in
+            let left = lhs.element.takenAt ?? .distantFuture
+            let right = rhs.element.takenAt ?? .distantFuture
+            return left == right ? lhs.offset < rhs.offset : left < right
+        }.map(\.element)
+    }
+
+    /// Only for a trip the collection store still holds, under the rule it was read for: a
+    /// snapshot of a deleted one, which its screen keeps drawing on the way out, reads nothing, and
+    /// a trip whose span or tag changed reads nothing until it is drained again.
     private func drained(_ record: CollectionRecord) -> Drained? {
-        guard let drained = drained[record.id], drained.tag == record.tags.first,
+        guard let drained = drained[record.id], drained.rule == Rule(record),
             collections.records.contains(where: { $0.id == record.id })
         else { return nil }
         return drained
     }
 
-    /// Whether the trip a drain is reading is still there, under the tag the drain reads.
+    /// Whether the trip a drain is reading is still there, under the rule the drain reads.
     private func isLive(_ id: UUID, _ lineage: Lineage) -> Bool {
-        collections.records.first { $0.id == id }?.tags.first == lineage.tag
+        collections.records.first { $0.id == id }.flatMap(Rule.init) == lineage.rule
     }
 
     /// Drops what this store holds for a trip that was deleted, and lets go of its drain: what that
@@ -442,19 +526,40 @@ public final class TripMembershipStore {
         return journal.truncated ? .truncated : .complete
     }
 
-    /// The memos carrying the record's tag, oldest first, as the server ordered them. Empty until
-    /// a journal load for the record's tag has applied, and for a trip the store no longer holds.
+    /// The memos of the record's tag and of its span, oldest first by their journal instant
+    /// (`journalInstant(of:)`), less a span memo whose every file the record excludes. Empty
+    /// until a journal load under the record's rule has applied, and for a trip the store no
+    /// longer holds.
     public func journal(for record: CollectionRecord) -> [Memo] {
-        journal(record)?.memos ?? []
+        guard let journal = journal(record) else { return [] }
+        guard let span = journal.rule.span else { return journal.memos }
+        let excluded = Set(record.excludedUids)
+        // A span memo stays while one of its files is a member now: taken in the window (its memo's
+        // date standing in for an undated one), not removed from the trip and not deleted.
+        return journal.memos.filter { memo in
+            journal.tagged.contains(memo.uid) || memo.attachments.isEmpty
+                || memo.attachments.contains { file in
+                    !excluded.contains(file.uid) && !removed.contains(file.uid)
+                        && span.contains(file.captureInstant ?? memo.createdAt)
+                }
+        }
+    }
+
+    /// The instant a memo stands at in a trip's journal: the earliest taken instant among its
+    /// files, or its own date when none of them is dated — so a memo posted after the trip stands
+    /// in the day its pictures were taken.
+    public static func journalInstant(of memo: Memo) -> Date {
+        memo.attachments.compactMap(\.captureInstant).min() ?? memo.createdAt
     }
 
     /// Reads the record's whole journal. Joins a load of the same record already in flight under
-    /// the same session and tag (see the type's doc); a record with no tag sends nothing.
+    /// the same session and rule (see the type's doc); a record with neither tag nor span sends
+    /// nothing.
     public func loadJournal(
         _ record: CollectionRecord, using handle: SessionHandle, baseURL: URL
     ) async {
-        guard let tag = record.tags.first else { return }
-        let lineage = Lineage(generation: generation, session: handle.generation, tag: tag)
+        guard let rule = Rule(record) else { return }
+        let lineage = Lineage(generation: generation, session: handle.generation, rule: rule)
         if let running = journalFlights[record.id], running.lineage == lineage {
             onJournalJoin?()
             await running.task.value
@@ -477,36 +582,47 @@ public final class TripMembershipStore {
         defer {
             if ownsJournal(id, token) { journalFlights[id] = nil }
         }
-        let query = MemoQuery(tags: [lineage.tag])
         var memos: [Memo] = []
-        var cursor: String?
+        var tagged: Set<String> = []
         var truncated = false
         do {
-            repeat {
-                // `.newer` with no bound is the query read oldest first: `sort=created_at`, no
-                // `created_before`, no `created_after` (`MemoQuery.parameters(in:direction:)`).
-                let page = try await TimelineStore.page(
-                    handle.client,
-                    query: query,
-                    calendar: .current,
-                    direction: .newer,
-                    cursor: cursor,
-                    limit: pageSize,
-                    baseURL: baseURL
-                )
-                guard stillCurrent(lineage, handle), ownsJournal(id, token), isLive(id, lineage)
-                else {
-                    MemosLog.api.info("a trip's journal page answered for a list that has moved on")
-                    return
-                }
-                memos += page.memos
-                cursor = page.nextCursor
-                if memos.count >= memberCap {
-                    truncated = memos.count > memberCap || cursor != nil
-                    memos = Array(memos.prefix(memberCap))
-                    break
-                }
-            } while cursor != nil
+            // The tag's memos, then the span's: `.newer` is the query read oldest first,
+            // `sort=created_at` (`MemoQuery.parameters(in:direction:after:)`) — with no bound for
+            // the tag, and from just before the span's start for the span (`created_after` is
+            // strict). A memo the tag lane read is not added twice.
+            var lanes: [(query: MemoQuery, span: TripSpan?)] = []
+            if let tag = lineage.rule.tag { lanes.append((MemoQuery(tags: [tag]), nil)) }
+            if let span = lineage.rule.span { lanes.append((MemoQuery(), span)) }
+            var known: Set<String> = []
+            lanes: for (query, span) in lanes {
+                let after = span.map { $0.start.addingTimeInterval(-1) }
+                var cursor: String?
+                repeat {
+                    let page = try await TimelineStore.page(
+                        handle.client, query: query, calendar: .current, direction: .newer,
+                        after: after, cursor: cursor, limit: pageSize, baseURL: baseURL)
+                    guard stillCurrent(lineage, handle), ownsJournal(id, token),
+                        isLive(id, lineage)
+                    else {
+                        MemosLog.api.info(
+                            "a trip's journal page answered for a list that has moved on")
+                        return
+                    }
+                    for memo in page.memos where !known.contains(memo.uid) {
+                        if let span, !span.contains(Self.journalInstant(of: memo)) { continue }
+                        known.insert(memo.uid)
+                        memos.append(memo)
+                        if span == nil { tagged.insert(memo.uid) }
+                    }
+                    cursor = page.nextCursor
+                    if memos.count >= memberCap {
+                        truncated = memos.count > memberCap || cursor != nil
+                        memos = Array(memos.prefix(memberCap))
+                        // Exactly the cap, read through: the next lane may still add a memo.
+                        if truncated { break lanes }
+                    }
+                } while cursor != nil
+            }
         } catch {
             guard lineage.generation == generation, ownsJournal(id, token) else {
                 MemosLog.api.info("a trip's journal page failed for a list that has moved on")
@@ -514,6 +630,7 @@ public final class TripMembershipStore {
             }
             await report(error, issuedUnder: handle, lane: .journal(id)) {
                 lineage.generation == self.generation && self.ownsJournal(id, token)
+                    && self.isLive(id, lineage)
             }
             return
         }
@@ -521,14 +638,25 @@ public final class TripMembershipStore {
             MemosLog.api.info("a trip's journal answered for a trip that is gone")
             return
         }
-        journals[id] = Journal(tag: lineage.tag, memos: memos, truncated: truncated)
+        journals[id] = Journal(
+            rule: lineage.rule, memos: Self.byJournalInstant(memos), tagged: tagged,
+            truncated: truncated)
         journalErrors[id] = nil
         session?.noteTransportSuccess(issuedUnder: handle.generation)
     }
 
-    /// Only for a trip the collection store still holds, under the tag it was read for.
+    /// The memos ordered by their journal instant; those at the same instant as they were read.
+    private static func byJournalInstant(_ memos: [Memo]) -> [Memo] {
+        memos.enumerated().sorted { lhs, rhs in
+            let left = journalInstant(of: lhs.element)
+            let right = journalInstant(of: rhs.element)
+            return left == right ? lhs.offset < rhs.offset : left < right
+        }.map(\.element)
+    }
+
+    /// Only for a trip the collection store still holds, under the rule it was read for.
     private func journal(_ record: CollectionRecord) -> Journal? {
-        guard let journal = journals[record.id], journal.tag == record.tags.first,
+        guard let journal = journals[record.id], journal.rule == Rule(record),
             collections.records.contains(where: { $0.id == record.id })
         else { return nil }
         return journal
@@ -564,12 +692,33 @@ public final class TripMembershipStore {
         }
     }
 
-    /// Reads one tag's first and last taken date among its files. Refused, not sent, while a
-    /// read of the same tag is in flight.
+    /// Reads one tag's first and last taken date among its files. A second read of the same tag,
+    /// under the same store generation and the same credential, while one is in flight joins it:
+    /// nothing is sent, and it returns when that read ends, so a caller that waits on its return
+    /// waits on the read itself. A read issued under another credential or generation is never
+    /// joined — its answer is dropped — so the caller sends its own and takes the slot; the old
+    /// read's end then lets its own joiners go and leaves the new slot alone. A caller whose
+    /// credential is no longer the session's sends nothing: its answer would be dropped too.
     public func loadSpan(ofTag tag: String, using handle: SessionHandle, baseURL: URL) async {
-        guard spansInFlight.insert(tag).inserted else { return }
+        guard sessionStillCurrent(handle) else {
+            MemosLog.api.info("a trip sheet's span was asked for under a session that moved on")
+            return
+        }
+        if let flight = spansInFlight[tag], flight.generation == generation,
+            flight.credential == handle.generation
+        {
+            onSpanJoin?()
+            await withCheckedContinuation { spanJoiners[flight.token, default: []].append($0) }
+            return
+        }
+        nextToken += 1
+        let token = nextToken
+        spansInFlight[tag] = (generation, handle.generation, token)
         let issued = generation
-        defer { if issued == generation { spansInFlight.remove(tag) } }
+        defer {
+            if spansInFlight[tag]?.token == token { spansInFlight[tag] = nil }
+            for joiner in spanJoiners.removeValue(forKey: token) ?? [] { joiner.resume() }
+        }
         do {
             let first = try await extremum(.oldestFirst, tag: tag, handle, baseURL)
             guard issued == generation, sessionStillCurrent(handle) else { return }
@@ -615,7 +764,10 @@ public final class TripMembershipStore {
         tagCountsLoaded = false
         spans = [:]
         countsInFlight = false
-        spansInFlight = []
+        spansInFlight = [:]
+        let joiners = spanJoiners.values.joined()
+        spanJoiners = [:]
+        for joiner in joiners { joiner.resume() }
         lastError = nil
         journals = [:]
         journalFlights = [:]

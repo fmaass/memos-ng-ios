@@ -254,6 +254,7 @@ struct NewTripFlowTests {
         flow.title = "Our trip"
         flow.choose("portugal2026")
         #expect(flow.title == "Our trip")
+        flow.endDatesRead(of: "portugal2026")
         #expect(flow.canCreate)
     }
 
@@ -262,6 +263,7 @@ struct NewTripFlowTests {
         let store = CollectionStore(identity: alice, root: root)
         let flow = NewTripFlow()
         flow.choose("portugal2026")
+        flow.endDatesRead(of: "portugal2026")
         let made = flow.create(in: store)
         #expect(made?.title == "Portugal 2026")
         #expect(made?.tags == ["portugal2026"])
@@ -278,6 +280,7 @@ struct NewTripFlowTests {
             identity: alice, root: root, writeBytes: { _, _ in throw Refused() })
         let flow = NewTripFlow()
         flow.choose("portugal2026")
+        flow.endDatesRead(of: "portugal2026")
         #expect(flow.create(in: store) == nil)
         #expect(flow.failure == NewTripFlow.notSaved)
         #expect(flow.created == nil)
@@ -290,6 +293,7 @@ struct NewTripFlowTests {
         let store = CollectionStore(identity: nil, root: root)
         let flow = NewTripFlow()
         flow.choose("portugal2026")
+        flow.endDatesRead(of: "portugal2026")
         #expect(flow.create(in: store) == nil)
         #expect(flow.failure == NewTripFlow.notSaved)
     }
@@ -504,6 +508,83 @@ struct CollectionsRootRenderTests {
             #expect(screen.element(labelled: NewTripSheet.create) != nil, "the sheet went")
         }
         #expect(stores.0.records.isEmpty)
+    }
+
+    @Test("Create waits for the chosen tag's own dates read, not for the sweep past it")
+    func createWaitsForTheChosenRead() async {
+        let wire = CollectionsWire()
+        wire.transport.holdSpan(of: "portugal2026")
+        wire.transport.holdSpan(of: "family")
+        let stores = stores()
+        let flow = NewTripFlow()
+        let sheet = NewTripSheet(
+            flow: flow, collections: stores.0, trips: stores.1,
+            access: { [access = wire.access] in access }, now: { Self.now })
+        await CollectionsHost.with(sheet) { screen in
+            #expect(await screen.until { wire.transport.spanReads(of: "portugal2026") > 0 })
+            #expect(await screen.until { screen.element(labelled: "family") != nil })
+            #expect(screen.press("family"))
+            #expect(
+                await screen.until { wire.transport.spanReads(of: "family") > 0 },
+                "the chosen tag's dates were not asked for")
+            wire.transport.releaseSpan(of: "portugal2026")
+            #expect(await screen.until { stores.1.spans["portugal2026"] != nil })
+            // The sweep has reached the chosen tag, whose own read is still held.
+            #expect(
+                !(await screen.until(seconds: 1) { flow.canCreate }),
+                "Create was offered while the chosen tag's dates were still being read")
+            wire.transport.releaseSpan(of: "family")
+            #expect(
+                await screen.until { flow.span != nil && flow.canCreate },
+                "the chosen tag's dates never reached the sheet")
+        }
+        #expect(stores.0.records.isEmpty)
+    }
+
+    /// The trip file read by a store whose every write fails, after one trip was filed on it.
+    private func brokenStore(
+        filing span: TripSpan?, tags: [String]
+    ) -> (CollectionStore, CollectionRecord) {
+        struct Refused: Error {}
+        let made = CollectionStore(identity: alice, root: root)
+            .create(title: "Portugal 2026", tags: tags, span: span)
+        let broken = CollectionStore(
+            identity: alice, root: root, writeBytes: { _, _ in throw Refused() })
+        return (broken, broken.records.first { $0.id == made.id } ?? made)
+    }
+
+    @Test("Remove Dates that was not saved keeps the sheet and says so")
+    func aFailedRemoveDatesStays() async {
+        let span = TripSpan(
+            start: Self.now, end: Self.now.addingTimeInterval(86_400), zone: "Europe/Lisbon")
+        let (broken, record) = brokenStore(filing: span, tags: ["portugal2026"])
+        #expect(record.span == span, "precondition: the trip was filed with its dates")
+        let sheet = TripSpanSheet(record: record, collections: broken, now: Self.now)
+        await CollectionsHost.with(sheet) { screen in
+            #expect(
+                await screen.until { screen.element(labelled: TripSpanSheet.removeDates) != nil })
+            #expect(screen.press(TripSpanSheet.removeDates))
+            #expect(
+                await screen.until { screen.says(NewTripFlow.notSaved) },
+                "a removal that was not saved was not said")
+            #expect(screen.element(labelled: TripSpanSheet.removeDates) != nil, "the sheet went")
+        }
+        #expect(broken.records.first { $0.id == record.id }?.span == span, "control: not written")
+    }
+
+    @Test("Trip Dates' Save that was not saved keeps the sheet and says so")
+    func aFailedSpanSaveStays() async {
+        let (broken, record) = brokenStore(filing: nil, tags: ["portugal2026"])
+        let sheet = TripSpanSheet(record: record, collections: broken, now: Self.now)
+        await CollectionsHost.with(sheet) { screen in
+            #expect(await screen.until { screen.element(labelled: TripSpanSheet.save) != nil })
+            #expect(screen.press(TripSpanSheet.save))
+            #expect(
+                await screen.until { screen.says(NewTripFlow.notSaved) },
+                "a span that was not saved was not said")
+            #expect(screen.element(labelled: TripSpanSheet.save) != nil, "the sheet went")
+        }
+        #expect(broken.records.first { $0.id == record.id }?.span == nil, "control: not written")
     }
 
     @Test("an identity change files the trips under the new identity and forgets every read")
@@ -765,6 +846,7 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var holdsYears = false
     private nonisolated(unsafe) var releasedYears: [String] = []
     private nonisolated(unsafe) var answeredYears: [String] = []
+    private nonisolated(unsafe) var heldSpans: Set<String> = []
 
     /// Every request sent so far, as `<operation id> <path and query>`.
     nonisolated var sent: [String] { lock.withLock { requests } }
@@ -777,6 +859,30 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
 
     nonisolated func release() {
         lock.withLock { released = true }
+    }
+
+    /// Holds every span read of `tag` — its one first or last picture — until `releaseSpan(of:)`.
+    nonisolated func holdSpan(of tag: String) {
+        lock.withLock { _ = heldSpans.insert(tag) }
+    }
+
+    nonisolated func releaseSpan(of tag: String) {
+        lock.withLock { _ = heldSpans.remove(tag) }
+    }
+
+    /// How many span reads of `tag` were sent.
+    nonisolated func spanReads(of tag: String) -> Int {
+        sent.filter { line in
+            let path = line.split(separator: " ", maxSplits: 1).last.map(String.init) ?? ""
+            return Self.spanTag(path) == tag
+        }.count
+    }
+
+    /// The tag a span read is of: one row (`limit=1`) under a tag; nil for every other read.
+    nonisolated static func spanTag(_ path: String) -> String? {
+        let query = URLComponents(string: path)?.queryItems ?? []
+        guard query.contains(where: { $0.name == "limit" && $0.value == "1" }) else { return nil }
+        return query.first { $0.name == "tag" }?.value
     }
 
     /// Answers every year read with no year at all.
@@ -847,6 +953,11 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
                 #"[{"key":"2026","count":3,"coverUid":"p0","# + thumb + "},"
                     + #"{"key":"2019","count":40,"coverUid":"p0","# + thumb + "}]")
         case "list_attachments_api_attachments_get":
+            if let tag = Self.spanTag(path) {
+                while lock.withLock({ heldSpans.contains(tag) }) {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+            }
             if isHeld(path) {
                 while !lock.withLock({ released }) {
                     try await Task.sleep(for: .milliseconds(20))

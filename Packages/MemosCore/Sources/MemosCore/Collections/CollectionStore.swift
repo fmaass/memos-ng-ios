@@ -123,14 +123,15 @@ public final class CollectionStore {
     /// Adds a trip at the end of the order and returns it as written. With nobody signed in, or a
     /// write that failed, the returned record exists nowhere else.
     @discardableResult
-    public func create(title: String, tags: [String]) -> CollectionRecord {
+    public func create(title: String, tags: [String], span: TripSpan? = nil) -> CollectionRecord {
         let record = CollectionRecord(
             id: UUID(),
             kind: .trip,
             title: title,
             tags: tags,
             order: (records.map(\.order).max() ?? -1) + 1,
-            createdAt: now()
+            createdAt: now(),
+            span: span
         )
         commit(records + [record])
         return records.first { $0.id == record.id } ?? record
@@ -138,6 +139,13 @@ public final class CollectionStore {
 
     public func rename(id: UUID, to title: String) {
         update(id) { $0.title = title }
+    }
+
+    /// Sets the trip's window in time, or with nil takes it away. A window whose end lies before
+    /// its start is refused and writes nothing.
+    public func setSpan(id: UUID, _ span: TripSpan?) {
+        if let span, span.end < span.start { return }
+        update(id) { $0.span = span }
     }
 
     public func delete(id: UUID) {

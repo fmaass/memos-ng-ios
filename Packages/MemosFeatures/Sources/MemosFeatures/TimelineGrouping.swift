@@ -29,14 +29,18 @@ public struct MemoDaySection: Identifiable, Equatable, Sendable {
 /// twice with the day cut in half between them. So the whole loaded list is regrouped, every time,
 /// off the day each memo actually falls on.
 public enum TimelineGrouping {
+    /// - Parameter instant: the instant a memo's day is cut from — its date, unless a list keys
+    ///   its memos on something else (a trip's journal keys on the earliest picture,
+    ///   `TripMembershipStore.journalInstant(of:)`).
     public static func sections(
         for memos: [Memo],
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        instant: (Memo) -> Date = { $0.createdAt }
     ) -> [MemoDaySection] {
         var order: [Date] = []
         var grouped: [Date: [Memo]] = [:]
         for memo in memos {
-            let day = calendar.startOfDay(for: memo.createdAt)
+            let day = calendar.startOfDay(for: instant(memo))
             if grouped[day] == nil {
                 grouped[day] = []
                 order.append(day)

@@ -44,10 +44,11 @@ extension TripRoute: @MainActor StackRoute {
 /// reports to the session from the moment it is built (`MainTabView`) and is moved with the
 /// identity beside the timeline (`CollectionsSession`), so a trip read as somebody else drops.
 ///
-/// **The drain refreshes on appear**, and again when the account or the trip's tag changes; a
-/// drain of the same trip already on the wire — the root's — is joined, never repeated.
+/// **The drain refreshes on appear**, and again when the account, the trip's tag or its span
+/// changes; a drain of the same trip already on the wire — the root's — is joined, never repeated.
 ///
-/// **Manage.** Rename, Pin or Unpin, Move Up, Move Down and Delete Trip, through `TripManage`.
+/// **Manage.** Rename, Trip Dates, Pin or Unpin, Move Up, Move Down and Delete Trip, through
+/// `TripManage`; Trip Dates opens `TripSpanSheet`, whose saved span reads the trip again.
 /// Pin or Unpin is one item, named by whether this trip is the scope's active pin now
 /// (`CollectionStore.activePin(now:)`), so a pin that has expired offers Pin again. A trip that
 /// is no longer in the store — deleted here or anywhere — leaves the stack by the stack's own
@@ -90,6 +91,8 @@ struct TripView: View {
     @State private var manage: TripManage
     /// The chip that is chosen: Photos until somebody picks another.
     @State private var mode = TripMode.photos
+    /// Whether Trip Dates is up.
+    @State private var editingSpan = false
 
     /// Optional: a test hosts the screen without a session, and has nothing to download with.
     @Environment(SessionStore.self) private var session: SessionStore?
@@ -157,6 +160,8 @@ struct TripView: View {
     static let selectButton = "Select"
     static let closeButton = "Close"
     static let renameButton = "Rename"
+    /// The Manage item that opens the trip's span.
+    static let spanButton = TripSpanSheet.title
     static let pinButton = "Pin"
     static let unpinButton = "Unpin"
     static let moveUpButton = "Move Up"
@@ -296,6 +301,11 @@ struct TripView: View {
                     }
                 }
             }
+            .background {
+                Color.clear.sheet(isPresented: $editingSpan) {
+                    TripSpanSheet(record: live ?? record, collections: collections, now: now())
+                }
+            }
             .navigationTitle(shown.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -357,14 +367,17 @@ struct TripView: View {
                     held = Self.viewerHolds(open, earlier: held, members: now, loaded: fit.loaded)
                 }
             }
-            .task(id: DrainKey(subject: subject, id: record.id, tag: live?.tags.first)) {
+            .task(
+                id: DrainKey(
+                    subject: subject, id: record.id, tag: live?.tags.first, span: live?.span)
+            ) {
                 await drain()
             }
             // Read when the chip is chosen, and again whenever it is chosen anew, the account or
             // the tag changes; a load already on the wire is joined.
             .task(
                 id: JournalKey(
-                    subject: subject, id: record.id, tag: live?.tags.first,
+                    subject: subject, id: record.id, tag: live?.tags.first, span: live?.span,
                     shown: mode == .journal)
             ) {
                 guard mode == .journal else { return }
@@ -420,7 +433,11 @@ struct TripView: View {
             if let error = trips.journalError(for: live) {
                 NoticeCard(text: error, tone: .error).cardRow()
             }
-            ForEach(TimelineGrouping.sections(for: memos, calendar: calendar)) { section in
+            ForEach(
+                TimelineGrouping.sections(
+                    for: memos, calendar: calendar,
+                    instant: TripMembershipStore.journalInstant(of:))
+            ) { section in
                 Section {
                     ForEach(section.memos) { memo in
                         MemoCard(
@@ -634,6 +651,7 @@ struct TripView: View {
             Button(Self.renameButton, systemImage: "pencil") {
                 manage.askRename(current: live?.title ?? record.title)
             }
+            Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
             let pinAction = TripManage.pinAction(of: record.id, in: collections, now: now())
             Button(pinAction.title, systemImage: pinAction.symbol) {
                 manage.apply(pinAction, to: record.id, in: collections, now: now())
@@ -695,12 +713,14 @@ struct TripView: View {
         let subject: String?
         let id: UUID
         let tag: String?
+        let span: TripSpan?
     }
 
     private struct JournalKey: Equatable {
         let subject: String?
         let id: UUID
         let tag: String?
+        let span: TripSpan?
         let shown: Bool
     }
 }

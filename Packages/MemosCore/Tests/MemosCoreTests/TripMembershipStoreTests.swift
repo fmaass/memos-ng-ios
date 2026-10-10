@@ -741,21 +741,53 @@ struct TripMembershipStoreTests {
         #expect(store.tagCountsLoaded, "control: the one read landed")
     }
 
-    @Test("a second span read of the same tag while one is in flight is refused, not sent")
+    @Test("a second span read of the same tag while one is in flight joins it, not sent")
     func overlappingSpanReadsAreOne() async {
         let hold = TripHold(holding: [0])
         let client = sheetClient(hold)
         let store = TripMembershipStore(collections: collections())
+        let joined = TripSignal()
+        store.onSpanJoin = { joined.signal() }
         let first = Task {
             await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
         }
         #expect(await hold.entered[0].wait(), "the first extremum was not asked for")
-        await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+        let second = Task {
+            await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+            return store.spans[Self.tag]
+        }
+        #expect(await joined.wait(), "the second read did not join the first")
         #expect(hold.calls == 1, "an overlapping span read was sent: \(hold.calls)")
         hold.release[0].signal()
         await first.value
+        #expect(await second.value == Self.span, "the joiner returned before the read it joined")
         #expect(hold.calls == 2, "not one read of each extremum: \(hold.calls)")
-        #expect(store.spans[Self.tag] == Self.span, "control: the one read landed")
+    }
+
+    @Test("a reset lets a caller that joined the old span read go")
+    func aResetLetsAJoinerGo() async {
+        let hold = TripHold(holding: [0])
+        let client = sheetClient(hold)
+        let store = TripMembershipStore(collections: collections())
+        let joined = TripSignal()
+        store.onSpanJoin = { joined.signal() }
+        let old = Task {
+            await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await hold.entered[0].wait(), "the old span read was not sent")
+        let gone = TripSignal()
+        let joiner = Task {
+            await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+            gone.signal()
+        }
+        #expect(await joined.wait(), "the second read did not join the first")
+        store.sessionIdentityChanged()
+        let freed = await gone.wait()
+        #expect(freed, "a reset left the joiner parked on a read nobody owns")
+        if freed { await joiner.value }
+        hold.release[0].signal()
+        await old.value
+        #expect(store.spans.isEmpty, "the old read landed after the reset")
     }
 
     @Test("a change of identity discards the sheet's pending counts and span")
@@ -819,6 +851,43 @@ struct TripMembershipStoreTests {
         #expect(spanStore.spans.isEmpty, "a renewed session got the old one's span")
     }
 
+    @Test("a renewed session's span read does not join the old session's: it reads for itself")
+    func aRenewedSpanReadIsItsOwn() async {
+        let hold = TripHold(holding: [0, 1])
+        let client = sheetClient(hold)
+        let session = TripSession(for: SessionHandle(client: client, generation: 1))
+        let store = TripMembershipStore(collections: collections())
+        store.reports(to: session)
+        let joined = TripSignal()
+        store.onSpanJoin = { joined.signal() }
+        let old = Task {
+            await store.loadSpan(
+                ofTag: Self.tag, using: SessionHandle(client: client, generation: 1),
+                baseURL: Stub.baseURL)
+        }
+        #expect(await hold.entered[0].wait(), "the old session's read was not sent")
+        let renewed = SessionHandle(client: client, generation: 2)
+        session.activeHandle = renewed
+        let current = Task {
+            await store.loadSpan(ofTag: Self.tag, using: renewed, baseURL: Stub.baseURL)
+            return store.spans[Self.tag]
+        }
+        #expect(
+            await hold.entered[1].wait(), "the renewed session joined the old session's read")
+        hold.release[0].signal()
+        await old.value
+
+        // The old read's end leaves the renewed read's slot alone: a third caller joins it.
+        let third = Task {
+            await store.loadSpan(ofTag: Self.tag, using: renewed, baseURL: Stub.baseURL)
+        }
+        #expect(await joined.wait(), "the old read's end cleared the renewed read's slot")
+        hold.release[1].signal()
+        #expect(await current.value == Self.span, "the renewed session got no dates of its own")
+        await third.value
+        #expect(hold.calls == 3, "not one old extremum and one renewed pair: \(hold.calls)")
+    }
+
     @Test("a second extremum answered for a renewed session publishes no span")
     func aStaleSecondExtremumPublishesNothing() async {
         let hold = TripHold(holding: [1])
@@ -873,10 +942,16 @@ struct TripMembershipStoreTests {
         #expect(await hold.entered[1].wait(), "the fresh read after the reset was refused")
         hold.release[0].signal()
         await old.value
-        await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+        let joined = TripSignal()
+        store.onSpanJoin = { joined.signal() }
+        let joiner = Task {
+            await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await joined.wait(), "the old read's end cleared the fresh read's guard")
         #expect(hold.calls == 2, "the old read's end cleared the fresh read's guard")
         hold.release[1].signal()
         await fresh.value
+        await joiner.value
         #expect(store.spans[Self.tag] == Self.span, "control: the fresh read landed")
     }
 }

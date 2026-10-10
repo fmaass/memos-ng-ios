@@ -2,7 +2,8 @@ import Foundation
 
 /// What a collection's membership is made of. The pilot has one kind.
 public enum CollectionKind: String, Sendable, Equatable, Codable {
-    /// Every picture of every memo carrying the record's tag, minus its exclusions.
+    /// Every picture of every memo carrying the record's tag, and every picture taken in its span,
+    /// minus its exclusions.
     case trip
 }
 
@@ -29,6 +30,44 @@ public struct TripSummary: Sendable, Equatable, Codable {
     }
 }
 
+/// The window of a trip in time (MEMNG-737): every picture taken from `start` to `end`, both
+/// included, is a member, whatever its memo's tags.
+///
+/// Both ends are instants, written down in UTC like every other date of the record; `zone` is the
+/// identifier of the zone the owner set them in (the trip's own, "until 14:00" in Lisbon), kept so
+/// the sheet shows them again as they were chosen. The span's own rule never reads the zone: an
+/// instant is in the window or it is not.
+public struct TripSpan: Sendable, Equatable, Codable {
+    public var start: Date
+    public var end: Date
+    /// A `TimeZone` identifier, such as `Europe/Lisbon`.
+    public var zone: String
+
+    public init(start: Date, end: Date, zone: String) {
+        self.start = start
+        self.end = end
+        self.zone = zone
+    }
+
+    /// The zone the ends were set in, or the device's when the identifier names none.
+    public var timeZone: TimeZone { TimeZone(identifier: zone) ?? .current }
+
+    /// Whether `instant` lies in the window, both ends included.
+    public func contains(_ instant: Date) -> Bool { start <= instant && instant <= end }
+
+    /// The days from `first`'s to `last`'s, whole: 00:00:00 of the first day to 23:59:59 of the
+    /// last, in `zone` — what a span set by its dates alone covers. Nil when `last` is earlier.
+    public static func days(from first: Date, to last: Date, in zone: TimeZone) -> TripSpan? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let start = calendar.startOfDay(for: first)
+        guard last >= first,
+            let next = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: last))
+        else { return nil }
+        return TripSpan(start: start, end: next.addingTimeInterval(-1), zone: zone.identifier)
+    }
+}
+
 /// One collection as this device keeps it — device-local, and filed under the identity that made
 /// it, never anyone else's.
 ///
@@ -38,7 +77,8 @@ public struct CollectionRecord: Sendable, Equatable, Identifiable, Codable {
     public var id: UUID
     public var kind: CollectionKind
     public var title: String
-    /// The tags whose pictures are the membership. The pilot creates and shows one.
+    /// The tags whose pictures are the membership. The pilot creates and shows one; a trip made of
+    /// its span alone has none.
     public var tags: [String]
     /// The member the owner picked as the cover, or nil for "the first member".
     public var coverUid: String?
@@ -50,6 +90,9 @@ public struct CollectionRecord: Sendable, Equatable, Identifiable, Codable {
     /// Pictures the owner removed from the trip on this device. The memo keeps its tag.
     public var excludedUids: [String]
     public var createdAt: Date
+    /// The trip's window in time, or nil for a trip made of its tag alone. Optional, so a record
+    /// written before spans existed decodes without one.
+    public var span: TripSpan?
 
     public init(
         id: UUID,
@@ -61,7 +104,8 @@ public struct CollectionRecord: Sendable, Equatable, Identifiable, Codable {
         pinnedUntil: Date? = nil,
         lastSummary: TripSummary? = nil,
         excludedUids: [String] = [],
-        createdAt: Date
+        createdAt: Date,
+        span: TripSpan? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -73,5 +117,6 @@ public struct CollectionRecord: Sendable, Equatable, Identifiable, Codable {
         self.lastSummary = lastSummary
         self.excludedUids = excludedUids
         self.createdAt = createdAt
+        self.span = span
     }
 }
