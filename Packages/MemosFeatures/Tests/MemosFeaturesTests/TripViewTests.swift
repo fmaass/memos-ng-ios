@@ -326,13 +326,14 @@ struct TripScreenRenderTests {
 
     private func trip(
         _ stores: (CollectionStore, TripMembershipStore), _ wire: TripWire,
-        _ record: CollectionRecord, viewer: any MediaTransport = MediaSession.shared
+        _ record: CollectionRecord, viewer: any MediaTransport = MediaSession.shared,
+        shareLane: TripShareLane? = nil
     ) -> some View {
         let access = wire.access
         return NavigationStack {
             TripView(
                 record: record, collections: stores.0, trips: stores.1, subject: "alice",
-                access: { access }, viewerTransport: viewer)
+                access: { access }, viewerTransport: viewer, shareLane: shareLane)
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -432,6 +433,166 @@ struct TripScreenRenderTests {
                 screen.element(labelled: "Photos")?.accessibilityTraits.contains(.selected) == true)
             #expect(screen.element(labelled: TripView.manageButton) != nil, "no Manage menu")
             #expect(wire.transport.memoReads.isEmpty, "Photos read the journal")
+        }
+    }
+
+    // MARK: - Select (MEMNG-721)
+
+    /// The trip on a dock that says the Collections tab is on screen, its grid drained: all five
+    /// pictures are on screen when `body` runs.
+    private func selectingTrip(
+        _ wire: TripWire, shareLane: TripShareLane? = nil,
+        _ body: (PressProbe.Screen, AppDock) async -> Void
+    ) async {
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let view = trip(stores, wire, record, shareLane: shareLane).environment(dock)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(TripProbe.photos(in: screen.window).count == 5, "control: the grid landed")
+            await body(screen, dock)
+        }
+    }
+
+    /// Presses the navigation bar's `label` and waits until `ready`. The count line is text, not a
+    /// control, so it is read with `says`: `element(labelled:)` finds buttons only.
+    private func pressBar(
+        _ label: String, on screen: PressProbe.Screen, until ready: () -> Bool
+    ) async -> Bool {
+        let pressed = CollectionsHost.pressBarItem(label, on: screen)
+        #expect(pressed.took, "\(label) took no press: \(pressed.seen)")
+        return await screen.until(ready)
+    }
+
+    /// The Library's select mode on the trip's grid: its toolbar stands where the main bar stood,
+    /// because the dock's one bottom bar on Collections is select mode's, and Close gives it back.
+    @Test("Select on a trip stands the Library's toolbar in the main bar's place; Close ends it")
+    func selectOnATrip() async {
+        await selectingTrip(TripWire()) { screen, dock in
+            #expect(dock.bar(on: .collections) == .tabs, "control: the tabs stand before Select")
+            #expect(!screen.says("0 Items Selected"))
+            let entered = await pressBar("Select", on: screen) {
+                screen.says("0 Items Selected")
+            }
+            #expect(entered, "Select stood no toolbar")
+            let bar = dock.bar(on: .collections)
+            #expect(bar == .select, "the dock reads \(bar)")
+            #expect(
+                MainTabs<EmptyView>.leadingShape(dock, on: .collections) == nil,
+                "the main bar stands beside the toolbar")
+            #expect(screen.element(labelled: TripView.manageButton) == nil, "Manage stayed")
+            let left = await pressBar("Close", on: screen) {
+                !screen.says("0 Items Selected")
+            }
+            #expect(left, "Close left the toolbar standing")
+            #expect(dock.bar(on: .collections) == .tabs, "the tabs did not come back")
+            #expect(screen.element(labelled: TripView.manageButton) != nil, "Manage did not return")
+        }
+    }
+
+    /// Delete stays the Library's "only own" (2.2.1 (36)): another member's picture can be chosen
+    /// and shared, never deleted; one of mine beside it makes Delete live, and the run sends mine
+    /// alone, which then leaves the trip.
+    @Test("a trip's Delete is off for another member's picture, and deletes only mine")
+    func deleteOnlyOwnOnATrip() async {
+        let wire = TripWire()
+        wire.transport.others("p1")
+        await selectingTrip(wire) { screen, dock in
+            let entered = await pressBar("Select", on: screen) {
+                screen.says("0 Items Selected")
+            }
+            #expect(entered, "Select stood no toolbar")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]), "p1 took no press")
+            #expect(await screen.until { screen.says("1 Item Selected") })
+            let share = screen.element(labelled: "Share")
+            let delete = screen.element(labelled: "Delete")
+            #expect(share?.accessibilityTraits.contains(.notEnabled) == false, "Share is off")
+            #expect(
+                delete?.accessibilityTraits.contains(.notEnabled) == true,
+                "Delete is offered for another member's picture")
+
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
+            #expect(await screen.until { screen.says("2 Items Selected") })
+            let live = screen.element(labelled: "Delete")
+            #expect(live?.accessibilityTraits.contains(.notEnabled) == false, "Delete stayed off")
+            #expect(live?.accessibilityActivate() == true, "Delete took no press")
+            let asked = await screen.until {
+                TripProbe.dialogActions(in: screen.host)?.contains("Delete") == true
+            }
+            #expect(asked, "no question was asked")
+            #expect(TripProbe.pressDialog("Delete", in: screen.host), "the alert had no Delete")
+            let gone = await screen.until { TripProbe.photos(in: screen.window).count == 4 }
+            #expect(gone, "the deleted picture stayed in the trip")
+            #expect(wire.transport.deletes == ["/api/attachments/p0"], "\(wire.transport.deletes)")
+        }
+    }
+
+    /// Share on a trip's selection: each chosen picture's ORIGINAL is fetched, in the order chosen,
+    /// and the share sheet offers exactly those files, under the names they were uploaded as.
+    @Test("a trip's Share fetches the chosen originals in the order chosen and offers just them")
+    func shareOnATrip() async {
+        let lane = TripShareRecorder()
+        await selectingTrip(TripWire(), shareLane: lane.lane) { screen, _ in
+            let entered = await pressBar("Select", on: screen) { screen.says("0 Items Selected") }
+            #expect(entered, "Select stood no toolbar")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[3]), "p3 took no press")
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]), "p1 took no press")
+            #expect(await screen.until { screen.says("2 Items Selected") })
+            #expect(screen.element(labelled: "Share")?.accessibilityActivate() == true)
+            let offered = await screen.until { TripProbe.shareSheet(over: screen.host) != nil }
+            #expect(offered, "no share sheet: asked \(lane.asked)")
+            #expect(lane.asked == ["p3 original", "p1 original"], "asked \(lane.asked)")
+            let sheet = TripProbe.shareSheet(over: screen.host)
+            #expect(sheet.flatMap(TripProbe.sharedNames) == ["p3.jpg", "p1.jpg"])
+        }
+    }
+
+    /// Close while Share is still fetching: the batch is let go, so its files are offered neither
+    /// then nor over the next Select, and it asks for no further picture.
+    @Test("Close while a trip's Share is fetching offers nothing, then or on the next Select")
+    func closeAbandonsATripShare() async {
+        let lane = TripShareRecorder()
+        lane.holding = true
+        await selectingTrip(TripWire(), shareLane: lane.lane) { screen, _ in
+            let entered = await pressBar("Select", on: screen) { screen.says("0 Items Selected") }
+            #expect(entered, "Select stood no toolbar")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[2]), "p2 took no press")
+            #expect(await screen.until { screen.says("2 Items Selected") })
+            #expect(screen.element(labelled: "Share")?.accessibilityActivate() == true)
+            #expect(await screen.until { lane.asked.count == 1 }, "the first file was not asked")
+            let left = await pressBar("Close", on: screen) { !screen.says("2 Items Selected") }
+            #expect(left, "Close left the toolbar standing")
+            lane.holding = false
+            await screen.settle(turns: 40)
+            #expect(TripProbe.shareSheet(over: screen.host) == nil, "a sheet over a closed Select")
+            let again = await pressBar("Select", on: screen) { screen.says("0 Items Selected") }
+            #expect(again, "Select stood no toolbar the second time")
+            await screen.settle(turns: 40)
+            #expect(TripProbe.shareSheet(over: screen.host) == nil, "the left batch was offered")
+            #expect(lane.asked == ["p0 original"], "the left batch asked on: \(lane.asked)")
+        }
+    }
+
+    /// Select mode belongs to the grid: choosing Journal ends it, and the tabs come back.
+    @Test("choosing Journal on a trip ends select mode and gives the tabs back")
+    func journalEndsSelectOnATrip() async {
+        await selectingTrip(TripWire()) { screen, dock in
+            let entered = await pressBar("Select", on: screen) {
+                screen.says("0 Items Selected")
+            }
+            #expect(entered, "Select stood no toolbar")
+            #expect(TripProbe.pressAtOnce("Journal", on: screen), "the chip took no press")
+            let ended = await screen.until {
+                !screen.says("0 Items Selected")
+                    && dock.bar(on: .collections) == .tabs
+            }
+            #expect(ended, "select mode outlived the grid: \(dock.bar(on: .collections))")
         }
     }
 
@@ -1125,6 +1286,31 @@ enum TripProbe {
         return true
     }
 
+    /// The share sheet presented over `host`, if one is: the activity controller in the chain of
+    /// presentations, or among the children of one of them.
+    static func shareSheet(over host: UIViewController) -> UIActivityViewController? {
+        var next = host.presentedViewController
+        while let controller = next {
+            var stack = [controller]
+            while let candidate = stack.popLast() {
+                if let sheet = candidate as? UIActivityViewController { return sheet }
+                stack.append(contentsOf: candidate.children)
+            }
+            next = controller.presentedViewController
+        }
+        return nil
+    }
+
+    /// The names of the files `sheet` was handed, read from the controller itself; nil when this
+    /// system's controller does not keep them where key-value coding can read them.
+    static func sharedNames(_ sheet: UIActivityViewController) -> [String]? {
+        let held =
+            class_getInstanceVariable(UIActivityViewController.self, "_activityItems") != nil
+            || sheet.responds(to: NSSelectorFromString("activityItems"))
+        guard held, let items = sheet.value(forKey: "activityItems") as? [Any] else { return nil }
+        return items.compactMap { ($0 as? URL)?.lastPathComponent }
+    }
+
     /// The titles of the actions of the alert or dialog presented over `host`, if one is.
     static func dialogActions(in host: UIViewController) -> [String]? {
         var next = host.presentedViewController
@@ -1263,6 +1449,33 @@ enum TripProbe {
 
 // MARK: - Fixtures
 
+/// A share lane a test can watch and hold: every file asked for, as "<uid> <rendition>", and a
+/// file written for each under a name of its own, so the sheet's names are the batch's renames.
+@MainActor
+final class TripShareRecorder {
+    private(set) var asked: [String] = []
+    /// While true, a download waits before it answers.
+    var holding = false
+    private let folder = FileManager.default.temporaryDirectory
+        .appending(path: "trip-share").appending(path: UUID().uuidString)
+
+    var lane: TripShareLane {
+        TripShareLane(
+            generation: { 1 },
+            download: { [self] file, rendition in
+                asked.append("\(file.uid) \(rendition)")
+                let deadline = Date().addingTimeInterval(10)
+                while holding, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+                try FileManager.default.createDirectory(
+                    at: folder, withIntermediateDirectories: true)
+                let url = folder.appending(path: "download-\(file.uid)")
+                try Data("picture \(file.uid)".utf8).write(to: url)
+                return url
+            }
+        )
+    }
+}
+
 @MainActor
 final class TripWire {
     static let baseURL = URL(string: "https://memos.example.invalid")!
@@ -1290,11 +1503,15 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var emptied = false
     private nonisolated(unsafe) var unoriginal = false
     private nonisolated(unsafe) var dropped: Set<String> = []
+    private nonisolated(unsafe) var others: Set<String> = []
+    private nonisolated(unsafe) var deleted: [String] = []
 
     /// Every list read so far, as its query.
     nonisolated var listReads: [[String: String]] { lock.withLock { reads } }
     /// Every memo list read so far, as its query.
     nonisolated var memoReads: [[String: String]] { lock.withLock { journalReads } }
+    /// Every DELETE sent so far, as its path.
+    nonisolated var deletes: [String] { lock.withLock { deleted } }
 
     /// `portugal2026`'s memos, oldest first: two on the 12th, one on the 14th.
     nonisolated static let journal: [(uid: String, text: String, stamp: String)] = [
@@ -1315,6 +1532,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func nameNoOriginal() { lock.withLock { unoriginal = true } }
     /// The trip's tag leaves one picture: from here on its reads answer without it.
     nonisolated func drop(_ uid: String) { lock.withLock { _ = dropped.insert(uid) } }
+    /// `uid` is another member's picture: from here on its reads say it is not mine.
+    nonisolated func others(_ uid: String) { lock.withLock { _ = others.insert(uid) } }
 
     nonisolated func send(
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
@@ -1330,10 +1549,19 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
                 return (HTTPResponse(status: .internalServerError), nil)
             }
             if lock.withLock({ emptied }) { return Self.json("[]", next: nil) }
-            let (sig, gone, bare) = lock.withLock { (signature, dropped, unoriginal) }
-            return Self.page(query, signed: sig, without: gone, bare: bare)
+            let (sig, gone, bare, theirs) = lock.withLock {
+                (signature, dropped, unoriginal, others)
+            }
+            return Self.page(query, signed: sig, without: gone, bare: bare, theirs: theirs)
         case "attachment_tags_api_attachments_tags_get":
             return Self.json("[]", next: nil)
+        case "delete_attachment_api_attachments__uid__delete":
+            let path = request.path ?? ""
+            lock.withLock {
+                deleted.append(path)
+                if let uid = path.split(separator: "/").last { dropped.insert(String(uid)) }
+            }
+            return (HTTPResponse(status: .noContent), nil)
         case "list_memos_api_memos_get":
             let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
             let query = Dictionary(
@@ -1347,16 +1575,18 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
 
     private nonisolated static func page(
         _ query: [String: String], signed sig: String, without gone: Set<String>,
-        bare: Bool = false
+        bare: Bool = false, theirs: Set<String> = []
     ) -> (HTTPResponse, HTTPBody?) {
         if query["tag"] == "spain2025" {
             return json("[\(item("s0", taken: "2025-05-01T12:00:00Z", sig: sig))]", next: nil)
         }
         if query["tag"] != "portugal2026" { return json("[]", next: nil) }
         let days = ["12", "14", "16", "18", "20"].map { "2026-03-\($0)T12:00:00Z" }
-        let rows = days.enumerated().map { day in
+        let rows = days.enumerated().map { day -> String? in
             let uid = "p\(day.offset)"
-            return gone.contains(uid) ? nil : item(uid, taken: day.element, sig: sig, bare: bare)
+            if gone.contains(uid) { return nil }
+            return item(
+                uid, taken: day.element, sig: sig, bare: bare, mine: !theirs.contains(uid))
         }
         func list(_ picks: Int...) -> String {
             "[" + picks.compactMap { rows[$0] }.joined(separator: ",") + "]"
@@ -1394,13 +1624,13 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     /// `v1` is signed with an `exp` long past, so a refusal of it reads as a lapse; any other
     /// signature with one far ahead.
     private nonisolated static func item(
-        _ uid: String, taken: String, sig: String, bare: Bool = false
+        _ uid: String, taken: String, sig: String, bare: Bool = false, mine: Bool = true
     ) -> String {
         let query = "?exp=\(sig == "v1" ? 1_000_000_000 : 4_000_000_000)&scope=1&sig=\(sig)"
         let download = bare ? "" : "/api/attachments/\(uid)/download\(query)"
         return """
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
-            "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+            "width":1000,"height":800,"mine":\(mine),"hasPrint":false,"hasLegacyPrint":false,\
             "renditions":[],"orphan":false,"memoUid":"m-\(uid)",\
             "takenAt":"\(taken)","filename":"\(uid).jpg",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\

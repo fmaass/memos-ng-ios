@@ -63,6 +63,13 @@ extension TripRoute: @MainActor StackRoute {
 /// **Map** (MEMNG-719). The `Map` chip swaps the grid for the trip's located members on the Places
 /// map (`TripMapScreen`): every marker the account can see, kept only where its uid is one of the
 /// drained members (`TripMapPresentation`), with the Places tab's own map, sheet and viewers.
+///
+/// **Select** (MEMNG-721). The Library's select mode on the trip's grid, in Photos: the Library's
+/// own `LibrarySelection` and `LibrarySelectToolbar`, with Share and with Delete for the member's
+/// own pictures only (`LibrarySelection.deletable`), run through `TripMembershipStore.delete`. The
+/// toolbar stands where the main bar stood because select mode claims the dock (`DockClaim.select`)
+/// and the dock's one bottom bar on Collections is then select mode's (`DockBar.standing`) — the
+/// same value the main bar is drawn from, so the two never stand together.
 struct TripView: View {
     let record: CollectionRecord
     let collections: CollectionStore
@@ -92,9 +99,22 @@ struct TripView: View {
     @State private var held: Set<String> = []
     /// The download a tile's menu starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
+    /// Select mode on the grid, and what it has chosen.
+    @State private var selection = LibrarySelection()
+    /// Select mode's Share: the chosen originals, fetched one by one into one sheet.
+    @State private var sharing = MediaBatchShareFlow()
+    /// The running share batch, cancelled when select mode ends so its download stops early.
+    @State private var shareTask: Task<Void, Never>?
+    /// Select mode's Delete: the question, and the run its yes starts.
+    @State private var deleting = LibraryDeleteFlow()
+    /// This screen's claim on the dock while select mode's toolbar stands in the main bar's place.
+    @State private var dockClaim = UUID()
     @Namespace private var zoom
     /// What the viewer fetches its stills through; a test hands in one it can watch.
     private let viewerTransport: any MediaTransport
+    /// Where select mode's Share fetches the chosen originals; nil for the session's own lane. A
+    /// test hands in one it can watch and hold.
+    private let shareLane: TripShareLane?
     /// The clock Pin and Unpin are judged and written by.
     private let now: () -> Date
 
@@ -107,6 +127,7 @@ struct TripView: View {
         trail: Binding<[TripRoute]> = .constant([]),
         manage: TripManage = TripManage(),
         viewerTransport: any MediaTransport = MediaSession.shared,
+        shareLane: TripShareLane? = nil,
         now: @escaping () -> Date = { Date() }
     ) {
         self.record = record
@@ -117,11 +138,15 @@ struct TripView: View {
         self.trail = trail
         _manage = State(initialValue: manage)
         self.viewerTransport = viewerTransport
+        self.shareLane = shareLane
         self.now = now
     }
 
     /// The toolbar menu's name, read by VoiceOver.
     static let manageButton = "Manage"
+    /// Select mode's way in and out, named as the Library's header names them.
+    static let selectButton = "Select"
+    static let closeButton = "Close"
     static let renameButton = "Rename"
     static let pinButton = "Pin"
     static let unpinButton = "Unpin"
@@ -257,7 +282,27 @@ struct TripView: View {
             .navigationTitle(shown.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .primaryAction) { manageMenu }
+                if selection.isActive {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button(selection.coversAll(in: members) ? "Deselect All" : "Select All") {
+                            selection.toggleAll(in: members)
+                        }
+                        Button(Self.closeButton, systemImage: "xmark") { selection.close() }
+                    }
+                } else {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if mode == .photos {
+                            Button(Self.selectButton) { selection.begin() }
+                        }
+                        manageMenu
+                    }
+                }
+            }
+            // Select mode's toolbar, in the main bar's place: it stands when the dock's one bottom
+            // bar on Collections is `select` — this screen's claim (`dockClaim`) — the same value
+            // the main bar is drawn from, so the main bar is not drawn beside it.
+            .safeAreaBar(edge: .bottom) {
+                if bottomBar == .select { selectBar }
             }
             .gridViewer(
                 $viewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
@@ -266,6 +311,26 @@ struct TripView: View {
                 Self.viewerSource(for: $0, members: members, loaded: loaded)
             }
             .onChange(of: viewing) { _, _ in held = [] }
+            // A picture that leaves the trip leaves the selection with it.
+            .onChange(of: members) { _, now in selection.prune(keeping: now) }
+            // Select mode belongs to the grid: Journal or Map ends it.
+            .onChange(of: mode) { _, now in
+                if now != .photos { selection.close() }
+            }
+            // Every way select mode ends comes through here, and each abandons a share still
+            // fetching, so it can never offer its files later.
+            .onChange(of: selection.isActive) { _, active in
+                if active {
+                    dock?.claim(dockClaim, for: .select)
+                } else {
+                    endSelect()
+                }
+            }
+            // The dock is one for every tab: a claim left behind would take the bar off them all.
+            .onDisappear {
+                selection.close()
+                endSelect()
+            }
             .onChange(of: ViewerFit(members: members.map(\.id), loaded: loaded)) { _, fit in
                 guard let open = viewing else { return }
                 let now = trips.members(for: shown)
@@ -400,6 +465,8 @@ struct TripView: View {
                 await MediaGridHosting.fetch(file, rendition, saving: saving, session: session)
             },
             loadMore: {},
+            selection: selection,
+            toggle: { selection.toggle($0) },
             above: AnyView(hero(live, members: members)),
             below: footerText(state: state, empty: members.isEmpty).map {
                 AnyView(TripFooter(text: $0))
@@ -441,6 +508,98 @@ struct TripView: View {
         if let note = Self.capNote(state, cap: trips.memberCap) { return note }
         let drained = state == .complete || state == .truncated
         return drained && empty && trips.lastError == nil ? Self.emptyTitle : nil
+    }
+
+    /// The one bar at the trip's foot (`AppDock.bar(on:)`). Hosted with no dock — a test that shows
+    /// the trip alone — the same rule is asked of select mode's claim alone.
+    private var bottomBar: DockBar {
+        if let dock { return dock.bar(on: .collections) }
+        return DockBar.standing(
+            mode: .initial, on: .collections, claim: selection.isActive ? .select : nil)
+    }
+
+    /// The trip's members as the store holds them now: what a tap of the toolbar acts on.
+    private var currentMembers: [LibraryRow] {
+        trips.members(for: live ?? record)
+    }
+
+    /// Select mode's toolbar, the toast of the last delete run over it, and the delete question.
+    private var selectBar: some View {
+        let members = currentMembers
+        return VStack(spacing: DesignTokens.Space.tight) {
+            if let message = deleting.message {
+                LibraryDeleteToast(text: message) { deleting.dismissMessage() }
+            }
+            LibrarySelectToolbar(
+                count: selection.count,
+                ownCount: selection.deletable(in: members).own.count,
+                isSharing: sharing.isSharing,
+                isDeleting: deleteRunning,
+                share: { shareSelection() },
+                // Only the chosen pictures that are mine, as in the Library.
+                delete: { deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers)) }
+            )
+            .sharingFiles(sharing)
+        }
+        // On the stack around the toolbar, not on the toolbar that carries the share sheet: two
+        // presentations on one view is how one of them stops appearing.
+        .alert(
+            LibraryDeleteFlow.question(
+                count: deleting.asking?.count ?? 0, skipped: deleting.skipping),
+            isPresented: askingDelete
+        ) {
+            Button(LibraryDeleteFlow.confirmTitle, role: .destructive) { confirmDelete() }
+            Button("Cancel", role: .cancel) { deleting.claim(.cancelled) }
+        } message: {
+            Text(LibraryDeleteFlow.explanation)
+        }
+    }
+
+    /// A delete run is out — this screen's, or one an abandoned select mode left running.
+    private var deleteRunning: Bool {
+        deleting.isDeleting || trips.isDeleting
+    }
+
+    private var askingDelete: Binding<Bool> {
+        Binding(
+            get: { deleting.asking != nil },
+            set: { if !$0 { deleting.claim(.cancelled) } }
+        )
+    }
+
+    /// The alert's yes: the handle is taken here, at the answer, and the whole run goes out on it
+    /// (`TripMembershipStore.delete`), claimed synchronously before any task. A run already sent
+    /// is let finish when select mode ends; only its answer stops counting (`abandon`).
+    private func confirmDelete() {
+        guard let handle = access()?.handle else {
+            deleting.claim(.cancelled)
+            return
+        }
+        guard deleting.claim(.confirmed) else { return }
+        Task {
+            await deleting.perform { uids in await trips.delete(uids, using: handle) }
+        }
+    }
+
+    /// Select mode's Share: the chosen rows, in the order they were chosen, each fetched as its
+    /// ORIGINAL through the session's download lane, fenced by the session generation it started
+    /// under (`MediaBatchShareFlow`). With no session there is nothing to fetch with.
+    private func shareSelection() {
+        guard let lane = shareLane ?? session.map(TripShareLane.session) else { return }
+        let rows = selection.rows(in: currentMembers)
+        shareTask = Task {
+            _ = await sharing.share(rows, generation: lane.generation, download: lane.download)
+        }
+    }
+
+    /// Select mode ended: a share still fetching stops being the live one and its task is
+    /// cancelled, an open question closes, and the dock is given back.
+    private func endSelect() {
+        sharing.abandon()
+        shareTask?.cancel()
+        shareTask = nil
+        deleting.abandon()
+        dock?.release(dockClaim)
     }
 
     private var manageMenu: some View {
@@ -737,5 +896,19 @@ final class TripManage {
         armed = nil
         question = nil
         return true
+    }
+}
+
+/// Where the Trip screen's Share fetches the chosen originals: the session's generation, which
+/// fences the batch, and its download lane (`SessionStore.download`).
+struct TripShareLane {
+    let generation: @MainActor () -> Int?
+    let download: @MainActor (MemoAttachment, AttachmentRendition) async throws -> URL
+
+    static func session(_ session: SessionStore) -> TripShareLane {
+        TripShareLane(
+            generation: { session.activeHandle?.generation },
+            download: { file, rendition in try await session.download(file, rendition) }
+        )
     }
 }

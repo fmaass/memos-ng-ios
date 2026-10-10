@@ -115,7 +115,8 @@ nonisolated public struct DockFold: Sendable, Equatable {
 /// What holds the dock's claim on the bottom chrome, which says what stands in the bars' place
 /// (MEMNG-684).
 nonisolated public enum DockClaim: String, Sendable, Equatable, CaseIterable {
-    /// The Library's select mode: its own toolbar stands where the bars stood, as in Photos.
+    /// Select mode on a grid of the Library's — the Library's own or a Trip's (MEMNG-721): its
+    /// toolbar stands where the bars stood, as in Photos.
     case select
     /// A pushed screen that stands for the whole app (`StackChrome`): nothing stands there.
     case takeover
@@ -135,7 +136,8 @@ nonisolated public enum DockBar: String, Sendable, Equatable, CaseIterable {
 
     /// The bar under `tab`'s root while the dock is in `mode` and `claim` holds the chrome, nil
     /// when nothing does. A claim decides alone — a takeover leaves nothing, select mode its
-    /// toolbar on the Library, whose mode alone it is — and leaves the mode as it was, so its end
+    /// toolbar on the Library and on Collections, whose Trip screen hosts the Library's grid and
+    /// selection (MEMNG-721) — and leaves the mode as it was, so its end
     /// brings back the bar the mode names. With no claim the scope toolbar stands on the Library
     /// in `scope`, and the tab bar everywhere else.
     public static func standing(mode: DockMode, on tab: MainTab, claim: DockClaim?) -> DockBar {
@@ -143,7 +145,7 @@ nonisolated public enum DockBar: String, Sendable, Equatable, CaseIterable {
         case .takeover:
             return .none
         case .select:
-            return tab == .library ? .select : .none
+            return tab == .library || tab == .collections ? .select : .none
         case nil:
             // Folded is a shape of the tabs, not another bar (`DockMode.folds(on:)`).
             return tab == .library && mode == .scope ? .scope : .tabs

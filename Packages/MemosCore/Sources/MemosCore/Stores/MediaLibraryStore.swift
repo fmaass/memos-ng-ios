@@ -397,43 +397,63 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         }
         isDeleting = true
         defer { isDeleting = false }
+        let outcome = await Self.deleteRun(
+            uids,
+            using: handle,
+            stillCurrent: { sessionStillCurrent(handle) },
+            succeeded: { session?.noteTransportSuccess(issuedUnder: handle.generation) },
+            failed: { await report($0, issuedUnder: handle, writesSentence: false) }
+        )
+        guard !outcome.stoppedForSessionChange else { return outcome }
+        forget(outcome.deleted)
+        return outcome
+    }
+
+    /// The run itself, without a store's bookkeeping: shared with the Trip screen's Delete
+    /// (`TripMembershipStore.delete`), so both send the same requests and stop on the same answers.
+    /// `stillCurrent` is asked before each send and once after the last answer; `failed` is told
+    /// the first failure, after which nothing further is sent.
+    static func deleteRun(
+        _ uids: [String],
+        using handle: SessionHandle,
+        stillCurrent: () -> Bool,
+        succeeded: () -> Void,
+        failed: (any Error) async -> Void
+    ) async -> LibraryDeleteOutcome {
         let client = handle.client
         var deleted: [String] = []
-        var failed: String?
+        var failure: String?
         var stoppedForSession = false
         for uid in uids {
-            guard sessionStillCurrent(handle) else {
+            guard stillCurrent() else {
                 MemosLog.api.info("a delete run outlived its session; nothing further is sent")
                 stoppedForSession = true
                 break
             }
             do {
-                try await Self.deleteOne(uid, client)
+                try await deleteOne(uid, client)
                 deleted.append(uid)
-                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                succeeded()
             } catch {
-                failed = uid
-                await report(error, issuedUnder: handle, writesSentence: false)
+                failure = uid
+                await failed(error)
                 break
             }
         }
         // Asked again after the last answer, whichever way the loop ended: a session that changed
         // while the final request was out, or while a failing one was, is never asked about by the
         // check before a next send, and the run is as stale as one stopped by that check.
-        if !stoppedForSession, !sessionStillCurrent(handle) {
+        if !stoppedForSession, !stillCurrent() {
             MemosLog.api.info("a delete run's last answer arrived for a session that has ended")
             stoppedForSession = true
         }
-        let reached = deleted.count + (failed == nil ? 0 : 1)
-        let outcome = LibraryDeleteOutcome(
+        let reached = deleted.count + (failure == nil ? 0 : 1)
+        return LibraryDeleteOutcome(
             deleted: deleted,
-            failed: failed,
+            failed: failure,
             notAttempted: Array(uids.dropFirst(reached)),
             stoppedForSessionChange: stoppedForSession
         )
-        guard !stoppedForSession else { return outcome }
-        forget(deleted)
-        return outcome
     }
 
     /// The deleted pictures leave the grid, and stay gone (`removed`).

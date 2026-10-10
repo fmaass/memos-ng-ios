@@ -126,6 +126,9 @@ public final class TripMembershipStore {
     }
 
     private var drained: [UUID: Drained] = [:]
+    /// The pictures a delete from a trip took (`delete`): absent from every trip's members, so
+    /// a page read before the delete cannot put one back.
+    private var removed: Set<String> = []
     private var inFlight: [UUID: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
     private var journals: [UUID: Journal] = [:]
     /// What the last journal load of each trip could not do, by trip.
@@ -187,7 +190,7 @@ public final class TripMembershipStore {
     public func members(for record: CollectionRecord) -> [LibraryRow] {
         guard let drained = drained(record) else { return [] }
         let excluded = Set(record.excludedUids)
-        return drained.rows.filter { !excluded.contains($0.id) }
+        return drained.rows.filter { !excluded.contains($0.id) && !removed.contains($0.id) }
     }
 
     /// What the record's members add up to, or nil before a drain has applied.
@@ -314,6 +317,64 @@ public final class TripMembershipStore {
     /// Whether the record's slot still holds the drain that was given `token`.
     private func owns(_ id: UUID, _ token: Int) -> Bool {
         inFlight[id]?.token == token
+    }
+
+    // MARK: - Select mode's Delete (MEMNG-721)
+
+    /// A delete run is out: the Trip screen's toolbar takes no second tap meanwhile.
+    public private(set) var isDeleting = false
+
+    /// Deletes the chosen pictures — the member's own only, as the Library's select mode chooses
+    /// them (`LibrarySelection.deletable`) — through the Library's own run
+    /// (`MediaLibraryStore.deleteRun`): one `DELETE /api/attachments/{uid}` at a time, in the
+    /// order chosen, stopping at the first failure.
+    ///
+    /// * Serialised by REFUSAL, as the Library's is: a second call while a run is out sends
+    ///   nothing and returns nil.
+    /// * Fenced by the session that issued it AND this store's identity generation: once either
+    ///   moved, nothing further is sent and nothing the run learned is applied.
+    /// * A failure goes through this store's funnel and writes no sentence over the photos: the
+    ///   screen's toast says what the run did.
+    /// * What went leaves every trip at once (`removed`, read by `members(for:)`), so a drain that
+    ///   read its page before the delete cannot bring it back, and each trip whose members it
+    ///   changed has its summary written again.
+    ///
+    /// - Returns: what the run did, or nil when it was refused.
+    public func delete(
+        _ uids: [String],
+        using handle: SessionHandle
+    ) async -> LibraryDeleteOutcome? {
+        guard !isDeleting else {
+            MemosLog.api.info("a trip delete asked for while another is running is refused")
+            return nil
+        }
+        isDeleting = true
+        defer { isDeleting = false }
+        let issued = generation
+        let outcome = await MediaLibraryStore.deleteRun(
+            uids,
+            using: handle,
+            stillCurrent: { issued == generation && sessionStillCurrent(handle) },
+            succeeded: { session?.noteTransportSuccess(issuedUnder: handle.generation) },
+            failed: { await report($0, issuedUnder: handle, while: { false }) }
+        )
+        guard !outcome.stoppedForSessionChange else { return outcome }
+        forget(pictures: outcome.deleted)
+        return outcome
+    }
+
+    /// The deleted pictures leave every trip, and stay gone; each live trip they left has its
+    /// summary written again.
+    private func forget(pictures uids: [String]) {
+        guard !uids.isEmpty else { return }
+        let gone = Set(uids)
+        removed.formUnion(gone)
+        for record in collections.records {
+            guard let held = drained(record), held.rows.contains(where: { gone.contains($0.id) }),
+                let summary = summary(for: record), summary != record.lastSummary
+            else { continue }
+            collections.setSummary(id: record.id, summary)
+        }
     }
 
     // MARK: - The journal
@@ -508,6 +569,7 @@ public final class TripMembershipStore {
         journals = [:]
         journalFlights = [:]
         journalErrors = [:]
+        removed = []
         generation += 1
     }
 

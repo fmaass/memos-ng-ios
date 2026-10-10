@@ -1265,3 +1265,159 @@ struct TripJournalTests {
         #expect(store.journalState(for: second) == .complete)
     }
 }
+
+// MARK: - Select mode's Delete on a trip (MEMNG-721)
+
+/// The Trip screen's Delete: the Library's one-at-a-time run (`MediaLibraryStore.delete`), sent
+/// through the same generated client, and what it took leaves the trip's members and summary.
+extension TripMembershipStoreTests {
+    private nonisolated static let deleteOperation =
+        "delete_attachment_api_attachments__uid__delete"
+
+    /// A server holding pictures 0..<3 under the trip's tag, recording every DELETE it is sent.
+    /// `hold`, when given, is waited on inside each DELETE after it is recorded.
+    private nonisolated static func deletingClient(
+        seen: LockedValue<[String]>, entered: TripSignal? = nil, hold: TripSignal? = nil,
+        answer: HTTPResponse.Status = .noContent
+    ) -> any APIProtocol {
+        Stub.client { request, _, operation in
+            guard operation == deleteOperation else { return Self.page(0..<3) }
+            seen.set(seen.get() + [request.path ?? ""])
+            entered?.signal()
+            if let hold { await hold.wait() }
+            return Stub.empty(answer)
+        }
+    }
+
+    /// The paths of the DELETEs for pictures `indices`, in that order.
+    private nonisolated static func deletes(_ indices: [Int]) -> [String] {
+        indices.map { "/api/attachments/\(uid($0))" }
+    }
+
+    @Test("a trip's delete sends one DELETE per picture in order, and they leave the trip")
+    func aDeleteLeavesTheTrip() async throws {
+        let seen = LockedValue<[String]>([])
+        let client = Self.deletingClient(seen: seen)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.members(for: record).count == 3, "control: the drain landed")
+
+        let outcome = await store.delete([Self.uid(2), Self.uid(0)], using: client.handle)
+
+        #expect(seen.get() == Self.deletes([2, 0]), "sent \(seen.get())")
+        #expect(outcome?.deleted == [Self.uid(2), Self.uid(0)])
+        #expect(store.members(for: record).map(\.id) == [Self.uid(1)])
+        let summary = try #require(current(record, in: collections)?.lastSummary)
+        #expect(summary.count == 1, "the record's summary still counts the deleted pictures")
+        #expect(summary.coverUid == Self.uid(1))
+        #expect(!store.isDeleting)
+    }
+
+    @Test("a second trip delete while one runs is refused and sends nothing")
+    func aSecondTripDeleteIsRefused() async {
+        let seen = LockedValue<[String]>([])
+        let entered = TripSignal()
+        let hold = TripSignal()
+        let client = Self.deletingClient(seen: seen, entered: entered, hold: hold)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+
+        let first = Task { await store.delete([Self.uid(0)], using: client.handle) }
+        #expect(await entered.wait(), "the first DELETE never went out")
+        #expect(store.isDeleting)
+        let second = await store.delete([Self.uid(1)], using: client.handle)
+        hold.signal()
+        let outcome = await first.value
+
+        #expect(second == nil, "the second run was not refused")
+        #expect(outcome?.deleted == [Self.uid(0)])
+        #expect(seen.get() == Self.deletes([0]), "sent \(seen.get())")
+        #expect(store.members(for: record).map(\.id) == [Self.uid(1), Self.uid(2)])
+    }
+
+    @Test("a drain read before a trip delete cannot bring the deleted picture back")
+    func aLateDrainDoesNotResurrect() async {
+        let reads = LockedValue<Int>(0)
+        let entered = TripSignal()
+        let hold = TripSignal()
+        let client = Stub.client { _, _, operation in
+            if operation == Self.deleteOperation { return Stub.empty(.noContent) }
+            reads.set(reads.get() + 1)
+            if reads.get() == 2 {
+                entered.signal()
+                await hold.wait()
+            }
+            return Self.page(0..<3)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+
+        // A second drain reads the page while the picture is still on the server, and answers
+        // after the delete has taken it.
+        let late = Task { await store.drain(record, using: client.handle, baseURL: Stub.baseURL) }
+        #expect(await entered.wait(), "the second drain never read")
+        _ = await store.delete([Self.uid(1)], using: client.handle)
+        hold.signal()
+        await late.value
+
+        #expect(store.members(for: record).map(\.id) == [Self.uid(0), Self.uid(2)])
+        #expect(current(record, in: collections)?.lastSummary?.count == 2)
+    }
+
+    @Test("a session change during a trip delete sends nothing further and applies nothing")
+    func aSessionChangeStopsTheTripDelete() async {
+        let seen = LockedValue<[String]>([])
+        let entered = TripSignal()
+        let hold = TripSignal()
+        let client = Self.deletingClient(seen: seen, entered: entered, hold: hold)
+        let issued = SessionHandle(client: client, generation: 1)
+        let session = TripSession(for: issued)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        store.reports(to: session)
+        await store.drain(record, using: issued, baseURL: Stub.baseURL)
+
+        let run = Task { await store.delete([Self.uid(0), Self.uid(1)], using: issued) }
+        #expect(await entered.wait(), "the first DELETE never went out")
+        session.activeHandle = SessionHandle(client: client, generation: 2)
+        hold.signal()
+        let outcome = await run.value
+
+        #expect(seen.get() == Self.deletes([0]), "sent \(seen.get())")
+        #expect(outcome?.stoppedForSessionChange == true)
+        #expect(outcome?.notAttempted == [Self.uid(1)])
+        #expect(store.members(for: record).count == 3, "a stale run changed the trip")
+    }
+
+    @Test("a refused trip delete goes to the session's funnel and writes no sentence")
+    func aRefusedTripDeleteReachesTheSession() async {
+        let seen = LockedValue<[String]>([])
+        let handled = LockedValue<Int>(0)
+        let client = Self.deletingClient(seen: seen, answer: .unauthorized)
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(
+            collections: collections,
+            onUnauthorized: { (_: CredentialRefusal) in
+                handled.set(handled.get() + 1)
+                return .endedSession
+            })
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+
+        let outcome = await store.delete([Self.uid(0), Self.uid(1)], using: client.handle)
+
+        #expect(handled.get() == 1, "the refusal did not reach the session")
+        #expect(seen.get().count == 1, "the run went on past a refusal: \(seen.get())")
+        #expect(outcome?.failed == Self.uid(0))
+        #expect(outcome?.deleted.isEmpty == true)
+        #expect(store.lastError == nil, "the delete wrote a sentence over the photos")
+        #expect(store.members(for: record).count == 3)
+    }
+}

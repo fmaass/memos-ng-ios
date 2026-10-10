@@ -385,7 +385,8 @@ struct DockModeTests {
 
     /// The one bottom bar (MEMNG-684), for every mode x tab x claim: 3 x 4 x 3 rows, written out.
     /// Folded is a shape of the tabs (MEMNG-690): it stands the tabs wherever `tabs` would.
-    /// A takeover leaves nothing anywhere; select mode its toolbar on the Library and nothing
+    /// A takeover leaves nothing anywhere; select mode its toolbar on the Library and on
+    /// Collections, whose Trip screen hosts the Library's selection (MEMNG-721), and nothing
     /// elsewhere; with no claim the scope stands on the Library in `scope`, the tabs otherwise.
     @Test("one bottom bar for every mode, tab and claim")
     func oneBarStands() {
@@ -394,7 +395,7 @@ struct DockModeTests {
             (.tabs, .timeline, .select, .none),
             (.tabs, .timeline, .takeover, .none),
             (.tabs, .collections, nil, .tabs),
-            (.tabs, .collections, .select, .none),
+            (.tabs, .collections, .select, .select),
             (.tabs, .collections, .takeover, .none),
             (.tabs, .places, nil, .tabs),
             (.tabs, .places, .select, .none),
@@ -406,7 +407,7 @@ struct DockModeTests {
             (.scope, .timeline, .select, .none),
             (.scope, .timeline, .takeover, .none),
             (.scope, .collections, nil, .tabs),
-            (.scope, .collections, .select, .none),
+            (.scope, .collections, .select, .select),
             (.scope, .collections, .takeover, .none),
             (.scope, .places, nil, .tabs),
             (.scope, .places, .select, .none),
@@ -418,7 +419,7 @@ struct DockModeTests {
             (.folded, .timeline, .select, .none),
             (.folded, .timeline, .takeover, .none),
             (.folded, .collections, nil, .tabs),
-            (.folded, .collections, .select, .none),
+            (.folded, .collections, .select, .select),
             (.folded, .collections, .takeover, .none),
             (.folded, .places, nil, .tabs),
             (.folded, .places, .select, .none),
@@ -436,6 +437,21 @@ struct DockModeTests {
         // Every combination is a row: none is left to a default.
         let rows = Set(table.map { "\($0.0)-\($0.1)-\($0.2.map(\.rawValue) ?? "-")" })
         #expect(rows.count == table.count, "a combination written twice")
+    }
+
+    /// Select mode's toolbar stands where a grid of the Library's can be selected in: the Library
+    /// and a Trip on the Collections tab (MEMNG-721). Timeline and Places host no selection, so a
+    /// claim there leaves nothing; ending the claim brings back the bar the mode names.
+    @Test("select mode's toolbar stands on the Library and on Collections, and nowhere else")
+    func selectStandsOnCollections() {
+        for mode in DockMode.allCases {
+            #expect(DockBar.standing(mode: mode, on: .collections, claim: .select) == .select)
+            #expect(DockBar.standing(mode: mode, on: .library, claim: .select) == .select)
+            #expect(DockBar.standing(mode: mode, on: .timeline, claim: .select) == .none)
+            #expect(DockBar.standing(mode: mode, on: .places, claim: .select) == .none)
+        }
+        #expect(DockBar.standing(mode: .tabs, on: .collections, claim: nil) == .tabs)
+        #expect(DockBar.standing(mode: .folded, on: .collections, claim: nil) == .tabs)
     }
 
     /// One reading of a tab's scroll view as the feed hands it to `DockFold`: where it stands,
