@@ -20,10 +20,11 @@ struct DynamicTypeFittingTests {
 
     @Test("the visibility control fits without truncating at the largest text size")
     func visibilityControlFitsAtAccessibility5() {
-        // `nil` with an account default is the WIDEST the pill ever gets — "Default (Protected)"
-        // — which is exactly the label the resolved-default fix introduced.
+        // `nil` with an account default is the WIDEST the pill ever gets — "Default (Private)" or
+        // "Default (Just us)" — which is exactly the label the resolved-default fix introduced.
         let choices: [(MemoVisibility?, MemoVisibility?)] = [
             (nil, nil),
+            (nil, .private),
             (nil, .protected),
             (nil, .public),
             (.private, nil),

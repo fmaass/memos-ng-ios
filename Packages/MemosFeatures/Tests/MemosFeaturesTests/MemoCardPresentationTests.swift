@@ -69,7 +69,7 @@ struct MemoCardPresentationTests {
         #expect(VisibilityChoice.title(selection: nil, accountDefault: .public) == nil)
         // An explicit choice speaks for itself and never mentions the default.
         #expect(
-            VisibilityChoice.title(selection: .protected, accountDefault: .public) == "Protected"
+            VisibilityChoice.title(selection: .protected, accountDefault: .public) == "Just us"
         )
         #expect(
             VisibilityChoice.symbol(selection: .protected, accountDefault: .public)
@@ -85,11 +85,11 @@ struct MemoCardPresentationTests {
     func compactKeepsTheAnswer() {
         #expect(
             VisibilityChoice.title(selection: nil, accountDefault: .protected, compact: true)
-                == "Protected"
+                == "Just us"
         )
         #expect(
             VisibilityChoice.title(selection: nil, accountDefault: .protected, compact: false)
-                == "Default (Protected)"
+                == "Default (Just us)"
         )
         // Nothing to shorten when nothing is known, and an explicit choice is already short.
         #expect(
@@ -127,7 +127,7 @@ struct MemoCardPresentationTests {
     func publicIsCarriedByItsGlyph() {
         #expect(MemoVisibility.public.pillLabel == nil)
         #expect(MemoVisibility.private.pillLabel == "Private")
-        #expect(MemoVisibility.protected.pillLabel == "Protected")
+        #expect(MemoVisibility.protected.pillLabel == "Just us")
         // The full word is untouched — that is what the a11y label and the menu rows use.
         #expect(MemoVisibility.public.label == "Public")
         #expect(MemoVisibility.public.symbolName == "globe")
@@ -144,7 +144,7 @@ struct MemoCardPresentationTests {
         #expect(VisibilityChoice.title(selection: .private, accountDefault: .public) == "Private")
         #expect(
             VisibilityChoice.title(selection: nil, accountDefault: .protected)
-                == "Default (Protected)"
+                == "Default (Just us)"
         )
         #expect(VisibilityChoice.title(selection: nil, accountDefault: nil) == "Default")
     }
@@ -197,7 +197,7 @@ struct MemoCardPresentationTests {
     func visibilityVocabulary() {
         let labels = MemoVisibility.allCases.map(\.label)
         let symbols = MemoVisibility.allCases.map(\.symbolName)
-        #expect(labels == ["Private", "Protected", "Public"])
+        #expect(labels == ["Private", "Just us", "Public"])
         #expect(Set(labels).count == labels.count)
         #expect(Set(symbols).count == symbols.count)
         #expect(symbols.allSatisfy { !$0.isEmpty })

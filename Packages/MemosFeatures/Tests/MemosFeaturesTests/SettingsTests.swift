@@ -153,7 +153,7 @@ struct DefaultVisibilityChoiceTests {
         #expect(DefaultVisibilityChoice.notice(for: .private) == nil)
         #expect(DefaultVisibilityChoice.notice(for: nil) == nil)
         let notice = try #require(DefaultVisibilityChoice.notice(for: .protected))
-        #expect(notice.contains("Protected"))
+        #expect(notice.contains("Just us"))
     }
 
     /// The round trip the section exists for, over the function the compose sheet actually reads.

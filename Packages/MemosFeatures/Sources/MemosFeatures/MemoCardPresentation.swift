@@ -140,7 +140,7 @@ extension MemoVisibility {
     public var label: String {
         switch self {
         case .private: "Private"
-        case .protected: "Protected"
+        case .protected: "Just us"
         case .public: "Public"
         }
     }

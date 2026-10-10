@@ -881,9 +881,9 @@ enum VisibilityChoice {
     /// consequence is how a control starts looking like it is saying something it is not.
     ///
     /// `compact` drops the framing and keeps the answer. At an accessibility text size
-    /// "Default (Protected)" wants 518pt of the 369 a compose sheet has, and a pill that refuses
-    /// to truncate would simply run off the screen — so at those sizes it says "Protected", which
-    /// is the part that was worth saying.
+    /// "Default (Just us)" wants far more than the 369pt a compose sheet has, and a pill that
+    /// refuses to truncate would simply run off the screen — so at those sizes it says "Just us",
+    /// which is the part that was worth saying.
     static func title(
         selection: MemoVisibility?,
         accountDefault: MemoVisibility?,
@@ -1148,7 +1148,7 @@ nonisolated public enum ComposeMetaRow {
         case glyph
         /// The short answer: a day and a month, a count, a single word.
         case short
-        /// The whole thing, framing included ("Default (Protected)").
+        /// The whole thing, framing included ("Default (Just us)").
         case spelledOut
     }
 

@@ -12,3 +12,15 @@ public enum ShareVisibility: String, Sendable, Equatable, CaseIterable {
     case protected = "PROTECTED"
     case `public` = "PUBLIC"
 }
+
+extension ShareVisibility {
+    /// The word the share sheet's picker shows. The app's own `MemoVisibility.label` says the same
+    /// three words, mirrored here for the reason the values are: the extension cannot link it.
+    public var label: String {
+        switch self {
+        case .private: "Private"
+        case .protected: "Just us"
+        case .public: "Public"
+        }
+    }
+}

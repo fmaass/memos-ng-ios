@@ -74,9 +74,9 @@ struct ShareRootView: View {
                 Section("Visibility") {
                     Picker("Visibility", selection: $visibility) {
                         Text("Account default").tag(ShareVisibility?.none)
-                        Text("Private").tag(ShareVisibility?.some(.private))
-                        Text("Protected").tag(ShareVisibility?.some(.protected))
-                        Text("Public").tag(ShareVisibility?.some(.public))
+                        Text(ShareVisibility.private.label).tag(ShareVisibility?.some(.private))
+                        Text(ShareVisibility.protected.label).tag(ShareVisibility?.some(.protected))
+                        Text(ShareVisibility.public.label).tag(ShareVisibility?.some(.public))
                     }
                     .pickerStyle(.segmented)
                 }
