@@ -26,15 +26,17 @@ public struct TripTagSpan: Sendable, Equatable {
     }
 }
 
-/// The members of a trip: every picture of every memo carrying the record's tag, oldest first,
+/// The members of a trip: every picture and video of every memo carrying the record's tag, oldest
+/// first,
 /// minus the record's exclusions — and what they add up to.
 ///
-/// **Membership is DRAINED, never derived.** `GET /api/attachments?tag=<t>&type=image&order=
-/// taken_asc&limit=60` is read page after page, following `X-Next-Cursor` until the server stops
-/// sending one, up to `memberCap` pictures (beyond which the state is `truncated`). A count or an
-/// extremum cannot stand in for it: exclusions are device-local, so only the list itself says
-/// which pictures are left and which of them is first. The grid, the viewer, the map and the
-/// summary all read the SAME drained list, so an excluded picture is absent from every one.
+/// **Membership is DRAINED, never derived.** `GET /api/attachments?tag=<t>&order=taken_asc&
+/// limit=60` — no `type`: every kind of file, as the Library's All asks (MEMNG-740) — is read page
+/// after page, following `X-Next-Cursor` until the server stops sending one, up to `memberCap`
+/// files (beyond which the state is `truncated`). A count or an extremum cannot stand in for it:
+/// exclusions are device-local, so only the list itself says which files are left and which of
+/// them is first. The grid, the viewer, the map and the summary all read the SAME drained list, so
+/// an excluded picture is absent from every one.
 ///
 /// **One drain per record, joined.** A second `drain` for a record whose drain is already on the
 /// wire — under the same session and the same tag — does not send anything: it JOINS the drain
@@ -61,10 +63,11 @@ public struct TripTagSpan: Sendable, Equatable {
 /// decision rule; the funnel is `MediaLibraryStore.report`'s, in its order.
 ///
 /// **The New trip sheet reads less.** For one tag without exclusions a count and two extrema are
-/// enough, so the sheet never drains: `loadTagCounts` reads `GET /api/attachments/tags?type=image`
-/// (the length of the image list under each tag, so a tagged video is not counted) and
-/// `loadSpan(ofTag:)` reads the first picture of `taken_asc` and of `taken_desc`, `limit=1`, both
-/// `type=image`. Each is refused while the same read is already in flight, and fenced the same way.
+/// enough, so the sheet never drains: `loadTagCounts` reads `GET /api/attachments/tags` (the
+/// length of every kind's list under each tag, a tagged video counted as a member is) and
+/// `loadSpan(ofTag:)` reads the first file of `taken_asc` and of `taken_desc`, `limit=1`, neither
+/// with a `type`. Each is refused while the same read is already in flight, and fenced the same
+/// way.
 ///
 /// **The journal is the trip's memos, oldest first** (MEMNG-718): `GET /api/memos?tag=<t>&sort=
 /// created_at` read page after page through the generated client, following the list's
@@ -92,7 +95,7 @@ public final class TripMembershipStore {
     /// What the last drain, or the sheet's last read, could not do — said the way
     /// `MediaLibraryStore` says it.
     public private(set) var lastError: String?
-    /// The image count of every tag, in the server's order, for the New trip sheet.
+    /// The count of every tag, every kind of file, in the server's order, for the New trip sheet.
     public private(set) var tagCounts: [LibraryTag] = []
     /// Whether `tagCounts` is an answer, so the sheet can tell "no tag has a picture" from "not
     /// read yet".
@@ -246,7 +249,7 @@ public final class TripMembershipStore {
             repeat {
                 let page = try await MediaLibraryStore.page(
                     client,
-                    filter: .images,
+                    filter: .all,
                     order: .oldestFirst,
                     tag: lineage.tag,
                     cursor: cursor,
@@ -257,7 +260,7 @@ public final class TripMembershipStore {
                     MemosLog.api.info("a trip's page answered for a list that has moved on")
                     return
                 }
-                rows = MediaLibraryStore.merged(rows, with: page.items, filter: .images)
+                rows = MediaLibraryStore.merged(rows, with: page.items, filter: .all)
                 cursor = page.nextCursor
                 if rows.count >= memberCap {
                     truncated = rows.count > memberCap || cursor != nil
@@ -491,14 +494,15 @@ public final class TripMembershipStore {
 
     // MARK: - The New trip sheet
 
-    /// Reads every tag's IMAGE count. Refused, not sent, while the same read is in flight.
+    /// Reads every tag's count, videos included. Refused, not sent, while the same read is in
+    /// flight.
     public func loadTagCounts(using handle: SessionHandle) async {
         guard !countsInFlight else { return }
         countsInFlight = true
         let issued = generation
         defer { if issued == generation { countsInFlight = false } }
         do {
-            let rows = try await LibraryTagStore.tags(handle.client, filter: .images)
+            let rows = try await LibraryTagStore.tags(handle.client, filter: .all)
             guard issued == generation, sessionStillCurrent(handle) else {
                 MemosLog.api.info("a trip sheet's tag counts answered for a session that moved on")
                 return
@@ -513,7 +517,7 @@ public final class TripMembershipStore {
         }
     }
 
-    /// Reads one tag's first and last taken date among its images. Refused, not sent, while a
+    /// Reads one tag's first and last taken date among its files. Refused, not sent, while a
     /// read of the same tag is in flight.
     public func loadSpan(ofTag tag: String, using handle: SessionHandle, baseURL: URL) async {
         guard spansInFlight.insert(tag).inserted else { return }
@@ -543,7 +547,7 @@ public final class TripMembershipStore {
     ) async throws -> Date? {
         let page = try await MediaLibraryStore.page(
             handle.client,
-            filter: .images,
+            filter: .all,
             order: order,
             tag: tag,
             cursor: nil,

@@ -5,8 +5,8 @@ import MemosAPI
 import OpenAPIRuntime
 import Testing
 
-/// A trip's membership: drained from `GET /api/attachments` under the trip's tag, images only,
-/// oldest first, to the end of the cursor chain or the cap — then filtered by the record's
+/// A trip's membership: drained from `GET /api/attachments` under the trip's tag, every kind of
+/// file, oldest first, to the end of the cursor chain or the cap — then filtered by the record's
 /// exclusions and summed up onto the record.
 ///
 /// The server is a script under the REAL generated client (`StubTransport`), so the query the
@@ -60,6 +60,15 @@ struct TripMembershipStoreTests {
 
     private nonisolated static func uid(_ index: Int) -> String {
         "p" + String(format: "%04d", index)
+    }
+
+    /// The `type` query item of a request as the log holds it (`<operation> <path>`), or nil when
+    /// it is ABSENT — which is how every kind is asked for. An empty `?type=` is not absent.
+    private nonisolated static func kind(_ request: String) -> String? {
+        let path = request.split(separator: " ", maxSplits: 1).last.map(String.init) ?? ""
+        let items = URLComponents(string: path)?.queryItems ?? []
+        guard let item = items.first(where: { $0.name == "type" }) else { return nil }
+        return item.value ?? ""
     }
 
     /// Pictures `range` as one page, with its continuation token where the server puts it.
@@ -128,7 +137,7 @@ struct TripMembershipStoreTests {
         for request in sent {
             #expect(request.hasPrefix(Self.listOperation), "not the list operation: \(request)")
             #expect(request.contains("tag=\(Self.tag)"), "no tag: \(request)")
-            #expect(request.contains("type=image"), "not images only: \(request)")
+            #expect(Self.kind(request) == nil, "not every kind of file: \(request)")
             #expect(request.contains("order=taken_asc"), "not oldest first: \(request)")
             #expect(request.contains("limit=60"), "not pages of 60: \(request)")
         }
@@ -140,6 +149,58 @@ struct TripMembershipStoreTests {
             coverUid: Self.uid(0))
         #expect(store.summary(for: record) == expected)
         #expect(current(record, in: collections)?.lastSummary == expected, "no summary written")
+    }
+
+    /// The owner's rule (2026-10-09): a trip is the Library's All under its tag, every picture
+    /// AND every video of a member memo. The server answers by the kind asked for, so a drain that
+    /// asked for images alone, or dropped the clip on arrival, would leave the clip out.
+    @Test("a video of a tagged memo is a member, and the drain asks with no type at all")
+    func aVideoIsAMember() async {
+        let paths = LockedValue<[String]>([])
+        let clip = Self.item("clip", taken: Self.taken(0), mime: "video/mp4")
+        let client = Stub.client { request, _, operation in
+            let path = request.path ?? ""
+            paths.set(paths.get() + ["\(operation) \(path)"])
+            let pictures = [1, 2].map { Self.item(Self.uid($0), taken: Self.taken($0)) }
+            return Self.page(Self.kind(path) == nil ? [clip] + pictures : pictures)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+
+        let members = store.members(for: record)
+        #expect(members.map(\.id) == ["clip", Self.uid(1), Self.uid(2)], "\(members.map(\.id))")
+        #expect(members.first?.attachment.mediaKind == .video, "the clip is not a video")
+        // The clip is taken first, so the cover the summary falls back to is its poster's.
+        #expect(store.summary(for: record)?.coverUid == "clip")
+        #expect(store.summary(for: record)?.count == 3, "the clip is not counted")
+        let sent = paths.get()
+        #expect(sent.count == 1, "not one page: \(sent)")
+        for request in sent {
+            #expect(request.contains("tag=\(Self.tag)"), "control: the query was read: \(request)")
+            #expect(Self.kind(request) == nil, "the drain named a kind: \(request)")
+        }
+    }
+
+    @Test("a tag that spells a kind is still one tag, and the drain still names no kind")
+    func aTagSpellingAKind() async {
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            paths.set(paths.get() + [request.path ?? ""])
+            return Self.page(0..<1)
+        }
+        let collections = collections()
+        let record = collections.create(title: "Odd", tags: ["x&type=image"])
+        let store = TripMembershipStore(collections: collections)
+        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+
+        let sent = paths.get()
+        let items = sent.first.flatMap { URLComponents(string: $0)?.queryItems } ?? []
+        #expect(
+            items.filter { $0.name == "tag" }.map(\.value) == ["x&type=image"], "\(sent)")
+        #expect(Self.kind(sent.first ?? "") == nil, "the tag's text stood in for a kind: \(sent)")
+        #expect(store.members(for: record).count == 1, "control: the drain landed")
     }
 
     @Test("a drain stops at 2000 members and says it was truncated")
@@ -606,37 +667,39 @@ struct TripMembershipStoreTests {
 
     // MARK: - the New trip sheet
 
-    @Test("the sheet's count is the image count when the tag also carries a video")
-    func theSheetCountsImagesOnly() async {
+    @Test("the sheet's count and span take in a video the tag carries, with no type asked")
+    func theSheetCountsEveryKind() async {
         let paths = LockedValue<[String]>([])
         let client = Stub.client { request, _, operation in
             let path = request.path ?? ""
             paths.set(paths.get() + ["\(operation) \(path)"])
-            // Two pictures and a clip carry the tag: the count with no type would say 3.
-            let images = path.contains("type=image")
+            // Two pictures and a clip carry the tag: the count of the images alone would say 2,
+            // and the clip, taken at hour 9, is the last thing the tag holds.
+            let images = Self.kind(path) == "image"
             if operation == Self.tagsOperation {
                 return Stub.json(#"[{"name":"portugal2026","count":\#(images ? 2 : 3)}]"#)
             }
             let clip = Self.item("clip", taken: Self.taken(9), mime: "video/mp4")
-            if !images { return Self.page([clip]) }
-            let index = path.contains("order=taken_desc") ? 5 : 1
-            return Self.page([Self.item(Self.uid(index), taken: Self.taken(index))])
+            if path.contains("order=taken_desc") {
+                return Self.page([images ? Self.item(Self.uid(5), taken: Self.taken(5)) : clip])
+            }
+            return Self.page([Self.item(Self.uid(1), taken: Self.taken(1))])
         }
         let collections = collections()
         let store = TripMembershipStore(collections: collections)
         await store.loadTagCounts(using: client.handle)
         await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(store.tagCounts == [LibraryTag(name: Self.tag, count: 2)], "\(store.tagCounts)")
+        #expect(store.tagCounts == [LibraryTag(name: Self.tag, count: 3)], "\(store.tagCounts)")
         #expect(store.tagCountsLoaded)
         #expect(
             store.spans[Self.tag]
-                == TripTagSpan(firstTaken: Self.taken(1), lastTaken: Self.taken(5)),
-            "the span is not the images' span")
+                == TripTagSpan(firstTaken: Self.taken(1), lastTaken: Self.taken(9)),
+            "the span is not every kind's span")
         let sent = paths.get()
         #expect(sent.count == 3, "not one count read and two extrema: \(sent)")
         #expect(sent.first?.hasPrefix(Self.tagsOperation) == true, "control: the counts were read")
-        for request in sent { #expect(request.contains("type=image"), "not images: \(request)") }
+        for request in sent { #expect(Self.kind(request) == nil, "a kind was named: \(request)") }
         for request in sent.dropFirst() {
             #expect(request.contains("limit=1"), "an extremum read more than one: \(request)")
             #expect(request.contains("tag=\(Self.tag)"))

@@ -727,6 +727,15 @@ final class RowsOnScreen {
     var rows: Set<String> = []
 }
 
+/// How a `LibraryGrid` cuts its list (MEMNG-740).
+enum LibraryGridGrouping {
+    /// The Library's All: a header per month, a heading per day, a block per day.
+    case byDay
+    /// A trip's: the whole list as one block, with no header and no heading
+    /// (`MediaLibraryPresentation.flatRows`).
+    case flat
+}
+
 struct LibraryGrid: View {
     let items: [LibraryRow]
     /// What the store last failed with, shown at the top of the scroll.
@@ -767,6 +776,9 @@ struct LibraryGrid: View {
     var above: AnyView?
     /// What the host draws at the foot of the scroll, under the last picture — a trip's cap note.
     var below: AnyView?
+    /// Days with their headings, or one block with none — a trip's (MEMNG-740). The same tiles,
+    /// zoom, tap and long press either way: only the rows the stack is cut into differ.
+    var grouping = LibraryGridGrouping.byDay
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
@@ -897,6 +909,8 @@ struct LibraryGrid: View {
     /// key, so a grid grouping in another zone than the buckets were counted in still lands on the
     /// day that holds the row the store found.
     private func headingID(holding fileID: String) -> String? {
+        // A flat grid has no heading to land on.
+        guard grouping == .byDay else { return nil }
         for month in sections {
             if let day = month.days.first(where: { $0.pictures.contains { $0.id == fileID } }) {
                 return day.headingID
@@ -948,42 +962,56 @@ struct LibraryGrid: View {
     /// bands (`MediaLibraryPresentation.mosaicBands`).
     ///
     /// Headings and bands are siblings in the one lazy stack, so it stays lazy inside a long day as
-    /// well as across days: only what is near the screen is ever built.
+    /// well as across days: only what is near the screen is ever built. A flat grid is the same
+    /// bands with no header and no heading among them (MEMNG-740).
     private var gallery: some View {
         LazyVStack(spacing: 0) {
-            ForEach(sections) { month in
-                LibraryMonthHeader(label: month.label)
-                    .padding(.horizontal, DesignTokens.Space.tight)
-                    .padding(.bottom, DesignTokens.Space.snug)
-                // One view per element, whose `.id` IS the element's identity: a lazy stack
-                // resolves a scroll to a row it has not built through the ForEach's identity, so
-                // a heading that was one of several views of a day's element could never be
-                // scrolled to before it was on screen.
-                ForEach(month.rows) { row in
-                    switch row {
-                    case .heading(let day):
-                        LibraryDayHeading(
-                            weekday: day.weekday,
-                            date: day.date,
-                            count: MediaLibraryPresentation.dayCount(day.key, in: dayBuckets)
-                        )
-                        .padding(.horizontal, DesignTokens.Space.regular)
+            switch grouping {
+            case .byDay:
+                ForEach(sections) { month in
+                    LibraryMonthHeader(label: month.label)
+                        .padding(.horizontal, DesignTokens.Space.tight)
                         .padding(.bottom, DesignTokens.Space.snug)
-                        .id(row.id)
-                        .modifier(marker(row.id, day: day.key, order: 2 * day.dayIndex))
-                    case .band(let band, let place):
-                        dayBand(band, first: place.first, last: place.last)
-                            .padding(.horizontal, DesignTokens.Space.regular)
-                            // 2 pt between bands, 22 pt of air before the next day's heading.
-                            .padding(
-                                .bottom,
-                                place.last ? LibraryDayHeading.air : DesignTokens.Space.hair
-                            )
-                            .id(row.id)
-                            .modifier(marker(row.id, day: place.day, order: 2 * place.dayIndex + 1))
+                    // One view per element, whose `.id` IS the element's identity: a lazy stack
+                    // resolves a scroll to a row it has not built through the ForEach's identity,
+                    // so a heading that was one of several views of a day's element could never
+                    // be scrolled to before it was on screen.
+                    ForEach(month.rows) { row in
+                        element(row)
                     }
                 }
+            case .flat:
+                ForEach(MediaLibraryPresentation.flatRows(for: items)) { row in
+                    element(row)
+                }
             }
+        }
+    }
+
+    /// One element of the lazy stack: a day's heading, or one band of a block.
+    @ViewBuilder
+    private func element(_ row: LibraryAllRow) -> some View {
+        switch row {
+        case .heading(let day):
+            LibraryDayHeading(
+                weekday: day.weekday,
+                date: day.date,
+                count: MediaLibraryPresentation.dayCount(day.key, in: dayBuckets)
+            )
+            .padding(.horizontal, DesignTokens.Space.regular)
+            .padding(.bottom, DesignTokens.Space.snug)
+            .id(row.id)
+            .modifier(marker(row.id, day: day.key, order: 2 * day.dayIndex))
+        case .band(let band, let place):
+            dayBand(band, first: place.first, last: place.last)
+                .padding(.horizontal, DesignTokens.Space.regular)
+                // 2 pt between bands, 22 pt of air before the next day's heading.
+                .padding(
+                    .bottom,
+                    place.last ? LibraryDayHeading.air : DesignTokens.Space.hair
+                )
+                .id(row.id)
+                .modifier(marker(row.id, day: place.day, order: 2 * place.dayIndex + 1))
         }
     }
 
@@ -1029,6 +1057,9 @@ struct LibraryGrid: View {
         MediaLibraryPresentation.daySections(for: items)
     }
 
+    /// What a test finds a loaded tile by: the file it shows, which its label does not say.
+    static func tileIdentifier(_ uid: String) -> String { "library-tile:\(uid)" }
+
     @ViewBuilder
     private func tile(
         _ attachment: MemoAttachment, slot: MosaicSlot, row: LibraryRow?
@@ -1058,6 +1089,7 @@ struct LibraryGrid: View {
             .buttonStyle(.plain)
             .accessibilityLabel(MediaLibraryPresentation.accessibilityLabel(for: kind))
             .accessibilityHint(hint)
+            .accessibilityIdentifier(Self.tileIdentifier(attachment.uid))
             .contextMenu {
                 menu(attachment)
             } preview: {

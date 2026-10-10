@@ -119,6 +119,46 @@ struct LibraryDayGroupTests {
         #expect(bands([.heroRight, .square]) == [0..<1, 1..<2], "a hero does not take a square")
     }
 
+    /// A trip's grid (MEMNG-740): the list as ONE block, in the order it was handed over, with no
+    /// heading row at all, its frames one cycle across the days, and every picture keeping its
+    /// index in the whole list.
+    @Test("a flat grid is one block of bands with no heading, its frames one cycle across days")
+    func flatIsOneBlock() throws {
+        let items = try [
+            Self.row("a1", "2026-03-12T09:00:00Z"),
+            Self.row("a2", "2026-03-12T10:00:00Z"),
+            Self.row("b1", "2026-03-14T09:00:00Z"),
+            Self.row("c1", "2026-03-16T09:00:00Z"),
+            Self.row("c2", "2026-03-16T10:00:00Z"),
+        ]
+        let rows = MediaLibraryPresentation.flatRows(for: items, timeZone: Self.zurich)
+        let bands = rows.compactMap { row -> (LibraryDayBand, LibraryBandPlace)? in
+            if case .band(let band, let place) = row { return (band, place) }
+            return nil
+        }
+        #expect(bands.count == rows.count, "a flat grid drew a heading: \(rows.map(\.id))")
+        // Five pictures over three days: A, then two squares — one cycle, not a block a day.
+        #expect(bands.flatMap { $0.0.pictures.map(\.slot) } == Self.a + [.square, .square])
+        #expect(bands.map { $0.0.pictures.map(\.id) } == [["a1", "a2", "b1"], ["c1", "c2"]])
+        #expect(bands.flatMap { $0.0.pictures.map(\.index) } == Array(0..<5))
+        // One block: rounded at its top and at its foot alone.
+        #expect(bands.map { $0.1.first } == [true, false])
+        #expect(bands.map { $0.1.last } == [false, true])
+        // Each band names the day its first picture was taken on, for the date pill alone.
+        #expect(bands.map { $0.1.day } == ["2026-03-12", "2026-03-16"])
+    }
+
+    @Test("a flat grid of one picture is one wide band, and of none is no row")
+    func flatEdges() throws {
+        let one = try Self.row("a1", "2026-03-12T09:00:00Z")
+        let picture = LibraryDayPicture(attachment: one.attachment, index: 0, slot: .wide)
+        let place = LibraryBandPlace(day: "2026-03-12", dayIndex: 0, first: true, last: true)
+        #expect(
+            MediaLibraryPresentation.flatRows(for: [one], timeZone: Self.zurich)
+                == [.band(LibraryDayBand(pictures: [picture]), place)])
+        #expect(MediaLibraryPresentation.flatRows(for: [], timeZone: Self.zurich).isEmpty)
+    }
+
     @Test("a heading counts the whole day's bucket, and nothing while the buckets are unread")
     func dayCount() {
         let buckets = [

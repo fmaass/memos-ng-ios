@@ -26,8 +26,8 @@ extension TripRoute: @MainActor StackRoute {
 }
 
 /// A trip, in Photos mode (MEMNG-714): its hero — the cover, the title, the span and the count —
-/// the `Photos | Journal | Map` chips, and every one of its pictures oldest first, under the
-/// Library's own day headings.
+/// the `Photos | Journal | Map` chips, and every one of its pictures and videos oldest first, as
+/// one flat block: the Library's All without its days (MEMNG-740, `LibraryGridGrouping.flat`).
 ///
 /// **The grid is the Library's.** `LibraryGrid` is hosted over the trip's DRAINED members
 /// (`TripMembershipStore.members(for:)`), which are already the record's pictures minus its
@@ -470,7 +470,8 @@ struct TripView: View {
             above: AnyView(hero(live, members: members)),
             below: footerText(state: state, empty: members.isEmpty).map {
                 AnyView(TripFooter(text: $0))
-            }
+            },
+            grouping: .flat
         )
         .environment(\.signedURLRefresher, refresher)
         // The reader's scroll folds and unfolds the main bar, as the Timeline's does: told as the

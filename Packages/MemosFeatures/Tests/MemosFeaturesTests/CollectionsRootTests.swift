@@ -689,16 +689,14 @@ struct CollectionsRootRenderTests {
         return (collections, trips)
     }
 
-    /// Whether `sent` is the Library grid's read under `tag`: every kind of file (no `type`), not
-    /// a span's one-row read nor a trip's drain, both of which ask for images.
+    /// Whether `sent` is the Library grid's read under `tag` (`CollectionsTransport.isGridRead`).
     private static func gridRead(_ sent: String, tag: String) -> Bool {
         let parts = sent.split(separator: " ", maxSplits: 1).map(String.init)
         guard parts.count == 2, parts[0] == "list_attachments_api_attachments_get" else {
             return false
         }
         let query = URLComponents(string: parts[1])?.queryItems ?? []
-        return query.contains { $0.name == "tag" && $0.value == tag }
-            && !query.contains { $0.name == "type" }
+        return CollectionsTransport.isGridRead(query, tag: tag)
     }
 
     private func signedOutSession(_ transport: CollectionsTransport) -> SessionStore {
@@ -860,19 +858,28 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
         }
     }
 
-    /// Whether `path` is a grid read (every kind, no `type`) under the held tag.
+    /// Whether `path` is a grid read under the held tag.
     private nonisolated func isHeld(_ path: String) -> Bool {
         let query = URLComponents(string: path)?.queryItems ?? []
         guard let held = lock.withLock({ heldTag }) else { return false }
-        return query.contains { $0.name == "tag" && $0.value == held }
-            && !query.contains { $0.name == "type" }
+        return Self.isGridRead(query, tag: held)
+    }
+
+    /// Whether `query` is the Library grid's read under `tag`: every kind of file (no `type`),
+    /// newest first, a page rather than one row. A trip's drain and a span's read name no kind
+    /// either (MEMNG-740), so the kind alone no longer tells them apart: the drain reads oldest
+    /// first, and a span reads one row.
+    nonisolated static func isGridRead(_ query: [URLQueryItem], tag: String) -> Bool {
+        func value(_ name: String) -> String? { query.first { $0.name == name }?.value }
+        return value("tag") == tag && !query.contains { $0.name == "type" }
+            && value("order") != "taken_asc" && value("limit") != "1"
     }
 
     private nonisolated static func list(_ path: String) -> (HTTPResponse, HTTPBody?) {
         let query = URLComponents(string: path)?.queryItems ?? []
         func value(_ name: String) -> String? { query.first { $0.name == name }?.value }
         // The grid under `portugal2026` alone holds a film: a tile no other read can put there.
-        if value("tag") == "portugal2026", value("type") == nil {
+        if isGridRead(query, tag: "portugal2026") {
             return json("[\(item("trip-film", taken: "2026-03-14T12:00:00Z", mime: "video/mp4"))]")
         }
         let descending = value("order") == "taken_desc"

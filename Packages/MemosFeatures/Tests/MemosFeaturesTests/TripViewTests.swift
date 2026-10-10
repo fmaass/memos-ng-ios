@@ -311,8 +311,10 @@ struct TripScreenRenderTests {
         MediaRetrySignal.shared = MediaRetrySignal()
     }
 
-    /// Every day's heading, in the order the drain's pages came: p0 to p4.
+    /// The day headings the Library would draw over p0 to p4, which a trip's grid draws none of.
     static let days = ["Thu 12 Mar", "Sat 14 Mar", "Mon 16 Mar", "Wed 18 Mar", "Fri 20 Mar"]
+    /// Every member's tile, in the order the drain's pages came.
+    static let files = ["p0", "p1", "p2", "p3", "p4"]
 
     private func stores(memberCap: Int = TripMembershipStore.memberCap)
         -> (CollectionStore, TripMembershipStore)
@@ -345,17 +347,17 @@ struct TripScreenRenderTests {
         let stores = stores()
         let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
         stores.0.exclude(id: record.id, uid: "p2")
-        var expected = Self.days
+        var expected = Self.files
         expected.remove(at: 2)
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
-            _ = await screen.until { TripProbe.headings(in: screen.window) == expected }
-            #expect(TripProbe.headings(in: screen.window) == expected)
+            _ = await screen.until { TripProbe.tiles(in: screen.window) == expected }
+            #expect(TripProbe.tiles(in: screen.window) == expected)
             #expect(screen.says("Portugal 2026"))
             #expect(screen.says("4 photos"), "the hero counts the members, the excluded one not")
         }
     }
 
-    @Test("the drain's requests carry the tag, type=image and order=taken_asc, page after page")
+    @Test("the drain's requests carry the tag and order=taken_asc and no type, page after page")
     func theDrainsRequests() async {
         let wire = TripWire()
         let stores = stores()
@@ -368,10 +370,51 @@ struct TripScreenRenderTests {
         #expect(reads.count == 3, "one read per page, \(reads)")
         for query in reads {
             #expect(query["tag"] == "portugal2026")
-            #expect(query["type"] == "image")
+            #expect(query["type"] == nil, "a kind was named: \(query)")
             #expect(query["order"] == "taken_asc")
         }
         #expect(reads.map { $0["cursor"] } == [nil, "c1", "c2"])
+    }
+
+    /// The owner's rule (MEMNG-740): a trip is the Library's All without its days — every member
+    /// a tile of one block, and no day heading over any of them.
+    @Test("the grid is one block of every member, with no day heading over any of them")
+    func theGridHasNoDays() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let drawn = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(drawn, "control: the members were drawn: \(TripProbe.tiles(in: screen.window))")
+            let headings = TripProbe.headings(in: screen.window)
+            #expect(headings.isEmpty, "the trip's grid drew the Library's days: \(headings)")
+        }
+    }
+
+    /// A video of a tagged memo is a member (MEMNG-740), drawn as the Library draws one and opened
+    /// the same way: the server, like the real one, leaves it out of a read that names images.
+    @Test("a video member is a Video tile, and its tap opens the viewer")
+    func aVideoMemberOpens() async {
+        let wire = TripWire()
+        wire.transport.film("p1")
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let drawn = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(drawn, "the video is not a member: \(TripProbe.tiles(in: screen.window))")
+            let video = screen.element(labelled: "Video")
+            #expect(video != nil, "no tile reads as a video")
+            // Out of `#expect`: a closure in the macro's expansion can be refused by the compiler.
+            let pressed = video.map { TripProbe.pressAtOnce($0) } ?? false
+            #expect(pressed, "the video tile took no press")
+            var pager: UIScrollView?
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, pager == nil {
+                pager = TripProbe.pager(over: screen.host)
+                if pager == nil { await screen.settle(turns: 5) }
+            }
+            #expect(pager != nil, "the video's tap opened no viewer")
+        }
     }
 
     @Test("a tag holding the query's own syntax travels as one value, the order untouched")
@@ -882,12 +925,12 @@ struct TripScreenRenderTests {
             // Every distinct reading on the way, for the failure's message.
             var seen: [[String]] = []
             let deadline = Date().addingTimeInterval(10)
-            while Date() < deadline, seen.last != Self.days {
-                let now = TripProbe.headings(in: screen.window)
+            while Date() < deadline, seen.last != Self.files {
+                let now = TripProbe.tiles(in: screen.window)
                 if seen.last != now { seen.append(now) }
                 try? await Task.sleep(for: .milliseconds(50))
             }
-            let pushed = seen.last == Self.days
+            let pushed = seen.last == Self.files
             #expect(pushed, "the trip was not pushed: \(seen)")
             #expect(stack.paths.last?.count == 1, "the stack went \(stack.paths.map(\.count))")
             // The menu's Delete Trip asks; the dialog's yes is the flow's confirm.
@@ -913,7 +956,7 @@ struct TripScreenRenderTests {
                 TripProbe.pressDialog(TripView.deleteButton, in: screen.host),
                 "the alert's Delete Trip took no press")
             let back = await TripProbe.idle(seconds: 10) {
-                TripProbe.headings(in: screen.window).isEmpty
+                TripProbe.tiles(in: screen.window).isEmpty
                     && screen.element(labelled: "Spain 2025") != nil
             }
             #expect(back, "the screen did not return: \(TripProbe.labels(in: screen.window))")
@@ -939,8 +982,8 @@ struct TripScreenRenderTests {
             // The trip's own drain is asked while the root's is still on the wire.
             await screen.settle(turns: 10)
             wire.transport.release()
-            _ = await screen.until { TripProbe.headings(in: screen.window) == Self.days }
-            #expect(TripProbe.headings(in: screen.window) == Self.days)
+            _ = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(TripProbe.tiles(in: screen.window) == Self.files)
         }
         #expect(wire.transport.listReads.filter { $0["cursor"] == nil }.count == 1)
     }
@@ -1191,6 +1234,29 @@ enum TripProbe {
             try? await Task.sleep(for: .milliseconds(50))
         }
         return ready()
+    }
+
+    /// The loaded tiles' files, top to bottom and then leading to trailing, read by the identifier
+    /// each tile carries (`LibraryGrid.tileIdentifier`), since no label says which file it shows.
+    static func tiles(in window: UIWindow) -> [String] {
+        let prefix = LibraryGrid.tileIdentifier("")
+        var found: [String: CGRect] = [:]
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.responds(to: Selector(("accessibilityIdentifier"))),
+                let identifier = object.value(forKey: "accessibilityIdentifier") as? String,
+                identifier.hasPrefix(prefix)
+            {
+                let uid = String(identifier.dropFirst(prefix.count))
+                if found[uid] == nil { found[uid] = object.accessibilityFrame }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found.sorted {
+            ($0.value.minY, $0.value.minX) < ($1.value.minY, $1.value.minX)
+        }.map(\.key)
     }
 
     /// The day headings on screen, top to bottom.
@@ -1504,6 +1570,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var unoriginal = false
     private nonisolated(unsafe) var dropped: Set<String> = []
     private nonisolated(unsafe) var others: Set<String> = []
+    private nonisolated(unsafe) var films: Set<String> = []
     private nonisolated(unsafe) var deleted: [String] = []
 
     /// Every list read so far, as its query.
@@ -1534,6 +1601,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func drop(_ uid: String) { lock.withLock { _ = dropped.insert(uid) } }
     /// `uid` is another member's picture: from here on its reads say it is not mine.
     nonisolated func others(_ uid: String) { lock.withLock { _ = others.insert(uid) } }
+    /// `uid` is a video from here on: a read that names images leaves it out, as the server does.
+    nonisolated func film(_ uid: String) { lock.withLock { _ = films.insert(uid) } }
 
     nonisolated func send(
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
@@ -1549,10 +1618,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
                 return (HTTPResponse(status: .internalServerError), nil)
             }
             if lock.withLock({ emptied }) { return Self.json("[]", next: nil) }
-            let (sig, gone, bare, theirs) = lock.withLock {
-                (signature, dropped, unoriginal, others)
+            let (sig, gone, bare, theirs, clips) = lock.withLock {
+                (signature, dropped, unoriginal, others, films)
             }
-            return Self.page(query, signed: sig, without: gone, bare: bare, theirs: theirs)
+            return Self.page(
+                query, signed: sig, without: gone, bare: bare, theirs: theirs, films: clips)
         case "attachment_tags_api_attachments_tags_get":
             return Self.json("[]", next: nil)
         case "delete_attachment_api_attachments__uid__delete":
@@ -1575,7 +1645,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
 
     private nonisolated static func page(
         _ query: [String: String], signed sig: String, without gone: Set<String>,
-        bare: Bool = false, theirs: Set<String> = []
+        bare: Bool = false, theirs: Set<String> = [], films: Set<String> = []
     ) -> (HTTPResponse, HTTPBody?) {
         if query["tag"] == "spain2025" {
             return json("[\(item("s0", taken: "2025-05-01T12:00:00Z", sig: sig))]", next: nil)
@@ -1585,8 +1655,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         let rows = days.enumerated().map { day -> String? in
             let uid = "p\(day.offset)"
             if gone.contains(uid) { return nil }
+            let film = films.contains(uid)
+            if film, query["type"] == "image" { return nil }
             return item(
-                uid, taken: day.element, sig: sig, bare: bare, mine: !theirs.contains(uid))
+                uid, taken: day.element, sig: sig, bare: bare, mine: !theirs.contains(uid),
+                mime: film ? "video/mp4" : "image/jpeg")
         }
         func list(_ picks: Int...) -> String {
             "[" + picks.compactMap { rows[$0] }.joined(separator: ",") + "]"
@@ -1624,12 +1697,13 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     /// `v1` is signed with an `exp` long past, so a refusal of it reads as a lapse; any other
     /// signature with one far ahead.
     private nonisolated static func item(
-        _ uid: String, taken: String, sig: String, bare: Bool = false, mine: Bool = true
+        _ uid: String, taken: String, sig: String, bare: Bool = false, mine: Bool = true,
+        mime: String = "image/jpeg"
     ) -> String {
         let query = "?exp=\(sig == "v1" ? 1_000_000_000 : 4_000_000_000)&scope=1&sig=\(sig)"
         let download = bare ? "" : "/api/attachments/\(uid)/download\(query)"
         return """
-            {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
+            {"uid":"\(uid)","mime":"\(mime)","status":"ready","blurhash":null,\
             "width":1000,"height":800,"mine":\(mine),"hasPrint":false,"hasLegacyPrint":false,\
             "renditions":[],"orphan":false,"memoUid":"m-\(uid)",\
             "takenAt":"\(taken)","filename":"\(uid).jpg",\

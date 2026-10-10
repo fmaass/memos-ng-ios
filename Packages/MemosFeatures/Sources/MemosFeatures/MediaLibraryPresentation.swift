@@ -238,6 +238,29 @@ public enum MediaLibraryPresentation {
         }
     }
 
+    /// A trip's grid (MEMNG-740): the same list as ONE block, in the order it was handed over —
+    /// "a collection is like All in the library", without its days. No month header, no day
+    /// heading: the rows are the block's bands alone, its frames one cycle from A, and every
+    /// picture keeps its index in the whole list as `daySections` gives it. Each band still names
+    /// the day its first picture was taken on, which only the date pill reads.
+    public static func flatRows(
+        for items: [LibraryRow], timeZone: String = libraryTimeZone
+    ) -> [LibraryAllRow] {
+        let slots = daySlots(items.count)
+        let pictures = zip(items, slots).enumerated().map { index, placed in
+            LibraryDayPicture(attachment: placed.0.attachment, index: index, slot: placed.1)
+        }
+        let bands = mosaicBands(slots)
+        return bands.enumerated().map { place, range in
+            let day = dayKey(items[range.lowerBound].takenAt, timeZone: timeZone)
+            return LibraryAllRow.band(
+                LibraryDayBand(pictures: Array(pictures[range])),
+                LibraryBandPlace(
+                    day: day ?? undatedSectionKey, dayIndex: 0, first: place == 0,
+                    last: place == bands.count - 1))
+        }
+    }
+
     /// The bands a mosaic's slots fall into, as ranges of the slots, read as
     /// `MonthMosaicGeometry.frames` reads them: a hero and at most two sides of its own after it,
     /// a row of at most three squares, or one wide frame alone. A band is what the lazy stack
