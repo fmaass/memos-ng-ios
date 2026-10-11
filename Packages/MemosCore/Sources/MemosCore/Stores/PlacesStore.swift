@@ -163,6 +163,9 @@ public final class PlacesStore {
                 "GET /api/map/markers -> 200, \(rows.count, privacy: .public) markers"
             )
             return rows.map { PlaceMarker(from: $0, baseURL: baseURL) }
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }

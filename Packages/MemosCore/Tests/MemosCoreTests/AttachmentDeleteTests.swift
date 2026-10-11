@@ -624,3 +624,25 @@ struct AttachmentDeleteTests {
         #expect(store.memos[0].attachments.map(\.uid) == ["a2"])
     }
 }
+
+// MARK: - a newly documented 503 is answered as its undocumented self was
+
+extension AttachmentDeleteTests {
+    /// Only a 404 says the file is gone; a 503 is a delete that did not happen, as before v2.1.0.
+    @Test("a 503 changes nothing and says HTTP 503, as before v2.1.0")
+    func aServiceUnavailableLeavesTheMemoAsItWas() async {
+        let client = Stub.client { _, _, operation in
+            operation == deleteAttachmentOperation
+                ? Stub.databaseBusy()
+                : Self.page([Self.memo("m1", ["a1", "a2"])])
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        let removed = await store.deleteAttachment(uid: "a1", from: "m1", using: client.handle)
+
+        #expect(!removed)
+        #expect(store.memos[0].attachments.map(\.uid) == ["a1", "a2"])
+        #expect(store.lastError == APIError.server(status: 503).errorDescription)
+    }
+}

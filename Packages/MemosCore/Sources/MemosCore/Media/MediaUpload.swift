@@ -266,6 +266,9 @@ public enum MediaUpload {
             return try created.body.json
         case .unprocessableContent:
             throw MediaUploadError.refused(.server(status: 422))
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw MediaUploadError.refused(.fromStatus(503))
         case .undocumented(let statusCode, _):
             throw MediaUploadError.refused(.fromStatus(statusCode))
         }
@@ -332,6 +335,9 @@ public enum MediaUpload {
             return Int64(offset)
         case .unprocessableContent:
             throw MediaUploadError.refused(.server(status: 422))
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw MediaUploadError.refused(.fromStatus(503))
         case .undocumented(let statusCode, _):
             throw MediaUploadError.refused(.fromStatus(statusCode))
         }
@@ -362,6 +368,12 @@ public enum MediaUpload {
             return .offsetGap
         case .unprocessableContent:
             throw MediaUploadError.refused(.server(status: 422))
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(429)` was.
+        case .tooManyRequests:
+            throw MediaUploadError.refused(.fromStatus(429))
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw MediaUploadError.refused(.fromStatus(503))
         case .undocumented(let statusCode, _):
             throw MediaUploadError.refused(.fromStatus(statusCode))
         }

@@ -24,6 +24,7 @@ struct LibraryBucketStoreTests {
             let size = Self.items(request.path)["size"]?.first ?? "?"
             return Stub.json(
                 #"[{"key":"k-\#(size)","count":4,"coverUid":"u-\#(size)","#
+                    + #""tags":[],"#
                     + #""coverThumbnailUrl":"/api/attachments/u-\#(size)/thumbnail?sig=s"}]"#
             )
         }
@@ -75,8 +76,9 @@ struct LibraryBucketStoreTests {
     func anUnresolvableCoverIsNil() async {
         let client = Stub.client { _, _, _ in
             Stub.json(
-                #"[{"key":"2026","count":3,"coverUid":"u","coverThumbnailUrl":""},"#
-                    + #"{"key":"2025","count":1,"coverUid":"v","coverThumbnailUrl":"/t"}]"#
+                #"[{"key":"2026","count":3,"coverUid":"u","tags":[],"coverThumbnailUrl":""},"#
+                    + #"{"key":"2025","count":1,"coverUid":"v","tags":[],"#
+                    + #""coverThumbnailUrl":"/t"}]"#
             )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -145,7 +147,8 @@ struct LibraryBucketStoreTests {
             empty.get()
                 ? Stub.json("[]")
                 : Stub.json(
-                    #"[{"key":"2026-09","count":2,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                    #"[{"key":"2026-09","count":2,"coverUid":"u","tags":[],"#
+                        + #""coverThumbnailUrl":"/t"}]"#
                 )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -216,7 +219,8 @@ struct LibraryBucketStoreTests {
             broken.get()
                 ? Stub.json(#"{"not":"a list"}"#)
                 : Stub.json(
-                    #"[{"key":"2026-09","count":2,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                    #"[{"key":"2026-09","count":2,"coverUid":"u","tags":[],"#
+                        + #""coverThumbnailUrl":"/t"}]"#
                 )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -265,11 +269,12 @@ struct LibraryBucketStoreTests {
                 entered.signal()
                 await release.wait()
                 return Stub.json(
-                    #"[{"key":"stale","count":9,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                    #"[{"key":"stale","count":9,"coverUid":"u","tags":[],"#
+                        + #""coverThumbnailUrl":"/t"}]"#
                 )
             }
             return Stub.json(
-                #"[{"key":"fresh","count":1,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                #"[{"key":"fresh","count":1,"coverUid":"u","tags":[],"coverThumbnailUrl":"/t"}]"#
             )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -315,7 +320,7 @@ struct LibraryBucketStoreTests {
                 await release.wait()
             }
             return Stub.json(
-                #"[{"key":"2026-09","count":2,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                #"[{"key":"2026-09","count":2,"coverUid":"u","tags":[],"coverThumbnailUrl":"/t"}]"#
             )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -505,7 +510,7 @@ struct LibraryBucketStoreTests {
             }
             let tag = Self.items(request.path)["tag"]?.first ?? "none"
             return Stub.json(
-                #"[{"key":"\#(tag)","count":1,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                #"[{"key":"\#(tag)","count":1,"coverUid":"u","tags":[],"coverThumbnailUrl":"/t"}]"#
             )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -526,7 +531,8 @@ struct LibraryBucketStoreTests {
     /// One day bucket counting `count` pictures.
     nonisolated private static func day(count: Int) -> (HTTPResponse, HTTPBody?) {
         Stub.json(
-            #"[{"key":"2026-09-28","count":\#(count),"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+            #"[{"key":"2026-09-28","count":\#(count),"coverUid":"u","tags":[],"#
+                + #""coverThumbnailUrl":"/t"}]"#
         )
     }
 
@@ -574,10 +580,14 @@ struct LibraryBucketStoreTests {
                 entered.signal()
                 await release.wait()
                 return Stub.json(
-                    #"[{"key":"theirs","count":1,"coverUid":"u","coverThumbnailUrl":"/t"}]"#
+                    #"[{"key":"theirs","count":1,"coverUid":"u","tags":[],"#
+                        + #""coverThumbnailUrl":"/t"}]"#
                 )
             }
-            return Stub.json(#"[{"key":"mine","count":1,"coverUid":"u","coverThumbnailUrl":"/t"}]"#)
+            return Stub.json(
+                #"[{"key":"mine","count":1,"coverUid":"u","tags":[],"#
+                    + #""coverThumbnailUrl":"/t"}]"#
+            )
         }
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
         await store.load(
@@ -616,7 +626,10 @@ struct LibraryBucketStoreTests {
         let client = Stub.client { _, _, _ in
             entered.signal()
             await release.wait()
-            return Stub.json(#"[{"key":"old","count":1,"coverUid":"u","coverThumbnailUrl":"/t"}]"#)
+            return Stub.json(
+                #"[{"key":"old","count":1,"coverUid":"u","tags":[],"#
+                    + #""coverThumbnailUrl":"/t"}]"#
+            )
         }
         let session = SwitchableSession(for: client.handle)
         let store = LibraryBucketStore(timeZoneIdentifier: Self.zone)
@@ -1024,8 +1037,10 @@ struct LibraryBucketStoreTests {
     ) -> (HTTPResponse, HTTPBody?) {
         Stub.json(
             #"[{"key":"2026","count":2,"coverUid":"b","#
+                + #""tags":[],"#
                 + #""coverThumbnailUrl":"/api/attachments/b/thumbnail?sig=\#(signature)"},"#
                 + #"{"key":"2025","count":1,"coverUid":"a","#
+                + #""tags":[],"#
                 + #""coverThumbnailUrl":"/api/attachments/a/thumbnail?sig=\#(signature)"}]"#
         )
     }

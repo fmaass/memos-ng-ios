@@ -1572,6 +1572,8 @@ public final class TimelineStore {
                 switch try await client.pinMemoApiMemosUidPinPost(.init(path: .init(uid: uid))) {
                 case .ok(let ok): json = try ok.body.json
                 case .unprocessableContent: throw APIError.server(status: 422)
+                // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+                case .serviceUnavailable: throw APIError.fromStatus(503)
                 case .undocumented(let statusCode, _): throw APIError.fromStatus(statusCode)
                 }
             } else {
@@ -1580,6 +1582,8 @@ public final class TimelineStore {
                 ) {
                 case .ok(let ok): json = try ok.body.json
                 case .unprocessableContent: throw APIError.server(status: 422)
+                // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+                case .serviceUnavailable: throw APIError.fromStatus(503)
                 case .undocumented(let statusCode, _): throw APIError.fromStatus(statusCode)
                 }
             }
@@ -1680,6 +1684,9 @@ public final class TimelineStore {
                 throw APIError.fromStatus(404)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
+            // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+            case .serviceUnavailable:
+                throw APIError.fromStatus(503)
             case .undocumented(let statusCode, _):
                 throw APIError.fromStatus(statusCode)
             }
@@ -1754,6 +1761,9 @@ public final class TimelineStore {
                 break
             case .unprocessableContent:
                 throw APIError.server(status: 422)
+            // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+            case .serviceUnavailable:
+                throw APIError.fromStatus(503)
             case .undocumented(let statusCode, _):
                 // A 404 says the same thing a 204 does: the file is not on the server. It is what
                 // the web app deleting it first looks like, and what a retry of a request whose
@@ -1995,6 +2005,9 @@ public final class TimelineStore {
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
+            // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+            case .serviceUnavailable:
+                throw APIError.fromStatus(503)
             case .undocumented(let statusCode, _):
                 throw APIError.fromStatus(statusCode)
             }
@@ -2140,6 +2153,9 @@ public final class TimelineStore {
                 return .memo(memo)
             case .unprocessableContent:
                 throw APIError.server(status: 422)
+            // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+            case .serviceUnavailable:
+                throw APIError.fromStatus(503)
             case .undocumented(let statusCode, _):
                 throw APIError.fromStatus(statusCode)
             }
@@ -2781,6 +2797,9 @@ public final class TimelineStore {
             return (list.items.map { Memo($0, baseURL: baseURL) }, list.nextCursor)
         case .unprocessableContent:
             throw APIError.server(status: 422)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }

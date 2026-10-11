@@ -769,6 +769,9 @@ public final class ManageTokensStore {
             return (payload.grant, payload.expiresAt)
         case .unprocessableContent:
             throw NativeLoginError.api(.server(status: 422))
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw NativeLoginError.api(.fromStatus(503))
         case .undocumented(let statusCode, let payload):
             // A server that predates this route answers 404, and that is the ONE signal that
             // separates "this deployment has not caught up" from "the code was refused".
@@ -789,6 +792,9 @@ public final class ManageTokensStore {
         switch try await client.listPatsApiPatsGet(.init()) {
         case .ok(let ok):
             return try ok.body.json.map(ManagedToken.init)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             if statusCode == 404 { throw RouteMissing() }
             throw APIError.fromStatus(statusCode)
@@ -809,6 +815,9 @@ public final class ManageTokensStore {
             return MintedToken(token: ManagedToken(payload), secret: payload.token)
         case .unprocessableContent:
             throw APIError.server(status: 422)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             if statusCode == 404 { throw RouteMissing() }
             throw APIError.fromStatus(statusCode)
@@ -821,6 +830,9 @@ public final class ManageTokensStore {
             return
         case .unprocessableContent:
             throw APIError.server(status: 422)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             // Deliberately no `RouteMissing` here: this path's 404 is the server saying that token
             // is not there, which is a thing the screen reports and re-reads rather than a server

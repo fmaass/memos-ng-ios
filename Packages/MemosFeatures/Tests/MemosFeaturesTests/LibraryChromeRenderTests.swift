@@ -86,7 +86,7 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
                 {"uid":"\(name)","mime":"image/jpeg","status":"ready","blurhash":null,"width":1200,\
                 "height":800,"duration":null,"sha256":null,"capture_instant":null,\
                 "capture_civil":null,"capture_source":null,"mine":true,"hasPrint":false,\
-                "hasLegacyPrint":false,"renditions":[],"position":null,\
+                "hasLegacyPrint":false,"webReady":true,"renditions":[],"position":null,\
                 "thumbnailUrl":"/api/attachments/\(name)/thumb",\
                 "previewUrl":"/api/attachments/\(name)/mobile",\
                 "webUrl":"/api/attachments/\(name)/web",\
@@ -106,7 +106,8 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
         return """
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":\(wide ? 1200 : 800),"height":\(wide ? 800 : 1200),"mine":\(mine),\
-            "hasPrint":false,"hasLegacyPrint":false,"renditions":[],"orphan":true,\
+            "hasPrint":false,"hasLegacyPrint":false,\
+            "webReady":true,"renditions":[],"tags":[],"orphan":true,\
             "memoUid":null,"takenAt":"\(dayKey(day))T\(10 + index):00:00Z",\
             "filename":"\(uid).jpg","thumbnailUrl":"/api/attachments/\(uid)/thumb",\
             "previewUrl":"/api/attachments/\(uid)/mobile","webUrl":"/api/attachments/\(uid)/web",\
@@ -128,16 +129,16 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
             let cover = uid(day: day, index: 0)
             return """
                 {"key":"\(dayKey(day))","count":\(ChromeWire.perDay),"coverUid":"\(cover)",\
-                "coverThumbnailUrl":"/api/attachments/\(cover)/thumb"}
+                "tags":[],"coverThumbnailUrl":"/api/attachments/\(cover)/thumb"}
                 """
         }
     }
 
     private static let years = """
         [{"key":"2026","count":48,"coverUid":"\(uid(day: 12, index: 0))",\
-        "coverThumbnailUrl":"/api/attachments/\(uid(day: 12, index: 0))/thumb"},\
+        "tags":[],"coverThumbnailUrl":"/api/attachments/\(uid(day: 12, index: 0))/thumb"},\
         {"key":"2025","count":17,"coverUid":"\(uid(day: 3, index: 1))",\
-        "coverThumbnailUrl":"/api/attachments/\(uid(day: 3, index: 1))/thumb"}]
+        "tags":[],"coverThumbnailUrl":"/api/attachments/\(uid(day: 3, index: 1))/thumb"}]
         """
 
     private static let memos: [String] = (1...6).map { index in
@@ -156,7 +157,7 @@ private final class ChromeTransport: ClientTransport, @unchecked Sendable {
         """
         {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
         "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
-        "hasLegacyPrint":false,"renditions":[],"position":null,\
+        "hasLegacyPrint":false,"webReady":true,"renditions":[],"position":null,\
         "sha256":null,"capture_instant":null,"capture_civil":null,"capture_source":null,\
         "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
         "previewUrl":"/api/attachments/\(uid)/mobile",\

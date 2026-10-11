@@ -1710,7 +1710,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         return """
             {"uid":"\(uid)","mime":"\(mime)","status":"ready","blurhash":null,\
             "width":1000,"height":800,"mine":\(mine),"hasPrint":false,"hasLegacyPrint":false,\
-            "renditions":[],"orphan":false,"memoUid":"m-\(uid)",\
+            "webReady":true,\
+            "renditions":[],"tags":[],"orphan":false,"memoUid":"m-\(uid)",\
             "takenAt":"\(taken)","filename":"\(uid).jpg",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
             "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\

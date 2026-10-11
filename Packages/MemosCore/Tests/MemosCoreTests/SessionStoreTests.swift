@@ -1369,3 +1369,41 @@ final class Gate: @unchecked Sendable {
         waiting?.resume()
     }
 }
+
+// MARK: - a newly documented 503 is answered as its undocumented self was
+
+extension SessionStoreTests {
+    /// The server failed to revoke: the credential stays, and the outcome names the 503 exactly as
+    /// the undocumented status did before v2.1.0.
+    @Test("a 503 to the revoke keeps the credential and names HTTP 503, as before v2.1.0")
+    func signOutUnavailable() async {
+        let credentials = InMemoryCredentials()
+        let session = store(credentials: credentials) { _, _, operation in
+            operation == whoamiOperation ? Stub.json(Stub.user) : Stub.databaseBusy()
+        }
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let outcome = await session.signOut()
+
+        #expect(outcome == .revokeFailed(.server(status: 503)))
+        #expect(session.state != .signedOut)
+        #expect(!credentials.isEmpty, "a live token must stay tracked until its fate is settled")
+    }
+}
+
+extension SessionStoreTests {
+    @Test("a proxy's HTML 503 to the revoke keeps the credential and names HTTP 503")
+    func signOutProxyPage() async {
+        let credentials = InMemoryCredentials()
+        let session = store(credentials: credentials) { _, _, operation in
+            operation == whoamiOperation
+                ? Stub.json(Stub.user) : Stub.proxyPage(.serviceUnavailable)
+        }
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_good")
+        let outcome = await session.signOut()
+
+        #expect(outcome == .revokeFailed(.server(status: 503)))
+        #expect(!credentials.isEmpty)
+    }
+}

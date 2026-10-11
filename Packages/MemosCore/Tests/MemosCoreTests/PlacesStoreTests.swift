@@ -31,7 +31,8 @@ struct PlacesStoreTests {
         """
         {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":"LEHV6n","width":1000,\
         "height":800,"duration":null,"sha256":null,"capture_instant":null,"capture_civil":null,\
-        "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,"renditions":[],\
+        "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+        "webReady":true,"renditions":[],\
         "position":null,"thumbnailUrl":"\(thumbnail)",\
         "previewUrl":"/api/attachments/\(uid)/mobile","webUrl":"/api/attachments/\(uid)/web",\
         "posterUrl":"/api/attachments/\(uid)/poster",\

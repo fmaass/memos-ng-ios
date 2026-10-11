@@ -1,5 +1,41 @@
 {
   "components": {
+    "responses": {
+      "DatabaseBusy": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "properties": {
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "description": "The server could not get a database connection in time. Resend the request after Retry-After seconds.",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds to wait before sending the request again.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "DatabaseBusyHead": {
+        "description": "The server could not get a database connection in time. Resend the request after Retry-After seconds.",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds to wait before sending the request again.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
     "schemas": {
       "AttachmentBucket": {
         "properties": {
@@ -18,13 +54,21 @@
           "key": {
             "title": "Key",
             "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
           }
         },
         "required": [
           "key",
           "count",
           "coverUid",
-          "coverThumbnailUrl"
+          "coverThumbnailUrl",
+          "tags"
         ],
         "title": "AttachmentBucket",
         "type": "object"
@@ -102,6 +146,13 @@
           "status": {
             "$ref": "#/components/schemas/AttachmentStatus"
           },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
           "takenAt": {
             "format": "date-time",
             "title": "Takenat",
@@ -114,6 +165,10 @@
           "uid": {
             "title": "Uid",
             "type": "string"
+          },
+          "webReady": {
+            "title": "Webready",
+            "type": "boolean"
           },
           "webUrl": {
             "title": "Weburl",
@@ -142,9 +197,11 @@
           "memoUid",
           "takenAt",
           "filename",
+          "tags",
           "thumbnailUrl",
           "previewUrl",
           "webUrl",
+          "webReady",
           "posterUrl",
           "downloadUrl",
           "printUrl"
@@ -270,6 +327,10 @@
             "title": "Uid",
             "type": "string"
           },
+          "webReady": {
+            "title": "Webready",
+            "type": "boolean"
+          },
           "webUrl": {
             "title": "Weburl",
             "type": "string"
@@ -306,6 +367,7 @@
           "thumbnailUrl",
           "previewUrl",
           "webUrl",
+          "webReady",
           "posterUrl"
         ],
         "title": "AttachmentMeta",
@@ -518,6 +580,10 @@
             "title": "Uid",
             "type": "string"
           },
+          "webReady": {
+            "title": "Webready",
+            "type": "boolean"
+          },
           "webUrl": {
             "title": "Weburl",
             "type": "string"
@@ -550,6 +616,7 @@
           "thumbnailUrl",
           "previewUrl",
           "webUrl",
+          "webReady",
           "posterUrl",
           "downloadUrl",
           "printUrl"
@@ -641,6 +708,350 @@
           "capture_source"
         ],
         "title": "CaptureOut",
+        "type": "object"
+      },
+      "CollectionCreate": {
+        "properties": {
+          "coverAttachmentUid": {
+            "title": "Coverattachmentuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotencyKey": {
+            "description": "Optional client-generated retry token, unique per logical create. Posting it again returns the collection the first call stored, with 201 like the original, whatever the retry's other fields say. Without a key, a retry stores a second collection.",
+            "maxLength": 64,
+            "minLength": 8,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotencykey",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spanEnd": {
+            "description": "An instant with its UTC offset; a value without one is refused.",
+            "format": "date-time",
+            "title": "Spanend",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spanStart": {
+            "description": "An instant with its UTC offset; a value without one is refused.",
+            "format": "date-time",
+            "title": "Spanstart",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tag": {
+            "description": "A tag name exactly as memos carry it, without the hash sign: letters, digits and underscores. Matched exactly, case included.",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Tag",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "tz": {
+            "description": "The IANA zone the span was picked in; display only.",
+            "title": "Tz",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "CollectionCreate",
+        "type": "object"
+      },
+      "CollectionOut": {
+        "properties": {
+          "cover": {
+            "description": "The cover as the library lists it, or null when there is none or the caller may not see it.",
+            "properties": {
+              "blurhash": {
+                "title": "Blurhash",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "downloadUrl": {
+                "title": "Downloadurl",
+                "type": "string"
+              },
+              "filename": {
+                "title": "Filename",
+                "type": "string"
+              },
+              "hasLegacyPrint": {
+                "title": "Haslegacyprint",
+                "type": "boolean"
+              },
+              "hasPrint": {
+                "title": "Hasprint",
+                "type": "boolean"
+              },
+              "height": {
+                "title": "Height",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "memoUid": {
+                "title": "Memouid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mime": {
+                "title": "Mime",
+                "type": "string"
+              },
+              "mine": {
+                "title": "Mine",
+                "type": "boolean"
+              },
+              "orphan": {
+                "title": "Orphan",
+                "type": "boolean"
+              },
+              "posterUrl": {
+                "title": "Posterurl",
+                "type": "string"
+              },
+              "previewUrl": {
+                "title": "Previewurl",
+                "type": "string"
+              },
+              "printUrl": {
+                "title": "Printurl",
+                "type": "string"
+              },
+              "renditions": {
+                "items": {
+                  "$ref": "#/components/schemas/RenditionItem"
+                },
+                "title": "Renditions",
+                "type": "array"
+              },
+              "status": {
+                "$ref": "#/components/schemas/AttachmentStatus"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Tags",
+                "type": "array"
+              },
+              "takenAt": {
+                "format": "date-time",
+                "title": "Takenat",
+                "type": "string"
+              },
+              "thumbnailUrl": {
+                "title": "Thumbnailurl",
+                "type": "string"
+              },
+              "uid": {
+                "title": "Uid",
+                "type": "string"
+              },
+              "webReady": {
+                "title": "Webready",
+                "type": "boolean"
+              },
+              "webUrl": {
+                "title": "Weburl",
+                "type": "string"
+              },
+              "width": {
+                "title": "Width",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "uid",
+              "mime",
+              "status",
+              "blurhash",
+              "width",
+              "height",
+              "mine",
+              "hasPrint",
+              "hasLegacyPrint",
+              "renditions",
+              "orphan",
+              "memoUid",
+              "takenAt",
+              "filename",
+              "tags",
+              "thumbnailUrl",
+              "previewUrl",
+              "webUrl",
+              "webReady",
+              "posterUrl",
+              "downloadUrl",
+              "printUrl"
+            ],
+            "title": "AttachmentListItem",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "createdBy": {
+            "description": "Who created it; null once that member is gone.",
+            "title": "Createdby",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memberCount": {
+            "description": "How many members the CALLER can see.",
+            "title": "Membercount",
+            "type": "integer"
+          },
+          "spanEnd": {
+            "format": "date-time",
+            "title": "Spanend",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spanStart": {
+            "format": "date-time",
+            "title": "Spanstart",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tag": {
+            "title": "Tag",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "tz": {
+            "title": "Tz",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "title": "Updatedat",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uid",
+          "title",
+          "tag",
+          "spanStart",
+          "spanEnd",
+          "tz",
+          "cover",
+          "memberCount",
+          "createdBy",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "CollectionOut",
+        "type": "object"
+      },
+      "CollectionPatch": {
+        "properties": {
+          "coverAttachmentUid": {
+            "title": "Coverattachmentuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spanEnd": {
+            "description": "An instant with its UTC offset; a value without one is refused.",
+            "format": "date-time",
+            "title": "Spanend",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spanStart": {
+            "description": "An instant with its UTC offset; a value without one is refused.",
+            "format": "date-time",
+            "title": "Spanstart",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tag": {
+            "description": "A tag name exactly as memos carry it, without the hash sign: letters, digits and underscores. Matched exactly, case included.",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Tag",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "tz": {
+            "description": "The IANA zone the span was picked in; display only.",
+            "title": "Tz",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "CollectionPatch",
         "type": "object"
       },
       "CreateRacedDetail": {
@@ -1783,6 +2194,10 @@
             "title": "Uid",
             "type": "string"
           },
+          "webReady": {
+            "title": "Webready",
+            "type": "boolean"
+          },
           "webUrl": {
             "title": "Weburl",
             "type": "string"
@@ -1815,6 +2230,7 @@
           "thumbnailUrl",
           "previewUrl",
           "webUrl",
+          "webReady",
           "posterUrl",
           "downloadUrl",
           "printUrl",
@@ -3044,6 +3460,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3071,6 +3490,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3101,6 +3523,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3145,6 +3570,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3185,6 +3613,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3240,6 +3671,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3275,6 +3709,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3348,6 +3785,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3396,6 +3836,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3422,6 +3865,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3467,6 +3913,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3514,6 +3963,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3540,6 +3992,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3585,6 +4040,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3600,7 +4058,7 @@
     },
     "/api/attachments": {
       "get": {
-        "description": "The household media library the user can see, newest first: their own attachments\n(including orphans) PLUS media on any memo visible to them (non-PRIVATE). ?type=image|video\nfilters by mime prefix; `orphan` flags media not attached to any memo, and `memoUid` names the\nmemo it does hang on. Another user's PRIVATE or orphan media is excluded \u2014 the same visibility\nrule the memo surfaces apply. ?order=asc walks the same library oldest-first.\n?order=taken_desc|taken_asc walks it by `takenAt` (ties broken by upload order); ?tag=<name>\nkeeps only media whose memo carries exactly that tag \u2014 an unknown tag is an empty page.\n\nPaged by keyset, like the memo feed: when more rows follow, the response carries an\n`X-Next-Cursor` header; resend it as `?cursor=` \u2014 with the same filters, which the cursor does\nnot carry \u2014 for the page after. The body is a plain array on every page, cursor or not.",
+        "description": "The household media library the user can see, newest first: their own attachments\n(including orphans) PLUS media on any memo visible to them (non-PRIVATE). ?type=image|video\nfilters by mime prefix; `orphan` flags media not attached to any memo, and `memoUid` names the\nmemo it does hang on. Another user's PRIVATE or orphan media is excluded \u2014 the same visibility\nrule the memo surfaces apply. ?order=asc walks the same library oldest-first.\n?order=taken_desc|taken_asc walks it by `takenAt` (ties broken by upload order); ?tag=<name>\nkeeps only media whose memo carries exactly that tag \u2014 an unknown tag is an empty page.\nEach item names the tags of its memo, by name; an orphan's are empty.\n?bucket=<key> opens a taken-order walk at a day, month or year \u2014 a `key` exactly as the\nbuckets of `tz` (an IANA zone, default Europe/Zurich) name it \u2014 so the first item is that\nbucket's newest under taken_desc, its oldest under taken_asc; an empty bucket opens at the\nnext item beyond it. A key the buckets could not name, an unknown zone or a bucket under an\nupload order is a 422.\n\nPaged by keyset, like the memo feed: when more rows follow, the response carries an\n`X-Next-Cursor` header; resend it as `?cursor=` \u2014 with the same filters, which the cursor does\nnot carry \u2014 for the page after. The body is a plain array on every page, cursor or not.",
         "operationId": "list_attachments_api_attachments_get",
         "parameters": [
           {
@@ -3664,6 +4122,28 @@
                 "null"
               ]
             }
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "title": "Bucket",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "tz",
+            "required": false,
+            "schema": {
+              "default": "Europe/Zurich",
+              "title": "Tz",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3698,6 +4178,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3716,7 +4199,7 @@
     },
     "/api/attachments/buckets": {
       "get": {
-        "description": "The library the list shows \u2014 same visibility, same `type` and `tag` filters \u2014 counted per\ncalendar day, month or year of `takenAt` in `tz` (an IANA zone, default Europe/Zurich), newest\nfirst. Each bucket names its newest item as the cover, with that item's signed thumbnail.",
+        "description": "The library the list shows \u2014 same visibility, same `type` and `tag` filters \u2014 counted per\ncalendar day, month or year of `takenAt` in `tz` (an IANA zone, default Europe/Zurich), newest\nfirst. Each bucket names its newest item as the cover, with that item's signed thumbnail \u2014\nfor a video its poster frame, the one picture a video has \u2014 and the tags of the memos its\nitems hang on, the tag on the most items first, then by name.",
         "operationId": "attachment_buckets_api_attachments_buckets_get",
         "parameters": [
           {
@@ -3792,6 +4275,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3850,6 +4336,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3894,6 +4383,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -3942,6 +4434,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4003,6 +4498,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4056,6 +4554,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4112,6 +4613,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4167,6 +4671,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4226,6 +4733,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4331,6 +4841,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4359,6 +4872,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "summary": "Logout",
@@ -4401,6 +4917,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "summary": "Native Exchange",
@@ -4416,6 +4935,9 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4463,6 +4985,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "summary": "Native Manage Grant",
@@ -4485,6 +5010,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4512,6 +5040,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4557,6 +5088,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4583,6 +5117,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4599,6 +5136,725 @@
         ]
       }
     },
+    "/api/collections": {
+      "get": {
+        "description": "Every collection of the household, the latest span first and span-less ones last, each\nwith the caller's member count and cover.",
+        "operationId": "list_collections_api_collections_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CollectionOut"
+                  },
+                  "title": "Response List Collections Api Collections Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Collections",
+        "tags": [
+          "collections"
+        ]
+      },
+      "post": {
+        "description": "Store a collection: it needs a tag, or both span bounds, or all three. A cover the caller\nmay not see is a 404. With `idempotencyKey`, a replay answers 201 with the stored record.",
+        "operationId": "create_collection_api_collections_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Create Collection",
+        "tags": [
+          "collections"
+        ]
+      }
+    },
+    "/api/collections/{uid}": {
+      "delete": {
+        "description": "Delete a collection and its exclusions. The media and the memos are untouched.",
+        "operationId": "delete_collection_api_collections__uid__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Delete Collection",
+        "tags": [
+          "collections"
+        ]
+      },
+      "get": {
+        "description": "One collection, with the caller's member count and cover.",
+        "operationId": "get_collection_api_collections__uid__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Get Collection",
+        "tags": [
+          "collections"
+        ]
+      },
+      "patch": {
+        "description": "Change the named fields: an absent field stays, null clears it (`title` excepted). The\nresulting record must still be a valid collection (422 otherwise, nothing changed). Any member\nmay edit any collection; the last write wins. A cover the caller may not see is a 404.",
+        "operationId": "update_collection_api_collections__uid__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectionPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Update Collection",
+        "tags": [
+          "collections"
+        ]
+      }
+    },
+    "/api/collections/{uid}/attachments": {
+      "get": {
+        "description": "The collection's members as the caller may see them \u2014 its tag's media and its span's,\nminus its exclusions \u2014 in exactly the shape, order and paging of `GET /api/attachments`.\n`type` narrows to images or videos. When more rows follow, the `X-Next-Cursor` header carries\nthe token to resend as `?cursor=` with the same `type`, `limit` and `order`.",
+        "operationId": "list_members_api_collections__uid__attachments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "image",
+                "video"
+              ],
+              "title": "Type",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "title": "Cursor",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "taken_desc",
+              "enum": [
+                "desc",
+                "asc",
+                "taken_desc",
+                "taken_asc"
+              ],
+              "title": "Order",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentListItem"
+                  },
+                  "title": "Response List Members Api Collections  Uid  Attachments Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-Next-Cursor": {
+                "description": "Opaque continuation token \u2014 resend it as `?cursor=` (with the same `type`, `tag`, `limit` and `order`) to get the next page. Absent on the last page.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "A query parameter failed validation (the `detail` array), or `cursor` could not be decoded or belongs to the other order kind (the `detail` string)."
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Members",
+        "tags": [
+          "collections"
+        ]
+      }
+    },
+    "/api/collections/{uid}/exclusions/{attachment_uid}": {
+      "delete": {
+        "description": "Put an excluded attachment back. Idempotent: one that is not excluded stays a member.",
+        "operationId": "include_attachment_api_collections__uid__exclusions__attachment_uid__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attachment_uid",
+            "required": true,
+            "schema": {
+              "title": "Attachment Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Include Attachment",
+        "tags": [
+          "collections"
+        ]
+      },
+      "put": {
+        "description": "Take one attachment out of this collection's members. Idempotent: excluding it again\nchanges nothing and answers 204 again.",
+        "operationId": "exclude_attachment_api_collections__uid__exclusions__attachment_uid__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attachment_uid",
+            "required": true,
+            "schema": {
+              "title": "Attachment Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such collection, or the attachment it names does not exist or is not visible to the caller \u2014 one answer for all three. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Exclude Attachment",
+        "tags": [
+          "collections"
+        ]
+      }
+    },
     "/api/events": {
       "get": {
         "operationId": "events_api_events_get",
@@ -4610,6 +5866,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4751,6 +6010,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4887,6 +6149,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4936,6 +6201,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4966,6 +6234,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -4996,6 +6267,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5045,6 +6319,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5092,6 +6369,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusyHead"
           }
         },
         "security": [
@@ -5126,6 +6406,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5309,6 +6592,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5429,6 +6715,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5477,6 +6766,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5623,6 +6915,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5683,6 +6978,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5742,6 +7040,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5792,6 +7093,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5825,6 +7129,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5872,6 +7179,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5915,6 +7225,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5957,6 +7270,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -5997,6 +7313,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6027,6 +7346,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "summary": "Vapid Public Key",
@@ -6048,6 +7370,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6095,6 +7420,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6128,6 +7456,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6161,6 +7492,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6210,6 +7544,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6261,6 +7598,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusyHead"
           }
         },
         "security": [
@@ -6354,6 +7694,32 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Too many uploads are streaming at once, for this account or for the server. The body was not read and nothing was stored; resend the same request after Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before sending the request again.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6405,6 +7771,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6455,6 +7824,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6528,6 +7900,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6574,6 +7949,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6640,6 +8018,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "security": [
@@ -6667,6 +8048,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "summary": "Health"
@@ -6686,6 +8070,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
           }
         },
         "summary": "Privacy"

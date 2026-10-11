@@ -105,6 +105,18 @@ struct ServerHandshakeTests {
         #expect(!session.showsOlderServerNotice)
     }
 
+    /// The 503 memos-ng itself sends since v2.1.0 carries a JSON body the contract now names, so it
+    /// arrives as its own case rather than as an undocumented status. It says nothing either.
+    @Test("a server that answers its documented 503 says nothing about its major")
+    func aDocumentedBusyHealthSaysNothing() async throws {
+        let asked = Counter()
+        let session = await signedIn(asked: asked) { Stub.databaseBusy() }
+        try await handshakeFinished(session)
+
+        #expect(asked.count == 1)
+        #expect(!session.showsOlderServerNotice)
+    }
+
     /// The 200 arrived and then the network went: the generated client throws with the 200 still
     /// attached, exactly as it does for a body that does not decode. What tells the two apart is
     /// the underlying error — a lost connection is not a server from before `apiMajor`. The error

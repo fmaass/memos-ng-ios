@@ -948,7 +948,7 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
             }
             lock.withLock { answeredYears.append(owner) }
             if owner == "bob" || lock.withLock({ noYears }) { return Self.json("[]") }
-            let thumb = #""coverThumbnailUrl":"/api/attachments/p0/thumb""#
+            let thumb = #""tags":[],"coverThumbnailUrl":"/api/attachments/p0/thumb""#
             return Self.json(
                 #"[{"key":"2026","count":3,"coverUid":"p0","# + thumb + "},"
                     + #"{"key":"2019","count":40,"coverUid":"p0","# + thumb + "}]")
@@ -1013,7 +1013,8 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
         """
         {"uid":"\(uid)","mime":"\(mime)","status":"ready","blurhash":null,\
         "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-        "renditions":[],"orphan":false,"memoUid":"m-\(uid)",\
+        "webReady":true,\
+        "renditions":[],"tags":[],"orphan":false,"memoUid":"m-\(uid)",\
         "takenAt":"\(taken)","filename":"\(uid).jpg",\
         "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
         "previewUrl":"/api/attachments/\(uid)/mobile",\

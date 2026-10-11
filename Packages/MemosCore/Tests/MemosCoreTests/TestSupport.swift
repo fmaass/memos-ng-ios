@@ -338,7 +338,7 @@ enum Stub {
         return """
             {"uid":"\(uid)","mime":"\(mime)","status":"\(status)","blurhash":null,\
             "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
-            "hasLegacyPrint":false,"renditions":[],"position":\(place),\
+            "hasLegacyPrint":false,"webReady":true,"renditions":[],"position":\(place),\
             "sha256":null,"capture_instant":\(capture),"capture_civil":null,\
             "capture_source":null,\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
@@ -361,7 +361,8 @@ enum Stub {
         return """
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":1000,"height":1000,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-            "renditions":[],"orphan":true,"memoUid":null,\
+            "webReady":true,\
+            "renditions":[],"tags":[],"orphan":true,"memoUid":null,\
             "takenAt":"2026-09-26T10:00:00Z","filename":"\(uid).jpg",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
             "previewUrl":"/api/attachments/\(uid)/mobile",\

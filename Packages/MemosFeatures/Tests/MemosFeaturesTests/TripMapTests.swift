@@ -513,7 +513,8 @@ final class TripMapTransport: ClientTransport, @unchecked Sendable {
         """
         {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
         "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-        "renditions":[],"orphan":false,"memoUid":"m-\(uid)",\
+        "webReady":true,\
+        "renditions":[],"tags":[],"orphan":false,"memoUid":"m-\(uid)",\
         "takenAt":"\(stamp(minute))","filename":"\(uid).jpg",\
         "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
         "previewUrl":"/api/attachments/\(uid)/mobile",\
@@ -528,7 +529,8 @@ final class TripMapTransport: ClientTransport, @unchecked Sendable {
         """
         {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,"width":1000,\
         "height":800,"duration":null,"sha256":null,"capture_instant":null,"capture_civil":null,\
-        "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,"renditions":[],\
+        "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+        "webReady":true,"renditions":[],\
         "position":null,"thumbnailUrl":"/api/attachments/\(uid)/thumb",\
         "previewUrl":"/api/attachments/\(uid)/mobile","webUrl":"/api/attachments/\(uid)/web",\
         "posterUrl":"/api/attachments/\(uid)/poster",\

@@ -228,18 +228,21 @@ struct ComposeTripChipTests {
     @Test("Post sends the tag line; after the x it does not; a new sheet has the chip back")
     func postCarriesTheTag() async {
         let log = PostLog()
-        let (posted, removed, postedAgain) = await PressProbe.withScreen(
+        let (posted, removed, postedAgain, waits) = await PressProbe.withScreen(
             sheet("Lisbon at dusk", pinnedTrip: trip) { await log.take($0) },
             height: 852
         ) { screen in
             let posted = screen.press("Post")
-            await screen.settle(until: { log.sent.count == 1 })
+            let sentOnce = await screen.until { log.sent.count == 1 }
             let removed = screen.press("Remove trip tag")
-            await screen.settle(until: { !screen.says("Pinned trip") })
+            let chipGone = await screen.until { !screen.says("Pinned trip") }
             let postedAgain = screen.press("Post")
-            await screen.settle(until: { log.sent.count == 2 })
-            return (posted, removed, postedAgain)
+            let sentTwice = await screen.until { log.sent.count == 2 }
+            return (posted, removed, postedAgain, (sentOnce, chipGone, sentTwice))
         }
+        #expect(waits.0, "the first Post was not recorded within 5 s")
+        #expect(waits.1, "the chip was still shown 5 s after its x was pressed")
+        #expect(waits.2, "the second Post was not recorded within 5 s")
         #expect(posted && removed && postedAgain)
         #expect(log.sent.map(\.content) == ["Lisbon at dusk\n#portugal2026", "Lisbon at dusk"])
 
@@ -250,19 +253,21 @@ struct ComposeTripChipTests {
     @Test("a failed post tried again sends the tag line once, from the unchanged words")
     func retryDoesNotDoubleTheLine() async {
         let log = PostLog(answers: [.failed(.transport(sent: false)), .saved])
-        let (wordsShown, lineShown) = await PressProbe.withScreen(
+        let ((wordsShown, lineShown), waits) = await PressProbe.withScreen(
             sheet("Lisbon at dusk", pinnedTrip: trip) { await log.take($0) },
             height: 852
         ) { screen in
             _ = screen.press("Post")
-            await screen.settle(until: { log.sent.count == 1 })
+            let sentOnce = await screen.until { log.sent.count == 1 }
             await screen.settle()
             // What the editor shows after the failure: the words as typed, and no tag line.
             let shown = (screen.says("Lisbon at dusk"), screen.says("#portugal2026"))
             _ = screen.press("Post")
-            await screen.settle(until: { log.sent.count == 2 })
-            return shown
+            let sentTwice = await screen.until { log.sent.count == 2 }
+            return (shown, (sentOnce, sentTwice))
         }
+        #expect(waits.0, "the failed Post was not recorded within 5 s")
+        #expect(waits.1, "the Post tried again was not recorded within 5 s")
         #expect(wordsShown, "the editor's words could not be read: the next check proves nothing")
         #expect(!lineShown, "the tag line was written into the editor")
         let once = "Lisbon at dusk\n#portugal2026"
@@ -272,13 +277,14 @@ struct ComposeTripChipTests {
     @Test("a restored capture already carrying the tag is posted as it stands")
     func restoredPostIsNotDoubled() async {
         let log = PostLog()
-        await PressProbe.withScreen(
+        let sent = await PressProbe.withScreen(
             sheet("Lisbon\n#portugal2026", pinnedTrip: trip) { await log.take($0) },
             height: 852
         ) { screen in
             _ = screen.press("Post")
-            await screen.settle(until: { log.sent.count == 1 })
+            return await screen.until { log.sent.count == 1 }
         }
+        #expect(sent, "the Post was not recorded within 5 s")
         #expect(log.sent.map(\.content) == ["Lisbon\n#portugal2026"])
     }
 

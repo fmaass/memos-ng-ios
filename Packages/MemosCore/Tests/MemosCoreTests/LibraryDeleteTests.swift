@@ -468,3 +468,26 @@ struct LibraryDeleteTests {
         #expect(!store.isDeleting)
     }
 }
+
+// MARK: - a newly documented 503 is answered as its undocumented self was
+
+extension LibraryDeleteTests {
+    /// Only a 404 counts as gone; a 503 stops the run on that picture as it did before v2.1.0.
+    @Test("a 503 on one picture fails it and stops the run, as before v2.1.0")
+    func aServiceUnavailableStopsTheRun() async {
+        let client = Stub.client { request, _, operation in
+            guard operation == deleteOperation else { return Self.page(["a", "b", "c"]) }
+            return request.path?.hasSuffix("/b") == true
+                ? Stub.databaseBusy() : Stub.empty(.noContent)
+        }
+        let store = await Self.loaded(client)
+
+        let outcome = await store.delete(["a", "b", "c"], using: client.handle)
+
+        let expected = LibraryDeleteOutcome(
+            deleted: ["a"], failed: "b", notAttempted: ["c"], stoppedForSessionChange: false
+        )
+        #expect(outcome == expected)
+        #expect(store.items.map(\.id) == ["b", "c"])
+    }
+}

@@ -33,15 +33,19 @@ filter:
     - attachment_buckets_api_attachments_buckets_get
     - attachment_meta_api_attachments__uid__get
     - attachment_tags_api_attachments_tags_get
+    - create_collection_api_collections_post
     - create_memo_api_memos_post
     - create_pat_api_pats_post
     - delete_attachment_api_attachments__uid__delete
+    - delete_collection_api_collections__uid__delete
     - delete_memo_api_memos__uid__delete
     - delete_rendition_api_attachments__uid__rendition__variant_key__delete
     - events_api_events_get
+    - exclude_attachment_api_collections__uid__exclusions__attachment_uid__put
     - export_memos_api_export_get
     - export_photobook_api_exports_photobook_get
     - finalize_upload_api_uploads__upload_uid__finalize_post
+    - get_collection_api_collections__uid__get
     - get_digest_hosting_api_admin_digest_hosting_get
     - get_digest_run_api_admin_digest_runs__run_id__get
     - get_digest_settings_api_admin_digest_settings_get
@@ -50,10 +54,13 @@ filter:
     - get_memo_compat_api_v1_memos__memo_id__get
     - get_settings_api_settings_get
     - health_health_get
+    - include_attachment_api_collections__uid__exclusions__attachment_uid__delete
     - list_attachments_api_attachments_get
+    - list_collections_api_collections_get
     - list_digest_recipients_api_admin_digest_recipients_get
     - list_digest_runs_api_admin_digest_runs_get
     - list_markers_api_map_markers_get
+    - list_members_api_collections__uid__attachments_get
     - list_members_api_members_get
     - list_memos_api_memos_get
     - list_memos_compat_api_v1_memos_get
@@ -87,6 +94,7 @@ filter:
     - unpin_memo_api_memos__uid__unpin_post
     - unreact_api_memos__uid__reactions__emoji__delete
     - unsubscribe_api_push_subscribe_delete
+    - update_collection_api_collections__uid__patch
     - update_digest_recipient_api_admin_digest_recipients__recipient_id__patch
     - update_settings_api_settings_patch
     - upload_capture_api_uploads__upload_uid__capture_get

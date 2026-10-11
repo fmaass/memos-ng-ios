@@ -168,6 +168,9 @@ public final class LibraryTagStore {
             return rows.map { LibraryTag(name: $0.name, count: $0.count) }
         case .unprocessableContent:
             throw APIError.server(status: 422)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }

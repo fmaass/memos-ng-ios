@@ -121,7 +121,8 @@ struct MediaLibraryJumpTests {
         """
         {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
         "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-        "renditions":[],"orphan":true,"memoUid":null,\
+        "webReady":true,\
+        "renditions":[],"tags":[],"orphan":true,"memoUid":null,\
         "takenAt":"\(takenAt)","filename":"\(uid).jpg",\
         "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
         "previewUrl":"/api/attachments/\(uid)/mobile",\

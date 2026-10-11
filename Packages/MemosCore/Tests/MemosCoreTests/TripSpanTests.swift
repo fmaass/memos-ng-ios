@@ -49,7 +49,8 @@ struct TripSpanTests {
         """
         {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
         "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-        "renditions":[],"orphan":false,"memoUid":"m-\(uid)",\
+        "webReady":true,\
+        "renditions":[],"tags":[],"orphan":false,"memoUid":"m-\(uid)",\
         "takenAt":"\(taken.formatted(.iso8601))","filename":"\(uid).jpg",\
         "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
         "previewUrl":"/api/attachments/\(uid)/mobile",\

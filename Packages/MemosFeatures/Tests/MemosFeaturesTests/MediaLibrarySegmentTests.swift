@@ -101,9 +101,9 @@ private final class SegmentTransport: ClientTransport, @unchecked Sendable {
     /// 2026 with a cover, 2019 with a cover URL that does not resolve.
     private static let years = """
         [{"key":"2026","count":12,"coverUid":"\(SegmentWire.coverPrefix)2026",\
-        "coverThumbnailUrl":"/api/attachments/\(SegmentWire.coverPrefix)2026/thumb"},\
+        "tags":[],"coverThumbnailUrl":"/api/attachments/\(SegmentWire.coverPrefix)2026/thumb"},\
         {"key":"2019","count":3,"coverUid":"\(SegmentWire.coverPrefix)2019",\
-        "coverThumbnailUrl":""}]
+        "tags":[],"coverThumbnailUrl":""}]
         """
 
     /// The signed server's one year, whose cover is the library's one row.
@@ -117,7 +117,7 @@ private final class SegmentTransport: ClientTransport, @unchecked Sendable {
     private static func signedYears(sig: String) -> String {
         """
         [{"key":"2026","count":12,"coverUid":"\(signedUID)",\
-        "coverThumbnailUrl":"/api/attachments/\(signedUID)/thumb\(signedQuery(sig))"}]
+        "tags":[],"coverThumbnailUrl":"/api/attachments/\(signedUID)/thumb\(signedQuery(sig))"}]
         """
     }
 
@@ -126,7 +126,8 @@ private final class SegmentTransport: ClientTransport, @unchecked Sendable {
         return """
             {"uid":"\(signedUID)","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-            "renditions":[],"orphan":true,"memoUid":null,\
+            "webReady":true,\
+            "renditions":[],"tags":[],"orphan":true,"memoUid":null,\
             "takenAt":"2026-09-26T10:00:00Z","filename":"cover.jpg",\
             "thumbnailUrl":"/api/attachments/\(signedUID)/thumb\(query)",\
             "previewUrl":"/api/attachments/\(signedUID)/mobile\(query)",\
@@ -187,7 +188,7 @@ private final class RefreshTransport: ClientTransport, @unchecked Sendable {
             return Self.json(
                 """
                 [{"key":"2026-09-14","count":\(count),"coverUid":"refresh-a",\
-                "coverThumbnailUrl":"/api/attachments/refresh-a/thumb"}]
+                "tags":[],"coverThumbnailUrl":"/api/attachments/refresh-a/thumb"}]
                 """
             )
         case SegmentWire.listAttachments:
@@ -204,7 +205,8 @@ private final class RefreshTransport: ClientTransport, @unchecked Sendable {
     private static let picture = """
         {"uid":"refresh-a","mime":"image/jpeg","status":"ready","blurhash":null,\
         "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-        "renditions":[],"orphan":true,"memoUid":null,\
+        "webReady":true,\
+        "renditions":[],"tags":[],"orphan":true,"memoUid":null,\
         "takenAt":"2026-09-14T10:00:00Z","filename":"refresh-a.jpg",\
         "thumbnailUrl":"/api/attachments/refresh-a/thumb",\
         "previewUrl":"/api/attachments/refresh-a/mobile",\

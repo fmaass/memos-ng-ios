@@ -798,3 +798,117 @@ extension TimelineStoreTests {
         #expect(store.memos.map(\.uid) == ["a"])
     }
 }
+
+// MARK: - a newly documented 503 is answered as its undocumented self was
+
+extension TimelineStoreTests {
+    private static let unavailableSentence = APIError.server(status: 503).errorDescription
+
+    /// The list every case below starts from, with `operation` answered by the database-busy 503.
+    private func seededBusy(on operation: String) async -> (TimelineStore, any APIProtocol) {
+        let client = Stub.client { _, _, asked in
+            asked == operation
+                ? Stub.databaseBusy() : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        return (await seeded(["a"], client: client), client)
+    }
+
+    @Test("a 503 to a memo delete keeps the row and says HTTP 503, as before v2.1.0")
+    func deleteUnavailable() async {
+        let (store, client) = await seededBusy(on: "delete_memo_api_memos__uid__delete")
+
+        #expect(!(await store.delete(uid: "a", using: client.handle)))
+        #expect(store.memos.map(\.uid) == ["a"])
+        #expect(store.lastError == Self.unavailableSentence)
+    }
+
+    @Test("a 503 to a pin is reported as HTTP 503, as before v2.1.0")
+    func pinUnavailable() async {
+        let (store, client) = await seededBusy(on: "pin_memo_api_memos__uid__pin_post")
+
+        let pinned = await store.setPinned(
+            true, uid: "a", using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(!pinned)
+        #expect(store.lastError == Self.unavailableSentence)
+    }
+
+    @Test("a 503 to an unpin is reported as HTTP 503, as before v2.1.0")
+    func unpinUnavailable() async {
+        let (store, client) = await seededBusy(on: "unpin_memo_api_memos__uid__unpin_post")
+
+        let unpinned = await store.setPinned(
+            false, uid: "a", using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(!unpinned)
+        #expect(store.lastError == Self.unavailableSentence)
+    }
+
+    /// Unreadable, not gone: only a 404 says a memo is no longer there.
+    @Test("a 503 to a single-memo read makes a jump unreadable, as before v2.1.0")
+    func jumpUnavailable() async {
+        let (store, client) = await seededBusy(on: "get_memo_api_memos__uid__get")
+
+        let outcome = await store.jump(
+            to: "a", calendar: Calendar(identifier: .gregorian), using: client.handle,
+            baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .unreadable)
+    }
+
+    /// A failed read, never a refusal: the session is not asked to end.
+    @Test("a 503 to a reconciling read is a read that did not happen, as before v2.1.0")
+    func reconcilingReadUnavailable() async {
+        let signedOut = Counter()
+        let store = TimelineStore(onUnauthorized: { _ in
+            signedOut.increment()
+            return .endedSession
+        })
+        let client = Stub.client { _, _, asked in
+            asked == "get_memo_api_memos__uid__get"
+                ? Stub.databaseBusy() : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        let read = await store.refreshMemo(uid: "a", using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(!read)
+        #expect(signedOut.count == 0)
+        #expect(store.memos.map(\.uid) == ["a"])
+    }
+}
+
+extension TimelineStoreTests {
+    @Test("a proxy's HTML 503 to a memo delete says HTTP 503, as before v2.1.0")
+    func deleteProxyPage() async {
+        let client = Stub.client { _, _, asked in
+            asked == "delete_memo_api_memos__uid__delete"
+                ? Stub.proxyPage(.serviceUnavailable)
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        let store = await seeded(["a"], client: client)
+
+        #expect(!(await store.delete(uid: "a", using: client.handle)))
+        #expect(store.memos.map(\.uid) == ["a"])
+        #expect(store.lastError == APIError.server(status: 503).errorDescription)
+    }
+
+    /// The keyed create's 503 was documented before v2.1.0 as the race that stored nothing, and an
+    /// unreadable one never was that answer: it is left to fail as it always did, not read as 503.
+    @Test("a proxy's HTML 503 to a create is not turned into the race answer")
+    func createProxyPageIsLeftAlone() async {
+        let client = Stub.client { _, _, asked in
+            asked == "create_memo_api_memos_post"
+                ? Stub.proxyPage(.serviceUnavailable)
+                : Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        let store = await seeded(["a"], client: client)
+
+        #expect(!(await store.create(content: "x", using: client.handle, baseURL: Stub.baseURL)))
+        #expect(store.lastError != nil)
+        #expect(store.lastError != APIError.server(status: 503).errorDescription)
+    }
+}

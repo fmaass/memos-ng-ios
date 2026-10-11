@@ -92,7 +92,7 @@ nonisolated final class ResigningMemoServer: ClientTransport, Sendable {
         return """
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":1000,"height":1000,"duration":null,"mine":true,"hasPrint":false,\
-            "hasLegacyPrint":false,"renditions":[],"position":null,\
+            "hasLegacyPrint":false,"webReady":true,"renditions":[],"position":null,\
             "sha256":null,"capture_instant":null,"capture_civil":null,"capture_source":null,\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
             "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
@@ -436,7 +436,8 @@ nonisolated final class ResigningLibraryServer: ClientTransport, Sendable {
         let row = """
             {"uid":"la","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":1000,"height":800,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-            "renditions":[],"orphan":true,"memoUid":null,\
+            "webReady":true,\
+            "renditions":[],"tags":[],"orphan":true,"memoUid":null,\
             "takenAt":"2026-09-26T10:00:00Z","filename":"la.jpg",\
             "thumbnailUrl":"/api/attachments/la/thumb\(query)",\
             "previewUrl":"/api/attachments/la/mobile\(query)",\
@@ -530,7 +531,7 @@ nonisolated final class HeldBucketServer: ClientTransport, Sendable {
         let key = size == "year" ? "2026" : "2026-09-14"
         let cover = size == "year" ? "yc" : "dc"
         let body = """
-            [{"key":"\(key)","count":3,"coverUid":"\(cover)",\
+            [{"key":"\(key)","count":3,"coverUid":"\(cover)","tags":[],\
             "coverThumbnailUrl":"/api/attachments/\(cover)/thumb?exp=1000000000&scope=1&sig=old"}]
             """
         return (response, HTTPBody(body))

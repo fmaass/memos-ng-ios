@@ -1388,6 +1388,11 @@ public final class SessionStore {
                 // session by the time this line runs.
                 if owns(wiped) { lastError = signOutComplaint }
                 return .revoked
+            // Documented since v2.1.0; answered exactly as its `.undocumented(503)` was.
+            case .serviceUnavailable:
+                let error = APIError.fromStatus(503)
+                lastError = error.errorDescription
+                return .revokeFailed(error)
             case .undocumented(let statusCode, _):
                 // A refusal no longer arrives here: the middleware throws it, and the catch below
                 // is where "the token was already gone" is told apart from "the token this revoke
@@ -2176,6 +2181,9 @@ public final class SessionStore {
             return (payload.token, User(payload.user))
         case .unprocessableContent:
             throw NativeLoginError.api(.server(status: 422))
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw NativeLoginError.api(.fromStatus(503))
         case .undocumented(let statusCode, let payload):
             // Every refusal is a 400 with one of four stable detail codes. They are read here
             // rather than reported as "HTTP 400" because they are the difference between "try
@@ -2567,6 +2575,9 @@ public final class SessionStore {
         case .ok(let ok):
             MemosLog.session.info("GET /api/auth/native/token -> 200")
             return DeviceToken(try ok.body.json)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
@@ -2585,6 +2596,9 @@ public final class SessionStore {
             return DeviceToken(try ok.body.json)
         case .unprocessableContent:
             throw APIError.server(status: 422)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
@@ -2599,6 +2613,9 @@ public final class SessionStore {
         switch response {
         case .ok(let ok):
             return try ok.body.json.token
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, let payload):
             if statusCode == 400, let body = payload.body,
                 let data = try? await Data(collecting: body, upTo: 4096),
@@ -2760,6 +2777,9 @@ public final class SessionStore {
                 defaultVisibility: MemoVisibility(json.defaultVisibility),
                 avatar: json.avatar
             )
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
@@ -2785,6 +2805,9 @@ public final class SessionStore {
             )
         case .unprocessableContent:
             throw APIError.server(status: 422)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
@@ -2909,7 +2932,8 @@ public final class SessionStore {
         case .success(.ok(let ok)):
             guard let health = try? ok.body.json else { return false }
             return health.apiMajor < appMajor
-        case .success(.undocumented):
+        // Documented since v2.1.0; says nothing, exactly as its `.undocumented(503)` did.
+        case .success(.undocumented), .success(.serviceUnavailable):
             return false
         case .failure(let error):
             guard let clientError = error as? ClientError,
@@ -2925,6 +2949,9 @@ public final class SessionStore {
         case .ok(let ok):
             MemosLog.session.info("GET /api/auth/user -> 200")
             return User(try ok.body.json)
+        // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):
             throw APIError.fromStatus(statusCode)
         }
