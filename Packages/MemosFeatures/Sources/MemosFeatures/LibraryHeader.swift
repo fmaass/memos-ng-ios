@@ -8,6 +8,7 @@ import SwiftUI
 ///
 /// Drawn by the screen rather than by the navigation bar, so the two controls are two pieces of
 /// glass side by side, as the Photos app draws them, and not items a toolbar may group into one.
+/// The layout is `ScreenHeader`'s, which Collections wears too (MEMNG-757).
 struct LibraryHeader<MenuContent: View>: View {
     let subtitle: String
     /// The Select capsule's action, or nil where there is nothing to select — Years and Months,
@@ -22,14 +23,65 @@ struct LibraryHeader<MenuContent: View>: View {
     var close: () -> Void = {}
     @ViewBuilder let menu: () -> MenuContent
 
-    /// The smallest target a finger is promised, which the round button and the capsule share so
-    /// they read as one row of controls.
-    private static var control: CGFloat { 44 }
+    var body: some View {
+        ScreenHeader(title: "Library", subtitle: subtitle) {
+            if selecting {
+                selectModeControls
+            } else {
+                browsingControls
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var browsingControls: some View {
+        Menu {
+            menu()
+        } label: {
+            HeaderGlassCircle.symbol("ellipsis")
+        }
+        .glassEffect(.regular.interactive(), in: .circle)
+        .accessibilityLabel("Options")
+        // Live only where there are files to choose (All); on Years and Months it is still drawn,
+        // so the header keeps its shape, and disabled, so it promises nothing it cannot do. The
+        // padding and the height are the label's, so the button is the whole capsule of glass and
+        // its frame is the capsule's: the edge Collections' + is held to (MEMNG-757).
+        Button {
+            select?()
+        } label: {
+            Text("Select")
+                .padding(.horizontal, DesignTokens.Space.roomy)
+                .frame(height: HeaderGlassCircle.control)
+        }
+        .font(.body.weight(.semibold))
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .disabled(select == nil)
+    }
+
+    @ViewBuilder
+    private var selectModeControls: some View {
+        HeaderGlassCircle(
+            systemName: allSelected ? "checkmark.circle.fill" : "checkmark.circle",
+            label: allSelected ? "Deselect All" : "Select All",
+            action: toggleAll
+        )
+        HeaderGlassCircle(systemName: "xmark", label: "Close", action: close)
+    }
+}
+
+/// A tab root's header, drawn by the screen with the navigation bar hidden (plan page 3929
+/// decision 10, MEMNG-757): a large bold title with a small subtitle line under it, and the
+/// screen's controls on the right. The Library and Collections both wear it, so the two tabs'
+/// titles stand at one edge and their controls at one height.
+struct ScreenHeader<Trailing: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: DesignTokens.Space.snug) {
             VStack(alignment: .leading, spacing: DesignTokens.Space.hair) {
-                Text("Library")
+                Text(title)
                     .font(.largeTitle.bold())
                     .accessibilityAddTraits(.isHeader)
                 Text(subtitle)
@@ -38,56 +90,37 @@ struct LibraryHeader<MenuContent: View>: View {
                     .lineLimit(1)
             }
             Spacer(minLength: DesignTokens.Space.snug)
-            if selecting {
-                selectModeControls
-            } else {
-                browsingControls
-            }
+            trailing()
         }
         .padding(.horizontal, DesignTokens.Space.roomy)
         .padding(.vertical, DesignTokens.Space.snug)
     }
+}
 
-    @ViewBuilder
-    private var browsingControls: some View {
-        Menu {
-            menu()
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: Self.control, height: Self.control)
+/// A header's round glass button: a symbol on a circle of glass, the Library's options and select
+/// mode's controls and Collections' + alike, so they read as one row of controls at one height.
+struct HeaderGlassCircle: View {
+    let systemName: String
+    let label: String
+    let action: () -> Void
+
+    /// The smallest target a finger is promised, which the circle and the Select capsule share.
+    static let control: CGFloat = 44
+
+    var body: some View {
+        Button(action: action) {
+            Self.symbol(systemName)
         }
         .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel("Options")
-        // Live only where there are files to choose (All); on Years and Months it is still drawn,
-        // so the header keeps its shape, and disabled, so it promises nothing it cannot do.
-        Button("Select") { select?() }
-            .font(.body.weight(.semibold))
-            .padding(.horizontal, DesignTokens.Space.roomy)
-            .frame(height: Self.control)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .disabled(select == nil)
+        .accessibilityLabel(label)
     }
 
-    @ViewBuilder
-    private var selectModeControls: some View {
-        Button(action: toggleAll) {
-            Image(systemName: allSelected ? "checkmark.circle.fill" : "checkmark.circle")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: Self.control, height: Self.control)
-        }
-        .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel(allSelected ? "Deselect All" : "Select All")
-        Button(action: close) {
-            Image(systemName: "xmark")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: Self.control, height: Self.control)
-        }
-        .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel("Close")
+    /// The symbol at the circle's size, for the one round control that is a menu, not a button.
+    static func symbol(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.primary)
+            .frame(width: control, height: control)
     }
 }
 

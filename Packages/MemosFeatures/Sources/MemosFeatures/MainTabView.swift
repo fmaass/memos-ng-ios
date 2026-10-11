@@ -128,14 +128,12 @@ struct MainTabView: View {
     }
 }
 
-extension View {
-    /// A tab root's title: stated to the navigation bar, LARGE (MEMNG-666).
-    ///
-    /// One modifier for every root rather than two lines at each, so that "every tab root stands
-    /// under a large title" is a statement a reader finds once — the system bar under a root and
-    /// the large title over it are what make the app read like every other app on the phone.
-    func tabRootTitle(_ title: String) -> some View {
-        navigationTitle(title)
-            .navigationBarTitleDisplayMode(.large)
+/// The navigation bar the Timeline and Places roots stand under (MEMNG-756): inline, with no
+/// title, so neither spends a band of the screen on its name — the main bar's selected item
+/// already says which tab this is. One modifier both roots apply, so the bar a test reads over a
+/// hosted root is the one this says.
+struct TabRootChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content.navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -81,8 +81,8 @@ private final class SystemBarCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// The signed-in app's bar is its own capsule, never the system's (MEMNG-690), and each tab root
-/// stands under a large title of its own (MEMNG-666).
+/// The signed-in app's bar is its own capsule, never the system's (MEMNG-690). A root that draws a
+/// header stands under its large title (MEMNG-666); the Timeline and Places draw none (MEMNG-756).
 ///
 /// The real `MainTabView` over a real `SessionStore` and the real generated client: which bar is
 /// drawn is decided by the modifiers between the `TabView` and each root, and a harness that
@@ -95,9 +95,12 @@ struct SystemTabBarRenderTests {
     /// The least height of the label a LARGE title is drawn in: the large-title style measures
     /// about 41 points on a phone and the inline style about 22, so the threshold sits between.
     static let largeTitleHeight: CGFloat = 30
+    /// The roots that draw a header with the tab's name in it (MEMNG-757); the others spend no
+    /// band of the screen on their names (MEMNG-756).
+    static let headed: Set<MainTab> = [.library, .collections]
 
     @Test(
-        "each tab root stands over the app's bar, under a large title of its own",
+        "each tab root stands over the app's bar, titled large where it draws a header",
         arguments: MainTab.allCases
     )
     func eachRootStandsOverTheAppBar(tab: MainTab) async {
@@ -106,6 +109,11 @@ struct SystemTabBarRenderTests {
 
         for _ in 0..<160 where !Self.arrived(on: tab, in: window) {
             await Self.settle(window)
+        }
+        // A title is installed turns after the bar, so where none is wanted its absence is read
+        // only after as many turns as one would take to come.
+        if !Self.headed.contains(tab) {
+            for _ in 0..<40 { await Self.settle(window) }
         }
 
         let titles = ScopeBarProbe.tabTitlesLeftToRight(in: window)
@@ -117,14 +125,19 @@ struct SystemTabBarRenderTests {
             ScopeBarProbe.selectedTitle(in: window) == tab.title,
             "\(tab.title) is not the tab selected")
 
-        // The title stands LARGE: a label reading the tab's name, drawn in the top third of the
-        // window outside the bar, at least as tall as the large-title style draws it.
+        // A header's title stands LARGE: a label reading the tab's name, drawn in the top third
+        // of the window outside the bar, at least as tall as the large-title style draws it. A
+        // root without a header has no such label at all.
         let height = Self.titleHeight(tab.title, in: window)
         let seen = Self.labels(in: window)
-        #expect(
-            height >= Self.largeTitleHeight,
-            "\(tab.title)'s title is \(height) tall, not large; the screen reads \(seen)"
-        )
+        if Self.headed.contains(tab) {
+            #expect(
+                height >= Self.largeTitleHeight,
+                "\(tab.title)'s title is \(height) tall, not large; the screen reads \(seen)"
+            )
+        } else {
+            #expect(height == 0, "\(tab.title) is titled \(height) tall; the screen reads \(seen)")
+        }
     }
 
     /// MEMNG-605: while Places loads, its root already fills the screen, so nothing laid out
@@ -208,12 +221,12 @@ struct SystemTabBarRenderTests {
         try? await Task.sleep(for: .milliseconds(25))
     }
 
-    /// Whether the screen has reached what the root test reads: the bar up on `tab`, and a large
-    /// label reading its name.
+    /// Whether the screen has reached what the root test reads: the bar up on `tab`, and where the
+    /// root draws a header, a large label reading its name.
     private static func arrived(on tab: MainTab, in window: UIWindow) -> Bool {
         guard ScopeBarProbe.tabsShow(in: window) else { return false }
         guard ScopeBarProbe.selectedTitle(in: window) == tab.title else { return false }
-        return titleHeight(tab.title, in: window) >= largeTitleHeight
+        return !headed.contains(tab) || titleHeight(tab.title, in: window) >= largeTitleHeight
     }
 
     // MARK: - what the screen reads

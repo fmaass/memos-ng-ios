@@ -153,12 +153,12 @@ struct CollectionsScreen: View {
         // The whole screen, so the chrome around the root is laid out against the screen and not
         // against the content's own size (MEMNG-605).
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .tabRootTitle(MainTab.collections.title)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(Self.newTripButton, systemImage: "plus") { newTrip = NewTripFlow() }
-            }
+        // The Library's header over the root, its + included, with no bar above it: the two tabs
+        // read as a pair (MEMNG-757).
+        .safeAreaBar(edge: .top) {
+            Self.header(tripCount: collections.records.count) { newTrip = NewTripFlow() }
         }
+        .toolbarVisibility(.hidden, for: .navigationBar)
         // A card opens its trip inside the tab's stack (MEMNG-714), under the main bar, with
         // its room (MEMNG-715).
         .stackDestination(for: TripRoute.self) { route in
@@ -182,13 +182,21 @@ struct CollectionsScreen: View {
     static var placeholder: some View {
         ScrollView { emptyState.padding(.vertical, DesignTokens.Space.roomy) }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .tabRootTitle(MainTab.collections.title)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(newTripButton, systemImage: "plus") {}
-                        .disabled(true)
-                }
-            }
+            .safeAreaBar(edge: .top) { header(tripCount: 0, newTrip: nil) }
+            .toolbarVisibility(.hidden, for: .navigationBar)
+    }
+
+    /// The root's header (MEMNG-757): the Library's, the trip count under the title and the `+`
+    /// the same glass circle as the Library's options button. With no action — the placeholder's
+    /// — the `+` is drawn and cannot act.
+    static func header(tripCount: Int, newTrip: (() -> Void)?) -> some View {
+        ScreenHeader(
+            title: MainTab.collections.title,
+            subtitle: CollectionsPresentation.headerSubtitle(tripCount: tripCount)
+        ) {
+            HeaderGlassCircle(systemName: "plus", label: newTripButton) { newTrip?() }
+                .disabled(newTrip == nil)
+        }
     }
 
     private static var emptyState: some View {

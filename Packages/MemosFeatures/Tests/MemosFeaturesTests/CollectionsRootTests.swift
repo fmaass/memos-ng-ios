@@ -332,6 +332,43 @@ struct CollectionsRootRenderTests {
     /// 2026-10-08T12:00:00Z.
     private static let now = Date(timeIntervalSince1970: 1_791_460_800)
 
+    /// MEMNG-757, decision 7: the header says how many trips there are, and nothing else.
+    @Test(
+        "the header's subtitle is the trip count alone",
+        arguments: [(0, "No trips yet"), (1, "1 trip"), (3, "3 trips")]
+    )
+    func headerSubtitle(count: Int, expected: String) {
+        #expect(CollectionsPresentation.headerSubtitle(tripCount: count) == expected)
+    }
+
+    /// MEMNG-757: the root's title is the header's, not a bar's, and the + is the header's too —
+    /// on no bar that is on screen — and it still opens the New trip sheet.
+    @Test("the root's bar has no title, and the header's + opens the New trip sheet")
+    func theHeaderCarriesTitleAndPlus() async {
+        let wire = CollectionsWire()
+        await CollectionsHost.with(screen(stores(), wire)) { screen in
+            let plus = CollectionsScreen.newTripButton
+            #expect(await screen.until { screen.element(labelled: plus) != nil })
+            // `says`, not `element(labelled:)`: the probe's element lookup finds buttons only.
+            #expect(screen.says(MainTab.collections.title), "no header title")
+            var stack: [UIView] = [screen.window]
+            var bars: [UINavigationBar] = []
+            while let next = stack.popLast() {
+                stack.append(contentsOf: next.subviews)
+                if let bar = next as? UINavigationBar { bars.append(bar) }
+            }
+            let titles = bars.compactMap { $0.topItem?.title }.filter { !$0.isEmpty }
+            #expect(titles.isEmpty, "the root's bar is titled \(titles)")
+            let frame = screen.element(labelled: plus)?.accessibilityFrame ?? .null
+            let middle = CGPoint(x: frame.midX, y: frame.midY)
+            let onABar = bars.filter { !$0.isHidden && $0.alpha > 0.01 }
+                .contains { $0.convert($0.bounds, to: nil).contains(middle) }
+            #expect(!onABar, "the + stands on a navigation bar at \(frame)")
+            #expect(screen.press(plus), "the + took no press")
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.create) != nil })
+        }
+    }
+
     private func stores(writeBytes: ((Data, URL) throws -> Void)? = nil)
         -> (CollectionStore, TripMembershipStore, LibraryTagStore)
     {

@@ -969,8 +969,9 @@ struct LibraryGrid: View {
             switch grouping {
             case .byDay:
                 ForEach(sections) { month in
+                    // The header title's 16 pt edge, which the day heading shares (MEMNG-756).
                     LibraryMonthHeader(label: month.label)
-                        .padding(.horizontal, DesignTokens.Space.tight)
+                        .padding(.horizontal, DesignTokens.Space.roomy)
                         .padding(.bottom, DesignTokens.Space.snug)
                     // One view per element, whose `.id` IS the element's identity: a lazy stack
                     // resolves a scroll to a row it has not built through the ForEach's identity,
@@ -998,7 +999,7 @@ struct LibraryGrid: View {
                 date: day.date,
                 count: MediaLibraryPresentation.dayCount(day.key, in: dayBuckets)
             )
-            .padding(.horizontal, DesignTokens.Space.regular)
+            .padding(.horizontal, DesignTokens.Space.roomy)
             .padding(.bottom, DesignTokens.Space.snug)
             .id(row.id)
             .modifier(marker(row.id, day: day.key, order: 2 * day.dayIndex))

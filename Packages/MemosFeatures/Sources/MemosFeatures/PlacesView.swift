@@ -14,13 +14,13 @@ struct PlacesView: View {
     @Environment(SessionStore.self) private var session
 
     var body: some View {
-        // A stack of its own for the one thing it carries: the tab root's large title, which a
-        // root stands under on every tab now that the bar is the system's (MEMNG-666). The map
-        // still runs under the bars, edge to edge.
+        // A stack of its own, as every tab root has one, under a bar with no title (MEMNG-756):
+        // the main bar's selected item already names the tab. The map still runs under the bars,
+        // edge to edge.
         NavigationStack {
             PlacesScreen()
                 .id(session.state.user?.subject)
-                .tabRootTitle(MainTab.places.title)
+                .modifier(TabRootChrome())
                 // The app's main bar's room, inside the stack (MEMNG-690).
                 .leadingFootBar(on: .places)
         }

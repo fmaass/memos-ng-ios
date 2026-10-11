@@ -250,6 +250,106 @@ struct MediaLibraryRenderTests {
         #expect(left < middle && middle < right, "x: title \(left), ••• \(middle), \(right)")
     }
 
+    /// MEMNG-756: the Library's left edges are one. The month over a day's rows and the day's
+    /// heading start where the header's title does, at its 16 pt inset; the bands under them keep
+    /// their own 12 pt.
+    @Test("the month header and the day heading start at the header title's edge")
+    func monthAndDayShareTheTitleEdge() async throws {
+        let header = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        header.rootViewController = UIHostingController(
+            rootView: VStack {
+                LibraryHeader(subtitle: "All") { Text("row") }
+                Spacer()
+            })
+        header.makeKeyAndVisible()
+        let window = Self.show(Harness(items: Self.day("mon", 3, at: Self.noon(14))))
+        defer {
+            header.isHidden = true
+            header.rootViewController = nil
+            window.isHidden = true
+        }
+        var title: NSObject?
+        var month: NSObject?
+        var day: NSObject?
+        for _ in 0..<60 where title == nil || month == nil || day == nil {
+            try await Task.sleep(for: .milliseconds(50))
+            header.layoutIfNeeded()
+            window.layoutIfNeeded()
+            title = Self.element("Library", in: header)
+            month = Self.element("September 2026", in: window)
+            day = Self.element("Mon 14 Sep", in: window)
+        }
+        let edge = try #require(title, "no header title").accessibilityFrame.minX
+        let monthEdge = try #require(month, "no month header").accessibilityFrame.minX
+        let dayEdge = try #require(day, "no day heading").accessibilityFrame.minX
+        #expect(abs(edge - DesignTokens.Space.roomy) < 0.5, "the title starts at \(edge)")
+        #expect(abs(monthEdge - edge) < 0.5, "the month at \(monthEdge), the title at \(edge)")
+        #expect(abs(dayEdge - edge) < 0.5, "the day heading at \(dayEdge), the title at \(edge)")
+    }
+
+    /// MEMNG-757: Collections wears the Library's header. Each tab's title starts at the Library
+    /// title's edge, and its last control stands where the Library's Select capsule does — the
+    /// same height and middle, and the same trailing edge, the header's inset from the window's.
+    /// The Library's own case holds the reference to the numbers it is measured by.
+    @Test(
+        "each tab's header puts its title and its last control where the Library's stand",
+        arguments: [MainTab.library, MainTab.collections]
+    )
+    func headerMatchesTheLibrarys(tab: MainTab) async throws {
+        let width: CGFloat = 390
+        let reference = try await Self.frames(
+            of: LibraryHeader(subtitle: "All", select: {}) { Text("row") },
+            labels: ["Library", "Select"], width: width)
+        var measured = reference
+        if tab == .collections {
+            measured = try await Self.frames(
+                of: CollectionsScreen.header(tripCount: 3, newTrip: {}),
+                labels: [MainTab.collections.title, CollectionsScreen.newTripButton],
+                width: width)
+        }
+        try #require(reference.count == 2, "the Library header read \(reference)")
+        try #require(measured.count == 2, "the \(tab) header read \(measured)")
+        let title = measured[0]
+        let control = measured[1]
+        let capsule = reference[1]
+        #expect(abs(reference[0].minX - DesignTokens.Space.roomy) < 0.5, "Library at \(reference)")
+        #expect(abs(title.minX - reference[0].minX) < 0.5, "\(tab) title \(title)")
+        #expect(abs(capsule.height - HeaderGlassCircle.control) < 0.5, "capsule \(capsule)")
+        #expect(abs(control.height - capsule.height) < 0.5, "\(tab) control \(control)")
+        #expect(abs(control.midY - capsule.midY) < 0.5, "\(tab) control \(control)")
+        #expect(abs(control.maxX - capsule.maxX) < 0.5, "\(tab) control \(control)")
+        #expect(abs(width - capsule.maxX - DesignTokens.Space.roomy) < 0.5, "capsule \(capsule)")
+    }
+
+    /// Hosts `view` at the top of a real window `width` wide and reads, while the window stands,
+    /// the frame of the element labelled each of `labels`, in order; fewer when one never shows.
+    private static func frames(
+        of view: some View, labels: [String], width: CGFloat
+    ) async throws -> [CGRect] {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: width, height: 844))
+        window.rootViewController = UIHostingController(
+            rootView: VStack {
+                view
+                Spacer()
+            })
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var frames: [CGRect] = []
+        for _ in 0..<60 where frames.count < labels.count {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            var found: [NSObject] = []
+            collectElements(window, into: &found)
+            frames = labels.compactMap { label in
+                found.first { $0.accessibilityLabel == label }?.accessibilityFrame
+            }
+        }
+        return frames
+    }
+
     /// Hosts `view` in a real window until an element labelled `waitFor` appears, and returns
     /// every labelled element it holds.
     private static func elements(of view: some View, waitFor: String) async throws -> [NSObject] {

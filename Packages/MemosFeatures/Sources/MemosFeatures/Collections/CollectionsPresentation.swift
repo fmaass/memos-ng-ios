@@ -23,6 +23,16 @@ enum CollectionsPresentation {
         return formatter.string(from: min(first, last), to: max(first, last))
     }
 
+    /// The root header's subtitle (MEMNG-757): the trip count alone. No order phrase, because the
+    /// trips stand in the order they were arranged in, which is no rule a phrase could name.
+    static func headerSubtitle(tripCount: Int) -> String {
+        switch tripCount {
+        case 0: "No trips yet"
+        case 1: "1 trip"
+        default: "\(tripCount) trips"
+        }
+    }
+
     /// How many pictures a trip or a tag holds: "1 photo", "3 photos".
     static func photoCount(_ count: Int) -> String {
         count == 1 ? "1 photo" : "\(count) photos"

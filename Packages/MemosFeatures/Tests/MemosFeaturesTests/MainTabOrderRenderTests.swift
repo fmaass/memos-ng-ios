@@ -270,6 +270,57 @@ struct MainTabOrderRenderTests {
         return last
     }
 
+    /// MEMNG-756: the Timeline and Places spend no band on their names. Their bar is inline and
+    /// carries no title — the main bar's selected item already says which tab this is — read off
+    /// the navigation controller the hosted tab controller has selected, so it is the bar the root
+    /// itself stands under and not one a harness built.
+    @Test(
+        "the Timeline and Places roots stand under an inline bar with no title",
+        arguments: [MainTab.timeline, MainTab.places]
+    )
+    func tabRootBarHasNoTitle(tab: MainTab) async throws {
+        let window = await Self.signedInWindow(opening: tab)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        // A fixed run of turns rather than "until a bar exists": UIKit installs a title a turn
+        // after the bar, and a bar read on its first turn has no title for reasons of timing.
+        var stack: UINavigationController?
+        for _ in 0..<40 {
+            await Self.settle(window)
+            stack = Self.navigationController(
+                in: Self.tabController(in: window.rootViewController)?.selectedViewController)
+        }
+        let bar = try #require(stack?.navigationBar, "no navigation bar over \(tab)")
+        let item = try #require(bar.topItem, "no item on the bar over \(tab)")
+        #expect((item.title ?? "").isEmpty, "the \(tab) bar is titled \(item.title ?? "")")
+        #expect(!Self.drawsText(tab.title, in: bar), "the \(tab) bar draws its name")
+        let mode = item.largeTitleDisplayMode.rawValue
+        #expect(
+            item.largeTitleDisplayMode == .never || !bar.prefersLargeTitles,
+            "the \(tab) bar is large: mode \(mode), height \(bar.frame.height)")
+    }
+
+    /// The first navigation controller at or under `controller`.
+    private static func navigationController(
+        in controller: UIViewController?
+    ) -> UINavigationController? {
+        guard let controller else { return nil }
+        if let found = controller as? UINavigationController { return found }
+        for child in controller.children {
+            if let found = navigationController(in: child) { return found }
+        }
+        return nil
+    }
+
+    /// Whether a label under `view` that is on screen reads `text`.
+    private static func drawsText(_ text: String, in view: UIView) -> Bool {
+        if view.isHidden || view.alpha < 0.01 { return false }
+        if let label = view as? UILabel, label.text == text { return true }
+        return view.subviews.contains { drawsText(text, in: $0) }
+    }
+
     /// Signs in over the tab-order wire and hosts the app on `tab`, chosen.
     private static func signedInWindow(opening tab: MainTab) async -> UIWindow {
         let session = SessionStore(

@@ -88,11 +88,10 @@ public struct TimelineView: View {
             .background(Color(.systemGroupedBackground))
             // The app's main bar's room, inside the stack (MEMNG-690).
             .leadingFootBar(on: .timeline)
-            // A large title, as every tab root has one now that the bar under them is the
-            // system's (MEMNG-666): it names the tab the bar has selected, and it folds into the
-            // inline bar as the first memo scrolls up under it. The toolbar keeps both its
+            // No title (MEMNG-756): the main bar's selected item already names the tab, and a
+            // large title spent a band of the screen saying it again. The toolbar keeps both its
             // controls exactly where they were.
-            .tabRootTitle(MainTab.timeline.title)
+            .modifier(TabRootChrome())
             // `stackDestination`, not `navigationDestination`: what the tab bar does under a
             // pushed screen is the route's to say, and saying it here is how Settings came to be
             // drawn under the Timeline and Library icons it has nothing to do with (MEMNG-220).
