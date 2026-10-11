@@ -399,6 +399,14 @@ enum PressProbe {
             element(labelled: label)?.accessibilityActivate() ?? false
         }
 
+        /// Whether the control is there and would take a press now: the same element `press`
+        /// finds, not marked `.notEnabled`. What a press started can still be holding a control
+        /// disabled after the effect a test waits for has landed, so the next press waits on this.
+        func isLive(_ label: String) -> Bool {
+            guard let found = element(labelled: label) else { return false }
+            return !found.accessibilityTraits.contains(.notEnabled)
+        }
+
         /// Whether anything on the screen READS as this sentence.
         ///
         /// A line of text carries no button trait, so it is not a control and `element(labelled:)`

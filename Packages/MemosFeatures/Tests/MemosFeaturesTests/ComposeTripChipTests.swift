@@ -233,7 +233,9 @@ struct ComposeTripChipTests {
             height: 852
         ) { screen in
             let posted = screen.press("Post")
-            let sentOnce = await screen.until { log.sent.count == 1 }
+            // The send lands inside the submission, which ends only after it: the next press
+            // waits for Post to be live again, not only for the log.
+            let sentOnce = await screen.until { log.sent.count == 1 && screen.isLive("Post") }
             let removed = screen.press("Remove trip tag")
             let chipGone = await screen.until { !screen.says("Pinned trip") }
             let postedAgain = screen.press("Post")
@@ -258,7 +260,7 @@ struct ComposeTripChipTests {
             height: 852
         ) { screen in
             _ = screen.press("Post")
-            let sentOnce = await screen.until { log.sent.count == 1 }
+            let sentOnce = await screen.until { log.sent.count == 1 && screen.isLive("Post") }
             await screen.settle()
             // What the editor shows after the failure: the words as typed, and no tag line.
             let shown = (screen.says("Lisbon at dusk"), screen.says("#portugal2026"))
