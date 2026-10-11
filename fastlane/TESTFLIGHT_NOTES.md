@@ -5,6 +5,16 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.3 (45)
+
+- The gear is gone: my avatar in the Timeline's toolbar opens an Account sheet with my account, the token this phone holds, Manage tokens, the default visibility and Sign out.
+- Appearance and Upload over mobile data moved into the phone's Settings app, under memos, where the version is shown too; the app follows a change made there without a relaunch.
+- Clear cache is now the last item of the Library's ⋯ menu.
+- Timeline and Places no longer carry a title; the Library heading sits at the screen edge, and Collections carries the same header.
+- In a trip's viewer, Use as Cover moved into the ⋯ menu, next to Show Memo.
+- Tapping a photo in a trip's Journal opens the viewer on the trip, starting at that photo, instead of leaving for the Timeline; tapping its text still opens the memo.
+- Please open the Account sheet from the avatar, change Appearance in the phone's Settings app and come back, open a Journal photo, and set a cover from the viewer's menu.
+
 ## 2.2.2 (44)
 
 - I can pin one trip from its menu. While it is pinned, a new memo gets the trip's tag on its own line, shown as a chip I can remove with ✕. The pin ends by itself 7 days after the trip's last picture.
