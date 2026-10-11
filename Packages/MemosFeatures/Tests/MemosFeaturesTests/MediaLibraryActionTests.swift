@@ -364,6 +364,72 @@ struct MediaViewerActionControlTests {
     }
 }
 
+// MARK: - the host's row (MEMNG-768)
+
+/// A trip hands its viewers one more row, "Use as Cover". It is drawn in the menu and never in
+/// `MediaTileMenu`'s list, and it turns a control that would have been one button into the menu.
+extension MediaViewerActionControlTests {
+    /// The host's action as a trip builds one, recording what it was asked to do into `log`.
+    private static func cover(_ log: Box<[String]>) -> MediaViewerHostAction {
+        MediaViewerHostAction(title: "Use as Cover", symbol: "photo.badge.checkmark") {
+            log.value.append("cover \($0.uid)")
+        }
+    }
+
+    @Test("with a host's row the viewer's control is the menu, whatever the shared list holds")
+    func aHostRowMakesTheMenu() {
+        let file = photo("a")
+        let two: MediaActionControl = .menu([.share(file), .saveOriginal(file)])
+
+        #expect(
+            MediaViewerActions.shape(.direct(.share(file)), hosted: true) == .menu([.share(file)]))
+        #expect(MediaViewerActions.shape(.hidden, hosted: true) == .menu([]))
+        #expect(MediaViewerActions.shape(two, hosted: true) == two)
+    }
+
+    /// Every viewer but a trip's: the MEMNG-213 rule, untouched, for each of its three shapes.
+    @Test("without a host's row the shared rule stands, one action still its own button")
+    func noHostRowKeepsTheRule() {
+        let file = photo("a")
+        let two: MediaActionControl = .menu([.share(file), .saveOriginal(file)])
+
+        #expect(MediaViewerActions.shape(.hidden, hosted: false) == .hidden)
+        #expect(
+            MediaViewerActions.shape(.direct(.share(file)), hosted: false) == .direct(.share(file)))
+        #expect(MediaViewerActions.shape(two, hosted: false) == two)
+    }
+
+    @Test("a one-action file with a host's row draws the menu, and neither row outside it")
+    func aHostRowOverOneActionDrawsTheMenu() {
+        let file = photo("a")
+        let labels = ScreenProbe.labels(
+            of: MediaViewerActions(
+                control: MediaTileMenu.control(for: file), showMemo: { _ in },
+                host: MediaViewerHostItem(action: Self.cover(Box([])), attachment: file) {}
+            )
+        )
+
+        #expect(labels.contains("More"), "no menu over one action and a host row: \(labels)")
+        #expect(!labels.contains("Share"), "the one action was drawn as its own button: \(labels)")
+        #expect(!labels.contains("Use as Cover"), "the host row is outside the menu: \(labels)")
+    }
+
+    /// The row's whole dispatch: a menu row cannot be pressed from a test, so this is the half no
+    /// rendered label shows — the action runs on the page it was built over, and only then does
+    /// the viewer close.
+    @Test("the host's row acts on its page first, then closes the viewer, once each")
+    func theHostRowActsThenCloses() {
+        let log = Box<[String]>([])
+        let item = MediaViewerHostItem(action: Self.cover(log), attachment: photo("p2")) {
+            log.value.append("closed")
+        }
+
+        item.tapped()
+
+        #expect(log.value == ["cover p2", "closed"])
+    }
+}
+
 /// MEMNG-189: the viewer continues the grid's cursor.
 @MainActor
 @Suite("Viewer paging")

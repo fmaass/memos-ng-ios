@@ -225,10 +225,6 @@ struct MediaViewerView: View {
             if selection.deletable, delete != nil, let page {
                 deleteButton(for: page)
             }
-            // Beside the shared list for the same reason: only the host that injected it offers it.
-            if let hostAction, let page {
-                hostButton(hostAction, for: page)
-            }
             MediaViewerActions(
                 control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
                 showMemo: { uid in
@@ -239,6 +235,15 @@ struct MediaViewerView: View {
                 },
                 fetch: { attachment, rendition in
                     Task { await fetch(attachment, rendition) }
+                },
+                // Handed to the menu here and never to `MediaTileMenu`'s list: only the host that
+                // injected it offers it, so a library tile never grows a trip's row (MEMNG-768).
+                host: hostAction.flatMap { action in
+                    page.map { page in
+                        MediaViewerHostItem(action: action, attachment: page.attachment) {
+                            dismiss()
+                        }
+                    }
                 }
             )
         }
@@ -256,21 +261,6 @@ struct MediaViewerView: View {
                 .padding()
         }
         .accessibilityLabel(AttachmentDeleteFlow.title(for: page.attachment))
-    }
-
-    /// The host's action on the page on screen, drawn as the delete is. It acts, then closes the
-    /// viewer: what it changed is the screen underneath's to show (a trip's hero, its card).
-    private func hostButton(_ action: MediaViewerHostAction, for page: MediaPage) -> some View {
-        Button {
-            action.perform(page.attachment)
-            dismiss()
-        } label: {
-            Image(systemName: action.symbol)
-                .font(.system(size: 30))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding()
-        }
-        .accessibilityLabel(action.title)
     }
 
     /// What a refused delete says, on the one screen with nowhere else to say it.
@@ -394,9 +384,13 @@ struct MediaViewerActions: View {
     /// Defaulted for the same reason the row's is: a surface that cannot download still builds the
     /// control rather than being handed a different one.
     var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
+    /// The presenting screen's own row, drawn LAST in the menu, or nil — every viewer but a trip's
+    /// (MEMNG-768). It is appended here rather than to `MediaTileMenu`'s list, which the library
+    /// tiles share.
+    var host: MediaViewerHostItem? = nil
 
     var body: some View {
-        switch control {
+        switch Self.shape(control, hosted: host != nil) {
         case .hidden:
             EmptyView()
         case .direct(let action):
@@ -413,10 +407,24 @@ struct MediaViewerActions: View {
                 ForEach(actions) { action in
                     row(action)
                 }
+                if let host { host }
             } label: {
                 glyph("ellipsis.circle.fill")
             }
             .accessibilityLabel("More")
+        }
+    }
+
+    /// The shape drawn: the shared rule's, unless the host handed in a row — then always the menu,
+    /// because that row makes two or more. A `.menu` here may hold one shared action or none; the
+    /// host's row is the rest of it. Without a host the shared rule stands untouched, so the
+    /// one-action button of MEMNG-213 is what every other viewer still draws.
+    static func shape(_ control: MediaActionControl, hosted: Bool) -> MediaActionControl {
+        guard hosted else { return control }
+        switch control {
+        case .hidden: return .menu([])
+        case .direct(let action): return .menu([action])
+        case .menu: return control
         }
     }
 
@@ -489,6 +497,31 @@ struct MediaViewerHostAction {
     let title: String
     let symbol: String
     let perform: @MainActor (MemoAttachment) -> Void
+}
+
+/// The host's action as the viewer's menu row, over the page that was on screen (MEMNG-768).
+///
+/// Its own view with its own `tapped()` for the reason `MediaTileActionItem` has one: a menu row's
+/// action is unreachable from a test, and a menu cannot be opened in one at all.
+struct MediaViewerHostItem: View {
+    let action: MediaViewerHostAction
+    let attachment: MemoAttachment
+    /// Closes the viewer: what the action changed is the screen underneath's to show (a trip's
+    /// hero, its card).
+    let done: () -> Void
+
+    func tapped() {
+        action.perform(attachment)
+        done()
+    }
+
+    var body: some View {
+        Button {
+            tapped()
+        } label: {
+            Label(action.title, systemImage: action.symbol)
+        }
+    }
 }
 
 /// The deliberate way out of a full-screen black surface.

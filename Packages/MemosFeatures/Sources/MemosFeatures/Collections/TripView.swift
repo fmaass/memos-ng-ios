@@ -59,7 +59,9 @@ extension TripRoute: @MainActor StackRoute {
 /// the Timeline's own day headings. A card opens its memo through `MemoJump`, the request the
 /// Library and this screen's viewer already make: `MemoDetailView` edits through the Timeline's
 /// store, which lives on the Timeline's stack alone, so the memo is pushed there as the same
-/// `MemoRoute` a Timeline card pushes — never a second detail screen on this stack.
+/// `MemoRoute` a Timeline card pushes — never a second detail screen on this stack. A card's
+/// PHOTO stays on the trip (MEMNG-769): it opens the viewer here, over that memo's own pictures,
+/// with the trip's Use as Cover row (`journalOpening`).
 ///
 /// **Map** (MEMNG-719). The `Map` chip swaps the grid for the trip's located members on the Places
 /// map (`TripMapScreen`): every marker the account can see, kept only where its uid is one of the
@@ -104,6 +106,9 @@ struct TripView: View {
     @Environment(MemoJump.self) private var jump: MemoJump?
     /// The picture a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
+    /// The picture a Journal card's tap opened, full screen, over that memo's own pictures. Apart
+    /// from `viewing` because that viewer's pages are the trip's members, re-read as they change.
+    @State private var journalViewing: MediaViewerSelection?
     /// What the open viewer has been handed since it opened, beyond its own pages; emptied
     /// whenever the viewer changes, so it only ever speaks for the one open now.
     @State private var held: Set<String> = []
@@ -213,6 +218,47 @@ struct TripView: View {
         _ state: TripMembershipState, cap: Int = TripMembershipStore.memberCap
     ) -> String? {
         state == .truncated ? "Showing the first \(cap) memos of this trip" : nil
+    }
+
+    /// What a tap on a Journal card opens (MEMNG-769).
+    enum JournalOpening: Equatable {
+        /// The viewer, on this trip's screen.
+        case viewer(MediaViewerSelection)
+        /// The memo, on the Timeline, through `MemoJump`.
+        case memo(String)
+    }
+
+    /// A card's text — `attachment` nil — opens the memo on the Timeline, whose store
+    /// `MemoDetailView` edits through. A card's picture opens the viewer over that memo's own
+    /// pictures, at the one tapped, and each page carries the memo's uid so it offers Show Memo as
+    /// a grid page does. One the viewer cannot show falls back to the memo, because a tap that does
+    /// nothing reads as a broken card.
+    static func journalOpening(_ attachment: MemoAttachment?, of memo: Memo) -> JournalOpening {
+        guard let attachment else { return .memo(memo.uid) }
+        let owned = memo.attachments.map { file in
+            var file = file
+            file.memoUID = memo.uid
+            return file
+        }
+        let selection = MediaViewerPresentation.viewer(for: owned, startingAt: attachment.uid)
+        return selection.map(JournalOpening.viewer) ?? .memo(memo.uid)
+    }
+
+    /// The Journal viewer's pages: the ones it opened with, each taking the copy of it the trip's
+    /// latest read holds, so a signature that lapsed is renewed by `TripURLRefresher` — which
+    /// reads the trip again, every kind of file, removed pictures included. A page the trip holds
+    /// no row for keeps the copy the memo read gave it. Each keeps its memo, for Show Memo.
+    static func journalViewerSource(
+        for selection: MediaViewerSelection, renewed rows: [LibraryRow]
+    ) -> MediaViewerSource {
+        let latest = Dictionary(
+            rows.map { ($0.id, $0.attachment) }, uniquingKeysWith: { first, _ in first })
+        let files = selection.pages.map { page in
+            guard var file = latest[page.id] else { return page.attachment }
+            file.memoUID = page.memoUID
+            return file
+        }
+        return .fixed(MediaViewerPresentation.pages(for: files))
     }
 
     /// What the viewer pages through: the trip's members as the store holds them NOW, as pages —
@@ -423,6 +469,8 @@ struct TripView: View {
     /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
     private func journal(_ live: CollectionRecord) -> some View {
         let memos = trips.journal(for: live)
+        // Read in the body, so a re-read of the trip re-presents the Journal viewer's pages.
+        let renewed = trips.members(for: live) + trips.removedMembers(for: live)
         let state = trips.journalState(for: live)
         let calendar = journalCalendar
         return List {
@@ -442,10 +490,9 @@ struct TripView: View {
                     ForEach(section.memos) { memo in
                         MemoCard(
                             memo: memo,
-                            openMemo: { jump?.request(memo.uid) },
-                            // The trip has no viewer over a memo's own pictures: a tile opens the
-                            // memo, so a tap on a card never does nothing.
-                            openAttachment: { _ in jump?.request(memo.uid) }
+                            mediaZoom: zoom,
+                            openMemo: { open(Self.journalOpening(nil, of: memo)) },
+                            openAttachment: { open(Self.journalOpening($0, of: memo)) }
                         )
                         .cardRow()
                     }
@@ -463,6 +510,20 @@ struct TripView: View {
         }
         .listStyle(.plain)
         .feedsDock(dock, on: .collections)
+        // On the list, not beside the grid's viewer: one presentation per view. Re-signed as the
+        // grid's viewer is, by reading the trip again; its pages take the copies that read holds.
+        .gridViewer(
+            $journalViewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
+            action: Self.useAsCover(record.id, in: collections)
+        ) { Self.journalViewerSource(for: $0, renewed: renewed) }
+    }
+
+    /// Where a Journal card's tap goes: the viewer here, or the memo on the Timeline.
+    private func open(_ opening: JournalOpening) {
+        switch opening {
+        case .viewer(let selection): journalViewing = selection
+        case .memo(let uid): jump?.request(uid)
+        }
     }
 
     /// The day a memo falls on, cut where the screen is: its zone and its language.

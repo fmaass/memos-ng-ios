@@ -739,6 +739,104 @@ struct TripScreenRenderTests {
         }
     }
 
+    /// A card's PHOTO stays on the trip (MEMNG-769): the viewer opens over this screen, over that
+    /// memo's own two pictures, with the trip's menu and no memo asked for; Close lands back on the
+    /// Journal, its card still drawn and its chip still chosen.
+    @Test("a journal card's photo opens the viewer on the trip, and Close lands on the Journal")
+    func aJournalPhotoOpensTheViewerHere() async {
+        let wire = TripWire()
+        wire.transport.pictureJournal()
+        let stores = stores()
+        let jump = MemoJump()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let second = TripTransport.journal[1]
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        let view = trip(stores, wire, record, viewer: media).environment(jump)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let drawn = await screen.until {
+                TripProbe.card(saying: second.text, in: screen.window) != nil
+            }
+            #expect(drawn, "no card says \(second.text)")
+            let card = TripProbe.card(saying: second.text, in: screen.window)
+            let ran = card.map { TripProbe.runAction("Open photo", of: $0) } ?? false
+            #expect(ran, "no Open photo ran: \(TripProbe.actionNames(of: card))")
+            var pager: UIScrollView?
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, pager == nil {
+                pager = TripProbe.pager(over: screen.host)
+                if pager == nil { await screen.settle(turns: 5) }
+            }
+            await screen.settle(turns: 20)
+            let pages = pager.map(TripProbe.pageCount)
+            #expect(pages == 2, "the viewer's pages: \(pages.map(String.init) ?? "no viewer")")
+            #expect(jump.pending == nil, "the photo asked for memo \(jump.pending ?? "?")")
+            let overlay = TripProbe.presentedLabels(over: screen.host)
+            #expect(overlay.contains("More"), "the trip's viewer drew no menu: \(overlay)")
+            #expect(
+                screen.element(labelled: TripView.useAsCoverButton) == nil,
+                "Use as Cover is drawn outside the menu")
+
+            #expect(TripProbe.pressAtOnce("Close", on: screen), "the viewer has no Close")
+            let closed = await screen.until(seconds: 10) {
+                TripProbe.pager(over: screen.host) == nil
+            }
+            #expect(closed, "the viewer did not close")
+            let back = await screen.until {
+                TripProbe.card(saying: second.text, in: screen.window) != nil
+            }
+            #expect(back, "the Journal is gone: \(TripProbe.labels(in: screen.window))")
+            let journal = screen.element(labelled: "Journal")
+            #expect(journal?.accessibilityTraits.contains(.selected) == true)
+            #expect(jump.pending == nil, "closing asked for memo \(jump.pending ?? "?")")
+        }
+    }
+
+    /// The Journal's viewer re-signs as the grid's does: a page whose signature lapsed reads the
+    /// trip again, and the open viewer takes the copy that read signed. The memo's pictures are
+    /// refused before the card draws them, so the viewer's page is one nothing has loaded yet.
+    @Test("a journal viewer whose page lapsed shows the copy the trip was read again for")
+    func aJournalViewerFollowsTheRedrain() async {
+        let wire = TripWire()
+        wire.transport.pictureJournal()
+        let stores = stores()
+        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let second = TripTransport.journal[1]
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        let view = trip(stores, wire, record, viewer: media).environment(MemoJump())
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let gridded = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(gridded, "the trip was not drawn")
+            // Every signature the first reads hand out lapses; the memo is still read under v1.
+            await media.revoke("v1")
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let drawn = await screen.until {
+                TripProbe.card(saying: second.text, in: screen.window) != nil
+            }
+            #expect(drawn, "no card says \(second.text)")
+            // From here the server signs anew.
+            wire.transport.resign("v2")
+            let card = TripProbe.card(saying: second.text, in: screen.window)
+            let ran = card.map { TripProbe.runAction("Open photo", of: $0) } ?? false
+            #expect(ran, "no Open photo ran: \(TripProbe.actionNames(of: card))")
+            let lapsed = await TripProbe.settled(seconds: 10) {
+                await media.asked("p1", "mobile", sig: "v1") >= 1
+            }
+            let seen = await media.log()
+            #expect(lapsed, "the viewer never asked for p1 under v1: \(seen)")
+            let followed = await TripProbe.settled(seconds: 10) {
+                await media.asked("p1", "mobile", sig: "v2") >= 1
+            }
+            #expect(followed, "the Journal's viewer never took p1's new signature")
+        }
+    }
+
     @Test("a drain stopped at the cap says so under the grid")
     func theCapFooter() async {
         let wire = TripWire()
@@ -991,11 +1089,14 @@ struct TripScreenRenderTests {
 
     // MARK: The viewer over the members, and the main bar (MEMNG-715)
 
+    /// What the trip's viewer's Use as Cover row does with a member's uid; false for a non-member.
+    typealias Cover = (String) -> Bool
+
     /// The trip with p2 or p4 excluded, its grid drawn, and a tile's tap opening the viewer: the
     /// pager and the trip's members, for the viewer tests below.
     private func openViewer(
         excluding excluded: String, at tile: Int, jump: MemoJump,
-        _ body: (PressProbe.Screen, UIScrollView?, TripMediaServer, [String]) async -> Void
+        _ body: (PressProbe.Screen, UIScrollView?, TripMediaServer, [String], Cover) async -> Void
     ) async {
         let wire = TripWire()
         wire.transport.nameNoOriginal()
@@ -1025,17 +1126,26 @@ struct TripScreenRenderTests {
                 if pager == nil { await screen.settle(turns: 5) }
             }
             await screen.settle(turns: 20)
-            await body(screen, pager, media, members)
+            // The trip's own action, run as the viewer's menu row runs it: a menu cannot be opened
+            // from a test, so the row's dispatch is `MediaViewerHostItem.tapped()`.
+            let cover: Cover = { uid in
+                let rows = stores.1.members(for: live())
+                guard let row = rows.first(where: { $0.id == uid }) else { return false }
+                let action = TripView.useAsCover(record.id, in: stores.0)
+                MediaViewerHostItem(action: action, attachment: row.attachment) {}.tapped()
+                return true
+            }
+            await body(screen, pager, media, members, cover)
         }
     }
 
     /// The viewer's pages are the members the grid shows, never the drained list with the
-    /// excluded picture back in it: four pages, and the page after p1 is p3 — read by the one
-    /// thing a page says about which file it is, the memo its "Show Memo" asks `MemoJump` for.
+    /// excluded picture back in it: four pages, and the page after p1 is p3 — read by the still
+    /// the viewer asks for, the excluded p2's never.
     @Test("the trip's viewer pages over its members: after p1 comes p3, never the excluded p2")
     func theViewerSkipsTheExcluded() async {
         let jump = MemoJump()
-        await openViewer(excluding: "p2", at: 1, jump: jump) { screen, pager, media, members in
+        await openViewer(excluding: "p2", at: 1, jump: jump) { screen, pager, media, members, _ in
             #expect(members == ["p0", "p1", "p3", "p4"], "the members: \(members)")
             let pages = pager.map(TripProbe.pageCount)
             let raw = pager.map { "\($0.contentSize) in \($0.bounds.size)" } ?? "no pager"
@@ -1046,12 +1156,12 @@ struct TripScreenRenderTests {
             #expect(pager.map(TripProbe.pageIndex) == 1, "the pager is not on p1's page")
             if let pager { await TripProbe.page(pager, to: 2, on: screen) }
             #expect(pager.map(TripProbe.pageIndex) == 2, "the pager did not move one page on")
-            let pressed = await TripProbe.pressMenuItem(
-                MediaTileAction.showMemo(uid: "").title, under: "More", on: screen)
-            #expect(pressed.took, "Show Memo took no press: \(pressed.seen)")
-            #expect(
-                jump.pending == "m-p3",
-                "the page after p1 belongs to \(jump.pending ?? "nothing") — the drained list?")
+            // p3's still is what the viewer asks for. Its Show Memo said so before, and is now a
+            // row of the menu the trip's Use as Cover makes (MEMNG-768): no test opens a menu.
+            let drew = await TripProbe.settled(seconds: 5) {
+                await media.asked("p3", "mobile", sig: "v1") >= 1
+            }
+            #expect(drew, "the page after p1 drew no p3 — the drained list?")
             let asked = await media.asked("p2", "mobile", sig: "v1")
             let log = await media.log()
             #expect(asked == 0, "the viewer drew the excluded p2: \(log)")
@@ -1063,16 +1173,17 @@ struct TripScreenRenderTests {
     @Test("a trip whose last picture is excluded ends its viewer at the last member")
     func theViewerEndsAtTheLastMember() async {
         let jump = MemoJump()
-        await openViewer(excluding: "p4", at: 3, jump: jump) { screen, pager, _, members in
+        await openViewer(excluding: "p4", at: 3, jump: jump) { screen, pager, media, members, _ in
             #expect(members == ["p0", "p1", "p2", "p3"], "the members: \(members)")
             let raw = pager.map { "\($0.contentSize) in \($0.bounds.size)" } ?? "no pager"
             #expect(pager.map(TripProbe.pageCount) == 4, "the viewer's pages: \(raw)")
             let opened = await TripProbe.settled(seconds: 5) { pager.map(TripProbe.pageIndex) == 3 }
             #expect(opened, "the viewer is not on its last page")
-            let pressed = await TripProbe.pressMenuItem(
-                MediaTileAction.showMemo(uid: "").title, under: "More", on: screen)
-            #expect(pressed.took, "Show Memo took no press: \(pressed.seen)")
-            #expect(jump.pending == "m-p3", "Show Memo asked for \(jump.pending ?? "nothing")")
+            // The last member's still, read as the test above reads it.
+            let drew = await TripProbe.settled(seconds: 5) {
+                await media.asked("p3", "mobile", sig: "v1") >= 1
+            }
+            #expect(drew, "the last page drew no p3")
         }
     }
 
@@ -1501,6 +1612,38 @@ enum TripProbe {
         return (false, "opened=\(opened) \(seen)")
     }
 
+    /// Every label drawn by what is presented over `host` — the viewer — and nothing under it:
+    /// the screen beneath answers "More" of its own.
+    static func presentedLabels(over host: UIViewController) -> [String] {
+        var top = host
+        while let next = top.presentedViewController { top = next }
+        guard top !== host, let root = top.view else { return [] }
+        var found: [String] = []
+        var stack: [Any] = [root]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if let label = object.accessibilityLabel, !label.isEmpty { found.append(label) }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found
+    }
+
+    /// Runs `element`'s accessibility action named `name`, the way VoiceOver's rotor runs it.
+    static func runAction(_ name: String, of element: NSObject) -> Bool {
+        let actions = element.accessibilityCustomActions ?? []
+        guard let action = actions.first(where: { $0.name == name }) else { return false }
+        if let handler = action.actionHandler { return handler(action) }
+        guard let target = action.target as? NSObject else { return false }
+        _ = target.perform(action.selector, with: action)
+        return true
+    }
+
+    /// The names of `element`'s accessibility actions, for a failure's message.
+    static func actionNames(of element: NSObject?) -> [String] {
+        element?.accessibilityCustomActions?.map(\.name) ?? []
+    }
+
     /// The first node that reads as `label`, a button or not: a menu's rows answer as rows.
     private static func node(labelled label: String, in window: UIWindow) -> NSObject? {
         var stack: [Any] = [window]
@@ -1511,6 +1654,97 @@ enum TripProbe {
             if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
         }
         return nil
+    }
+}
+
+// MARK: - What a Journal card's tap opens (MEMNG-769)
+
+/// A Journal card's text goes to the memo on the Timeline; its photo opens the viewer on the trip,
+/// over that memo's own pictures — without a screen.
+@MainActor
+@Suite("Trip journal opening")
+struct TripJournalOpeningTests {
+    private func picture(_ uid: String) -> MemoAttachment {
+        let file = "https://memos.example.invalid/api/attachments/\(uid)"
+        return MemoAttachment(
+            uid: uid, mime: "image/jpeg", status: .ready, width: 1000, height: 800,
+            thumbnailURL: URL(string: "\(file)/thumb"), previewURL: URL(string: "\(file)/mobile"),
+            webURL: URL(string: "\(file)/web"), downloadURL: URL(string: "\(file)/download"))
+    }
+
+    private func memo(_ attachments: [MemoAttachment]) -> Memo {
+        let stamp = Date(timeIntervalSince1970: 1_772_000_000)
+        return Memo(
+            uid: "j1", owner: "fabian", mine: true, content: "Tram up to the castle",
+            visibility: .private, pinned: false, createdAt: stamp, updatedAt: stamp,
+            tags: ["portugal2026"], attachments: attachments)
+    }
+
+    /// The selection a photo tap opened, or nil when the tap opened something else.
+    private func viewer(_ opening: TripView.JournalOpening) -> MediaViewerSelection? {
+        if case .viewer(let selection) = opening { return selection }
+        return nil
+    }
+
+    @Test("a card's text opens its memo on the Timeline")
+    func theTextOpensTheMemo() {
+        #expect(TripView.journalOpening(nil, of: memo([picture("a")])) == .memo("j1"))
+    }
+
+    @Test("a card's photo opens the viewer over the memo's pictures, at the one tapped")
+    func aPhotoOpensTheViewer() throws {
+        let opening = TripView.journalOpening(picture("b"), of: memo([picture("a"), picture("b")]))
+        let selection = try #require(viewer(opening), "the photo opened \(opening)")
+
+        #expect(selection.pages.map(\.id) == ["a", "b"])
+        #expect(selection.startPage.id == "b", "opened on \(selection.startPage.id)")
+        // As the grid's: nothing in a trip's viewer deletes.
+        #expect(!selection.deletable)
+        // Each page names its memo, so the viewer offers Show Memo as a grid page does.
+        let actions = MediaTileMenu.actions(for: selection.startPage.attachment)
+        #expect(actions.first == .showMemo(uid: "j1"), "the page offers \(actions)")
+    }
+
+    @Test("the last of three pictures opens on the last page, a lone picture on its one page")
+    func theEdgesOfTheMemo() throws {
+        let three = memo([picture("a"), picture("b"), picture("c")])
+        let last = try #require(viewer(TripView.journalOpening(picture("c"), of: three)))
+        #expect(last.startIndex == 2, "opened on page \(last.startIndex)")
+        #expect(last.pages.count == 3)
+
+        let alone = memo([picture("a")])
+        let lone = try #require(viewer(TripView.journalOpening(picture("a"), of: alone)))
+        #expect(lone.pages.map(\.id) == ["a"])
+        #expect(lone.startIndex == 0)
+    }
+
+    /// The trip's latest read renews a page; a page it holds no row for keeps its own copy, and
+    /// every page keeps the memo it belongs to.
+    @Test("a journal viewer's pages take the trip's renewed copies, keeping their memo")
+    func theJournalViewerTakesRenewedCopies() throws {
+        let opening = TripView.journalOpening(picture("a"), of: memo([picture("a"), picture("b")]))
+        let selection = try #require(viewer(opening))
+        var fresh = picture("a")
+        fresh.previewURL = URL(string: "https://memos.example.invalid/renewed/a/mobile")
+        let row = LibraryRow(attachment: fresh, takenAt: nil, mine: true, filename: "a.jpg")
+
+        let source = TripView.journalViewerSource(for: selection, renewed: [row])
+        guard case .fixed(let pages) = source else {
+            Issue.record("not a fixed source")
+            return
+        }
+        #expect(pages.map(\.id) == ["a", "b"])
+        #expect(pages.first?.stillURL == fresh.previewURL, "a kept its old copy")
+        #expect(pages.last?.stillURL == selection.pages.last?.stillURL, "b changed without a row")
+        #expect(pages.map(\.memoUID) == ["j1", "j1"])
+    }
+
+    /// A tap that does nothing reads as a broken card: a file the viewer cannot show opens the
+    /// memo, as the Timeline's card does.
+    @Test("a tapped file the viewer cannot show opens the memo, never nothing")
+    func anUnviewableFileOpensTheMemo() {
+        let pdf = MemoAttachment(uid: "d", mime: "application/pdf", status: .ready)
+        #expect(TripView.journalOpening(pdf, of: memo([picture("a"), pdf])) == .memo("j1"))
     }
 }
 
@@ -1569,6 +1803,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var signature = "v1"
     private nonisolated(unsafe) var emptied = false
     private nonisolated(unsafe) var unoriginal = false
+    private nonisolated(unsafe) var pictured = false
     private nonisolated(unsafe) var dropped: Set<String> = []
     private nonisolated(unsafe) var others: Set<String> = []
     private nonisolated(unsafe) var films: Set<String> = []
@@ -1599,8 +1834,10 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     /// The trip's tag leaves every picture: from here on its reads answer empty.
     nonisolated func empty() { lock.withLock { emptied = true } }
     /// The trip's pictures name no original: nothing to share, so "Show Memo" is the viewer's one
-    /// action, drawn as a button of its own rather than a row of a menu a test cannot open.
+    /// shared action, and the trip's Use as Cover row is all that makes it a menu (MEMNG-768).
     nonisolated func nameNoOriginal() { lock.withLock { unoriginal = true } }
+    /// The journal's second memo carries two pictures of its own, p1 and p3.
+    nonisolated func pictureJournal() { lock.withLock { pictured = true } }
     /// The trip's tag leaves one picture: from here on its reads answer without it.
     nonisolated func drop(_ uid: String) { lock.withLock { _ = dropped.insert(uid) } }
     /// `uid` is another member's picture: from here on its reads say it is not mine.
@@ -1641,8 +1878,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
             let query = Dictionary(
                 items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
-            lock.withLock { journalReads.append(query) }
-            return Self.memoPage(query)
+            let (pictures, sig) = lock.withLock {
+                journalReads.append(query)
+                return (pictured, signature)
+            }
+            return Self.memoPage(query, pictures: pictures, signed: sig)
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
@@ -1678,18 +1918,20 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
 
     /// A page of `portugal2026`'s memos, two at a time, in the order the query's `sort` asks for:
     /// oldest first under `created_at`, newest first under anything else — the server's default.
-    private nonisolated static func memoPage(_ query: [String: String]) -> (
-        HTTPResponse, HTTPBody?
-    ) {
+    private nonisolated static func memoPage(
+        _ query: [String: String], pictures: Bool, signed sig: String
+    ) -> (HTTPResponse, HTTPBody?) {
         let all = query["tag"] == "portugal2026" ? journal : []
         let ordered = query["sort"] == "created_at" ? all : all.reversed()
         let rows = ordered.map { memo in
-            """
-            {"uid":"\(memo.uid)","owner":"fabian","mine":true,"content":"\(memo.text)",\
-            "visibility":"PRIVATE","pinned":false,"created_at":"\(memo.stamp)",\
-            "updated_at":"\(memo.stamp)","archived_at":null,"tags":["portugal2026"],\
-            "attachments":[]}
-            """
+            let uids = pictures && memo.uid == "j1" ? ["p1", "p3"] : []
+            let attached = uids.map { reference($0, sig: sig) }
+            return """
+                {"uid":"\(memo.uid)","owner":"fabian","mine":true,"content":"\(memo.text)",\
+                "visibility":"PRIVATE","pinned":false,"created_at":"\(memo.stamp)",\
+                "updated_at":"\(memo.stamp)","archived_at":null,"tags":["portugal2026"],\
+                "attachments":[\(attached.joined(separator: ","))]}
+                """
         }
         let first = query["cursor"] == nil
         let picked = first ? Array(rows.prefix(2)) : Array(rows.dropFirst(2))
@@ -1697,6 +1939,23 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         let items = picked.joined(separator: ",")
         let body = "{\"items\":[\(items)],\"nextCursor\":\(next),\"totalCount\":null}"
         return json(body, next: nil)
+    }
+
+    /// A memo's own picture, as the memo read carries it (`AttachmentRef`), signed as `item`'s.
+    private nonisolated static func reference(_ uid: String, sig: String) -> String {
+        let query = "?exp=\(sig == "v1" ? 1_000_000_000 : 4_000_000_000)&scope=1&sig=\(sig)"
+        return """
+            {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,"width":1000,\
+            "height":800,"duration":null,"sha256":null,"capture_instant":null,\
+            "capture_civil":null,"capture_source":null,"mine":true,"hasPrint":false,\
+            "hasLegacyPrint":false,"renditions":[],"position":null,\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
+            "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
+            "webUrl":"/api/attachments/\(uid)/web\(query)","webReady":true,\
+            "posterUrl":"/api/attachments/\(uid)/poster\(query)",\
+            "downloadUrl":"/api/attachments/\(uid)/download\(query)",\
+            "printUrl":"/api/attachments/\(uid)/print\(query)"}
+            """
     }
 
     /// `v1` is signed with an `exp` long past, so a refusal of it reads as a lapse; any other
@@ -1783,13 +2042,23 @@ extension TripScreenRenderTests {
     @Test("Use as Cover in the trip's viewer makes that picture the hero's cover")
     func useAsCoverReachesTheHero() async {
         let jump = MemoJump()
-        await openViewer(excluding: "p4", at: 2, jump: jump) { screen, _, _, members in
+        await openViewer(excluding: "p4", at: 2, jump: jump) { screen, _, _, members, cover in
             #expect(members == ["p0", "p1", "p2", "p3"], "the members: \(members)")
-            let offered = await screen.until {
-                screen.element(labelled: TripView.useAsCoverButton) != nil
+            // The overlay's control set (MEMNG-768): Show Memo is this file's one shared action,
+            // so the menu is there only because the trip's row is in it — and neither row is a
+            // button of its own.
+            let menu = await screen.until {
+                TripProbe.presentedLabels(over: screen.host).contains("More")
             }
-            #expect(offered, "the trip's viewer offers no Use as Cover")
-            #expect(TripProbe.pressAtOnce(TripView.useAsCoverButton, on: screen))
+            let drawn = TripProbe.presentedLabels(over: screen.host)
+            #expect(menu, "the trip's viewer drew no menu: \(drawn)")
+            #expect(
+                screen.element(labelled: TripView.useAsCoverButton) == nil,
+                "Use as Cover is drawn outside the menu")
+            #expect(
+                screen.element(labelled: MediaTileAction.showMemo(uid: "").title) == nil,
+                "the one shared action is drawn as its own button beside a host's row")
+            #expect(cover("p2"), "p2 is not a member")
             let shown = await screen.until(seconds: 10) {
                 CollectionsHost.identified(TripView.coverIdentifier("p2"), in: screen.window)
             }

@@ -565,12 +565,26 @@ extension TripMapTests {
         await CollectionsHost.with(view, height: 1400) { screen in
             #expect(await onMap(screen, probe, staged: ["t0", "t1"]), "staged \(probe.staged)")
             probe.tap?(.viewer(selection))
-            let offered = await screen.until {
-                screen.element(labelled: TripView.useAsCoverButton) != nil
+            // The overlay's control set (MEMNG-768): a pin's one shared action is Show Memo, so
+            // the menu is there only because the trip's row is in it — and neither row is a
+            // button of its own.
+            let menu = await screen.until {
+                TripProbe.presentedLabels(over: screen.host).contains("More")
             }
-            #expect(offered, "the Map's viewer offers no Use as Cover")
-            #expect(TripProbe.pressAtOnce(TripView.useAsCoverButton, on: screen))
-            #expect(stores.0.records.first?.coverUid == "t1", "the press chose no cover")
+            let drawn = TripProbe.presentedLabels(over: screen.host)
+            #expect(menu, "the Map's viewer drew no menu: \(drawn)")
+            #expect(
+                screen.element(labelled: TripView.useAsCoverButton) == nil,
+                "Use as Cover is drawn outside the menu")
+            #expect(
+                screen.element(labelled: MediaTileAction.showMemo(uid: "").title) == nil,
+                "the one shared action is drawn as its own button beside a host's row")
+            // The trip's own action, run as the viewer's menu row runs it: a menu cannot be opened
+            // from a test, so the row's dispatch is `MediaViewerHostItem.tapped()`.
+            let action = TripView.useAsCover(record.id, in: stores.0)
+            MediaViewerHostItem(action: action, attachment: selection.startPage.attachment) {}
+                .tapped()
+            #expect(stores.0.records.first?.coverUid == "t1", "the row chose no cover")
         }
     }
 }
