@@ -5,6 +5,18 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.2.2 (44)
+
+- I can pin one trip from its menu. While it is pinned, a new memo gets the trip's tag on its own line, shown as a chip I can remove with ✕. The pin ends by itself 7 days after the trip's last picture.
+- While a trip is pinned, a new memo starts as Just us; change the pill to post it publicly.
+- The middle visibility level is now called Just us, on the memo card and in the share sheet.
+- A trip now shows every picture and video of its memos in one flat grid, oldest first.
+- A trip can have a start and an end, with a time of day for the first and last day, and every picture taken in between belongs to it, tagged or not. New trip fills in the dates from the tag's first and last picture.
+- A trip's Journal shows its memos oldest first, each on the day of its first picture, and its Map shows only the trip's places.
+- I can choose any picture as a trip's cover with Use as Cover, and the Collections list has a Years row.
+- In a trip I can Select pictures to share them, delete my own, or Remove them from the trip; Show Removed in the trip's menu lists them with Add Back. Removing never changes a memo.
+- Please pin a trip and post a memo, give a trip a start and end time, and remove a picture from a trip and add it back.
+
 ## 2.2.2 (43)
 
 - I added a fourth tab, Collections, for trips. A trip is made from a tag: New trip lists my tags that have photos, and puts the short, recent ones I would call a journey under Suggested.
