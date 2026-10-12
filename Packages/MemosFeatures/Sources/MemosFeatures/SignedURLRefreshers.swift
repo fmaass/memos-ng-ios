@@ -205,29 +205,82 @@ extension MediaViewerSource {
 /// arrives, so a trip deleted meanwhile is not read.
 @MainActor
 final class TripURLRefresher: SignedURLRefreshing {
-    let trips: TripMembershipStore
-    let collections: CollectionStore
-    let id: UUID
+    let members: TripMemberStore
+    let trips: TripStore
+    let uid: String
     let session: IssuingSession
 
-    init(
-        trips: TripMembershipStore, collections: CollectionStore, id: UUID, session: IssuingSession
-    ) {
+    init(members: TripMemberStore, trips: TripStore, uid: String, session: IssuingSession) {
+        self.members = members
         self.trips = trips
-        self.collections = collections
-        self.id = id
+        self.uid = uid
         self.session = session
     }
 
-    var owner: AnyObject { trips }
+    var owner: AnyObject { members }
 
     /// The session is read in the turn that enters the store, for `MemoURLRefresher`'s reason.
+    /// `uid` is the picture whose signature lapsed; the trip read again is this refresher's own.
     func signatureExpired(uid: String) {
-        Task { [trips, collections, id, session] in
-            guard let record = collections.records.first(where: { $0.id == id }),
+        Task { [members, trips, tripUid = self.uid, session] in
+            guard let trip = trips.trips.first(where: { $0.uid == tripUid }),
                 let handle = session.handle(), let baseURL = session.baseURL()
             else { return }
-            await trips.drain(record, using: handle, baseURL: baseURL)
+            await members.drain(trip, using: handle, baseURL: baseURL)
         }
+    }
+}
+
+/// A trip's Journal pictures, re-signed by reading the journal again (MEMNG-754).
+///
+/// The journal's memos hold every picture they carry — members, and pictures removed from the
+/// trip that a tagged memo still holds — so a read of them re-signs a picture whatever the
+/// members or the Removed list say. The read is the store's own `loadJournal`: issued under the
+/// session read in the turn that enters the store, joined by a load of the same trip, session and
+/// rule already on the wire, and applied only while that session and rule are still current.
+@MainActor
+final class TripJournalURLRefresher: SignedURLRefreshing {
+    let members: TripMemberStore
+    let trips: TripStore
+    let uid: String
+    let session: IssuingSession
+
+    init(members: TripMemberStore, trips: TripStore, uid: String, session: IssuingSession) {
+        self.members = members
+        self.trips = trips
+        self.uid = uid
+        self.session = session
+    }
+
+    /// The journal's own cooldown owner, never the member store itself: a journal read re-signs
+    /// the journal alone, so a member it also carries must still be renewable for the grid inside
+    /// the same minute (`TripJournalRenewal`).
+    var owner: AnyObject { TripJournalRenewal.owner(of: members) }
+
+    /// `uid` is the picture whose signature lapsed; the journal read again is this trip's own.
+    func signatureExpired(uid: String) {
+        Task { [members, trips, tripUid = self.uid, session] in
+            guard let trip = trips.trips.first(where: { $0.uid == tripUid }),
+                let handle = session.handle(), let baseURL = session.baseURL()
+            else { return }
+            await members.loadJournal(trip, using: handle, baseURL: baseURL)
+        }
+    }
+}
+
+/// The cooldown owner of a member store's journal renewals: one per store, stable for as long as
+/// the store lives, and apart from the store itself — which owns the membership's renewals. The
+/// two reads re-sign different lists, so one's cooldown must never hold the other's ask back.
+@MainActor
+enum TripJournalRenewal {
+    private final class Owner {}
+
+    private static let owners = NSMapTable<TripMemberStore, Owner>.weakToStrongObjects()
+
+    static func owner(of members: TripMemberStore) -> AnyObject {
+        if let owner = owners.object(forKey: members) { return owner }
+        let owner = Owner()
+        owners.setObject(owner, forKey: members)
+        return owner
     }
 }

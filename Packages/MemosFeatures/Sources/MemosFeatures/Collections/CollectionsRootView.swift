@@ -4,15 +4,15 @@ import SwiftUI
 /// The Collections tab's root (MEMNG-709, MEMNG-713), as the tab hosts it: the session's stores
 /// handed to `CollectionsScreen`.
 ///
-/// The collection and membership stores are the session's, built once by `MainTabView` and moved
+/// The trip and member stores are the session's, built once by `MainTabView` and moved
 /// to a new identity beside the timeline (`TimelineView`); this view only reads them. The tag
 /// list and the year buckets are its own, as the Library's are. With no stores in the
 /// environment — a harness that hosts the tabs without a session's — it draws the empty root with
 /// nothing it can do.
 struct CollectionsRootView: View {
     @Environment(SessionStore.self) private var session: SessionStore?
-    @Environment(CollectionStore.self) private var collections: CollectionStore?
-    @Environment(TripMembershipStore.self) private var trips: TripMembershipStore?
+    @Environment(TripStore.self) private var trips: TripStore?
+    @Environment(TripMemberStore.self) private var members: TripMemberStore?
     @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
     @Environment(LibraryYearJump.self) private var yearJump: LibraryYearJump?
     /// The Tags row's names and counts, every kind of file counted.
@@ -32,13 +32,13 @@ struct CollectionsRootView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let session, let collections, let trips, let tags, let years {
+        if let session, let trips, let members, let tags, let years {
             CollectionsScreen(
-                collections: collections,
                 trips: trips,
+                members: members,
                 tags: tags,
                 years: years,
-                subject: session.state.user?.subject,
+                identity: session.snapshotIdentity,
                 access: {
                     guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
                     else { return nil }
@@ -48,8 +48,9 @@ struct CollectionsRootView: View {
                 openYear: { LibraryJumpRequests.openYear($0, tags: tagJump, years: yearJump) },
                 trail: $trail
             )
-            // Another account's tags and years go before anything is read for this one.
-            .onChange(of: session.state.user?.subject) {
+            // Another account's tags and years go before anything is read for this one: the whole
+            // identity, since the same subject on another server is another account.
+            .onChange(of: session.snapshotIdentity) {
                 tags.sessionIdentityChanged()
                 years.sessionIdentityChanged()
             }
@@ -83,24 +84,27 @@ struct CollectionsRootView: View {
 /// Everything it reads arrives as a value — the stores, and the session's means of reading as a
 /// closure — so a test hosts it over a scripted transport without a session.
 ///
-/// **Cards.** In `order`, each with its cover, title, span and count. The span and count are the
-/// record's `lastSummary`, so a card renders before anything is read; the cover is the member that
-/// summary names, once the membership has been drained here. Every trip on screen is drained when
-/// the root appears and whenever the list of trips changes — `TripMembershipStore` joins a drain
-/// already in flight, and writes a summary that changed back to the record. A card opens its trip
-/// (`TripView`), pushed onto the tab's stack.
+/// **Cards.** The household's trips as the server lists them (`TripStore.refresh`), in the
+/// server's order, each with its cover, title, dates and count. The list is read when the root
+/// appears, on pull-to-refresh and when the New trip sheet goes away; while the first read is out
+/// the root says so, a failed read with nothing to show says why with Try Again, and an answer
+/// with no trip is the empty state. The count is the server's for this account; the cover and
+/// dates are the drained members' once read here (`TripMemberStore`, every trip on screen drained
+/// when the list or its revision moves, a drain in flight joined), the server's own until then. A
+/// card opens its trip (`TripView`), pushed onto the tab's stack.
 ///
 /// **Years.** The year buckets, every kind and every tag counted, newest first — drawn only from a
 /// list read for exactly that (`bucketsShown`), so nothing else the store held, nor an empty or
 /// failed read, puts a row on screen: no years, no row. A chip opens the Library at that year.
 struct CollectionsScreen: View {
-    let collections: CollectionStore
-    let trips: TripMembershipStore
+    let trips: TripStore
+    let members: TripMemberStore
     let tags: LibraryTagStore
     /// The Years row's buckets; with none — a host that reads no years — there is no row.
     var years: LibraryBucketStore? = nil
-    /// Whose root this is; a change reads it all again.
-    let subject: String?
+    /// Whose root this is — the server and the subject, since the same subject on another server
+    /// is another account; a change of either reads it all again.
+    let identity: TimelineSnapshotIdentity?
     /// The session's handle and server when a read is issued, or nil when there is none.
     let access: () -> CollectionsAccess?
     /// A tag chip was tapped: the Library opens narrowed to it.
@@ -117,6 +121,8 @@ struct CollectionsScreen: View {
     var tripManage: () -> TripManage = { TripManage() }
 
     @State private var newTrip: NewTripFlow?
+    /// Each card's last summary, kept while its trip is read again (`HeldTripSummary`).
+    @State private var heldSummaries: [String: HeldTripSummary] = [:]
     @Environment(\.locale) private var locale
     @Environment(\.timeZone) private var timeZone
 
@@ -132,15 +138,17 @@ struct CollectionsScreen: View {
     static let tagsHeader = "Tags"
     /// The years' heading.
     static let yearsHeader = "Years"
+    /// What the root says while the first list of trips is read.
+    static let loadingTitle = "Reading trips…"
+    /// The identifier of that line.
+    static let loadingID = "collections-loading"
+    /// The failed list's retry.
+    static let retryButton = "Try Again"
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DesignTokens.Space.section) {
-                if collections.records.isEmpty {
-                    Self.emptyState
-                } else {
-                    tripsRow
-                }
+                tripsSection
                 if !tags.tags.isEmpty {
                     tagsRow
                 }
@@ -153,27 +161,42 @@ struct CollectionsScreen: View {
         // The whole screen, so the chrome around the root is laid out against the screen and not
         // against the content's own size (MEMNG-605).
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .refreshable { await refresh() }
         // The Library's header over the root, its + included, with no bar above it: the two tabs
         // read as a pair (MEMNG-757).
         .safeAreaBar(edge: .top) {
-            Self.header(tripCount: collections.records.count) { newTrip = NewTripFlow() }
+            Self.header(
+                subtitle: CollectionsPresentation.headerSubtitle(
+                    tripCount: trips.trips.count, listFailed: trips.lastError != nil)
+            ) { newTrip = NewTripFlow() }
         }
         .toolbarVisibility(.hidden, for: .navigationBar)
         // A card opens its trip inside the tab's stack (MEMNG-714), under the main bar, with
         // its room (MEMNG-715).
         .stackDestination(for: TripRoute.self) { route in
             TripView(
-                record: collections.records.first { $0.id == route.id } ?? route.opened,
-                collections: collections, trips: trips, subject: subject, access: access,
+                trip: trips.trips.first { $0.uid == route.id } ?? route.opened,
+                trips: trips, memberStore: members, identity: identity, access: access,
                 trail: trail, manage: tripManage(), now: now)
         }
-        .sheet(item: $newTrip) { flow in
-            NewTripSheet(
-                flow: flow, collections: collections, trips: trips, access: access, now: now)
+        // Back from the sheet the list is read again: one list, whatever the sheet did.
+        .sheet(item: $newTrip, onDismiss: { Task { await refresh() } }) { flow in
+            NewTripSheet(flow: flow, trips: trips, members: members, access: access, now: now)
         }
-        .task(id: subject) { await loadTags() }
-        .task(id: subject) { await loadYears() }
-        .task(id: DrainKey(subject: subject, ids: collections.records.map(\.id))) {
+        .task(id: identity) { await refresh() }
+        // A summary the store answered stands until the next one; another account keeps none.
+        .onChange(of: freshSummaries) { _, now in
+            let kept = Set(trips.trips.map(\.uid))
+            heldSummaries = heldSummaries.filter { kept.contains($0.key) }
+                .merging(now) { _, new in new }
+        }
+        .onChange(of: identity) { heldSummaries = [:] }
+        .task(id: identity) { await loadTags() }
+        .task(id: identity) { await loadYears() }
+        .task(
+            id: DrainKey(
+                identity: identity, ids: trips.trips.map(\.uid), revision: trips.revision)
+        ) {
             await drainTrips()
         }
     }
@@ -190,10 +213,13 @@ struct CollectionsScreen: View {
     /// the same glass circle as the Library's options button. With no action — the placeholder's
     /// — the `+` is drawn and cannot act.
     static func header(tripCount: Int, newTrip: (() -> Void)?) -> some View {
-        ScreenHeader(
-            title: MainTab.collections.title,
-            subtitle: CollectionsPresentation.headerSubtitle(tripCount: tripCount)
-        ) {
+        let subtitle = CollectionsPresentation.headerSubtitle(tripCount: tripCount)
+        return header(subtitle: subtitle, newTrip: newTrip)
+    }
+
+    /// The header over a subtitle already worded: the count, or that the list was not read.
+    static func header(subtitle: String, newTrip: (() -> Void)?) -> some View {
+        ScreenHeader(title: MainTab.collections.title, subtitle: subtitle) {
             HeaderGlassCircle(systemName: "plus", label: newTripButton) { newTrip?() }
                 .disabled(newTrip == nil)
         }
@@ -207,6 +233,32 @@ struct CollectionsScreen: View {
         }
     }
 
+    /// The trips, or what stands in for them: the first read on the wire, a failure with nothing
+    /// to show, or the empty state.
+    @ViewBuilder
+    private var tripsSection: some View {
+        if let error = trips.lastError {
+            VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+                NoticeCard(text: error, tone: .error)
+                Button(Self.retryButton) { Task { await refresh() } }
+            }
+            .padding(.horizontal, DesignTokens.Space.roomy)
+        }
+        if !trips.trips.isEmpty {
+            tripsRow
+        } else if trips.isRefreshing {
+            HStack(spacing: DesignTokens.Space.snug) {
+                ProgressView()
+                Text(Self.loadingTitle).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(Self.loadingID)
+        } else if trips.lastError == nil {
+            Self.emptyState
+        }
+    }
+
     private var tripsRow: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
             Text(Self.tripsHeader)
@@ -214,15 +266,17 @@ struct CollectionsScreen: View {
                 .padding(.horizontal, DesignTokens.Space.roomy)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: DesignTokens.Space.regular) {
-                    let pinned = collections.activePin(now: now())?.id
-                    ForEach(collections.records) { record in
-                        NavigationLink(value: TripRoute(record)) {
+                    let pinned = trips.pins.activePin(now: now())?.uid
+                    ForEach(trips.trips) { trip in
+                        NavigationLink(value: TripRoute(trip)) {
                             TripCard(
-                                record: record,
-                                cover: cover(of: record),
-                                detail: CollectionsPresentation.cardDetail(
-                                    record.lastSummary, locale: locale, timeZone: timeZone),
-                                pinned: record.id == pinned
+                                trip: trip,
+                                cover: CollectionsPresentation.cover(
+                                    of: trip, summary: shownSummary(of: trip)),
+                                detail: CollectionsPresentation.tripDetail(
+                                    trip, summary: shownSummary(of: trip), locale: locale,
+                                    timeZone: timeZone),
+                                pinned: trip.uid == pinned
                             )
                         }
                         .buttonStyle(.plain)
@@ -251,11 +305,10 @@ struct CollectionsScreen: View {
         }
     }
 
-    /// The card's cover: the chosen one while it is still a member, else the first member, as
-    /// the trip's hero draws it.
-    private func cover(of record: CollectionRecord) -> MemoAttachment? {
-        CollectionsPresentation.cover(
-            of: record, live: trips.summary(for: record), members: trips.members(for: record))
+    /// Reads the list of trips; a list already on the wire is joined.
+    private func refresh() async {
+        guard let access = access() else { return }
+        await trips.refresh(using: access.handle, baseURL: access.baseURL)
     }
 
     private func loadTags() async {
@@ -297,18 +350,36 @@ struct CollectionsScreen: View {
             size: .year, filter: .all, tag: nil, using: access.handle, baseURL: access.baseURL)
     }
 
+    /// The summaries the store holds now, each with the trip it was read for.
+    private var freshSummaries: [String: HeldTripSummary] {
+        var fresh: [String: HeldTripSummary] = [:]
+        for trip in trips.trips {
+            if let summary = members.summary(for: trip) {
+                fresh[trip.uid] = HeldTripSummary(trip, summary, under: trips.identity)
+            }
+        }
+        return fresh
+    }
+
+    private func shownSummary(of trip: Trip) -> TripMemberSummary? {
+        CollectionsPresentation.shownSummary(
+            of: trip, store: members.summary(for: trip), held: heldSummaries,
+            under: trips.identity)
+    }
+
     /// Every trip's membership, one after another, in the order the cards stand.
     private func drainTrips() async {
-        for record in collections.records {
+        for trip in trips.trips where members.state(for: trip) == .notLoaded {
             if Task.isCancelled { return }
             guard let access = access() else { return }
-            await trips.drain(record, using: access.handle, baseURL: access.baseURL)
+            await members.drain(trip, using: access.handle, baseURL: access.baseURL)
         }
     }
 
     private struct DrainKey: Equatable {
-        let subject: String?
-        let ids: [UUID]
+        let identity: TimelineSnapshotIdentity?
+        let ids: [String]
+        let revision: Int
     }
 }
 
@@ -317,7 +388,7 @@ struct CollectionsScreen: View {
 /// "Pinned" before the detail. Whether it is pinned is the host's to say (`activePin(now:)` on the
 /// host's clock); the card reads no clock.
 struct TripCard: View {
-    let record: CollectionRecord
+    let trip: Trip
     let cover: MemoAttachment?
     let detail: String?
     var pinned = false
@@ -345,7 +416,7 @@ struct TripCard: View {
                     if pinned { pinBadge }
                 }
                 .padding(.bottom, DesignTokens.Space.tight)
-            Text(record.title)
+            Text(trip.title)
                 .font(.headline)
                 .lineLimit(1)
             if let detail {
@@ -357,7 +428,7 @@ struct TripCard: View {
         }
         .frame(width: Self.width, alignment: .leading)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(record.title)
+        .accessibilityLabel(trip.title)
         .accessibilityValue(Self.accessibilityValue(detail: detail, pinned: pinned))
         // From the very value `coverImage` draws, so what a test reads is what the card renders.
         .accessibilityIdentifier(Self.coverIdentifier(cover?.uid))

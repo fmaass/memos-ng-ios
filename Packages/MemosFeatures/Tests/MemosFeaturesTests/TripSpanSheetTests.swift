@@ -35,6 +35,23 @@ struct TripSpanSheetTests {
     private static let span = TripSpan(
         start: lisbon(10, 0, 0), end: lisbon(20, 14, 0, 59), zone: "Europe/Lisbon")
 
+    /// A trip store over `wire`, read back by a real refresh.
+    private func store(_ wire: SpanWire) async -> TripStore {
+        let store = TripStore(identity: alice, root: root)
+        await store.refresh(using: wire.handle, baseURL: SpanWire.baseURL)
+        return store
+    }
+
+    /// `Lisbon` on `wire`'s server, spanned `Self.span` and with no tag, as a refresh lists it.
+    private func lisbonTrip(on wire: SpanWire) async throws -> (TripStore, Trip) {
+        let span = Self.span
+        wire.trips.seed(
+            "Lisbon", spanStart: span.start.formatted(.iso8601),
+            spanEnd: span.end.formatted(.iso8601), tz: span.zone)
+        let store = await store(wire)
+        return (store, try #require(store.trips.first))
+    }
+
     @Test("the sheet writes the start from its minute's first second and the end to its last")
     func toTheMinute() throws {
         let draft = TripSpanDraft(
@@ -48,41 +65,66 @@ struct TripSpanSheetTests {
     }
 
     @Test("the sheet refuses an end before the start, and Save writes nothing")
-    func aBackwardSpanIsRefused() {
-        let collections = CollectionStore(identity: alice, root: root)
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
+    func aBackwardSpanIsRefused() async throws {
+        let wire = SpanWire()
+        let (store, record) = try await lisbonTrip(on: wire)
         var draft = TripSpanDraft(Self.span)
         draft.end = Self.lisbon(9, 23, 59)
         #expect(draft.span == nil, "a backward span was offered to Save")
-        #expect(!draft.save(to: collections, id: record.id))
-        #expect(collections.records.first?.span == Self.span, "a refused span was written")
+        let saved = try await draft.save(to: store, uid: record.uid, using: wire.access)
+        #expect(saved == nil)
+        #expect(wire.trips.calls(TripRows.patch).isEmpty, "a refused span was sent")
+        #expect(store.trips.first?.tripSpan == Self.span, "a refused span was written")
         // The same minute at both ends is a span of that minute.
         draft.end = Self.lisbon(10, 0, 0, 30)
         #expect(draft.span?.end == Self.lisbon(10, 0, 0, 59))
     }
 
     @Test("moving the end by one minute on the sheet changes the trip's count on the next drain")
-    func oneMinuteOnTheSheet() async {
+    func oneMinuteOnTheSheet() async throws {
         let wire = SpanWire(newestFirst: [
             ("after", Self.lisbon(20, 14, 1, 30)),
             ("last", Self.lisbon(20, 14, 0, 30)),
             ("first", Self.lisbon(10, 10, 0)),
             ("eve", Self.lisbon(9, 22, 0)),
         ])
-        let collections = CollectionStore(identity: alice, root: root)
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let trips = TripMembershipStore(collections: collections)
+        let (collections, record) = try await lisbonTrip(on: wire)
+        let trips = TripMemberStore(trips: collections)
         await trips.drain(record, using: wire.handle, baseURL: SpanWire.baseURL)
-        #expect(collections.records.first?.lastSummary?.count == 2, "control: 14:01 is out")
+        #expect(trips.summary(for: record)?.count == 2, "control: 14:01 is out")
 
         var draft = TripSpanDraft(Self.span)
         draft.end = Self.lisbon(20, 14, 1)
-        #expect(draft.save(to: collections, id: record.id), "the sheet's span was not written")
-        let moved = collections.records.first ?? record
+        let saved = try await draft.save(to: collections, uid: record.uid, using: wire.access)
+        #expect(saved != nil, "the sheet's span was not written")
+        let moved = collections.trips.first ?? record
         await trips.drain(moved, using: wire.handle, baseURL: SpanWire.baseURL)
 
-        #expect(collections.records.first?.lastSummary?.count == 3, "the minute changed nothing")
+        #expect(trips.summary(for: moved)?.count == 3, "the minute changed nothing")
         #expect(trips.members(for: moved).map(\.id) == ["first", "last", "after"])
+    }
+
+    @Test("a backward span is never sent; one minute is a span; Remove Dates takes it away")
+    func theStoreRefusesABackwardSpan() async throws {
+        let wire = SpanWire()
+        let (store, record) = try await lisbonTrip(on: wire)
+        var backward = TripSpanDraft(Self.span)
+        backward.end = Self.span.start.addingTimeInterval(-60)
+        _ = try await backward.save(to: store, uid: record.uid, using: wire.access)
+        #expect(wire.trips.calls(TripRows.patch).isEmpty, "a backward span was sent")
+        #expect(store.trips.first?.tripSpan == Self.span, "a backward span was written")
+
+        var instant = TripSpanDraft(Self.span)
+        instant.end = instant.start
+        _ = try await instant.save(to: store, uid: record.uid, using: wire.access)
+        let minute = TripSpan(
+            start: Self.span.start, end: Self.span.start.addingTimeInterval(59),
+            zone: Self.span.zone)
+        #expect(store.trips.first?.tripSpan == minute, "a one-minute span is a span")
+        try await TripSpanSheet.removeDates(of: record.uid, in: store, using: wire.access)
+        #expect(store.trips.first?.tripSpan == nil, "the span was not taken away")
+        let reread = await self.store(wire)
+        #expect(reread.trips.first?.tripSpan == nil, "the server kept the span")
     }
 
     @Test("another zone keeps the wall clock the owner chose")
@@ -98,19 +140,22 @@ struct TripSpanSheetTests {
 
     @Test("Trip Dates opens on the trip's span, else on the days its pictures span")
     func theSheetOpensOnTheTrip() {
-        let spanned = CollectionRecord(
-            id: UUID(), kind: .trip, title: "Lisbon", tags: [], order: 0,
-            createdAt: Self.lisbon(1, 0, 0), span: Self.span)
+        let made = Self.lisbon(1, 0, 0)
+        let spanned = Trip(
+            uid: "spanned", title: "Lisbon", spanStart: Self.span.start, spanEnd: Self.span.end,
+            tz: Self.span.zone, createdAt: made, updatedAt: made)
         #expect(
-            TripSpanSheet.opening(spanned, now: Self.lisbon(25, 9, 0), zone: Self.berlin)
+            TripSpanSheet.opening(
+                spanned, summary: nil, now: Self.lisbon(25, 9, 0), zone: Self.berlin)
                 == TripSpanDraft(Self.span))
-        let tagged = CollectionRecord(
-            id: UUID(), kind: .trip, title: "Portugal", tags: ["portugal2026"], order: 0,
-            lastSummary: TripSummary(
-                count: 4, firstTaken: Self.lisbon(10, 9, 0), lastTaken: Self.lisbon(20, 18, 0),
-                coverUid: nil),
-            createdAt: Self.lisbon(1, 0, 0))
-        let opened = TripSpanSheet.opening(tagged, now: Self.lisbon(25, 9, 0), zone: Self.lisbon)
+        let tagged = Trip(
+            uid: "tagged", title: "Portugal", tag: "portugal2026", memberCount: 4,
+            createdAt: made, updatedAt: made)
+        let drained = TripMemberSummary(
+            count: 4, firstTaken: Self.lisbon(10, 9, 0), lastTaken: Self.lisbon(20, 18, 0),
+            cover: nil)
+        let opened = TripSpanSheet.opening(
+            tagged, summary: drained, now: Self.lisbon(25, 9, 0), zone: Self.lisbon)
         let days = TripSpan.days(
             from: Self.lisbon(10, 9, 0), to: Self.lisbon(20, 18, 0), in: Self.lisbon)
         #expect(opened.span == days)
@@ -140,25 +185,28 @@ struct TripSpanSheetTests {
     }
 
     @Test("Create waits for the chosen tag's dates, and files them once they arrive")
-    func createWaitsForThePrefill() throws {
-        let store = CollectionStore(identity: alice, root: root)
+    func createWaitsForThePrefill() async throws {
+        let wire = SpanWire()
+        let store = await store(wire)
         let flow = NewTripFlow()
         flow.choose("portugal2026", span: nil, zone: Self.lisbon)
         #expect(!flow.canCreate, "Create was offered before the tag's dates arrived")
-        #expect(flow.create(in: store) == nil)
-        #expect(store.records.isEmpty, "a trip was filed without its dates")
+        #expect(await flow.create(in: store, using: wire.access) == nil)
+        #expect(store.trips.isEmpty, "a trip was filed without its dates")
+        #expect(wire.trips.calls(TripRows.create).isEmpty, "a trip was sent without its dates")
 
         flow.prefill(
             TripTagSpan(firstTaken: Self.lisbon(10, 9, 0), lastTaken: Self.lisbon(20, 9, 0)),
             of: "portugal2026", zone: Self.lisbon)
         #expect(flow.canCreate)
-        let made = try #require(flow.create(in: store))
-        #expect(made.span?.start == Self.lisbon(10, 0, 0), "the prefill never reached the record")
+        let made = try #require(await flow.create(in: store, using: wire.access))
+        #expect(made.spanStart == Self.lisbon(10, 0, 0), "the prefill never reached the record")
     }
 
     @Test("a tag whose dates never came is filed alone once its own read ends")
-    func aFailedDatesReadReleasesCreate() throws {
-        let store = CollectionStore(identity: alice, root: root)
+    func aFailedDatesReadReleasesCreate() async throws {
+        let wire = SpanWire()
+        let store = await store(wire)
         let flow = NewTripFlow()
         flow.choose("portugal2026", span: nil, zone: Self.lisbon)
         #expect(flow.awaitingDates)
@@ -168,14 +216,15 @@ struct TripSpanSheetTests {
         #expect(!flow.awaitingDates, "a failed read held Create forever")
         flow.choose("portugal2026", span: nil, zone: Self.lisbon)
         #expect(!flow.awaitingDates, "the same tag again waited for a read nobody sends")
-        let made = try #require(flow.create(in: store))
-        #expect(made.tags == ["portugal2026"])
+        let made = try #require(await flow.create(in: store, using: wire.access))
+        #expect(made.tag == "portugal2026")
         #expect(made.span == nil)
     }
 
     @Test("No Dates is a choice: Create needs no prefill, and a late one does not undo it")
-    func noDatesIsAChoice() throws {
-        let store = CollectionStore(identity: alice, root: root)
+    func noDatesIsAChoice() async throws {
+        let wire = SpanWire()
+        let store = await store(wire)
         let flow = NewTripFlow()
         flow.choose("portugal2026", span: nil, zone: Self.lisbon)
         flow.removeDates()
@@ -185,7 +234,7 @@ struct TripSpanSheetTests {
             TripTagSpan(firstTaken: Self.lisbon(10, 9, 0), lastTaken: Self.lisbon(20, 9, 0)),
             of: "portugal2026", zone: Self.lisbon)
         #expect(flow.span == nil, "a late prefill overrode No Dates")
-        let made = try #require(flow.create(in: store))
+        let made = try #require(await flow.create(in: store, using: wire.access))
         #expect(made.span == nil)
     }
 
@@ -201,37 +250,40 @@ struct TripSpanSheetTests {
     }
 
     @Test("Create files the tag with its span; dates alone make a trip without a tag")
-    func createWithASpan() throws {
-        let store = CollectionStore(identity: alice, root: root)
+    func createWithASpan() async throws {
+        let wire = SpanWire()
+        let store = await store(wire)
         let flow = NewTripFlow()
         flow.choose(
             "portugal2026",
             span: TripTagSpan(firstTaken: Self.lisbon(10, 9, 0), lastTaken: Self.lisbon(20, 9, 0)),
             zone: Self.lisbon)
-        let made = try #require(flow.create(in: store))
-        #expect(made.tags == ["portugal2026"])
-        #expect(made.span?.start == Self.lisbon(10, 0, 0))
+        let made = try #require(await flow.create(in: store, using: wire.access))
+        #expect(made.tag == "portugal2026")
+        #expect(made.spanStart == Self.lisbon(10, 0, 0))
 
         let datesOnly = NewTripFlow()
         #expect(!datesOnly.canCreate)
         datesOnly.addDates(now: Self.lisbon(12, 15, 0), zone: Self.lisbon)
         datesOnly.title = "A weekend"
         #expect(datesOnly.canCreate)
-        let weekend = try #require(datesOnly.create(in: store))
-        #expect(weekend.tags.isEmpty)
-        #expect(weekend.span?.start == Self.lisbon(12, 0, 0))
+        let weekend = try #require(await datesOnly.create(in: store, using: wire.access))
+        #expect(weekend.tag == nil)
+        #expect(weekend.spanStart == Self.lisbon(12, 0, 0))
     }
 
     @Test("a span that ends before it starts keeps Create off")
-    func aBackwardSpanKeepsCreateOff() {
-        let store = CollectionStore(identity: alice, root: root)
+    func aBackwardSpanKeepsCreateOff() async {
+        let wire = SpanWire()
+        let store = await store(wire)
         let flow = NewTripFlow()
         flow.choose("portugal2026")
         flow.addDates(now: Self.lisbon(12, 15, 0), zone: Self.lisbon)
         flow.span?.end = Self.lisbon(11, 0, 0)
         #expect(!flow.canCreate)
-        #expect(flow.create(in: store) == nil)
-        #expect(store.records.isEmpty)
+        #expect(await flow.create(in: store, using: wire.access) == nil)
+        #expect(store.trips.isEmpty)
+        #expect(wire.trips.calls(TripRows.create).isEmpty, "a backward span was sent")
         flow.removeDates()
         #expect(flow.canCreate, "the tag alone is a trip")
     }
@@ -258,7 +310,7 @@ struct TripSpanSheetTests {
             pinned: false, createdAt: Self.lisbon(13, 9, 0), updatedAt: Self.lisbon(13, 9, 0))
         let sections = TimelineGrouping.sections(
             for: [photos, words], calendar: calendar,
-            instant: TripMembershipStore.journalInstant(of:))
+            instant: TripMemberStore.journalInstant(of:))
         #expect(sections.map(\.day) == [Self.lisbon(11, 0, 0), Self.lisbon(13, 0, 0)])
         // The timeline's own grouping keys on the date, as it always has.
         let timeline = TimelineGrouping.sections(for: [photos], calendar: calendar)
@@ -266,27 +318,70 @@ struct TripSpanSheetTests {
     }
 }
 
-/// A server whose library is `newestFirst`, answered whole to every `taken_desc` read.
+/// A server holding trips on the collection routes, whose library is `newestFirst`: a trip's
+/// members are the pictures taken inside its span, and so is its count.
 @MainActor
 private final class SpanWire {
     static let baseURL = URL(string: "https://memos.example.invalid")!
-    let handle: SessionHandle
+    let transport: SpanTransport
+    let access: CollectionsAccess
+    var handle: SessionHandle { access.handle }
+    var trips: TripRows { transport.trips }
 
-    init(newestFirst rows: [(uid: String, taken: Date)]) {
+    init(newestFirst rows: [(uid: String, taken: Date)] = []) {
+        transport = SpanTransport(rows: rows)
         let client = APIClientFactory.make(
             configuration: ServerConfiguration(baseURL: Self.baseURL),
             token: { "memos_pat_trips" },
-            transport: SpanTransport(rows: rows))
-        handle = SessionHandle(client: client, generation: 1)
+            transport: transport)
+        access = CollectionsAccess(
+            handle: SessionHandle(client: client, generation: 1), baseURL: Self.baseURL)
     }
 }
 
-private struct SpanTransport: ClientTransport {
+private nonisolated final class SpanTransport: ClientTransport, @unchecked Sendable {
     let rows: [(uid: String, taken: Date)]
+    let trips: TripRows
+
+    init(rows: [(uid: String, taken: Date)]) {
+        self.rows = rows
+        trips = TripRows(counter: { row in
+            Self.within(start: row.spanStart, end: row.spanEnd, of: rows).count
+        })
+    }
 
     func send(
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
+        let rows = rows
+        if let answered = try await trips.answer(
+            request, body: body, operationID: operationID,
+            listing: { query in
+                let inside = Self.within(start: query["spanStart"], end: query["spanEnd"], of: rows)
+                return Self.page(inside.reversed())
+            })
+        {
+            return answered
+        }
+        return Self.page(rows)
+    }
+
+    /// The rows taken inside the span its ends spell, newest first; none without a span.
+    static func within(
+        start: String?, end: String?, of rows: [(uid: String, taken: Date)]
+    ) -> [(uid: String, taken: Date)] {
+        guard let first = instant(start), let last = instant(end) else { return [] }
+        return rows.filter { first <= $0.taken && $0.taken <= last }
+    }
+
+    static func instant(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return ISO8601DateFormatter().date(from: text) ?? fractional.date(from: text)
+    }
+
+    static func page(_ rows: [(uid: String, taken: Date)]) -> (HTTPResponse, HTTPBody?) {
         let items = rows.map { row in
             let uid = row.uid
             return """

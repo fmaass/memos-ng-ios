@@ -17,18 +17,19 @@ public struct ComposePinnedTrip: Equatable, Sendable {
         self.tag = tag
     }
 
-    /// The record's offer — its title and its FIRST tag — or nil for a record with no tag, which
-    /// has nothing to add to a memo.
-    public init?(record: CollectionRecord) {
-        guard let tag = record.tags.first, !tag.isEmpty else { return nil }
-        self.init(title: record.title, tag: tag)
+    /// The pin row's offer — the trip's title and tag as the row keeps them, so a cold launch has
+    /// both before any list answers — or nil for a trip with no tag, which has nothing to add to a
+    /// memo.
+    public init?(pin: TripPin) {
+        guard let tag = pin.tag, !tag.isEmpty else { return nil }
+        self.init(title: pin.title, tag: tag)
     }
 
     /// What a new memo opened at `now` is offered: the trip pinned at that instant
-    /// (`CollectionStore.activePin(now:)`, which treats a pin ending exactly at `now` as over), or
-    /// nothing — with no store, no pin, an expired pin or a pinned record without a tag alike.
-    public static func offered(by store: CollectionStore?, now: Date) -> ComposePinnedTrip? {
-        store?.activePin(now: now).flatMap(ComposePinnedTrip.init(record:))
+    /// (`TripPins.activePin(now:)`, which treats a pin ending exactly at `now` as over), or
+    /// nothing — with no store, no pin, an expired pin or a pinned trip without a tag alike.
+    public static func offered(by pins: TripPins?, now: Date) -> ComposePinnedTrip? {
+        pins?.activePin(now: now).flatMap(ComposePinnedTrip.init(pin:))
     }
 }
 

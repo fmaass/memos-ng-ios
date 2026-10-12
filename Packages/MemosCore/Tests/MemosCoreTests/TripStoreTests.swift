@@ -78,6 +78,43 @@ struct TripStoreTests {
         #expect(store.trips.map(\.uid) == ["t1"])
     }
 
+    /// The store joins overlapping Creates of one frozen request itself, whatever its caller
+    /// does: the second caller waits on the first POST and sends none of its own.
+    @Test("two Creates of one frozen request at once are one POST, and both get its trip")
+    func identicalCreatesJoin() async throws {
+        let calls = TripCalls()
+        let entered = TripLatch()
+        let release = TripLatch()
+        let joined = TripLatch()
+        let client = Stub.client { request, body, operation in
+            _ = await calls.record(request, body, operation)
+            entered.open()
+            await release.wait()
+            return Stub.json(
+                TripWire.collection("t1", title: "Lisbon", tag: "lisbon"), status: .created)
+        }
+        let store = store()
+        store.onJoin = { joined.open() }
+        let frozen = NewTripRequest(
+            scope: TripWire.alice, title: "Lisbon", tag: "lisbon", idempotencyKey: "key-0002")
+        let first = Task {
+            try await store.create(frozen, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the first POST never reached the wire")
+        let second = Task {
+            try await store.create(frozen, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await joined.wait(), "the second caller never joined")
+        release.open()
+        let one = try await first.value
+        let other = try await second.value
+
+        #expect(calls.of(TripWire.create).count == 1, "overlapping Creates sent more than one POST")
+        #expect(one == other)
+        #expect(one.uid == "t1")
+        #expect(store.trips.map(\.uid) == ["t1"])
+    }
+
     @Test("an identity change with a create in flight drops the answer and bumps the revision")
     func identityChangeDropsACreate() async {
         let entered = TripLatch()
@@ -442,13 +479,16 @@ struct TripStoreTests {
 
     @Test("the legacy file is removed on first load and never read")
     func legacyFileIsRemoved() throws {
-        let old = CollectionStore(identity: TripWire.alice, root: root)
-        old.create(title: "Old trip", tags: ["old"])
-        let bobs = CollectionStore(identity: TripWire.bob, root: root)
-        bobs.create(title: "Bob's trip", tags: ["bob"])
+        // The pilot's file, as 2.2 wrote it: one per scope, beside where pins.json goes.
         let file = { (identity: TimelineSnapshotIdentity) in
-            root.appending(path: CollectionStore.scopeKey(for: identity))
-                .appending(path: CollectionStore.fileName).path
+            root.appending(path: TripPins.scopeKey(for: identity))
+                .appending(path: TripStore.legacyFileName).path
+        }
+        for identity in [TripWire.alice, TripWire.bob] {
+            let url = URL(filePath: file(identity))
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(#"{"formatVersion":1,"records":[{"title":"Old trip"}]}"#.utf8).write(to: url)
         }
         #expect(FileManager.default.fileExists(atPath: file(TripWire.alice)), "control: written")
 

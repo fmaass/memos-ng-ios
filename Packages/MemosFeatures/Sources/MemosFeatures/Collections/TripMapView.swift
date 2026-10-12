@@ -6,7 +6,7 @@ import SwiftUI
 /// `GET /api/map/markers` takes no parameters, so the map is given every located photo the account
 /// can see and keeps the trip's: a marker stays exactly when its `uid` — the attachment's — is one
 /// of the trip's member uids. Those uids are the COMPLETE drained membership
-/// (`TripMembershipStore.members(for:)`, the drained list minus the record's exclusions), and only
+/// (`TripMemberStore.members(for:)`, what the server's member route answered), and only
 /// once the drain has settled: a drain applies its list once, at its end, and while one is on the
 /// wire there is no membership to filter by, so the map waits rather than draw a partial trip or
 /// say it has no places. A drain stopped at the cap filters by the pictures it did read — the
@@ -22,11 +22,11 @@ nonisolated enum TripMapPresentation {
     /// The uids the map may show: the trip's drained members, or nil while the drain has not
     /// settled — not read yet, or a read on the wire.
     @MainActor
-    static func memberUids(of record: CollectionRecord, in trips: TripMembershipStore)
+    static func memberUids(of trip: Trip, in members: TripMemberStore)
         -> Set<String>?
     {
-        switch trips.state(for: record) {
-        case .complete, .truncated: Set(trips.members(for: record).map(\.id))
+        switch members.state(for: trip) {
+        case .complete, .truncated: Set(members.members(for: trip).map(\.id))
         case .draining, .notLoaded: nil
         }
     }
@@ -51,7 +51,7 @@ nonisolated enum TripMapPresentation {
     /// markers' own state decides, except that a read answered with markers of which none is the
     /// trip's is the empty map: no member of this trip knows where it was taken.
     static func state(
-        places: PlacesStatus, membership: TripMembershipState, membershipError: String?,
+        places: PlacesStatus, membership: TripMemberState, membershipError: String?,
         shown: Int
     ) -> PlacesStatus {
         switch membership {
@@ -116,9 +116,9 @@ nonisolated enum TripMapPresentation {
 /// (`PlacesPresenting.keep`): a deleted trip's membership is unknown again, so everything open
 /// closes and the map waits while the screen leaves the stack.
 struct TripMapScreen<Hero: View>: View {
-    /// The trip as the screen draws it — the live record, or the snapshot on its way out.
-    let record: CollectionRecord
-    let trips: TripMembershipStore
+    /// The trip as the screen draws it — the live one, or the snapshot on its way out.
+    let trip: Trip
+    let members: TripMemberStore
     let access: () -> CollectionsAccess?
     /// Reads the trip's membership again, for Try Again after a drain that failed.
     let redrain: () async -> Void
@@ -136,12 +136,12 @@ struct TripMapScreen<Hero: View>: View {
     @Environment(\.placesStageProbe) private var probe
 
     var body: some View {
-        let members = TripMapPresentation.memberUids(of: record, in: trips)
-        let markers = TripMapPresentation.markers(places?.markers ?? [], of: members)
-        let membership = trips.state(for: record)
+        let uids = TripMapPresentation.memberUids(of: trip, in: members)
+        let markers = TripMapPresentation.markers(places?.markers ?? [], of: uids)
+        let membership = members.state(for: trip)
         let status = TripMapPresentation.state(
             places: places?.status ?? .pending, membership: membership,
-            membershipError: trips.lastError, shown: markers.count)
+            membershipError: members.lastError, shown: markers.count)
         VStack(spacing: 0) {
             hero()
             content(status, markers: markers, membership: membership)
@@ -149,7 +149,7 @@ struct TripMapScreen<Hero: View>: View {
         }
         .placesViewer($presenting.viewing, action: viewerAction)
         .onAppear { probe?.presenting = { presenting } }
-        .onChange(of: TripMapPresentation.kept(markers, members: members)) { _, kept in
+        .onChange(of: TripMapPresentation.kept(markers, members: uids)) { _, kept in
             presenting.keep(only: kept)
         }
         .task {
@@ -166,7 +166,7 @@ struct TripMapScreen<Hero: View>: View {
 
     @ViewBuilder
     private func content(
-        _ status: PlacesStatus, markers: [PlaceMarker], membership: TripMembershipState
+        _ status: PlacesStatus, markers: [PlaceMarker], membership: TripMemberState
     ) -> some View {
         switch status {
         case .pending:
@@ -193,10 +193,10 @@ struct TripMapScreen<Hero: View>: View {
 
     /// What the card says: the membership's failure when the trip could not be read, else the
     /// markers'.
-    private func notice(_ status: PlacesStatus, membership: TripMembershipState)
+    private func notice(_ status: PlacesStatus, membership: TripMemberState)
         -> PlacesNotice?
     {
-        let error = membership == .notLoaded ? trips.lastError : places?.lastError
+        let error = membership == .notLoaded ? members.lastError : places?.lastError
         return TripMapPresentation.notice(for: status, error: error)
     }
 
@@ -213,7 +213,7 @@ struct TripMapScreen<Hero: View>: View {
 
     /// Try Again: the membership when it could not be read, and the markers.
     private func retry() async {
-        if trips.state(for: record) == .notLoaded { await redrain() }
+        if members.state(for: trip) == .notLoaded { await redrain() }
         await load()
     }
 }

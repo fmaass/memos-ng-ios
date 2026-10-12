@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 
@@ -20,7 +21,7 @@ public struct TripPin: Sendable, Equatable, Codable {
 /// The device-local pin of the signed-in identity's trips: `<root>/<scope key>/pins.json`.
 ///
 /// The pin is the one part of a trip that never reaches the server. One file per identity scope,
-/// the same scope key `CollectionStore` files under, replaced whole through a temporary sibling so
+/// keyed by `scopeKey(for:)`, replaced whole through a temporary sibling so
 /// a write that dies half way leaves the previous file intact. When the session becomes somebody
 /// else's, the outgoing scope's rows leave memory and the incoming scope's file is read, so
 /// account B never sees A's pinned tag and A gets it back on return.
@@ -42,7 +43,7 @@ public final class TripPins {
 
     public init(
         identity: TimelineSnapshotIdentity?,
-        root: URL? = CollectionStore.appGroupRoot(),
+        root: URL? = TripPins.appGroupRoot(),
         writeBytes: @escaping (Data, URL) throws -> Void = { try $0.write(to: $1) }
     ) {
         self.identity = identity
@@ -107,6 +108,23 @@ public final class TripPins {
 
     // MARK: - File
 
+    /// `Collections` inside the app group, or nil when the container is not reachable.
+    public nonisolated static func appGroupRoot(
+        appGroup: String = DeviceCredentials.appGroup
+    ) -> URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+            .appending(path: "Collections")
+    }
+
+    /// The directory name an identity's files are kept under: the SHA-256 of the pair, in hex.
+    ///
+    /// A digest because neither a base URL nor an issuer's subject is a legal path component, and
+    /// a stable one because the same identity has to find its file again on the next launch.
+    public nonisolated static func scopeKey(for identity: TimelineSnapshotIdentity) -> String {
+        let material = Data("\(identity.server.absoluteString)\n\(identity.subject)".utf8)
+        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
+    }
+
     private struct PinFile: Codable {
         var formatVersion: Int
         var pins: [TripPin]
@@ -114,7 +132,7 @@ public final class TripPins {
 
     private var fileURL: URL? {
         guard let root, let identity else { return nil }
-        return root.appending(path: CollectionStore.scopeKey(for: identity))
+        return root.appending(path: Self.scopeKey(for: identity))
             .appending(path: Self.fileName)
     }
 

@@ -47,12 +47,17 @@ struct TripSpanDraft: Equatable {
         self.zone = zone
     }
 
-    /// Writes the span to the trip, and answers whether the record now holds it.
+    /// Sends the span to trip `uid` — both ends and the zone in one change — and returns the
+    /// trip as the server answered it. Nothing is sent while the end lies before the start.
     @discardableResult
-    func save(to collections: CollectionStore, id: UUID) -> Bool {
-        guard let span else { return false }
-        collections.setSpan(id: id, span)
-        return collections.records.first { $0.id == id }?.span == span
+    func save(
+        to trips: TripStore, uid: String, using access: CollectionsAccess
+    ) async throws -> Trip? {
+        guard let span else { return nil }
+        let patch = TripPatch(
+            spanStart: .set(span.start), spanEnd: .set(span.end), tz: .set(span.zone))
+        return try await trips.update(
+            uid: uid, patch: patch, using: access.handle, baseURL: access.baseURL)
     }
 
     private func minute(of date: Date) -> Date {
@@ -115,51 +120,75 @@ struct TripSpanFields: View {
 }
 
 /// Trip Dates, from the trip's Manage menu (MEMNG-737): the trip's span, edited and saved, or
-/// taken away from a trip that keeps its tag.
+/// taken away from a trip that keeps its tag — on the server (`TripStore.update`).
 ///
-/// A trip without a span opens on the days its pictures span (`lastSummary`), else on the day it
-/// is opened, in the device's zone.
+/// A trip without a span opens on the days its drained pictures span (`lastSummary`), else on the
+/// day it is opened, in the device's zone. While a change is out the sheet says so; one the server
+/// did not take keeps the sheet open with its reason under the dates.
 struct TripSpanSheet: View {
-    let record: CollectionRecord
-    let collections: CollectionStore
+    let trip: Trip
+    let trips: TripStore
+    let access: () -> CollectionsAccess?
     @State private var draft: TripSpanDraft
     @Environment(\.dismiss) private var dismiss
     /// Why the last Save or Remove Dates did not reach the trip, or nil.
     @State private var failure: String?
+    /// Whether a Save or Remove Dates is out.
+    @State private var saving = false
 
     static let title = "Trip Dates"
     static let save = "Save"
     static let removeDates = "Remove Dates"
-    /// What the sheet says when a write did not reach the device: the New trip sheet's sentence.
-    static let notSaved = NewTripFlow.notSaved
+    /// What the sheet says when a change could not be sent at all.
+    static let notSaved = "The trip could not be saved. Try again."
 
-    init(record: CollectionRecord, collections: CollectionStore, now: Date = Date()) {
-        self.record = record
-        self.collections = collections
-        _draft = State(initialValue: Self.opening(record, now: now, zone: .current))
+    init(
+        trip: Trip, trips: TripStore, access: @escaping () -> CollectionsAccess?,
+        lastSummary: TripMemberSummary? = nil, now: Date = Date()
+    ) {
+        self.trip = trip
+        self.trips = trips
+        self.access = access
+        _draft = State(
+            initialValue: Self.opening(trip, summary: lastSummary, now: now, zone: .current))
     }
 
     /// What the sheet opens on.
-    static func opening(_ record: CollectionRecord, now: Date, zone: TimeZone) -> TripSpanDraft {
-        if let span = record.span { return TripSpanDraft(span) }
-        let first = record.lastSummary?.firstTaken ?? now
-        let last = record.lastSummary?.lastTaken ?? first
+    static func opening(
+        _ trip: Trip, summary: TripMemberSummary?, now: Date, zone: TimeZone
+    ) -> TripSpanDraft {
+        if let span = trip.tripSpan { return TripSpanDraft(span) }
+        let first = summary?.firstTaken ?? now
+        let last = summary?.lastTaken ?? first
         return TripSpanDraft.days(from: first, to: max(first, last), in: zone)
             ?? TripSpanDraft(start: now, end: now, zone: zone)
     }
 
-    /// Takes the span off the trip, and answers whether the record, read back, holds none.
-    static func removeDates(of id: UUID, in collections: CollectionStore) -> Bool {
-        collections.setSpan(id: id, nil)
-        return collections.records.first { $0.id == id }?.span == nil
+    /// Takes the span off trip `uid` on the server — both ends and the zone cleared in one change.
+    @discardableResult
+    static func removeDates(
+        of uid: String, in trips: TripStore, using access: CollectionsAccess
+    ) async throws -> Trip {
+        try await trips.update(
+            uid: uid, patch: TripPatch(spanStart: .clear, spanEnd: .clear, tz: .clear),
+            using: access.handle, baseURL: access.baseURL)
     }
 
-    /// Closes the sheet on a write the trip holds; keeps it, saying so, on one it does not.
-    private func finish(_ saved: Bool) {
-        if saved {
-            dismiss()
-        } else {
+    /// Runs one change; closes the sheet once the server took it, else says why.
+    private func run(_ change: @escaping @MainActor (CollectionsAccess) async throws -> Void) {
+        guard let access = access() else {
             failure = Self.notSaved
+            return
+        }
+        saving = true
+        Task {
+            defer { saving = false }
+            do {
+                try await change(access)
+                dismiss()
+            } catch {
+                failure = TripManage.sentence(error) ?? Self.notSaved
+            }
         }
     }
 
@@ -167,14 +196,25 @@ struct TripSpanSheet: View {
         NavigationStack {
             Form {
                 Section { TripSpanFields(draft: $draft) }
+                if saving {
+                    Section {
+                        HStack {
+                            Text(TripView.savingLine).foregroundStyle(.secondary)
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
                 if let failure {
                     Section { Text(failure).foregroundStyle(.red) }
                 }
                 // Without its tag a trip with no span would have no rule left at all.
-                if record.span != nil, !record.tags.isEmpty {
+                if trip.span != nil, trip.tag != nil {
                     Section {
                         Button(Self.removeDates, role: .destructive) {
-                            finish(Self.removeDates(of: record.id, in: collections))
+                            run { access in
+                                try await Self.removeDates(of: trip.uid, in: trips, using: access)
+                            }
                         }
                     }
                 }
@@ -187,9 +227,12 @@ struct TripSpanSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(Self.save) {
-                        finish(draft.save(to: collections, id: record.id))
+                        let draft = draft
+                        run { access in
+                            try await draft.save(to: trips, uid: trip.uid, using: access)
+                        }
                     }
-                    .disabled(draft.span == nil)
+                    .disabled(draft.span == nil || saving)
                 }
             }
         }

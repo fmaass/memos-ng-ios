@@ -3,17 +3,17 @@ import SwiftUI
 
 /// What the session's collections do when the session becomes somebody else's, or nobody's.
 enum CollectionsSession {
-    /// The collections are filed under `identity` from now on — the outgoing scope's records,
-    /// summaries and pin leave memory and the incoming scope's file is read — and every membership,
+    /// The trips belong to `identity` from now on — the outgoing scope's trips, writes and pins
+    /// leave memory and the incoming scope's pins are read — and every member list, journal,
     /// count and span read under the outgoing identity is forgotten and drops on arrival. Called
     /// beside the timeline's own move (`TimelineView`), with the same identity.
     static func identityChanged(
         to identity: TimelineSnapshotIdentity?,
-        collections: CollectionStore?,
-        trips: TripMembershipStore?
+        trips: TripStore?,
+        members: TripMemberStore?
     ) {
-        collections?.sessionIdentityChanged(to: identity)
-        trips?.sessionIdentityChanged()
+        trips?.sessionIdentityChanged(to: identity)
+        members?.sessionIdentityChanged()
     }
 }
 

@@ -12,13 +12,13 @@ struct CollectionsAccess {
 /// trip under `Suggested`, a title prefilled from the chosen tag, its dates prefilled from the
 /// tag's pictures (`NewTripFlow.prefill`) and editable as on Trip Dates, and Create.
 ///
-/// The counts and spans are `TripMembershipStore`'s sheet reads — one count read for every tag,
+/// The counts and spans are `TripMemberStore`'s sheet reads — one count read for every tag,
 /// then a span read per tag, in the server's order — and each row fills in as its answer arrives.
 /// A tag already read under this session is not read again.
 struct NewTripSheet: View {
     @Bindable var flow: NewTripFlow
-    let collections: CollectionStore
-    let trips: TripMembershipStore
+    let trips: TripStore
+    let members: TripMemberStore
     /// The session's handle and server when a read is issued, or nil when there is none.
     let access: () -> CollectionsAccess?
     /// The clock `Suggested` is judged against.
@@ -36,6 +36,8 @@ struct NewTripSheet: View {
     static let allTagsHeader = "All tags"
     /// The confirming button.
     static let create = "Create"
+    /// What stands in its place while Create is out, read by VoiceOver.
+    static let creating = "Creating"
     /// The section of the trip's span.
     static let datesHeader = "Dates"
     static let addDates = "Add Dates"
@@ -78,12 +80,12 @@ struct NewTripSheet: View {
                         Button(Self.addDates) { flow.addDates(now: now(), zone: timeZone) }
                     }
                 }
-                if let error = trips.lastError {
+                if let error = members.lastError {
                     Section { NoticeCard(text: error, tone: .error) }
                 }
-                let tags = trips.tagCounts.filter { $0.count > 0 }
+                let tags = members.tagCounts.filter { $0.count > 0 }
                 let suggested = CollectionsPresentation.suggested(
-                    tags, spans: trips.spans, now: now())
+                    tags, spans: members.spans, now: now())
                 if !suggested.isEmpty {
                     Section(Self.suggestedHeader) {
                         ForEach(suggested) { tag in
@@ -92,7 +94,7 @@ struct NewTripSheet: View {
                     }
                 }
                 Section(Self.allTagsHeader) {
-                    if tags.isEmpty, trips.tagCountsLoaded {
+                    if tags.isEmpty, members.tagCountsLoaded {
                         Text(Self.noTags).foregroundStyle(.secondary)
                     }
                     ForEach(tags) { tag in row(tag) }
@@ -105,18 +107,34 @@ struct NewTripSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(Self.create) {
-                        if flow.create(in: collections) != nil { dismiss() }
+                    if flow.isCreating {
+                        ProgressView().accessibilityLabel(Self.creating)
+                    } else {
+                        Button(Self.create) {
+                            let access = access()
+                            Task {
+                                if await flow.create(in: trips, using: access) != nil
+                                    || flow.abandoned
+                                {
+                                    dismiss()
+                                }
+                            }
+                        }
+                        .disabled(!flow.canCreate)
                     }
-                    .disabled(!flow.canCreate)
                 }
             }
         }
         .task { await load() }
+        // Somebody else's session now: the sheet closes, and nothing is sent for them.
+        .onChange(of: trips.identity) {
+            flow.abandon()
+            dismiss()
+        }
         // The chosen tag's dates are read at once, ahead of the other tags'.
         .task(id: flow.chosenTag) { await readChosenDates() }
         // A tag chosen before its span arrived takes the span once it does.
-        .onChange(of: flow.chosenTag.flatMap { trips.spans[$0] }) { _, span in
+        .onChange(of: flow.chosenTag.flatMap { members.spans[$0] }) { _, span in
             guard let tag = flow.chosenTag else { return }
             flow.prefill(span, of: tag, zone: timeZone)
         }
@@ -124,7 +142,7 @@ struct NewTripSheet: View {
 
     private func row(_ tag: LibraryTag) -> some View {
         Button {
-            flow.choose(tag.name, span: trips.spans[tag.name], zone: timeZone)
+            flow.choose(tag.name, span: members.spans[tag.name], zone: timeZone)
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: DesignTokens.Space.hair) {
@@ -148,7 +166,7 @@ struct NewTripSheet: View {
 
     private func detail(_ tag: LibraryTag) -> String {
         CollectionsPresentation.tagDetail(
-            count: tag.count, span: trips.spans[tag.name], locale: locale, timeZone: timeZone)
+            count: tag.count, span: members.spans[tag.name], locale: locale, timeZone: timeZone)
     }
 
     /// The chosen tag's dates: read, or joined when the sweep is already reading them, so this
@@ -156,22 +174,22 @@ struct NewTripSheet: View {
     /// whatever the read's outcome, and only for this tag.
     private func readChosenDates() async {
         guard let tag = flow.chosenTag else { return }
-        if trips.spans[tag] == nil, let access = access() {
-            await trips.loadSpan(ofTag: tag, using: access.handle, baseURL: access.baseURL)
+        if members.spans[tag] == nil, let access = access() {
+            await members.loadSpan(ofTag: tag, using: access.handle, baseURL: access.baseURL)
         }
-        flow.prefill(trips.spans[tag], of: tag, zone: timeZone)
+        flow.prefill(members.spans[tag], of: tag, zone: timeZone)
         flow.endDatesRead(of: tag)
     }
 
     /// The counts, then the span of every tag not yet read under this session, one at a time.
     private func load() async {
         guard let access = access() else { return }
-        await trips.loadTagCounts(using: access.handle)
-        for tag in trips.tagCounts where tag.count > 0 && trips.spans[tag.name] == nil {
+        await members.loadTagCounts(using: access.handle)
+        for tag in members.tagCounts where tag.count > 0 && members.spans[tag.name] == nil {
             if Task.isCancelled { return }
             guard let current = self.access(), current.handle.generation == access.handle.generation
             else { return }
-            await trips.loadSpan(ofTag: tag.name, using: current.handle, baseURL: current.baseURL)
+            await members.loadSpan(ofTag: tag.name, using: current.handle, baseURL: current.baseURL)
         }
     }
 }

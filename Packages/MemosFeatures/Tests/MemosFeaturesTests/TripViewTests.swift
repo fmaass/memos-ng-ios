@@ -21,42 +21,15 @@ struct TripManageTests {
     private let alice = TimelineSnapshotIdentity(
         server: URL(string: "https://memos.example.invalid")!, subject: "alice")
 
-    private func three() -> (CollectionStore, [CollectionRecord]) {
-        let store = CollectionStore(identity: alice, root: root)
-        let made = ["Lisbon", "Porto", "Faro"].map {
-            store.create(title: $0, tags: [$0.lowercased()])
+    /// Lisbon, Porto and Faro on a scripted server, listed by a real refresh, in that order.
+    private func three() async -> (TripStore, [Trip], TripWire) {
+        let wire = TripWire()
+        for title in ["Lisbon", "Porto", "Faro"] {
+            wire.transport.trips.seed(title, tag: title.lowercased())
         }
-        return (store, made)
-    }
-
-    @Test("Move Up is refused for the first trip and Move Down for the last")
-    func moveTargetsAtTheEnds() {
-        let (store, made) = three()
-        #expect(TripManage.moveTarget(of: made[0].id, .up, in: store.records) == nil)
-        #expect(TripManage.moveTarget(of: made[2].id, .down, in: store.records) == nil)
-        #expect(TripManage.moveTarget(of: made[1].id, .up, in: store.records) == 0)
-        #expect(TripManage.moveTarget(of: made[1].id, .down, in: store.records) == 2)
-        #expect(TripManage.moveTarget(of: UUID(), .up, in: store.records) == nil, "not a trip")
-    }
-
-    @Test("a lone trip can move neither way")
-    func aLoneTrip() {
-        let store = CollectionStore(identity: alice, root: root)
-        let only = store.create(title: "Lisbon", tags: ["lisbon"])
-        #expect(TripManage.moveTarget(of: only.id, .up, in: store.records) == nil)
-        #expect(TripManage.moveTarget(of: only.id, .down, in: store.records) == nil)
-    }
-
-    @Test("Move Down puts the trip after the next one, and Move Up puts it back")
-    func moves() {
-        let (store, made) = three()
-        let manage = TripManage()
-        manage.move(made[0].id, .down, in: store)
-        #expect(store.records.map(\.title) == ["Porto", "Lisbon", "Faro"])
-        manage.move(made[0].id, .up, in: store)
-        #expect(store.records.map(\.title) == ["Lisbon", "Porto", "Faro"])
-        manage.move(made[0].id, .up, in: store)
-        #expect(store.records.map(\.title) == ["Lisbon", "Porto", "Faro"], "the first stays first")
+        let store = TripStore(identity: alice, root: root)
+        await store.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+        return (store, store.trips, wire)
     }
 
     @Test(
@@ -74,36 +47,46 @@ struct TripManageTests {
     }
 
     @Test("Rename writes the trimmed title once; a second yes writes nothing")
-    func renameOnce() {
-        let (store, made) = three()
+    func renameOnce() async {
+        let (store, made, wire) = await three()
         let manage = TripManage()
-        #expect(!manage.confirmRename(made[0].id, in: store), "nothing was asked")
+        let unasked = manage.confirmRename(made[0].uid, in: store, using: wire.access)
+        #expect(unasked == nil, "nothing was asked")
         manage.askRename(current: made[0].title)
         #expect(manage.question == .rename)
         #expect(manage.draft == "Lisbon", "the field starts from the current title")
         manage.draft = " Lisboa "
-        #expect(manage.confirmRename(made[0].id, in: store))
+        let write = manage.confirmRename(made[0].uid, in: store, using: wire.access)
+        #expect(write != nil)
         #expect(manage.question == nil)
-        #expect(store.records.first { $0.id == made[0].id }?.title == "Lisboa")
+        #expect(await write?.value == true)
+        #expect(store.trips.first { $0.uid == made[0].uid }?.title == "Lisboa")
         // A second yes with a draft that WOULD be written: only the claim refuses it.
         manage.draft = "Lissabon"
-        #expect(!manage.confirmRename(made[0].id, in: store), "a second yes")
-        #expect(store.records.first { $0.id == made[0].id }?.title == "Lisboa")
+        let again = manage.confirmRename(made[0].uid, in: store, using: wire.access)
+        #expect(again == nil, "a second yes")
+        #expect(store.trips.first { $0.uid == made[0].uid }?.title == "Lisboa")
+        #expect(wire.transport.trips.calls(TripRows.patch).count == 1)
     }
 
     @Test("Delete removes that trip and no other, once; a yes nobody was asked for does nothing")
-    func deleteOnce() {
-        let (store, made) = three()
+    func deleteOnce() async {
+        let (store, made, wire) = await three()
         let manage = TripManage()
-        #expect(!manage.confirmDelete(made[1].id, in: store), "nothing was asked")
-        #expect(store.records.count == 3)
+        let access = wire.access
+        #expect(manage.confirmDelete(made[1].uid, in: store, using: access) == nil, "unasked")
+        #expect(store.trips.count == 3)
         manage.askDelete()
         #expect(manage.question == .delete)
-        #expect(manage.confirmDelete(made[1].id, in: store))
-        #expect(!manage.confirmDelete(made[1].id, in: store), "a second yes")
+        let write = manage.confirmDelete(made[1].uid, in: store, using: access)
+        #expect(write != nil)
+        #expect(manage.confirmDelete(made[1].uid, in: store, using: access) == nil, "a second yes")
         // A second yes for a trip that IS there: only the claim refuses it.
-        #expect(!manage.confirmDelete(made[0].id, in: store), "a second yes for another trip")
-        #expect(store.records.map(\.title) == ["Lisbon", "Faro"])
+        let other = manage.confirmDelete(made[0].uid, in: store, using: access)
+        #expect(other == nil, "a second yes for another trip")
+        #expect(await write?.value == true)
+        #expect(store.trips.map(\.title) == ["Lisbon", "Faro"])
+        #expect(wire.transport.trips.calls(TripRows.delete).count == 1)
         #expect(manage.question == nil)
     }
 
@@ -112,73 +95,73 @@ struct TripManageTests {
     private static let october15 = october8.addingTimeInterval(7 * 24 * 60 * 60)
 
     @Test("Pin pins the trip and the item turns to Unpin; Unpin unpins it and it offers Pin")
-    func pinThenUnpin() {
-        let (store, made) = three()
+    func pinThenUnpin() async {
+        let (store, made, _) = await three()
         let manage = TripManage()
         let now = Self.october8
-        let offered = TripManage.pinAction(of: made[1].id, in: store, now: now)
+        let offered = TripManage.pinAction(of: made[1].uid, in: store, now: now)
         #expect(offered == .pin)
         #expect(offered.title == TripView.pinButton && offered.symbol == "pin")
-        manage.apply(offered, to: made[1].id, in: store, now: now)
-        #expect(store.activePin(now: now)?.id == made[1].id)
-        #expect(store.records.first { $0.id == made[1].id }?.pinnedUntil == Self.october15)
+        manage.apply(offered, to: made[1].uid, in: store, lastTaken: nil, now: now)
+        #expect(store.pins.activePin(now: now)?.uid == made[1].uid)
+        #expect(store.pins.pinnedUntil(uid: made[1].uid) == Self.october15)
 
-        let then = TripManage.pinAction(of: made[1].id, in: store, now: now)
+        let then = TripManage.pinAction(of: made[1].uid, in: store, now: now)
         #expect(then == .unpin)
         #expect(then.title == TripView.unpinButton && then.symbol == "pin.slash")
-        #expect(TripManage.pinAction(of: made[0].id, in: store, now: now) == .pin, "another trip")
-        manage.apply(then, to: made[1].id, in: store, now: now)
-        #expect(store.activePin(now: now) == nil)
-        #expect(TripManage.pinAction(of: made[1].id, in: store, now: now) == .pin)
+        #expect(TripManage.pinAction(of: made[0].uid, in: store, now: now) == .pin, "another trip")
+        manage.apply(then, to: made[1].uid, in: store, lastTaken: nil, now: now)
+        #expect(store.pins.activePin(now: now) == nil)
+        #expect(TripManage.pinAction(of: made[1].uid, in: store, now: now) == .pin)
     }
 
     @Test("Pin on another trip moves the pin there")
-    func pinMoves() {
-        let (store, made) = three()
+    func pinMoves() async {
+        let (store, made, _) = await three()
         let manage = TripManage()
-        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
-        manage.apply(.pin, to: made[2].id, in: store, now: Self.october8)
-        #expect(store.activePin(now: Self.october8)?.id == made[2].id)
-        #expect(store.records.map(\.pinnedUntil) == [nil, nil, Self.october15])
+        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
+        manage.apply(.pin, to: made[2].uid, in: store, lastTaken: nil, now: Self.october8)
+        #expect(store.pins.activePin(now: Self.october8)?.uid == made[2].uid)
+        #expect(made.map { store.pins.pinnedUntil(uid: $0.uid) } == [nil, nil, Self.october15])
     }
 
     @Test("an expired pin offers Pin again, and Pin starts a new one from now")
-    func anExpiredPinOffersPin() {
-        let (store, made) = three()
+    func anExpiredPinOffersPin() async {
+        let (store, made, _) = await three()
         let manage = TripManage()
-        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
+        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
         #expect(
-            TripManage.pinAction(of: made[0].id, in: store, now: Self.october15) == .pin,
+            TripManage.pinAction(of: made[0].uid, in: store, now: Self.october15) == .pin,
             "it ended exactly now")
         #expect(
             TripManage.pinAction(
-                of: made[0].id, in: store, now: Self.october15.addingTimeInterval(-1)) == .unpin)
-        manage.apply(.pin, to: made[0].id, in: store, now: Self.october15)
+                of: made[0].uid, in: store, now: Self.october15.addingTimeInterval(-1)) == .unpin)
+        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october15)
         #expect(
-            store.records.first?.pinnedUntil
+            store.pins.pinnedUntil(uid: made[0].uid)
                 == Self.october15.addingTimeInterval(7 * 24 * 60 * 60))
     }
 
     @Test("the item does what it offered: two Pins pin once, two Unpins leave it unpinned")
-    func twoTapsAreNotAToggle() {
-        let (store, made) = three()
+    func twoTapsAreNotAToggle() async {
+        let (store, made, _) = await three()
         let manage = TripManage()
-        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
-        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
-        #expect(store.activePin(now: Self.october8)?.id == made[0].id)
-        #expect(store.records.first?.pinnedUntil == Self.october15)
-        manage.apply(.unpin, to: made[0].id, in: store, now: Self.october8)
-        manage.apply(.unpin, to: made[0].id, in: store, now: Self.october8)
-        #expect(store.activePin(now: Self.october8) == nil)
+        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
+        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
+        #expect(store.pins.activePin(now: Self.october8)?.uid == made[0].uid)
+        #expect(store.pins.pinnedUntil(uid: made[0].uid) == Self.october15)
+        manage.apply(.unpin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
+        manage.apply(.unpin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
+        #expect(store.pins.activePin(now: Self.october8) == nil)
     }
 
     @Test("Pin for a trip that has left the store writes nothing")
-    func pinAGoneTrip() {
-        let (store, made) = three()
+    func pinAGoneTrip() async {
+        let (store, made, _) = await three()
         let manage = TripManage()
-        manage.apply(.pin, to: made[0].id, in: store, now: Self.october8)
-        manage.apply(.pin, to: UUID(), in: store, now: Self.october8)
-        #expect(store.activePin(now: Self.october8)?.id == made[0].id, "the pin stayed")
+        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
+        manage.apply(.pin, to: "gone", in: store, lastTaken: nil, now: Self.october8)
+        #expect(store.pins.activePin(now: Self.october8)?.uid == made[0].uid, "the pin stayed")
     }
 
     @Test("the footer names the cap only when the drain stopped at it")
@@ -191,10 +174,10 @@ struct TripManageTests {
     }
 
     @Test("a trip that left the store leaves the stack, with everything pushed above it")
-    func theTrailKeepsWhatExists() {
-        let (_, made) = three()
+    func theTrailKeepsWhatExists() async {
+        let (_, made, _) = await three()
         let routes = made.map(TripRoute.init)
-        let ids = made.map(\.id)
+        let ids = made.map(\.uid)
         #expect(CollectionsPresentation.trail(routes, keeping: ids) == routes)
         #expect(CollectionsPresentation.trail(routes, keeping: [ids[0], ids[2]]) == [routes[0]])
         #expect(CollectionsPresentation.trail(routes, keeping: [ids[1], ids[2]]).isEmpty)
@@ -316,26 +299,36 @@ struct TripScreenRenderTests {
     /// Every member's tile, in the order the drain's pages came.
     static let files = ["p0", "p1", "p2", "p3", "p4"]
 
-    private func stores(memberCap: Int = TripMembershipStore.memberCap)
-        -> (CollectionStore, TripMembershipStore)
+    private func stores(memberCap: Int = TripMemberStore.memberCap)
+        -> (TripStore, TripMemberStore)
     {
-        let collections = CollectionStore(identity: alice, root: root)
-        return (
-            collections,
-            TripMembershipStore(collections: collections, pageSize: 2, memberCap: memberCap)
-        )
+        let trips = TripStore(identity: alice, root: root)
+        return (trips, TripMemberStore(trips: trips, pageSize: 2, memberCap: memberCap))
+    }
+
+    /// `title` on the scripted server under `tag`, with its removals and its cover already made
+    /// there, listed into the stores by a real refresh: the trip as listed.
+    private func filed(
+        _ stores: (TripStore, TripMemberStore), _ wire: TripWire, _ title: String, tag: String,
+        excluding removed: [String] = [], cover: String? = nil
+    ) async -> Trip {
+        let uid = wire.transport.trips.seed(title, tag: tag, cover: cover)
+        if !removed.isEmpty { wire.transport.trips.edit(uid) { $0.exclusions = removed } }
+        await stores.0.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+        return stores.0.trips.first { $0.uid == uid }
+            ?? Trip(uid: uid, title: title, createdAt: .distantPast, updatedAt: .distantPast)
     }
 
     private func trip(
-        _ stores: (CollectionStore, TripMembershipStore), _ wire: TripWire,
-        _ record: CollectionRecord, viewer: any MediaTransport = MediaSession.shared,
-        shareLane: TripShareLane? = nil
+        _ stores: (TripStore, TripMemberStore), _ wire: TripWire,
+        _ record: Trip, viewer: any MediaTransport = MediaSession.shared,
+        shareLane: TripShareLane? = nil, manage: TripManage = TripManage()
     ) -> some View {
         let access = wire.access
         return NavigationStack {
             TripView(
-                record: record, collections: stores.0, trips: stores.1, subject: "alice",
-                access: { access }, viewerTransport: viewer, shareLane: shareLane)
+                trip: record, trips: stores.0, memberStore: stores.1, identity: alice,
+                access: { access }, manage: manage, viewerTransport: viewer, shareLane: shareLane)
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -345,8 +338,8 @@ struct TripScreenRenderTests {
     func threePagesInOrder() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
-        stores.0.exclude(id: record.id, uid: "p2")
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p2"])
         var expected = Self.files
         expected.remove(at: 2)
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
@@ -361,7 +354,7 @@ struct TripScreenRenderTests {
     func theDrainsRequests() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             _ = await screen.until { wire.transport.listReads.count >= 3 }
             await screen.settle(turns: 4)
@@ -382,7 +375,7 @@ struct TripScreenRenderTests {
     func theGridHasNoDays() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let drawn = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
             #expect(drawn, "control: the members were drawn: \(TripProbe.tiles(in: screen.window))")
@@ -398,7 +391,7 @@ struct TripScreenRenderTests {
         let wire = TripWire()
         wire.transport.film("p1")
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let drawn = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
             #expect(drawn, "the video is not a member: \(TripProbe.tiles(in: screen.window))")
@@ -421,7 +414,7 @@ struct TripScreenRenderTests {
     func aTagWithQuerySyntax() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Odd", tags: ["a&order=taken_desc"])
+        let record = await filed(stores, wire, "Odd", tag: "a&order=taken_desc")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             _ = await screen.until { !wire.transport.listReads.isEmpty }
         }
@@ -434,8 +427,7 @@ struct TripScreenRenderTests {
     func theHeroShowsTheCover() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
-        stores.0.setCover(id: record.id, uid: "p3")
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026", cover: "p3")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let shown = await screen.until {
                 CollectionsHost.identified(TripView.coverIdentifier("p3"), in: screen.window)
@@ -449,9 +441,8 @@ struct TripScreenRenderTests {
     func anExcludedCoverFallsBack() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
-        stores.0.setCover(id: record.id, uid: "p3")
-        stores.0.exclude(id: record.id, uid: "p3")
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p3"], cover: "p3")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let shown = await screen.until {
                 CollectionsHost.identified(TripView.coverIdentifier("p0"), in: screen.window)
@@ -465,7 +456,7 @@ struct TripScreenRenderTests {
     func theChipRow() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             #expect(await screen.until { screen.element(labelled: "Photos") != nil })
             let journal = screen.element(labelled: "Journal")
@@ -485,13 +476,13 @@ struct TripScreenRenderTests {
     /// pictures are on screen when `body` runs.
     private func selectingTrip(
         _ wire: TripWire, shareLane: TripShareLane? = nil,
-        stores given: (CollectionStore, TripMembershipStore)? = nil,
+        stores given: (TripStore, TripMemberStore)? = nil,
         _ body: (PressProbe.Screen, AppDock) async -> Void
     ) async {
         let dock = AppDock()
         dock.send(.selected(.collections))
         let stores = given ?? stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let view = trip(stores, wire, record, shareLane: shareLane).environment(dock)
         await CollectionsHost.with(view, height: 3000) { screen in
             _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
@@ -660,7 +651,7 @@ struct TripScreenRenderTests {
     func theJournalIsOldestFirst() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let texts = TripTransport.journal.map(\.text)
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
@@ -692,7 +683,7 @@ struct TripScreenRenderTests {
     func theJournalCapFooter() async {
         let wire = TripWire()
         let stores = stores(memberCap: 2)
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
             #expect(chosen, "the Journal chip took no press")
@@ -708,7 +699,7 @@ struct TripScreenRenderTests {
     func anEmptyJournal() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Spain 2025", tags: ["spain2025"])
+        let record = await filed(stores, wire, "Spain 2025", tag: "spain2025")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
             #expect(chosen, "the Journal chip took no press")
@@ -723,7 +714,7 @@ struct TripScreenRenderTests {
         let wire = TripWire()
         let stores = stores()
         let jump = MemoJump()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let second = TripTransport.journal[1]
         let view = trip(stores, wire, record).environment(jump)
         await CollectionsHost.with(view, height: 3000) { screen in
@@ -748,7 +739,7 @@ struct TripScreenRenderTests {
         wire.transport.pictureJournal()
         let stores = stores()
         let jump = MemoJump()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let second = TripTransport.journal[1]
         let media = TripMediaServer(payload: MediaFixture.png(.red))
         MediaImageLoader.transport = media
@@ -803,7 +794,7 @@ struct TripScreenRenderTests {
         let wire = TripWire()
         wire.transport.pictureJournal()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let second = TripTransport.journal[1]
         let media = TripMediaServer(payload: MediaFixture.png(.red))
         MediaImageLoader.transport = media
@@ -841,7 +832,7 @@ struct TripScreenRenderTests {
     func theCapFooter() async {
         let wire = TripWire()
         let stores = stores(memberCap: 3)
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let note = TripView.capNote(.truncated, cap: 3) ?? "?"
             #expect(await screen.until { screen.says(note) })
@@ -854,7 +845,7 @@ struct TripScreenRenderTests {
         let wire = TripWire()
         wire.transport.fail()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             _ = await screen.until { stores.1.lastError != nil }
             let error = stores.1.lastError ?? "?"
@@ -867,11 +858,9 @@ struct TripScreenRenderTests {
     func anOpenViewerFollowsTheRedrain() async {
         let wire = TripWire()
         let stores = stores()
-        var record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
         // The cover is p4 at the viewer's tier, so the page opened — p0, the first tile — is a
         // picture nothing has loaded at that tier yet.
-        stores.0.setCover(id: record.id, uid: "p4")
-        record = stores.0.records.first { $0.id == record.id } ?? record
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026", cover: "p4")
         let media = TripMediaServer(payload: MediaFixture.png(.red))
         MediaImageLoader.transport = media
         defer { MediaImageLoader.transport = MediaSession.shared }
@@ -903,9 +892,7 @@ struct TripScreenRenderTests {
     func anOpenViewerClosesOnAnEmptiedTrip() async {
         let wire = TripWire()
         let stores = stores()
-        var record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
-        stores.0.setCover(id: record.id, uid: "p4")
-        record = stores.0.records.first { $0.id == record.id } ?? record
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026", cover: "p4")
         let media = TripMediaServer(payload: MediaFixture.png(.red))
         MediaImageLoader.transport = media
         defer { MediaImageLoader.transport = MediaSession.shared }
@@ -944,9 +931,7 @@ struct TripScreenRenderTests {
     func anOpenViewerClosesOnAPartlyEmptiedTrip() async {
         let wire = TripWire()
         let stores = stores()
-        var record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
-        stores.0.setCover(id: record.id, uid: "p4")
-        record = stores.0.records.first { $0.id == record.id } ?? record
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026", cover: "p4")
         let media = TripMediaServer(payload: MediaFixture.png(.red))
         MediaImageLoader.transport = media
         defer { MediaImageLoader.transport = MediaSession.shared }
@@ -984,12 +969,12 @@ struct TripScreenRenderTests {
     func aLapsedSignatureRedrains() async {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
         #expect(wire.transport.listReads.count == 3, "precondition: one drain")
         let access = wire.access
         let refresher = TripURLRefresher(
-            trips: stores.1, collections: stores.0, id: record.id,
+            members: stores.1, trips: stores.0, uid: record.uid,
             session: IssuingSession(handle: { access.handle }, baseURL: { access.baseURL }))
         let sameOwner = ObjectIdentifier(refresher.owner) == ObjectIdentifier(stores.1)
         #expect(sameOwner, "the refresher answers for the trip store")
@@ -1004,14 +989,14 @@ struct TripScreenRenderTests {
     func deleteReturnsToTheRoot() async {
         let wire = TripWire()
         let stores = stores()
-        let other = stores.0.create(title: "Spain 2025", tags: ["spain2025"])
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let other = await filed(stores, wire, "Spain 2025", tag: "spain2025")
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let manage = TripManage()
         let access = wire.access
         let stack = TripStackLog()
         let view = TripStack(log: stack) { trail in
             CollectionsScreen(
-                collections: stores.0, trips: stores.1, tags: LibraryTagStore(), subject: "alice",
+                trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
                 access: { access }, openTag: { _ in }, trail: trail, tripManage: { manage })
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
@@ -1060,7 +1045,8 @@ struct TripScreenRenderTests {
             }
             #expect(back, "the screen did not return: \(TripProbe.labels(in: screen.window))")
         }
-        #expect(stores.0.records.map(\.id) == [other.id])
+        #expect(stores.0.trips.map(\.uid) == [other.uid])
+        #expect(wire.transport.trips.rows.map(\.uid) == [other.uid], "the server kept the trip")
     }
 
     @Test("the root's drain and the trip's are one request chain")
@@ -1068,11 +1054,11 @@ struct TripScreenRenderTests {
         let wire = TripWire()
         wire.transport.hold()
         let stores = stores()
-        stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        wire.transport.trips.seed("Portugal 2026", tag: "portugal2026")
         let access = wire.access
         let view = NavigationStack {
             CollectionsScreen(
-                collections: stores.0, trips: stores.1, tags: LibraryTagStore(), subject: "alice",
+                trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
                 access: { access }, openTag: { _ in })
         }
         await CollectionsHost.with(view, height: 3000) { screen in
@@ -1101,14 +1087,15 @@ struct TripScreenRenderTests {
         let wire = TripWire()
         wire.transport.nameNoOriginal()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
-        stores.0.exclude(id: record.id, uid: excluded)
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: [excluded])
         let media = TripMediaServer(payload: MediaFixture.png(.red))
         MediaImageLoader.transport = media
         defer { MediaImageLoader.transport = MediaSession.shared }
         let view = trip(stores, wire, record, viewer: media).environment(jump)
+        let access = wire.access
         await CollectionsHost.with(view, height: 3000) { screen in
-            let live = { stores.0.records.first { $0.id == record.id } ?? record }
+            let live = { stores.0.trips.first { $0.uid == record.uid } ?? record }
             let drained = await TripProbe.settled(seconds: 10) {
                 stores.1.state(for: live()) == .complete
                     && TripProbe.photos(in: screen.window).count == 4
@@ -1131,7 +1118,8 @@ struct TripScreenRenderTests {
             let cover: Cover = { uid in
                 let rows = stores.1.members(for: live())
                 guard let row = rows.first(where: { $0.id == uid }) else { return false }
-                let action = TripView.useAsCover(record.id, in: stores.0)
+                let action = TripView.useAsCover(
+                    record.uid, in: stores.0, manage: TripManage(), access: { access })
                 MediaViewerHostItem(action: action, attachment: row.attachment) {}.tapped()
                 return true
             }
@@ -1193,12 +1181,12 @@ struct TripScreenRenderTests {
     ) async {
         let wire = TripWire()
         let stores = stores()
-        stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        wire.transport.trips.seed("Portugal 2026", tag: "portugal2026")
         let access = wire.access
         let stack = TripStackLog()
         let view = TripStack(log: stack) { trail in
             CollectionsScreen(
-                collections: stores.0, trips: stores.1, tags: LibraryTagStore(), subject: "alice",
+                trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
                 access: { access }, openTag: { _ in }, trail: trail)
         }
         .environment(dock)
@@ -1740,17 +1728,16 @@ struct TripJournalOpeningTests {
         #expect(lone.startIndex == 0)
     }
 
-    /// The trip's latest read renews a page; a page it holds no row for keeps its own copy, and
-    /// every page keeps the memo it belongs to.
-    @Test("a journal viewer's pages take the trip's renewed copies, keeping their memo")
+    /// The journal's latest read renews a page; a page no memo of it holds any more keeps its own
+    /// copy, and every page keeps the memo it belongs to.
+    @Test("a journal viewer's pages take the journal's renewed copies, keeping their memo")
     func theJournalViewerTakesRenewedCopies() throws {
         let opening = TripView.journalOpening(picture("a"), of: memo([picture("a"), picture("b")]))
         let selection = try #require(viewer(opening))
         var fresh = picture("a")
         fresh.previewURL = URL(string: "https://memos.example.invalid/renewed/a/mobile")
-        let row = LibraryRow(attachment: fresh, takenAt: nil, mine: true, filename: "a.jpg")
 
-        let source = TripView.journalViewerSource(for: selection, renewed: [row])
+        let source = TripView.journalViewerSource(for: selection, memos: [memo([fresh])])
         guard case .fixed(let pages) = source else {
             Issue.record("not a fixed source")
             return
@@ -1831,6 +1818,25 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var films: Set<String> = []
     private nonisolated(unsafe) var deleted: [String] = []
     private nonisolated(unsafe) var sent: [String] = []
+    /// The trips the server holds. A trip's members are its tag's listing below; its count is
+    /// that listing's pictures less those removed from the trip or deleted.
+    nonisolated let trips = TripRows()
+
+    nonisolated init() {
+        trips.counting { [weak self] row in self?.count(of: row) ?? 0 }
+    }
+
+    private nonisolated func count(of row: TripRows.Row) -> Int {
+        let gone = lock.withLock { emptied ? nil : dropped }
+        guard let gone else { return 0 }
+        let listed: [String] =
+            switch row.tag {
+            case "portugal2026": (0..<5).map { "p\($0)" }
+            case "spain2025": ["s0"]
+            default: []
+            }
+        return listed.filter { !gone.contains($0) && !row.exclusions.contains($0) }.count
+    }
 
     /// Every list read so far, as its query.
     nonisolated var listReads: [[String: String]] { lock.withLock { reads } }
@@ -1871,22 +1877,20 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
         lock.withLock { sent.append("\(request.method) \(operationID)") }
+        if let answered = try await trips.answer(
+            request, body: body, operationID: operationID,
+            listing: { [weak self] query in
+                try await self?.listing(query) ?? (HTTPResponse(status: .notFound), nil)
+            })
+        {
+            return answered
+        }
         switch operationID {
         case "list_attachments_api_attachments_get":
             let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
             let query = Dictionary(
                 items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
-            lock.withLock { reads.append(query) }
-            while lock.withLock({ held }) { try await Task.sleep(for: .milliseconds(20)) }
-            if lock.withLock({ failing }) {
-                return (HTTPResponse(status: .internalServerError), nil)
-            }
-            if lock.withLock({ emptied }) { return Self.json("[]", next: nil) }
-            let (sig, gone, bare, theirs, clips) = lock.withLock {
-                (signature, dropped, unoriginal, others, films)
-            }
-            return Self.page(
-                query, signed: sig, without: gone, bare: bare, theirs: theirs, films: clips)
+            return try await listing(query)
         case "attachment_tags_api_attachments_tags_get":
             return Self.json("[]", next: nil)
         case "delete_attachment_api_attachments__uid__delete":
@@ -1908,6 +1912,24 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
+    }
+
+    /// A list read — the Library's, or a trip's member route asking for its tag — answered as
+    /// the server now holds the tag.
+    private nonisolated func listing(_ query: [String: String]) async throws -> (
+        HTTPResponse, HTTPBody?
+    ) {
+        lock.withLock { reads.append(query) }
+        while lock.withLock({ held }) { try await Task.sleep(for: .milliseconds(20)) }
+        if lock.withLock({ failing }) {
+            return (HTTPResponse(status: .internalServerError), nil)
+        }
+        if lock.withLock({ emptied }) { return Self.json("[]", next: nil) }
+        let (sig, gone, bare, theirs, clips) = lock.withLock {
+            (signature, dropped, unoriginal, others, films)
+        }
+        return Self.page(
+            query, signed: sig, without: gone, bare: bare, theirs: theirs, films: clips)
     }
 
     private nonisolated static func page(
@@ -2092,11 +2114,11 @@ extension TripScreenRenderTests {
 
 // MARK: - Select mode's Remove from trip (MEMNG-722)
 
-/// Remove from Trip: the chosen pictures leave this trip on this device — the grid, the hero, the
-/// selection and the viewer at once — and nothing is sent that could change a memo; the Trip's
-/// Show Removed list gives each one back.
+/// Remove from Trip: the chosen pictures leave this trip on the server, through the trip's
+/// exclusions in one batch — the grid, the hero, the selection and the viewer with them — and
+/// nothing is sent that could change a memo; the Trip's Show Removed list gives each one back.
 extension TripScreenRenderTests {
-    @Test("Remove from Trip takes the chosen out of the grid and the hero, and writes nothing")
+    @Test("Remove from Trip takes the chosen out of the grid and the hero, and changes no memo")
     func removeFromATrip() async {
         let wire = TripWire()
         let stores = stores()
@@ -2120,8 +2142,11 @@ extension TripScreenRenderTests {
             // the trip.
             let emptied = await screen.until { screen.says("0 Items Selected") }
             #expect(emptied, "a removed picture stayed chosen")
-            #expect(stores.0.records.first?.excludedUids == ["p0", "p1"])
-            #expect(wire.transport.writes.isEmpty, "a removal wrote: \(wire.transport.writes)")
+            #expect(wire.transport.trips.rows.first?.exclusions.sorted() == ["p0", "p1"])
+            let exclude = "PUT \(TripRows.exclude)"
+            #expect(
+                wire.transport.writes == [exclude, exclude],
+                "a removal wrote: \(wire.transport.writes)")
             #expect(wire.transport.deletes.isEmpty)
         }
     }
@@ -2130,16 +2155,17 @@ extension TripScreenRenderTests {
     func theViewerAfterARemoval() async throws {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
         let all = stores.1.members(for: record)
         #expect(all.count == 5, "control: the drain landed")
         let opened = try #require(
             MediaViewerPresentation.viewer(for: all.map(\.attachment), startingAt: "p1"))
 
-        stores.1.remove(["p1"], from: record.id)
+        try await stores.1.remove(
+            ["p1"], from: record, using: wire.access.handle, baseURL: TripWire.baseURL)
 
-        let live = try #require(stores.0.records.first { $0.id == record.id })
+        let live = try #require(stores.0.trips.first { $0.uid == record.uid })
         let members = stores.1.members(for: live)
         let loaded = stores.1.summary(for: live) != nil
         let pages = TripView.viewerSource(for: opened, members: members, loaded: loaded).pages
@@ -2147,18 +2173,21 @@ extension TripScreenRenderTests {
         #expect(
             TripView.viewerOutlived(opened, holding: [], members: members, loaded: loaded),
             "a viewer holding the removed picture stayed open")
-        #expect(wire.transport.writes.isEmpty, "\(wire.transport.writes)")
+        #expect(wire.transport.writes == ["PUT \(TripRows.exclude)"], "\(wire.transport.writes)")
     }
 
     @Test("Show Removed lists the removed pictures, and Add Back returns one to the trip")
-    func addBackFromTheRemovedList() async {
+    func addBackFromTheRemovedList() async throws {
         let wire = TripWire()
         let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
-        stores.1.remove(["p3"], from: record.id)
+        try await stores.1.remove(
+            ["p3"], from: record, using: wire.access.handle, baseURL: TripWire.baseURL)
+        let live = stores.0.trips.first { $0.uid == record.uid } ?? record
+        let access = wire.access
         let view = NavigationStack {
-            TripRemovedList(record: record, collections: stores.0, trips: stores.1)
+            TripRemovedList(trip: live, trips: stores.0, members: stores.1, access: { access })
         }
         await CollectionsHost.with(view) { screen in
             let listed = await screen.until {
@@ -2168,13 +2197,15 @@ extension TripScreenRenderTests {
             #expect(!screen.says(TripRemovedList.emptyTitle))
             #expect(screen.press(TripRemovedList.addBackButton), "Add Back took no press")
             let back = await screen.until {
-                stores.0.records.first?.excludedUids == []
+                wire.transport.trips.rows.first?.exclusions == []
+                    && stores.0.trips.first.map { stores.1.members(for: $0).count } == 5
             }
             #expect(back, "Add Back left the picture removed")
-            #expect(stores.0.records.first.map { stores.1.members(for: $0).count } == 5)
+            #expect(stores.0.trips.first.map { stores.1.members(for: $0).count } == 5)
             #expect(await screen.until { screen.says(TripRemovedList.emptyTitle) })
         }
-        #expect(wire.transport.writes.isEmpty, "\(wire.transport.writes)")
+        let written = ["PUT \(TripRows.exclude)", "DELETE \(TripRows.include)"]
+        #expect(wire.transport.writes == written, "\(wire.transport.writes)")
     }
 
     @Test("the Library's toolbar offers no Remove; the trip's does")
@@ -2191,5 +2222,329 @@ extension TripScreenRenderTests {
         await CollectionsHost.with(trip) { screen in
             #expect(screen.element(labelled: LibrarySelectToolbar.removeLabel) != nil)
         }
+    }
+}
+
+// MARK: - The trip on the server: a refused edit, Show Removed, a trip of dates alone
+
+extension TripScreenRenderTests {
+    /// One write per trip at a time: an edit asked while another is out is the store's `.busy`,
+    /// said on the error line under the title, and nothing of it reaches the server.
+    @Test("an edit asked while another is out says so under the title and sends nothing")
+    func aBusyEditSendsNothing() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let manage = TripManage()
+        let access = wire.access
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let drawn = await screen.until { screen.says("Portugal 2026") }
+            #expect(drawn, "the trip never drew")
+            wire.transport.trips.hold(TripRows.patch)
+            manage.askRename(current: record.title)
+            manage.draft = "Algarve 2026"
+            let rename = manage.confirmRename(record.uid, in: stores.0, using: access)
+            #expect(rename != nil, "the rename was not taken")
+            let sent = await screen.until { wire.transport.trips.calls(TripRows.patch).count == 1 }
+            #expect(sent, "the rename never reached the server")
+            let cover = manage.setCover("p1", of: record.uid, in: stores.0, using: access)
+            #expect(await cover?.value == false, "the second edit was not refused")
+            let busy = TripStore.Failure.busy.errorDescription ?? "?"
+            let said = await screen.until {
+                screen.says(busy)
+                    && CollectionsHost.identified(TripView.errorLineID, in: screen.window)
+            }
+            #expect(said, "no error line: \(TripProbe.labels(in: screen.window))")
+            #expect(
+                wire.transport.trips.calls(TripRows.patch).count == 1, "the refused edit was sent")
+            wire.transport.trips.release(TripRows.patch)
+            #expect(await rename?.value == true, "the rename did not land")
+        }
+        let row = wire.transport.trips.rows.first { $0.uid == record.uid }
+        #expect(row?.title == "Algarve 2026")
+        #expect(row?.cover == nil, "the refused cover reached the server")
+        #expect(wire.transport.trips.calls(TripRows.patch).count == 1)
+    }
+
+    /// Show Removed is offered before anything is known: its sheet opens on a trip whose members
+    /// are still being read, says so, and then lists the exact removed set.
+    @Test("Show Removed opens before any member is known: loading, then the removed set")
+    func showRemovedBeforeTheMembers() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p3"])
+        wire.transport.trips.hold(TripRows.members)
+        let manage = TripManage()
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let drawn = await screen.until { screen.says("Portugal 2026") }
+            #expect(drawn, "the trip never drew")
+            #expect(stores.1.members(for: record).isEmpty, "a member was known")
+            // The Manage menu's action, as the menu's Show Removed calls it: a toolbar menu does
+            // not open in a hand-hosted window.
+            manage.showRemoved()
+            let loading = await screen.until { screen.says(TripRemovedList.loadingTitle) }
+            #expect(loading, "the sheet did not say it was reading")
+            #expect(stores.1.members(for: record).isEmpty, "the members came before the hold")
+            wire.transport.trips.release(TripRows.members)
+            let listed = await screen.until {
+                screen.element(labelled: TripRemovedList.addBackButton) != nil
+            }
+            #expect(listed, "the removed set never drew: \(TripProbe.labels(in: screen.window))")
+            var removed: [String] = []
+            if case .exact(let rows) = stores.1.removedState(for: record) {
+                removed = rows.map(\.id)
+            }
+            #expect(removed == ["p3"], "the removed set: \(removed)")
+        }
+    }
+
+    /// A trip past the member cap cannot be listed exactly: the sheet says the list is not
+    /// available rather than guess.
+    @Test("Show Removed on a trip past the cap says the list is not available")
+    func showRemovedPastTheCap() async {
+        let wire = TripWire()
+        let stores = stores(memberCap: 2)
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p3"])
+        let manage = TripManage()
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let capped = await screen.until { stores.1.state(for: record) == .truncated }
+            #expect(capped, "the drain did not stop at the cap")
+            // The Manage menu's action, as the menu's Show Removed calls it: a toolbar menu does
+            // not open in a hand-hosted window.
+            manage.showRemoved()
+            let said = await screen.until { screen.says(TripRemovedList.unavailableTitle) }
+            #expect(said, "no unavailable line: \(TripProbe.labels(in: screen.window))")
+            #expect(screen.element(labelled: TripRemovedList.addBackButton) == nil)
+            #expect(stores.1.removedState(for: record) == .unavailable)
+        }
+    }
+
+    /// A trip of dates alone has no tag, so no journal: the chip says why and reads nothing.
+    @Test("a trip of dates alone says its journal has no tag, and reads no memo")
+    func aSpanOnlyJournal() async {
+        let wire = TripWire()
+        let stores = stores()
+        let uid = wire.transport.trips.seed(
+            "Lisbon", spanStart: "2026-03-10T00:00:00Z", spanEnd: "2026-03-20T00:00:00Z",
+            tz: "UTC")
+        await stores.0.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+        guard let record = stores.0.trips.first(where: { $0.uid == uid }) else {
+            Issue.record("the trip was not listed")
+            return
+        }
+        #expect(record.tag == nil)
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let said = await screen.until { screen.says(TripMemberStore.noTagJournal) }
+            #expect(said, "no no-tag line: \(TripProbe.labels(in: screen.window))")
+            // A second answer, were one coming, has a second to arrive.
+            try? await Task.sleep(for: .seconds(1))
+            await screen.settle(turns: 5)
+            #expect(!screen.says(TripView.journalEmptyTitle), "the journal claimed it read")
+        }
+        #expect(wire.transport.memoReads.isEmpty, "a journal read: \(wire.transport.memoReads)")
+        #expect(stores.1.journalState(for: record) == .notLoaded)
+    }
+}
+
+// MARK: - The whole identity, and the Journal's own renewal (MEMNG-754 R1)
+
+extension TripScreenRenderTests {
+    /// The Trip screen over an identity the test moves, as the session's identity reaches it.
+    private func switchingTrip(
+        _ stores: (TripStore, TripMemberStore), _ wire: TripWire, _ record: Trip,
+        _ source: IdentitySource, viewer: any MediaTransport
+    ) -> some View {
+        let access = wire.access
+        return IdentityHost(source: source) { who in
+            NavigationStack {
+                TripView(
+                    trip: record, trips: stores.0, memberStore: stores.1, identity: who,
+                    access: { access }, viewerTransport: viewer)
+            }
+            .environment(\.locale, Locale(identifier: "en_GB"))
+            .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+        }
+    }
+
+    /// Another account of the household may see the same trip with other pictures: while its own
+    /// read is out, the screen shows none of the outgoing account's photos, and a viewer open over
+    /// them closes — whether the stores or the screen hear of the new account first.
+    @Test(
+        "another account's screen shows none of this one's photos, nor its viewer, meanwhile",
+        arguments: [true, false])
+    func anAccountChangeDropsTheShownMembers(storesFirst: Bool) async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        let source = IdentitySource(alice)
+        let bob = TimelineSnapshotIdentity(server: alice.server, subject: "bob")
+        let view = switchingTrip(stores, wire, record, source, viewer: media)
+            .environment(MemoJump())
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let gridded = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(gridded, "precondition: the trip was not drawn")
+            let tiles = TripProbe.photos(in: screen.window)
+            let pressed = tiles.first.map { TripProbe.pressAtOnce($0) } ?? false
+            #expect(pressed, "precondition: no tile took a press")
+            let opened = await screen.until(seconds: 10) {
+                TripProbe.pager(over: screen.host) != nil
+            }
+            #expect(opened, "precondition: the viewer never opened")
+            wire.transport.trips.hold(TripRows.members)
+            if storesFirst {
+                CollectionsSession.identityChanged(to: bob, trips: stores.0, members: stores.1)
+                source.identity = bob
+            } else {
+                // The screen first, a turn ahead of the stores: they still hold the outgoing
+                // account's members while the screen already shows the incoming one.
+                source.identity = bob
+                await screen.settle(turns: 5)
+                CollectionsSession.identityChanged(to: bob, trips: stores.0, members: stores.1)
+            }
+            await stores.0.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+            let relisted = stores.0.trips.contains { $0.uid == record.uid }
+            #expect(relisted, "precondition: the other account lists the trip")
+            let closed = await screen.until(seconds: 10) {
+                TripProbe.pager(over: screen.host) == nil
+            }
+            #expect(closed, "the viewer stayed open over the outgoing account's photos")
+            await screen.settle(turns: 10)
+            let left = TripProbe.photos(in: screen.window).count
+            #expect(left == 0, "the other account was shown \(left) of the outgoing one's photos")
+            wire.transport.trips.release(TripRows.members)
+            let own = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(own, "the other account's own read never drew")
+        }
+    }
+
+    /// A trip opened over members already read keeps them on screen from its first frame while
+    /// its own read is out — not only once a later read has settled.
+    @Test("a trip opened over members already read keeps them while its own read is out")
+    func openedOverReadMembers() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
+        let read = stores.1.state(for: record) == .complete
+        #expect(read, "precondition: the members were read")
+        wire.transport.trips.hold(TripRows.members)
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let draining = await screen.until { stores.1.state(for: record) == .draining }
+            #expect(draining, "precondition: the screen's own read never went out")
+            await screen.settle(turns: 10)
+            let shown = TripProbe.photos(in: screen.window).count
+            #expect(shown == 5, "the screen dropped the members it opened over: \(shown)")
+            wire.transport.trips.release(TripRows.members)
+        }
+    }
+
+    /// A Journal photo removed from the trip is no member, so a read of the members never
+    /// re-signs it, and a Removed list read before it lapsed holds the lapsed copy: the Journal's
+    /// viewer renews its pages by reading the journal again, whatever either list holds.
+    @Test(
+        "a journal viewer re-signs a photo removed from the trip, its Removed list read or not",
+        arguments: [false, true])
+    func aJournalViewerRenewsARemovedPhoto(removedRead: Bool) async {
+        let wire = TripWire()
+        wire.transport.pictureJournal()
+        let stores = stores()
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p1"])
+        if removedRead {
+            await stores.1.removed(
+                for: record, using: wire.access.handle, baseURL: TripWire.baseURL)
+            if case .exact(let rows) = stores.1.removedState(for: record) {
+                #expect(rows.map(\.id) == ["p1"], "precondition: the removed list")
+            } else {
+                Issue.record("precondition: the removed list was not read")
+            }
+        }
+        let second = TripTransport.journal[1]
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        let view = trip(stores, wire, record, viewer: media).environment(MemoJump())
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let gridded = await screen.until { TripProbe.photos(in: screen.window).count == 4 }
+            #expect(gridded, "precondition: the trip was not drawn")
+            await media.revoke("v1")
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "the Journal chip took no press")
+            let drawn = await screen.until {
+                TripProbe.card(saying: second.text, in: screen.window) != nil
+            }
+            #expect(drawn, "no card says \(second.text)")
+            wire.transport.resign("v2")
+            let card = TripProbe.card(saying: second.text, in: screen.window)
+            let ran = card.map { TripProbe.runAction("Open photo", of: $0) } ?? false
+            #expect(ran, "no Open photo ran: \(TripProbe.actionNames(of: card))")
+            let lapsed = await TripProbe.settled(seconds: 10) {
+                await media.asked("p1", "mobile", sig: "v1") >= 1
+            }
+            #expect(lapsed, "precondition: the viewer never asked for p1 under v1")
+            let renewed = await TripProbe.settled(seconds: 10) {
+                await media.asked("p1", "mobile", sig: "v2") >= 1
+            }
+            #expect(renewed, "the removed photo p1 never took its new signature")
+        }
+    }
+
+    /// The Journal and the grid renew different lists: a journal read re-signs the journal's memos
+    /// and leaves the members' rows as they were. So a picture in both — a member a tagged memo
+    /// carries — renewed for the Journal's viewer is still renewed for the grid when the grid asks
+    /// inside the same minute: the cooldown is kept per list, never shared between the two.
+    @Test("a member renewed for the Journal is still renewed for the grid inside the cooldown")
+    func aJournalRenewalLeavesTheGridItsOwn() async {
+        let wire = TripWire()
+        wire.transport.pictureJournal()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let access = wire.access
+        await stores.1.drain(record, using: access.handle, baseURL: TripWire.baseURL)
+        await stores.1.loadJournal(record, using: access.handle, baseURL: TripWire.baseURL)
+        let member = {
+            stores.1.members(for: record).first { $0.id == "p1" }?.attachment.previewURL
+        }
+        let carried = {
+            stores.1.journal(for: record).flatMap(\.attachments)
+                .first { $0.uid == "p1" }?.previewURL
+        }
+        let signed = { (url: URL?) in url?.query?.contains("sig=v2") == true }
+        let both = member() != nil && carried() != nil
+        #expect(both, "precondition: p1 is a member that a journal memo carries")
+        // From here every read signs anew; both lists still hold p1 under v1.
+        wire.transport.resign("v2")
+        let session = IssuingSession(handle: { access.handle }, baseURL: { access.baseURL })
+        let journal = TripJournalURLRefresher(
+            members: stores.1, trips: stores.0, uid: record.uid, session: session)
+        let grid = TripURLRefresher(
+            members: stores.1, trips: stores.0, uid: record.uid, session: session)
+        // The loader's own dispatcher, its cooldown real: an ask it defers waits a minute.
+        let table = MediaFetchTable(currentGeneration: { 0 })
+        let key = MediaFetchTable.Key(
+            image: MediaImageKey(uid: "p1", tier: "mobile"), generation: 0)
+        let now = Date()
+        let askedJournal = table.refresh(key, via: journal, at: now)
+        #expect(askedJournal, "the Journal's renewal was not asked")
+        let journalRenewed = await TripProbe.settled(seconds: 10) { signed(carried()) }
+        #expect(journalRenewed, "the journal never took p1's new signature")
+        let stale = !signed(member())
+        #expect(stale, "precondition: the journal read re-signed the member row too")
+        let askedGrid = table.refresh(key, via: grid, at: now.addingTimeInterval(1))
+        #expect(askedGrid, "the grid's renewal waited out the Journal's cooldown")
+        let gridRenewed = await TripProbe.settled(seconds: 10) { signed(member()) }
+        #expect(gridRenewed, "the member row kept p1's lapsed URL")
+        let journalKept = signed(carried())
+        #expect(journalKept, "the journal lost p1's new signature")
     }
 }

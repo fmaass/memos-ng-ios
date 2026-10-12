@@ -24,8 +24,8 @@ struct MainTabView: View {
     /// The session's collections and their memberships: one of each for as long as this view
     /// shows a session, built once its identity can be read, moved to a new identity beside the
     /// timeline (`TimelineView`), and read by every tab through the environment.
-    @State private var collections: CollectionStore?
-    @State private var trips: TripMembershipStore?
+    @State private var trips: TripStore?
+    @State private var members: TripMemberStore?
 
     /// Opens on the Timeline (plan page 3929 decision 11), third of the four since Collections
     /// came in beside the Library (MEMNG-709). A test that is about another tab's screen under the
@@ -43,20 +43,25 @@ struct MainTabView: View {
             notice
             tabs
         }
-        .task { makeCollectionStores() }
+        .task { makeTripStores() }
     }
 
-    /// Builds the collection and membership stores, once, under the identity signed in now.
-    private func makeCollectionStores() {
-        guard collections == nil else { return }
-        let store = CollectionStore(identity: session.snapshotIdentity)
-        let members = TripMembershipStore(
-            collections: store,
+    /// Builds the trip and member stores, once, under the identity signed in now. Both report to
+    /// the session and hand a refusal to its funnel (`SessionStore.handle`).
+    private func makeTripStores() {
+        guard trips == nil else { return }
+        let store = TripStore(
+            identity: session.snapshotIdentity,
             onUnauthorized: { [session] refusal in await session.handle(refusal) }
         )
-        members.reports(to: session)
-        collections = store
-        trips = members
+        store.reports(to: session)
+        let memberStore = TripMemberStore(
+            trips: store,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) }
+        )
+        memberStore.reports(to: session)
+        trips = store
+        members = memberStore
     }
 
     /// The one card the session is entitled to, and never two: which of them is on screen is
@@ -100,8 +105,8 @@ struct MainTabView: View {
         .environment(jump)
         .environment(tagJump)
         .environment(yearJump)
-        .environment(collections)
         .environment(trips)
+        .environment(members)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
         // Timeline is what reads that and pushes it, because it owns both the list and the stack.
         .onChange(of: jump.pending) { _, pending in

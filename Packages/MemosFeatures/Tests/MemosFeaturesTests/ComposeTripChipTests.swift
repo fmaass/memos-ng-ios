@@ -147,20 +147,25 @@ struct ComposeTripChipTests {
 
     // MARK: - The offer, read from the store
 
-    @Test("the offer is the pinned trip's title and first tag, while the pin lasts")
+    /// A trip as the server lists it, made at `now`.
+    private func listed(_ title: String, tag: String?, at now: Date) -> Trip {
+        Trip(uid: "trip-1", title: title, tag: tag, createdAt: now, updatedAt: now)
+    }
+
+    @Test("the offer is the pinned trip's title and tag, while the pin lasts")
     func offerFollowsThePin() throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let store = CollectionStore(identity: alice, root: root, now: { now })
-        let made = store.create(title: "Portugal 2026", tags: ["portugal2026", "lisbon"])
-        #expect(ComposePinnedTrip.offered(by: store, now: now) == nil, "an unpinned trip offered")
+        let pins = TripPins(identity: alice, root: root)
+        let made = listed("Portugal 2026", tag: "portugal2026", at: now)
+        #expect(ComposePinnedTrip.offered(by: pins, now: now) == nil, "an unpinned trip offered")
 
-        store.pin(id: made.id, now: now)
-        let until = try #require(store.records.first?.pinnedUntil)
-        #expect(ComposePinnedTrip.offered(by: store, now: now) == trip)
+        pins.pin(made, lastTaken: nil, now: now)
+        let until = try #require(pins.pinnedUntil(uid: made.uid))
+        #expect(ComposePinnedTrip.offered(by: pins, now: now) == trip)
         #expect(
-            ComposePinnedTrip.offered(by: store, now: until.addingTimeInterval(-1)) == trip)
+            ComposePinnedTrip.offered(by: pins, now: until.addingTimeInterval(-1)) == trip)
         #expect(
-            ComposePinnedTrip.offered(by: store, now: until) == nil,
+            ComposePinnedTrip.offered(by: pins, now: until) == nil,
             "a pin that ends exactly now is over and must not be offered")
         #expect(ComposePinnedTrip.offered(by: nil, now: now) == nil)
     }
@@ -168,16 +173,13 @@ struct ComposeTripChipTests {
     @Test("a pinned record with no tag offers nothing")
     func untaggedRecordOffersNothing() {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let store = CollectionStore(identity: alice, root: root, now: { now })
-        let made = store.create(title: "Nowhere", tags: [])
-        store.pin(id: made.id, now: now)
-        #expect(store.activePin(now: now) != nil, "the case needs the pin to be active")
-        #expect(ComposePinnedTrip.offered(by: store, now: now) == nil)
+        let pins = TripPins(identity: alice, root: root)
+        pins.pin(listed("Nowhere", tag: nil, at: now), lastTaken: nil, now: now)
+        #expect(pins.activePin(now: now) != nil, "the case needs the pin to be active")
+        #expect(ComposePinnedTrip.offered(by: pins, now: now) == nil)
         #expect(
             ComposePinnedTrip(
-                record: CollectionRecord(
-                    id: UUID(), kind: .trip, title: "Blank", tags: [""], order: 0,
-                    createdAt: now)) == nil)
+                pin: TripPin(uid: "blank", title: "Blank", tag: "", pinnedUntil: now)) == nil)
     }
 
     // MARK: - The chip's state
@@ -225,14 +227,14 @@ struct ComposeTripChipTests {
     @Test("the timeline's sheet shows the chip for an active pin and not for an expired one")
     func timelineSheetFollowsThePin() throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let store = CollectionStore(identity: alice, root: root, now: { now })
-        store.pin(id: store.create(title: "Portugal 2026", tags: ["portugal2026"]).id, now: now)
-        let until = try #require(store.records.first?.pinnedUntil)
+        let pins = TripPins(identity: alice, root: root)
+        pins.pin(listed("Portugal 2026", tag: "portugal2026", at: now), lastTaken: nil, now: now)
+        let until = try #require(pins.pinnedUntil(uid: "trip-1"))
 
         func sheet(at instant: Date) -> some View {
             TimelineView.editSheet(
                 mode: .create(restoring: nil), isAsking: false, failure: nil,
-                pinnedTrip: ComposePinnedTrip.offered(by: store, now: instant),
+                pinnedTrip: ComposePinnedTrip.offered(by: pins, now: instant),
                 send: { _ in }, submit: { _ in .saved })
         }
         #expect(chipShown(ScreenProbe.labels(of: sheet(at: now))))

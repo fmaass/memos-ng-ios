@@ -18,14 +18,19 @@ import Observation
 /// included): the trip is then filed by its tag alone, and its dates can be set later on Trip
 /// Dates. Only the chosen tag's read ends the wait — never a read of another tag.
 ///
-/// **Create is read back, never trusted.** `CollectionStore.create` hands back a record whether or
-/// not it reached the file — with nobody signed in, or a write that failed, the record exists
-/// nowhere else. So the flow looks for it in `records`, the list the file says, and only a record
-/// found there closes the sheet; anything else keeps the sheet open with `failure` said under it.
+/// **Create is the server's.** Create freezes the form — title, tag, span and zone — into one
+/// `NewTripRequest` with one idempotency key, and sends it (`TripStore.create`). While it is out
+/// the sheet is busy; only the trip the server answered closes it. A failure keeps the sheet open
+/// with `failure` said under the title, and Create again RE-SENDS the frozen request, key and
+/// all, so a create the server did take but whose answer was lost is not filed twice. Editing the
+/// form after a failure makes a new request with a new key.
 ///
-/// **One trip per sheet, refused after.** A second Create after one that succeeded is refused, not
-/// sent: the store runs two calls one after the other and would file two trips. A Create that
-/// failed may be pressed again — nothing of it exists to duplicate.
+/// **Bound to its account.** The request carries the identity it was frozen under; when the
+/// session becomes somebody else's while it is out, the flow is abandoned — the sheet closes with
+/// no result and nothing is retried under the new identity.
+///
+/// **One trip per sheet, refused after.** A second Create after one that succeeded, or while one is
+/// out, is refused and sends nothing.
 @MainActor
 @Observable
 final class NewTripFlow: Identifiable {
@@ -43,10 +48,16 @@ final class NewTripFlow: Identifiable {
     /// Why the last Create did not file a trip, or nil.
     private(set) var failure: String?
     /// The trip this sheet filed, once it has.
-    private(set) var created: CollectionRecord?
+    private(set) var created: Trip?
+    /// The request Create last sent, with its key; sent again by a retry of the same form.
+    private(set) var frozen: NewTripRequest?
+    /// Whether a Create is out.
+    private(set) var isCreating = false
+    /// The account changed while the sheet was up: it closes, and nothing is sent again.
+    private(set) var abandoned = false
 
-    /// What the sheet says when the record is not in the store after Create.
-    static let notSaved = "The trip could not be saved on this device. Try again."
+    /// What the sheet says when Create failed without a reason of its own.
+    static let notSaved = "The trip could not be saved. Try again."
 
     /// The suggestion the title field was last filled with, so a title somebody typed survives
     /// choosing another tag and one they left alone follows it.
@@ -122,26 +133,60 @@ final class NewTripFlow: Identifiable {
     var trimmedTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     /// Whether Create has anything to file: a title, a tag or a span, no span that ends before it
-    /// starts, and no prefill still awaited.
+    /// starts, no prefill still awaited, and no Create out or done.
     var canCreate: Bool {
-        guard created == nil, !trimmedTitle.isEmpty, !awaitingDates else { return false }
+        guard created == nil, !isCreating, !abandoned, !trimmedTitle.isEmpty, !awaitingDates
+        else { return false }
         if let span { return span.span != nil }
         return chosenTag != nil
     }
 
-    /// Files the trip in `store` and answers it, or nil when nothing was filed — refused, or not
-    /// found in the store afterwards (`failure` then says so).
+    /// The request the form makes under `scope`: the one sent last while the form still says the
+    /// same — a retry re-sends it whole, key and all — else a new one with a new key.
+    func request(under scope: TimelineSnapshotIdentity) -> NewTripRequest {
+        let span = span?.span
+        if let frozen, frozen.scope == scope, frozen.title == trimmedTitle,
+            frozen.tag == chosenTag, frozen.spanStart == span?.start,
+            frozen.spanEnd == span?.end, frozen.tz == span?.zone
+        {
+            return frozen
+        }
+        return NewTripRequest(
+            scope: scope, title: trimmedTitle, tag: chosenTag, spanStart: span?.start,
+            spanEnd: span?.end, tz: span?.zone)
+    }
+
+    /// Sends the trip to the server and answers it, or nil when nothing was filed — refused, failed
+    /// (`failure` then says why), or abandoned because the account changed while it was out.
     @discardableResult
-    func create(in store: CollectionStore) -> CollectionRecord? {
+    func create(in trips: TripStore, using access: CollectionsAccess?) async -> Trip? {
         guard canCreate else { return nil }
-        let record = store.create(
-            title: trimmedTitle, tags: chosenTag.map { [$0] } ?? [], span: span?.span)
-        guard let filed = store.records.first(where: { $0.id == record.id }) else {
+        guard let access, let scope = trips.identity else {
             failure = Self.notSaved
             return nil
         }
+        let request = request(under: scope)
+        frozen = request
+        isCreating = true
+        defer { isCreating = false }
+        do {
+            let trip = try await trips.create(
+                request, using: access.handle, baseURL: access.baseURL)
+            failure = nil
+            created = trip
+            return trip
+        } catch TripStore.Failure.superseded {
+            abandon()
+            return nil
+        } catch {
+            failure = TripManage.sentence(error) ?? Self.notSaved
+            return nil
+        }
+    }
+
+    /// The account changed: the sheet closes with no result, and nothing is sent again.
+    func abandon() {
+        abandoned = true
         failure = nil
-        created = filed
-        return filed
     }
 }

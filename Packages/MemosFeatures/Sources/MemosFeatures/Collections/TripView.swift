@@ -3,15 +3,15 @@ import SwiftUI
 
 /// What the Collections root pushes for a trip card: the trip, known by its id.
 struct TripRoute: Hashable {
-    let id: UUID
+    let id: String
     /// The trip as it was when its card was opened. Its screen draws this once the trip has left
     /// the store, while the stack lets the screen go: a destination that drew nothing for a trip
     /// that is gone would take the screen's own way off the stack with it.
-    let opened: CollectionRecord
+    let opened: Trip
 
-    init(_ record: CollectionRecord) {
-        id = record.id
-        opened = record
+    init(_ trip: Trip) {
+        id = trip.uid
+        opened = trip
     }
 
     static func == (lhs: TripRoute, rhs: TripRoute) -> Bool { lhs.id == rhs.id }
@@ -30,9 +30,9 @@ extension TripRoute: @MainActor StackRoute {
 /// one flat block: the Library's All without its days (MEMNG-740, `LibraryGridGrouping.flat`).
 ///
 /// **The grid is the Library's.** `LibraryGrid` is hosted over the trip's DRAINED members
-/// (`TripMembershipStore.members(for:)`), which are already the record's pictures minus its
-/// exclusions, so an excluded picture is absent from the grid, the hero, the count and the viewer
-/// alike. No second `MediaLibraryStore` is built: the drain reads the whole trip before anything is
+/// (`TripMemberStore.members(for:)`), which are what the server's member route answers — the
+/// server has already taken a removed picture out, so it is absent from the grid, the hero and the
+/// viewer alike. No second `MediaLibraryStore` is built: the drain reads the whole trip before anything is
 /// shown, so the grid never asks for a next page and its `loadMore` is a no-op. A drain that
 /// stopped at the cap says so under the last picture.
 ///
@@ -45,17 +45,21 @@ extension TripRoute: @MainActor StackRoute {
 /// identity beside the timeline (`CollectionsSession`), so a trip read as somebody else drops.
 ///
 /// **The drain refreshes on appear**, and again when the account, the trip's tag or its span
-/// changes; a drain of the same trip already on the wire — the root's — is joined, never repeated.
+/// changes, or the store let the members go (any change to a trip moves the one revision every
+/// trip's members belong to); a drain of the same trip already on the wire is joined. While a
+/// re-read is on the wire the screen keeps the members it last showed (`TripSettledMembers`), so
+/// a change to another trip never empties this one's grid.
 ///
-/// **Manage.** Rename, Trip Dates, Pin or Unpin, Move Up, Move Down and Delete Trip, through
-/// `TripManage`; Trip Dates opens `TripSpanSheet`, whose saved span reads the trip again.
-/// Pin or Unpin is one item, named by whether this trip is the scope's active pin now
-/// (`CollectionStore.activePin(now:)`), so a pin that has expired offers Pin again. A trip that
+/// **Manage.** Rename, Trip Dates, Pin or Unpin, Show Removed and Delete Trip, through
+/// `TripManage`, whose writes are the server's (`TripStore.update`/`delete`): while one is out the
+/// hero shows it, and a write that failed says why under the title. Trip Dates opens
+/// `TripSpanSheet`. Pin or Unpin is one item, named by whether this trip is the scope's active pin
+/// now (`TripPins.activePin(now:)`), so a pin that has expired offers Pin again. A trip that
 /// is no longer in the store — deleted here or anywhere — leaves the stack by the stack's own
 /// state (`trail`, the Collections tab's path), drawn as it last was on the way out.
 ///
 /// **Journal** (MEMNG-718). The `Journal` chip swaps the grid for the trip's memos, oldest first
-/// as the server read them (`TripMembershipStore.loadJournal`), as the Timeline's `MemoCard`s under
+/// as the server read them (`TripMemberStore.loadJournal`), as the Timeline's `MemoCard`s under
 /// the Timeline's own day headings. A card opens its memo through `MemoJump`, the request the
 /// Library and this screen's viewer already make: `MemoDetailView` edits through the Timeline's
 /// store, which lives on the Timeline's stack alone, so the memo is pushed there as the same
@@ -69,23 +73,24 @@ extension TripRoute: @MainActor StackRoute {
 ///
 /// **Select** (MEMNG-721). The Library's select mode on the trip's grid, in Photos: the Library's
 /// own `LibrarySelection` and `LibrarySelectToolbar`, with Share and with Delete for the member's
-/// own pictures only (`LibrarySelection.deletable`), run through `TripMembershipStore.delete`. The
+/// own pictures only (`LibrarySelection.deletable`), run through `TripMemberStore.delete`. The
 /// toolbar stands where the main bar stood because select mode claims the dock (`DockClaim.select`)
 /// and the dock's one bottom bar on Collections is then select mode's (`DockBar.standing`) — the
 /// same value the main bar is drawn from, so the two never stand together.
 ///
 /// **Remove from Trip** (MEMNG-722). Select mode's toolbar gains Remove on a trip: the chosen
-/// pictures leave this trip on this device (`TripMembershipStore.remove`, the record's
-/// exclusions), and the grid, the hero, the viewer and the root's card all recompute from the
-/// same filtered members. Nothing is sent — the memo keeps its text and its tag. Manage's Show
-/// Removed lists the removed pictures the trip's drain still holds (`TripRemovedList`), each with
+/// pictures leave this trip on the server (`TripMemberStore.remove`, one exclusion per picture,
+/// then the record and the members read again), and the grid, the hero, the viewer and the root's
+/// card follow the answer. The memo keeps its text and its tag. Manage's Show Removed is always
+/// offered: its sheet computes the removed pictures when it opens (`TripRemovedList`), each with
 /// Add Back.
 struct TripView: View {
-    let record: CollectionRecord
-    let collections: CollectionStore
-    let trips: TripMembershipStore
-    /// Whose trip this is; a change reads it again.
-    let subject: String?
+    let trip: Trip
+    let trips: TripStore
+    let memberStore: TripMemberStore
+    /// Whose trip this is — the server and the subject; a change reads it again, and lets go of
+    /// everything the outgoing account was shown.
+    let identity: TimelineSnapshotIdentity?
     /// The session's handle and server when a read is issued, or nil when there is none.
     let access: () -> CollectionsAccess?
     /// The stack this screen was pushed onto, which it leaves once its trip is gone.
@@ -124,8 +129,10 @@ struct TripView: View {
     @State private var deleting = LibraryDeleteFlow()
     /// This screen's claim on the dock while select mode's toolbar stands in the main bar's place.
     @State private var dockClaim = UUID()
-    /// Manage's Show Removed is up.
-    @State private var showingRemoved = false
+    /// The members last shown while they were settled, kept while a re-read is on the wire.
+    @State private var settled = TripSettledMembers()
+    /// Why the last Remove from Trip did not finish, or nil.
+    @State private var removeFailure: String?
     @Namespace private var zoom
     /// What the viewer fetches its stills through; a test hands in one it can watch.
     private let viewerTransport: any MediaTransport
@@ -136,10 +143,10 @@ struct TripView: View {
     private let now: () -> Date
 
     init(
-        record: CollectionRecord,
-        collections: CollectionStore,
-        trips: TripMembershipStore,
-        subject: String?,
+        trip: Trip,
+        trips: TripStore,
+        memberStore: TripMemberStore,
+        identity: TimelineSnapshotIdentity?,
         access: @escaping () -> CollectionsAccess?,
         trail: Binding<[TripRoute]> = .constant([]),
         manage: TripManage = TripManage(),
@@ -147,10 +154,10 @@ struct TripView: View {
         shareLane: TripShareLane? = nil,
         now: @escaping () -> Date = { Date() }
     ) {
-        self.record = record
-        self.collections = collections
+        self.trip = trip
         self.trips = trips
-        self.subject = subject
+        self.memberStore = memberStore
+        self.identity = identity
         self.access = access
         self.trail = trail
         _manage = State(initialValue: manage)
@@ -169,8 +176,6 @@ struct TripView: View {
     static let spanButton = TripSpanSheet.title
     static let pinButton = "Pin"
     static let unpinButton = "Unpin"
-    static let moveUpButton = "Move Up"
-    static let moveDownButton = "Move Down"
     static let showRemovedButton = "Show Removed"
     /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
     /// to go.
@@ -194,20 +199,29 @@ struct TripView: View {
     static let useAsCoverButton = "Use as Cover"
 
     /// What a viewer opened from trip `id` — its grid, or its Map's pins and sheet — offers on the
-    /// page on screen: that picture becomes the trip's cover (`CollectionStore.setCover`). The
-    /// trip's viewers are the only ones handed it; the Library's, the Timeline's, a memo's and the
-    /// Places tab's are handed nil.
-    static func useAsCover(_ id: UUID, in collections: CollectionStore) -> MediaViewerHostAction {
+    /// page on screen: that picture becomes the trip's cover on the server (`TripManage.setCover`,
+    /// a `TripStore.update`). The trip's viewers are the only ones handed it; the Library's, the
+    /// Timeline's, a memo's and the Places tab's are handed nil.
+    static func useAsCover(
+        _ uid: String, in trips: TripStore, manage: TripManage,
+        access: @escaping () -> CollectionsAccess?
+    ) -> MediaViewerHostAction {
         MediaViewerHostAction(title: useAsCoverButton, symbol: "photo.badge.checkmark") {
-            collections.setCover(id: id, uid: $0.uid)
+            manage.setCover($0.uid, of: uid, in: trips, using: access())
         }
     }
+
+    /// The line under the title while a change to the trip is out.
+    static let savingLine = "Saving…"
+    /// The identifiers of the hero's saving and error lines.
+    static let savingLineID = "trip-saving"
+    static let errorLineID = "trip-error"
 
     /// The delete dialog's question.
     static func deleteQuestion(_ title: String) -> String { "Delete “\(title)”?" }
 
     /// The footer under the grid: the cap, only when the drain stopped at it.
-    static func capNote(_ state: TripMembershipState, cap: Int = TripMembershipStore.memberCap)
+    static func capNote(_ state: TripMemberState, cap: Int = TripMemberStore.memberCap)
         -> String?
     {
         state == .truncated ? "Showing the first \(cap) photos of this trip" : nil
@@ -215,7 +229,7 @@ struct TripView: View {
 
     /// The footer of a journal that stopped at the cap: it counts memos, not photos.
     static func journalCapNote(
-        _ state: TripMembershipState, cap: Int = TripMembershipStore.memberCap
+        _ state: TripMemberState, cap: Int = TripMemberStore.memberCap
     ) -> String? {
         state == .truncated ? "Showing the first \(cap) memos of this trip" : nil
     }
@@ -245,14 +259,17 @@ struct TripView: View {
     }
 
     /// The Journal viewer's pages: the ones it opened with, each taking the copy of it the trip's
-    /// latest read holds, so a signature that lapsed is renewed by `TripURLRefresher` — which
-    /// reads the trip again, every kind of file, removed pictures included. A page the trip holds
-    /// no row for keeps the copy the memo read gave it. Each keeps its memo, for Show Memo.
+    /// journal holds now, so a signature that lapsed is renewed by `TripJournalURLRefresher`,
+    /// which reads the journal again. The journal's memos carry every picture they hold, a member
+    /// or one removed from the trip, so the renewal never depends on the members or the Removed
+    /// list. A page no memo holds any more keeps the copy it had. Each keeps its memo, for Show
+    /// Memo.
     static func journalViewerSource(
-        for selection: MediaViewerSelection, renewed rows: [LibraryRow]
+        for selection: MediaViewerSelection, memos: [Memo]
     ) -> MediaViewerSource {
         let latest = Dictionary(
-            rows.map { ($0.id, $0.attachment) }, uniquingKeysWith: { first, _ in first })
+            memos.flatMap { memo in memo.attachments.map { ($0.uid, $0) } },
+            uniquingKeysWith: { first, _ in first })
         let files = selection.pages.map { page in
             guard var file = latest[page.id] else { return page.attachment }
             file.memoUID = page.memoUID
@@ -303,19 +320,40 @@ struct TripView: View {
         return !holding.union(selection.pages.map(\.id)).isSubset(of: now)
     }
 
-    /// The record as the store holds it now, or nil once it is gone.
-    private var live: CollectionRecord? {
-        collections.records.first { $0.id == record.id }
+    /// The trip as the store holds it now, or nil once it is gone.
+    /// The members as the store holds them, once a drain has settled; nil while none has, or the
+    /// store let them go and a re-read is on the wire.
+    static func settled(
+        of trip: Trip, in store: TripMemberStore, under identity: TimelineSnapshotIdentity?
+    ) -> TripSettledMembers? {
+        switch store.state(for: trip) {
+        case .complete, .truncated:
+            TripSettledMembers(
+                uid: trip.uid, identity: identity, rows: store.members(for: trip),
+                loaded: store.summary(for: trip) != nil)
+        case .notLoaded, .draining: nil
+        }
+    }
+
+    /// The cover the hero draws: the chosen one while it is among `members`, else the first.
+    static func cover(of trip: Trip, members: [LibraryRow]) -> LibraryRow? {
+        trip.cover.flatMap { cover in members.first { $0.id == cover.id } } ?? members.first
+    }
+
+    private var live: Trip? {
+        trips.trips.first { $0.uid == trip.uid }
     }
 
     var body: some View {
         // The trip as it was while its screen leaves: a delete takes it out of the store before
         // the stack has popped, and a body that dropped the grid would drop the alert on it in
         // the middle of the alert's own exit — after which the stack never popped.
-        let shown = live ?? record
+        let shown = live ?? trip
         // Read here, in the body, so a drain that lands re-presents the viewer's source as well.
-        let members = trips.members(for: shown)
-        let loaded = trips.summary(for: shown) != nil
+        let fresh = freshMembers(of: shown)
+        let current = shownMembers
+        let members = current.rows
+        let loaded = current.loaded
         modeContent(shown)
             .background(Color(.systemGroupedBackground))
             // On the grid; the rename alert, the file sheet and the viewer's cover each on a view
@@ -324,7 +362,7 @@ struct TripView: View {
             // screen nor in the accessibility tree.
             .alert(Self.deleteQuestion(shown.title), isPresented: asking(.delete)) {
                 Button(Self.deleteButton, role: .destructive) {
-                    manage.confirmDelete(record.id, in: collections, forgetting: trips)
+                    manage.confirmDelete(trip.uid, in: trips, using: access())
                 }
                 Button("Cancel", role: .cancel) { manage.cancel() }
             } message: {
@@ -334,22 +372,25 @@ struct TripView: View {
                 Color.clear.alert(Self.renameTitle, isPresented: asking(.rename)) {
                     TextField(Self.renameTitle, text: $manage.draft)
                     Button(Self.renameButton) {
-                        manage.confirmRename(record.id, in: collections)
+                        manage.confirmRename(trip.uid, in: trips, using: access())
                     }
                     Button("Cancel", role: .cancel) { manage.cancel() }
                 }
             }
             .background { Color.clear.fetchingFile(saving) }
             .background {
-                Color.clear.sheet(isPresented: $showingRemoved) {
+                Color.clear.sheet(isPresented: $manage.showingRemoved) {
                     NavigationStack {
-                        TripRemovedList(record: shown, collections: collections, trips: trips)
+                        TripRemovedList(
+                            trip: shown, trips: trips, members: memberStore, access: access)
                     }
                 }
             }
             .background {
                 Color.clear.sheet(isPresented: $editingSpan) {
-                    TripSpanSheet(record: live ?? record, collections: collections, now: now())
+                    TripSpanSheet(
+                        trip: live ?? trip, trips: trips, access: access,
+                        lastSummary: memberStore.summary(for: live ?? trip), now: now())
                 }
             }
             .navigationTitle(shown.title)
@@ -379,11 +420,24 @@ struct TripView: View {
             }
             .gridViewer(
                 $viewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
-                action: Self.useAsCover(record.id, in: collections)
+                action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access)
             ) {
                 Self.viewerSource(for: $0, members: members, loaded: loaded)
             }
             .onChange(of: viewing) { _, _ in held = [] }
+            // What a settled drain answered stands until the next one settles — from the first
+            // frame: a trip opened over members already read keeps them while its own read is out.
+            .onChange(of: fresh, initial: true) { _, now in
+                if let now { settled = now }
+            }
+            // Another account's screen: no viewer open over the outgoing one's photos, and no
+            // selection of them, stays. Its members stay behind their identity (`shownMembers`).
+            .onChange(of: identity) {
+                viewing = nil
+                journalViewing = nil
+                held = []
+                selection.close()
+            }
             // A picture that leaves the trip leaves the selection with it.
             .onChange(of: members) { _, now in selection.prune(keeping: now) }
             // Select mode belongs to the grid: Journal or Map ends it.
@@ -406,7 +460,7 @@ struct TripView: View {
             }
             .onChange(of: ViewerFit(members: members.map(\.id), loaded: loaded)) { _, fit in
                 guard let open = viewing else { return }
-                let now = trips.members(for: shown)
+                let now = shownMembers.rows
                 if Self.viewerOutlived(open, holding: held, members: now, loaded: fit.loaded) {
                     viewing = nil
                 } else {
@@ -415,15 +469,21 @@ struct TripView: View {
             }
             .task(
                 id: DrainKey(
-                    subject: subject, id: record.id, tag: live?.tags.first, span: live?.span)
+                    identity: identity, id: trip.uid, tag: live?.tag, span: live?.tripSpan)
             ) {
+                await drain()
+            }
+            // The store let the members go — a change to a trip moved its revision — so they are
+            // read again; the screen keeps showing the last ones meanwhile.
+            .task(id: memberStore.state(for: shown) == .notLoaded) {
+                guard memberStore.state(for: shown) == .notLoaded else { return }
                 await drain()
             }
             // Read when the chip is chosen, and again whenever it is chosen anew, the account or
             // the tag changes; a load already on the wire is joined.
             .task(
                 id: JournalKey(
-                    subject: subject, id: record.id, tag: live?.tags.first, span: live?.span,
+                    identity: identity, id: trip.uid, tag: live?.tag, span: live?.tripSpan,
                     shown: mode == .journal)
             ) {
                 guard mode == .journal else { return }
@@ -438,7 +498,7 @@ struct TripView: View {
                 guard live == nil else { return }
                 try? await Task.sleep(for: Self.leavingDelay)
                 guard !Task.isCancelled else { return }
-                let ids = collections.records.map(\.id)
+                let ids = trips.trips.map(\.uid)
                 let kept = CollectionsPresentation.trail(trail.wrappedValue, keeping: ids)
                 if kept != trail.wrappedValue { trail.wrappedValue = kept }
             }
@@ -446,7 +506,7 @@ struct TripView: View {
 
     /// The chosen mode's content: the grid, the journal, or the map.
     @ViewBuilder
-    private func modeContent(_ live: CollectionRecord) -> some View {
+    private func modeContent(_ live: Trip) -> some View {
         switch mode {
         case .photos: grid(live)
         case .journal: journal(live)
@@ -457,34 +517,32 @@ struct TripView: View {
     /// The trip's members that know where they were taken, on the Places map (MEMNG-719): the
     /// hero above it, so the chips stay in reach. Keyed on the account, so a change of account
     /// drops the map's markers, sheet and viewer with its store (`TripMapScreen`).
-    private func tripMap(_ live: CollectionRecord) -> some View {
+    private func tripMap(_ live: Trip) -> some View {
         TripMapScreen(
-            record: live, trips: trips, access: access, redrain: { await drain() },
-            viewerAction: Self.useAsCover(record.id, in: collections),
-            hero: { hero(live, members: trips.members(for: live)) }
+            trip: live, members: memberStore, access: access, redrain: { await drain() },
+            viewerAction: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access),
+            hero: { hero(live, members: shownMembers.rows) }
         )
-        .id(subject)
+        .id(identity)
     }
 
     /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
-    private func journal(_ live: CollectionRecord) -> some View {
-        let memos = trips.journal(for: live)
-        // Read in the body, so a re-read of the trip re-presents the Journal viewer's pages.
-        let renewed = trips.members(for: live) + trips.removedMembers(for: live)
-        let state = trips.journalState(for: live)
+    private func journal(_ live: Trip) -> some View {
+        let memos = memberStore.journal(for: live)
+        let state = memberStore.journalState(for: live)
         let calendar = journalCalendar
         return List {
-            hero(live, members: trips.members(for: live))
+            hero(live, members: shownMembers.rows)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
-            if let error = trips.journalError(for: live) {
+            if let error = memberStore.journalError(for: live) {
                 NoticeCard(text: error, tone: .error).cardRow()
             }
             ForEach(
                 TimelineGrouping.sections(
                     for: memos, calendar: calendar,
-                    instant: TripMembershipStore.journalInstant(of:))
+                    instant: TripMemberStore.journalInstant(of:))
             ) { section in
                 Section {
                     ForEach(section.memos) { memo in
@@ -510,12 +568,13 @@ struct TripView: View {
         }
         .listStyle(.plain)
         .feedsDock(dock, on: .collections)
-        // On the list, not beside the grid's viewer: one presentation per view. Re-signed as the
-        // grid's viewer is, by reading the trip again; its pages take the copies that read holds.
+        // On the list, not beside the grid's viewer: one presentation per view. Its pages are
+        // re-signed by reading the journal again; `memos` is read in the body, so that read
+        // re-presents them with its copies.
         .gridViewer(
-            $journalViewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
-            action: Self.useAsCover(record.id, in: collections)
-        ) { Self.journalViewerSource(for: $0, renewed: renewed) }
+            $journalViewing, refresher: journalRefresher, zoom: zoom, transport: viewerTransport,
+            action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access)
+        ) { Self.journalViewerSource(for: $0, memos: memos) }
     }
 
     /// Where a Journal card's tap goes: the viewer here, or the memo on the Timeline.
@@ -537,20 +596,22 @@ struct TripView: View {
     /// What stands under the last memo: the cap note when the load stopped at the cap, else the
     /// empty line when a load answered with nothing — never over a failure, which says its own.
     private func journalFooter(
-        _ live: CollectionRecord, state: TripMembershipState, empty: Bool
+        _ live: Trip, state: TripMemberState, empty: Bool
     ) -> String? {
-        if let note = Self.journalCapNote(state, cap: trips.memberCap) { return note }
+        // A trip of dates alone has no journal: nothing is read, and the chip says why.
+        guard live.tag != nil else { return TripMemberStore.noTagJournal }
+        if let note = Self.journalCapNote(state, cap: memberStore.memberCap) { return note }
         let read = state == .complete || state == .truncated
-        let failed = trips.journalError(for: live) != nil
+        let failed = memberStore.journalError(for: live) != nil
         return read && empty && !failed ? Self.journalEmptyTitle : nil
     }
 
-    private func grid(_ live: CollectionRecord) -> some View {
-        let members = trips.members(for: live)
-        let state = trips.state(for: live)
+    private func grid(_ live: Trip) -> some View {
+        let members = shownMembers.rows
+        let state = memberStore.state(for: live)
         return LibraryGrid(
             items: members,
-            errorText: trips.lastError,
+            errorText: memberStore.lastError,
             loadingMore: state == .draining,
             zoom: zoom,
             // The drain read the whole trip: there is never a next page to ask for.
@@ -574,20 +635,34 @@ struct TripView: View {
         .feedsDock(dock, on: .collections)
     }
 
-    private func hero(_ live: CollectionRecord, members: [LibraryRow]) -> some View {
-        let summary = trips.summary(for: live)
-        let cover = summary?.coverUid.flatMap { uid in members.first { $0.id == uid } }
+    private func hero(_ live: Trip, members: [LibraryRow]) -> some View {
+        let summary = memberStore.summary(for: live)
         return VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-            TripCover(cover: cover)
+            TripCover(cover: Self.cover(of: live, members: members))
             Text(live.title)
                 .font(.largeTitle.bold())
                 .lineLimit(2)
-            if let detail = CollectionsPresentation.cardDetail(
-                summary ?? live.lastSummary, locale: locale, timeZone: timeZone)
-            {
-                Text(detail)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            Text(
+                CollectionsPresentation.tripDetail(
+                    live, summary: summary, locale: locale, timeZone: timeZone)
+            )
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            if manage.isSaving {
+                HStack(spacing: DesignTokens.Space.tight) {
+                    ProgressView()
+                    Text(Self.savingLine)
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier(Self.savingLineID)
+            }
+            if let failure = manage.failure ?? removeFailure {
+                Text(failure)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(Self.errorLineID)
             }
             TripModeRow(chosen: mode) { mode = $0 }
                 .padding(.top, DesignTokens.Space.tight)
@@ -600,10 +675,10 @@ struct TripView: View {
     /// What stands under the last picture: the cap note when the drain stopped at the cap, else
     /// the empty line when a drain answered with nothing left — never over a failure, whose
     /// notice is the grid's own.
-    private func footerText(state: TripMembershipState, empty: Bool) -> String? {
-        if let note = Self.capNote(state, cap: trips.memberCap) { return note }
+    private func footerText(state: TripMemberState, empty: Bool) -> String? {
+        if let note = Self.capNote(state, cap: memberStore.memberCap) { return note }
         let drained = state == .complete || state == .truncated
-        return drained && empty && trips.lastError == nil ? Self.emptyTitle : nil
+        return drained && empty && memberStore.lastError == nil ? Self.emptyTitle : nil
     }
 
     /// The one bar at the trip's foot (`AppDock.bar(on:)`). Hosted with no dock — a test that shows
@@ -616,7 +691,23 @@ struct TripView: View {
 
     /// The trip's members as the store holds them now: what a tap of the toolbar acts on.
     private var currentMembers: [LibraryRow] {
-        trips.members(for: live ?? record)
+        shownMembers.rows
+    }
+
+    /// What the screen shows: the store's settled members, else the last settled ones of this
+    /// trip and this account while a re-read is on the wire, else none.
+    private var shownMembers: TripSettledMembers {
+        let shown = live ?? trip
+        if let fresh = freshMembers(of: shown) { return fresh }
+        let kept = settled.uid == shown.uid && settled.identity == identity
+        return kept ? settled : TripSettledMembers(uid: shown.uid, identity: identity)
+    }
+
+    /// The store's settled members, only while the trip store holds this screen's account: one
+    /// that has not moved yet to the account the screen shows still holds the outgoing one's.
+    private func freshMembers(of shown: Trip) -> TripSettledMembers? {
+        guard identity != nil, trips.identity == identity else { return nil }
+        return Self.settled(of: shown, in: memberStore, under: identity)
     }
 
     /// Select mode's toolbar, the toast of the last delete run over it, and the delete question.
@@ -654,7 +745,7 @@ struct TripView: View {
 
     /// A delete run is out — this screen's, or one an abandoned select mode left running.
     private var deleteRunning: Bool {
-        deleting.isDeleting || trips.isDeleting
+        deleting.isDeleting || memberStore.isDeleting
     }
 
     private var askingDelete: Binding<Bool> {
@@ -665,16 +756,18 @@ struct TripView: View {
     }
 
     /// The alert's yes: the handle is taken here, at the answer, and the whole run goes out on it
-    /// (`TripMembershipStore.delete`), claimed synchronously before any task. A run already sent
+    /// (`TripMemberStore.delete`), claimed synchronously before any task. A run already sent
     /// is let finish when select mode ends; only its answer stops counting (`abandon`).
     private func confirmDelete() {
-        guard let handle = access()?.handle else {
+        guard let access = access() else {
             deleting.claim(.cancelled)
             return
         }
         guard deleting.claim(.confirmed) else { return }
         Task {
-            await deleting.perform { uids in await trips.delete(uids, using: handle) }
+            await deleting.perform { uids in
+                await memberStore.delete(uids, using: access.handle, baseURL: access.baseURL)
+            }
         }
     }
 
@@ -693,8 +786,18 @@ struct TripView: View {
     /// selection with them — select mode stays, holding nothing, as after a Delete.
     private func removeSelection() {
         let chosen = selection.rows(in: currentMembers).map(\.id)
-        trips.remove(chosen, from: record.id)
-        selection.prune(keeping: currentMembers)
+        guard !chosen.isEmpty, let access = access() else { return }
+        let target = live ?? trip
+        Task {
+            do {
+                let outcome = try await memberStore.remove(
+                    chosen, from: target, using: access.handle, baseURL: access.baseURL)
+                removeFailure = outcome.stopped.flatMap(TripManage.sentence)
+            } catch {
+                removeFailure = TripManage.sentence(error)
+            }
+            selection.prune(keeping: currentMembers)
+        }
     }
 
     /// Select mode ended: a share still fetching stops being the live one and its task is
@@ -710,23 +813,17 @@ struct TripView: View {
     private var manageMenu: some View {
         Menu(Self.manageButton, systemImage: "ellipsis.circle") {
             Button(Self.renameButton, systemImage: "pencil") {
-                manage.askRename(current: live?.title ?? record.title)
+                manage.askRename(current: live?.title ?? trip.title)
             }
             Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
-            let pinAction = TripManage.pinAction(of: record.id, in: collections, now: now())
+            let pinAction = TripManage.pinAction(of: trip.uid, in: trips, now: now())
             Button(pinAction.title, systemImage: pinAction.symbol) {
-                manage.apply(pinAction, to: record.id, in: collections, now: now())
+                manage.apply(
+                    pinAction, to: trip.uid, in: trips,
+                    lastTaken: memberStore.summary(for: live ?? trip)?.lastTaken, now: now())
             }
-            Button(Self.moveUpButton, systemImage: "arrow.up") {
-                manage.move(record.id, .up, in: collections)
-            }
-            .disabled(TripManage.moveTarget(of: record.id, .up, in: collections.records) == nil)
-            Button(Self.moveDownButton, systemImage: "arrow.down") {
-                manage.move(record.id, .down, in: collections)
-            }
-            .disabled(TripManage.moveTarget(of: record.id, .down, in: collections.records) == nil)
-            Button(Self.showRemovedButton, systemImage: "eye.slash") { showingRemoved = true }
-                .disabled(trips.removedMembers(for: live ?? record).isEmpty)
+            // Offered before anything is known: its sheet computes the list when it opens.
+            Button(Self.showRemovedButton, systemImage: "eye.slash") { manage.showRemoved() }
             Divider()
             Button(Self.deleteButton, systemImage: "trash", role: .destructive) {
                 manage.askDelete()
@@ -747,21 +844,32 @@ struct TripView: View {
     private var refresher: TripURLRefresher {
         let access = access
         return TripURLRefresher(
+            members: memberStore,
             trips: trips,
-            collections: collections,
-            id: record.id,
+            uid: trip.uid,
+            session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL })
+        )
+    }
+
+    /// Who re-signs a lapsed picture of the Journal: a read of the journal again.
+    private var journalRefresher: TripJournalURLRefresher {
+        let access = access
+        return TripJournalURLRefresher(
+            members: memberStore,
+            trips: trips,
+            uid: trip.uid,
             session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL })
         )
     }
 
     private func drain() async {
         guard let live, let access = access() else { return }
-        await trips.drain(live, using: access.handle, baseURL: access.baseURL)
+        await memberStore.drain(live, using: access.handle, baseURL: access.baseURL)
     }
 
     private func loadJournal() async {
         guard let live, let access = access() else { return }
-        await trips.loadJournal(live, using: access.handle, baseURL: access.baseURL)
+        await memberStore.loadJournal(live, using: access.handle, baseURL: access.baseURL)
     }
 
     /// What decides whether an open viewer still fits the trip.
@@ -771,15 +879,15 @@ struct TripView: View {
     }
 
     private struct DrainKey: Equatable {
-        let subject: String?
-        let id: UUID
+        let identity: TimelineSnapshotIdentity?
+        let id: String
         let tag: String?
         let span: TripSpan?
     }
 
     private struct JournalKey: Equatable {
-        let subject: String?
-        let id: UUID
+        let identity: TimelineSnapshotIdentity?
+        let id: String
         let tag: String?
         let span: TripSpan?
         let shown: Bool
@@ -820,55 +928,53 @@ struct TripCover: View {
     }
 }
 
-/// Manage's Show Removed: the trip's removed pictures its drain still holds, oldest first
-/// (`TripMembershipStore.removedMembers`), each with Add Back. A removed picture the drain no
-/// longer holds — deleted, or its memo no longer tagged — is not listed, and stays removed.
+/// Manage's Show Removed: the pictures the server excludes from the trip, oldest first, each with
+/// Add Back — computed when the sheet opens (`TripMemberStore.removed`), never before. While they
+/// are read it says so; the answer is the exact list, "nothing removed", or — when the trip's
+/// members could not all be read (past the cap) — that the list is not available, never a guess.
 struct TripRemovedList: View {
-    let record: CollectionRecord
-    let collections: CollectionStore
-    let trips: TripMembershipStore
+    let trip: Trip
+    let trips: TripStore
+    let members: TripMemberStore
+    let access: () -> CollectionsAccess?
 
     @Environment(\.dismiss) private var dismiss
+    /// Why the last Add Back did not reach the server, or nil.
+    @State private var failure: String?
 
     static let title = "Removed"
     static let addBackButton = "Add Back"
+    /// What the sheet says when the server excludes nothing from the trip.
     static let emptyTitle = "No removed photos"
-    /// A removed picture's thumbnail side.
+    /// What it says while the list is computed.
+    static let loadingTitle = "Reading the removed photos…"
+    /// What it says when the list cannot be exact.
+    static let unavailableTitle = "Not available for a trip this large"
+    /// A row's thumbnail edge, in points.
     static let thumbnail: CGFloat = 56
 
     var body: some View {
-        let live = collections.records.first { $0.id == record.id } ?? record
-        let rows = trips.removedMembers(for: live)
+        let live = trips.trips.first { $0.uid == trip.uid } ?? trip
         List {
-            if rows.isEmpty {
-                Text(Self.emptyTitle)
-                    .foregroundStyle(.secondary)
+            if let failure {
+                Text(failure)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(TripView.errorLineID)
             }
-            ForEach(rows) { row in
-                HStack(spacing: DesignTokens.Space.regular) {
-                    AttachmentThumbnail(
-                        attachment: row.attachment,
-                        tier: .thumb,
-                        slot: AttachmentSlot(aspectRatio: 1, contentMode: .fill),
-                        cornerRadius: DesignTokens.Radius.tile
-                    )
-                    .frame(width: Self.thumbnail, height: Self.thumbnail)
-                    .accessibilityHidden(true)
-                    Group {
-                        if let taken = row.takenAt {
-                            Text(taken, format: .dateTime.day().month().year().hour().minute())
-                        } else {
-                            Text(row.filename)
-                        }
-                    }
-                    .font(.subheadline)
-                    .lineLimit(1)
-                    Spacer(minLength: DesignTokens.Space.snug)
-                    // Borderless: a default-styled button in a row is pressed by a tap anywhere
-                    // in that row.
-                    Button(Self.addBackButton) { trips.addBack(row.id, to: record.id) }
-                        .buttonStyle(.borderless)
+            switch members.removedState(for: live) {
+            case .notRequested, .loading:
+                HStack {
+                    Text(Self.loadingTitle).foregroundStyle(.secondary)
+                    Spacer()
+                    ProgressView()
                 }
+            case .unavailable:
+                Text(Self.unavailableTitle).foregroundStyle(.secondary)
+            case .exact(let rows) where rows.isEmpty:
+                Text(Self.emptyTitle).foregroundStyle(.secondary)
+            case .exact(let rows):
+                ForEach(rows) { row in self.row(row, of: live) }
             }
         }
         .navigationTitle(Self.title)
@@ -876,6 +982,54 @@ struct TripRemovedList: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") { dismiss() }
+            }
+        }
+        // Computed when the sheet opens, and again whenever the store let it go (a change to a
+        // trip, a refresh, another account).
+        .task(id: members.removedState(for: live) == .notRequested) {
+            guard members.removedState(for: live) == .notRequested, let access = access() else {
+                return
+            }
+            await members.removed(for: live, using: access.handle, baseURL: access.baseURL)
+        }
+    }
+
+    private func row(_ row: LibraryRow, of live: Trip) -> some View {
+        HStack(spacing: DesignTokens.Space.regular) {
+            AttachmentThumbnail(
+                attachment: row.attachment,
+                tier: .thumb,
+                slot: AttachmentSlot(aspectRatio: 1, contentMode: .fill),
+                cornerRadius: DesignTokens.Radius.tile
+            )
+            .frame(width: Self.thumbnail, height: Self.thumbnail)
+            .accessibilityHidden(true)
+            Group {
+                if let taken = row.takenAt {
+                    Text(taken, format: .dateTime.day().month().year().hour().minute())
+                } else {
+                    Text(row.filename)
+                }
+            }
+            .font(.subheadline)
+            .lineLimit(1)
+            Spacer(minLength: DesignTokens.Space.snug)
+            // Borderless: a default-styled button in a row is pressed by a tap anywhere
+            // in that row.
+            Button(Self.addBackButton) { addBack(row.id, to: live) }
+                .buttonStyle(.borderless)
+        }
+    }
+
+    private func addBack(_ uid: String, to live: Trip) {
+        guard let access = access() else { return }
+        Task {
+            do {
+                let outcome = try await members.addBack(
+                    uid, to: live, using: access.handle, baseURL: access.baseURL)
+                failure = outcome.stopped.flatMap(TripManage.sentence)
+            } catch {
+                failure = TripManage.sentence(error)
             }
         }
     }
@@ -937,11 +1091,6 @@ struct TripModeRow: View {
     }
 }
 
-/// Which way Move Up and Move Down move a trip in the order.
-enum TripMoveDirection {
-    case up, down
-}
-
 /// What the Manage menu's pin item offers: Pin for a trip that is not the active pin (an expired
 /// pin included), Unpin for the one that is.
 enum TripPinAction: Equatable {
@@ -964,12 +1113,21 @@ final class TripManage {
         case rename, delete
     }
 
-    /// The question on screen.
+    /// The question on screen, or nil.
     private(set) var question: Question?
-    /// The rename field's text.
+    /// The rename dialog's field.
     var draft = ""
-    /// The question whose yes has not been given yet.
+    /// Why the last change did not reach the server, or nil — said under the trip's title.
+    private(set) var failure: String?
+    /// The question a yes may still answer.
     private var armed: Question?
+    /// How many changes are out.
+    private var saving = 0
+    /// Manage's Show Removed is up.
+    var showingRemoved = false
+
+    /// Whether a rename, delete or cover change is out: the hero says so.
+    var isSaving: Bool { saving > 0 }
 
     func askRename(current: String) {
         draft = current
@@ -978,7 +1136,10 @@ final class TripManage {
 
     func askDelete() { ask(.delete) }
 
-    /// The dialog went off the screen, by whatever means.
+    /// Manage's Show Removed: offered before anything is known, its sheet computes the list.
+    func showRemoved() { showingRemoved = true }
+
+    /// The dialog went off the screen without an answer this flow saw: nothing more to show.
     func dismissed(_ question: Question) {
         if self.question == question { self.question = nil }
     }
@@ -988,73 +1149,95 @@ final class TripManage {
         question = nil
     }
 
-    /// Rename's yes: the trimmed title, written once. A blank or unchanged title writes nothing.
+    /// Renames trip `uid` to the draft, trimmed, on the server — only when the question was armed,
+    /// the draft says something and it differs from the title now. The answer is claimed here,
+    /// before anything is awaited; the returned task is the write.
     @discardableResult
-    func confirmRename(_ id: UUID, in collections: CollectionStore) -> Bool {
-        guard take(.rename),
-            let current = collections.records.first(where: { $0.id == id })?.title,
+    func confirmRename(
+        _ uid: String, in trips: TripStore, using access: CollectionsAccess?
+    ) -> Task<Bool, Never>? {
+        guard take(.rename), let access,
+            let current = trips.trips.first(where: { $0.uid == uid })?.title,
             let title = Self.renamed(draft, from: current)
-        else { return false }
-        collections.rename(id: id, to: title)
-        return true
+        else { return nil }
+        return save {
+            try await trips.update(
+                uid: uid, patch: TripPatch(title: .set(title)), using: access.handle,
+                baseURL: access.baseURL)
+        }
     }
 
-    /// Delete's yes: that trip, and only it, once.
+    /// Deletes trip `uid` on the server — only when the question was armed and the store holds
+    /// the trip. Its photos and memos stay. Claimed here; the returned task is the write.
     @discardableResult
     func confirmDelete(
-        _ id: UUID, in collections: CollectionStore, forgetting trips: TripMembershipStore? = nil
-    ) -> Bool {
-        guard take(.delete), collections.records.contains(where: { $0.id == id }) else {
-            return false
+        _ uid: String, in trips: TripStore, using access: CollectionsAccess?
+    ) -> Task<Bool, Never>? {
+        guard take(.delete), let access, trips.trips.contains(where: { $0.uid == uid }) else {
+            return nil
         }
-        collections.delete(id: id)
-        trips?.forget(id)
-        return true
+        return save { try await trips.delete(uid: uid, using: access.handle) }
     }
 
-    /// Moves the trip one place up or down the order; at the end it stays.
-    func move(_ id: UUID, _ direction: TripMoveDirection, in collections: CollectionStore) {
-        guard let target = Self.moveTarget(of: id, direction, in: collections.records) else {
-            return
+    /// Makes `picture` trip `uid`'s cover on the server (MEMNG-720).
+    @discardableResult
+    func setCover(
+        _ picture: String, of uid: String, in trips: TripStore, using access: CollectionsAccess?
+    ) -> Task<Bool, Never>? {
+        guard let access, trips.trips.contains(where: { $0.uid == uid }) else { return nil }
+        return save {
+            try await trips.update(
+                uid: uid, patch: TripPatch(cover: .set(picture)), using: access.handle,
+                baseURL: access.baseURL)
         }
-        collections.move(id: id, to: target)
     }
 
-    /// What the pin item offers for the trip at `now`: Unpin when it is the scope's active pin,
-    /// else Pin.
-    static func pinAction(
-        of id: UUID, in collections: CollectionStore, now: Date
-    ) -> TripPinAction {
-        collections.activePin(now: now)?.id == id ? .unpin : .pin
+    /// Pin or Unpin, named by whether trip `uid` is the scope's active pin at `now`.
+    static func pinAction(of uid: String, in trips: TripStore, now: Date) -> TripPinAction {
+        trips.pins.activePin(now: now)?.uid == uid ? .unpin : .pin
     }
 
-    /// Does what the item offered, never the opposite: a Pin tapped twice pins once (the second
-    /// write is the same pin), and an Unpin tapped twice leaves the trip unpinned. Not a toggle,
-    /// so a second tap cannot undo the first. A trip that has left the store is not written.
+    /// Pins trip `uid` (until seven days past `lastTaken`, or past `now` without it) or unpins
+    /// it. The pin is this device's own: nothing is sent.
     func apply(
-        _ action: TripPinAction, to id: UUID, in collections: CollectionStore, now: Date
+        _ action: TripPinAction, to uid: String, in trips: TripStore, lastTaken: Date?, now: Date
     ) {
-        guard collections.records.contains(where: { $0.id == id }) else { return }
+        guard trips.trips.contains(where: { $0.uid == uid }) else { return }
         switch action {
-        case .pin: collections.pin(id: id, now: now)
-        case .unpin: collections.unpin(id: id)
+        case .pin: trips.pin(uid: uid, lastTaken: lastTaken, now: now)
+        case .unpin: trips.unpin(uid: uid)
         }
     }
 
-    /// Where a move would put the trip, or nil when it is already at that end (or not a trip).
-    static func moveTarget(
-        of id: UUID, _ direction: TripMoveDirection, in records: [CollectionRecord]
-    ) -> Int? {
-        guard let index = records.firstIndex(where: { $0.id == id }) else { return nil }
-        let target = direction == .up ? index - 1 : index + 1
-        return records.indices.contains(target) ? target : nil
-    }
-
-    /// The title a rename writes: the draft trimmed, or nil when that is blank or unchanged.
+    /// The title a rename files: the draft trimmed, or nil when it is empty or unchanged.
     static func renamed(_ draft: String, from current: String) -> String? {
         let title = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, title != current else { return nil }
         return title
+    }
+
+    /// What a failed change says: the store's sentence, or nil for one that was superseded (the
+    /// account changed while it was out — nothing to say to the new one).
+    static func sentence(_ error: any Error) -> String? {
+        if let failure = error as? TripStore.Failure { return failure.errorDescription }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    private func save(
+        _ write: @escaping @MainActor () async throws -> Void
+    ) -> Task<Bool, Never> {
+        saving += 1
+        return Task {
+            defer { saving -= 1 }
+            do {
+                try await write()
+                failure = nil
+                return true
+            } catch {
+                failure = Self.sentence(error)
+                return false
+            }
+        }
     }
 
     private func ask(_ next: Question) {
@@ -1082,4 +1265,14 @@ struct TripShareLane {
             download: { file, rendition in try await session.download(file, rendition) }
         )
     }
+}
+
+/// The members a Trip screen shows: the store's once settled, held while a re-read is on the wire.
+struct TripSettledMembers: Equatable {
+    var uid: String?
+    /// Whose members these are: another account's screen never shows them.
+    var identity: TimelineSnapshotIdentity? = nil
+    var rows: [LibraryRow] = []
+    /// Whether a drain of the trip had applied when these were taken.
+    var loaded = false
 }

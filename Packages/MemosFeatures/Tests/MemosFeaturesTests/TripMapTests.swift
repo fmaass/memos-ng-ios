@@ -11,7 +11,7 @@ import UIKit
 
 /// A trip's Map (MEMNG-719): only the trip's markers, filtered by the COMPLETE drained membership.
 ///
-/// The membership is drained for real — a scripted server answers `GET /api/attachments` page
+/// The membership is drained for real — a scripted server answers the trip's member route page
 /// after page at the store's own page size of 60 — and the markers are read through the real
 /// `PlacesStore` from the same server, so the uid that joins the two is the one the wire carries.
 @MainActor
@@ -34,11 +34,18 @@ struct TripMapTests {
         MediaRetrySignal.shared = MediaRetrySignal()
     }
 
-    fileprivate func stores(memberCap: Int = TripMembershipStore.memberCap)
-        -> (CollectionStore, TripMembershipStore)
+    /// The trip stores over `wire`'s server, holding `Portugal 2026` (`portugal2026`) as a real
+    /// refresh read it back; the trip is the third of the triple.
+    fileprivate func stores(_ wire: TripMapWire, memberCap: Int = TripMemberStore.memberCap)
+        async -> (TripStore, TripMemberStore, Trip)
     {
-        let collections = CollectionStore(identity: alice, root: root)
-        return (collections, TripMembershipStore(collections: collections, memberCap: memberCap))
+        wire.transport.trips.seed("Portugal 2026", tag: "portugal2026", count: wire.transport.count)
+        let store = TripStore(identity: alice, root: root)
+        await store.refresh(using: wire.access.handle, baseURL: TripMapWire.baseURL)
+        let trip =
+            store.trips.first
+            ?? Trip(uid: "missing", title: "", createdAt: .distantPast, updatedAt: .distantPast)
+        return (store, TripMemberStore(trips: store, memberCap: memberCap), trip)
     }
 
     /// A marker at `latitude`, taken `minute` minutes into the trip.
@@ -74,8 +81,7 @@ struct TripMapTests {
     @Test("the 61st picture of a three-page drain keeps its marker")
     func aMemberBeyondTheFirstPageIsPresent() async {
         let wire = TripMapWire(members: 125, located: ["t0", "t60", "t124", "x9"])
-        let (collections, trips) = stores()
-        let record = collections.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let (collections, trips, record) = await stores(wire)
         await trips.drain(record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
         let pages = wire.transport.pageReads
         #expect(pages == 3, "precondition: three pages, read \(pages)")
@@ -90,8 +96,7 @@ struct TripMapTests {
     @Test("a drain stopped at the cap filters by the pictures it read, and no further")
     func aTruncatedDrainFiltersByWhatItRead() async {
         let wire = TripMapWire(members: 125, located: ["t0", "t60", "t61", "t124"])
-        let (collections, trips) = stores(memberCap: 61)
-        let record = collections.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let (collections, trips, record) = await stores(wire, memberCap: 61)
         await trips.drain(record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
         #expect(trips.state(for: record) == .truncated)
         let places = await loadedPlaces(wire)
@@ -103,8 +108,7 @@ struct TripMapTests {
     @Test("while the drain is on the wire the map is pending, never the empty map")
     func aDrainInFlightIsPending() async {
         let wire = TripMapWire(members: 3, located: ["t0"])
-        let (collections, trips) = stores()
-        let record = collections.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let (collections, trips, record) = await stores(wire)
         let places = await loadedPlaces(wire)
         #expect(places.status == .ready, "precondition: the markers are in")
         wire.transport.hold()
@@ -129,8 +133,7 @@ struct TripMapTests {
     @Test("no member that knows where it was taken is the empty map, and says so")
     func theEmptyMap() async {
         let wire = TripMapWire(members: 3, located: ["x0", "x1"])
-        let (collections, trips) = stores()
-        let record = collections.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let (collections, trips, record) = await stores(wire)
         await trips.drain(record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
         let places = await loadedPlaces(wire)
         #expect(places.status == .ready, "precondition: the account has located photos")
@@ -147,7 +150,7 @@ struct TripMapTests {
     @Test("the trip map's states: the membership first, then the markers")
     func states() {
         func state(
-            _ places: PlacesStatus, _ membership: TripMembershipState, _ error: String? = nil,
+            _ places: PlacesStatus, _ membership: TripMemberState, _ error: String? = nil,
             shown: Int = 0
         ) -> PlacesStatus {
             TripMapPresentation.state(
@@ -212,8 +215,7 @@ struct TripMapTests {
     @Test("an excluded member's marker leaves the map, and a viewer open on it closes")
     func anExcludedMemberLeaves() async throws {
         let wire = TripMapWire(members: 3, located: ["t0", "t1"])
-        let (collections, trips) = stores()
-        let record = collections.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let (collections, trips, record) = await stores(wire)
         await trips.drain(record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
         let places = await loadedPlaces(wire)
         let before = TripMapPresentation.markers(
@@ -224,8 +226,9 @@ struct TripMapTests {
         var kept = PlacesPresenting()
         kept.open(.viewer(try #require(PlacesPresentation.open("t0", in: [before[0]]))))
 
-        collections.exclude(id: record.id, uid: "t1")
-        let live = try #require(collections.records.first { $0.id == record.id })
+        try await trips.remove(
+            ["t1"], from: record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
+        let live = try #require(collections.trips.first { $0.uid == record.uid })
         let members = TripMapPresentation.memberUids(of: live, in: trips)
         let after = TripMapPresentation.markers(places.markers, of: members)
         let pins = after.map(\.uid)
@@ -239,8 +242,7 @@ struct TripMapTests {
     @Test("a trip deleted under the map closes its sheet and its viewers")
     func aDeletedTripClosesEverything() async throws {
         let wire = TripMapWire(members: 3, located: ["t0", "t1"])
-        let (collections, trips) = stores()
-        let record = collections.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let (collections, trips, record) = await stores(wire)
         await trips.drain(record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
         let places = await loadedPlaces(wire)
         let shown = TripMapPresentation.markers(
@@ -250,8 +252,7 @@ struct TripMapTests {
         presenting.open(.viewer(try #require(PlacesPresentation.open("t0", in: shown))))
         #expect(presenting.viewingFromSheet != nil, "precondition: a viewer over the sheet")
 
-        collections.delete(id: record.id)
-        trips.forget(record.id)
+        try await collections.delete(uid: record.uid, using: wire.access.handle)
         let members = TripMapPresentation.memberUids(of: record, in: trips)
         #expect(members == nil, "a deleted trip still has members: \(members ?? [])")
         let after = TripMapPresentation.markers(places.markers, of: members)
@@ -281,13 +282,13 @@ struct TripMapTests {
     // MARK: - the screen
 
     fileprivate func host(
-        _ stores: (CollectionStore, TripMembershipStore), _ wire: TripMapWire,
-        _ record: CollectionRecord, probe: PlacesStageProbe? = nil
+        _ stores: (TripStore, TripMemberStore, Trip), _ wire: TripMapWire,
+        _ record: Trip, probe: PlacesStageProbe? = nil
     ) -> some View {
         let access = wire.access
         return NavigationStack {
             TripView(
-                record: record, collections: stores.0, trips: stores.1, subject: "alice",
+                trip: record, trips: stores.0, memberStore: stores.1, identity: alice,
                 access: { access })
         }
         .environment(\.placesStageProbe, probe)
@@ -299,8 +300,8 @@ struct TripMapTests {
     func theScreenWaitsThenSaysEmpty() async {
         let wire = TripMapWire(members: 3, located: ["x0"])
         wire.transport.hold()
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         await CollectionsHost.with(host(stores, wire, record), height: 1400) { screen in
             let chosen = await screen.until { TripProbe.pressAtOnce("Map", on: screen) }
             #expect(chosen, "the Map chip took no press")
@@ -321,8 +322,8 @@ struct TripMapTests {
     @Test("Map shows the map for a trip with a located member, the chip chosen")
     func theScreenShowsTheMap() async {
         let wire = TripMapWire(members: 3, located: ["t1", "x0"])
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         await CollectionsHost.with(host(stores, wire, record), height: 1400) { screen in
             let chosen = await screen.until { TripProbe.pressAtOnce("Map", on: screen) }
             #expect(chosen, "the Map chip took no press")
@@ -349,8 +350,8 @@ extension TripMapTests {
     @Test("the screen hands the map the trip's markers only, the 61st member's among them")
     func theScreenStagesOnlyTheTrip() async {
         let wire = TripMapWire(members: 125, located: ["t0", "x9", "t60", "t124"])
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         let probe = PlacesStageProbe()
         let view = host(stores, wire, record, probe: probe)
         await CollectionsHost.with(view, height: 1400) { screen in
@@ -363,8 +364,8 @@ extension TripMapTests {
     @Test("excluding a picture closes the viewer its pin opened, and takes its pin off")
     func anExclusionClosesTheViewer() async throws {
         let wire = TripMapWire(members: 3, located: ["t0", "t1"])
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         let probe = PlacesStageProbe()
         let selection = try #require(PlacesPresentation.open("t1", in: [Self.marker("t1")]))
         let view = host(stores, wire, record, probe: probe)
@@ -372,7 +373,8 @@ extension TripMapTests {
             #expect(await onMap(screen, probe, staged: ["t0", "t1"]), "staged \(probe.staged)")
             probe.tap?(.viewer(selection))
             #expect(probe.presenting?().viewing?.id == "t1", "precondition: the viewer is open")
-            stores.0.exclude(id: record.id, uid: "t1")
+            _ = try? await stores.1.remove(
+                ["t1"], from: record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
             let closed = await screen.until { probe.presenting?().viewing == nil }
             #expect(closed, "the viewer stayed open on a picture the trip excluded")
             #expect(await screen.until { probe.staged == ["t0"] }, "staged \(probe.staged)")
@@ -382,8 +384,8 @@ extension TripMapTests {
     @Test("excluding a picture closes the sheet listing it, and the viewer over that sheet")
     func anExclusionClosesTheSheet() async throws {
         let wire = TripMapWire(members: 3, located: ["t0", "t1"])
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         let probe = PlacesStageProbe()
         let listed = [Self.marker("t0"), Self.marker("t1")]
         let sheet = PlaceSheet(markers: listed, canZoomIn: false, members: [])
@@ -395,7 +397,8 @@ extension TripMapTests {
             probe.tap?(.viewer(selection))
             #expect(probe.presenting?().sheet != nil, "precondition: the sheet is up")
             #expect(probe.presenting?().viewingFromSheet != nil, "precondition: a viewer over it")
-            stores.0.exclude(id: record.id, uid: "t1")
+            _ = try? await stores.1.remove(
+                ["t1"], from: record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
             let closed = await screen.until {
                 probe.presenting?().sheet == nil && probe.presenting?().viewingFromSheet == nil
             }
@@ -406,8 +409,8 @@ extension TripMapTests {
     @Test("deleting the trip closes the viewer a pin opened on its map")
     func aDeletionClosesTheViewer() async throws {
         let wire = TripMapWire(members: 3, located: ["t0", "t1"])
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         let probe = PlacesStageProbe()
         let selection = try #require(PlacesPresentation.open("t0", in: [Self.marker("t0")]))
         let view = host(stores, wire, record, probe: probe)
@@ -417,7 +420,8 @@ extension TripMapTests {
             #expect(probe.presenting?().viewing?.id == "t0", "precondition: the viewer is open")
             let manage = TripManage()
             manage.askDelete()
-            #expect(manage.confirmDelete(record.id, in: stores.0, forgetting: stores.1))
+            let deletion = manage.confirmDelete(record.uid, in: stores.0, using: wire.access)
+            #expect(await deletion?.value == true, "the delete did not reach the server")
             let closed = await screen.until { probe.presenting?().viewing == nil }
             #expect(closed, "the viewer stayed open over a trip that was deleted")
         }
@@ -466,10 +470,16 @@ final class TripMapTransport: ClientTransport, @unchecked Sendable {
     private nonisolated let members: Int
     private nonisolated let located: [String]
 
+    /// The trips the server holds; a trip's members are the tag listing below.
+    nonisolated let trips = TripRows()
+
     nonisolated init(members: Int, located: [String]) {
         self.members = members
         self.located = located
     }
+
+    /// How many pictures the trip's tag holds.
+    nonisolated var count: Int { members }
 
     /// Pages of the trip read so far.
     nonisolated var pageReads: Int { lock.withLock { pages } }
@@ -481,19 +491,17 @@ final class TripMapTransport: ClientTransport, @unchecked Sendable {
     nonisolated func send(
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
+        if let answered = try await trips.answer(
+            request, body: body, operationID: operationID, listing: { try await self.tagPage($0) })
+        {
+            return answered
+        }
         switch operationID {
         case "list_attachments_api_attachments_get":
             let items = URLComponents(string: request.path ?? "")?.queryItems ?? []
             let query = Dictionary(
                 items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
-            lock.withLock { pages += 1 }
-            while lock.withLock({ held }) { try await Task.sleep(for: .milliseconds(20)) }
-            let start = Int(query["cursor"] ?? "") ?? 0
-            let limit = Int(query["limit"] ?? "") ?? 60
-            let end = min(start + limit, members)
-            let rows = (start..<max(start, end)).map { Self.item("t\($0)", minute: $0) }
-            let next = end < members ? "\(end)" : nil
-            return Self.json("[" + rows.joined(separator: ",") + "]", next: next)
+            return try await tagPage(query)
         case "list_markers_api_map_markers_get":
             lock.withLock { markers += 1 }
             let rows = located.enumerated().map { Self.marker($0.element, index: $0.offset) }
@@ -503,6 +511,20 @@ final class TripMapTransport: ClientTransport, @unchecked Sendable {
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
+    }
+
+    /// The trip's tag, oldest first, at the query's `limit` from its offset `cursor`.
+    private nonisolated func tagPage(_ query: [String: String]) async throws -> (
+        HTTPResponse, HTTPBody?
+    ) {
+        lock.withLock { pages += 1 }
+        while lock.withLock({ held }) { try await Task.sleep(for: .milliseconds(20)) }
+        let start = Int(query["cursor"] ?? "") ?? 0
+        let limit = Int(query["limit"] ?? "") ?? 60
+        let end = min(start + limit, members)
+        let rows = (start..<max(start, end)).map { Self.item("t\($0)", minute: $0) }
+        let next = end < members ? "\(end)" : nil
+        return Self.json("[" + rows.joined(separator: ",") + "]", next: next)
     }
 
     private nonisolated static func stamp(_ minute: Int) -> String {
@@ -557,8 +579,8 @@ extension TripMapTests {
     @Test("a trip Map pin's viewer offers Use as Cover, and it makes that picture the cover")
     func aMapViewerUsesAsCover() async throws {
         let wire = TripMapWire(members: 3, located: ["t0", "t1"])
-        let stores = stores()
-        let record = stores.0.create(title: "Portugal 2026", tags: ["portugal2026"])
+        let stores = await stores(wire)
+        let record = stores.2
         let probe = PlacesStageProbe()
         let selection = try #require(PlacesPresentation.open("t1", in: [Self.marker("t1")]))
         let view = host(stores, wire, record, probe: probe)
@@ -581,10 +603,14 @@ extension TripMapTests {
                 "the one shared action is drawn as its own button beside a host's row")
             // The trip's own action, run as the viewer's menu row runs it: a menu cannot be opened
             // from a test, so the row's dispatch is `MediaViewerHostItem.tapped()`.
-            let action = TripView.useAsCover(record.id, in: stores.0)
+            let access = wire.access
+            let action = TripView.useAsCover(
+                record.uid, in: stores.0, manage: TripManage(), access: { access })
             MediaViewerHostItem(action: action, attachment: selection.startPage.attachment) {}
                 .tapped()
-            #expect(stores.0.records.first?.coverUid == "t1", "the row chose no cover")
+            let chosen = await screen.until { stores.0.trips.first?.cover?.id == "t1" }
+            #expect(chosen, "the row chose no cover")
+            #expect(wire.transport.trips.rows.first?.cover == "t1", "the server holds no cover")
         }
     }
 }

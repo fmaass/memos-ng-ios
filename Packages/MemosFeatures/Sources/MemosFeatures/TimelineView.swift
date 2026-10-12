@@ -24,9 +24,9 @@ public struct TimelineView: View {
     /// A memo the Library asked this tab to open. Optional for the same reason the outbox is: a
     /// preview or a test host has no router.
     @Environment(MemoJump.self) private var jump: MemoJump?
-    /// The session's collections and memberships, moved to a new identity beside the timeline.
-    @Environment(CollectionStore.self) private var collections: CollectionStore?
-    @Environment(TripMembershipStore.self) private var trips: TripMembershipStore?
+    /// The session's trips and their members, moved to a new identity beside the timeline.
+    @Environment(TripStore.self) private var trips: TripStore?
+    @Environment(TripMemberStore.self) private var tripMembers: TripMemberStore?
     /// The tabs' dock, which the list's scrolls are told to; nil when hosted without the tabs.
     @Environment(AppDock.self) private var dock: AppDock?
     @State private var timeline: TimelineStore?
@@ -144,7 +144,7 @@ public struct TimelineView: View {
                     isAsking: memoDelete.deleteStage == .asking,
                     failure: memoDelete.lastError,
                     // Read from the store as the sheet opens; the sheet keeps the first answer.
-                    pinnedTrip: ComposePinnedTrip.offered(by: collections, now: Date()),
+                    pinnedTrip: ComposePinnedTrip.offered(by: trips?.pins, now: Date()),
                     send: { event in
                         memoDelete.sendDelete(event) { uid in
                             await delete(uid: uid, in: timeline)
@@ -233,7 +233,7 @@ public struct TimelineView: View {
         .onSessionIdentityChange(snapshotIdentity) { identity in
             timeline?.sessionIdentityChanged(to: identity)
             CollectionsSession.identityChanged(
-                to: identity, collections: collections, trips: trips)
+                to: identity, trips: trips, members: tripMembers)
         }
         // The live media channel, and its single owner.
         //
@@ -986,7 +986,7 @@ struct ComposedAccountDefault: Sendable {
 }
 
 extension SessionStore {
-    /// Whose data this session reads — the pair a timeline snapshot and the collections file are
+    /// Whose data this session reads — the pair a timeline snapshot and the trips' pins file are
     /// filed under. Nil until there is both a server and a user.
     var snapshotIdentity: TimelineSnapshotIdentity? {
         guard let server = serverBaseURL, let subject = state.user?.subject else { return nil }

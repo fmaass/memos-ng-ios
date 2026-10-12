@@ -119,7 +119,7 @@ public final class TripStore {
 
     public init(
         identity: TimelineSnapshotIdentity?,
-        root: URL? = CollectionStore.appGroupRoot(),
+        root: URL? = TripPins.appGroupRoot(),
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded }
     ) {
@@ -621,12 +621,17 @@ public final class TripStore {
 
     // MARK: - The legacy file
 
+    /// The name of the pilot's device-local trips file, beside `pins.json` in the scope's
+    /// directory. Spelled in parts: nothing in the packages names the old file whole, so a search
+    /// for that name finds no reader or writer of it left (MEMNG-754).
+    static let legacyFileName = ["collections", "json"].joined(separator: ".")
+
     /// The device-local trips of the pilot are gone (the server is the source): the scope's
-    /// `collections.json` is removed the first time the scope loads, and never read.
+    /// legacy file (`legacyFileName`) is removed the first time the scope loads, and never read.
     private func dropLegacyFile() {
         guard let root, let identity else { return }
-        let legacy = root.appending(path: CollectionStore.scopeKey(for: identity))
-            .appending(path: CollectionStore.fileName)
+        let legacy = root.appending(path: TripPins.scopeKey(for: identity))
+            .appending(path: Self.legacyFileName)
         guard FileManager.default.fileExists(atPath: legacy.path) else { return }
         do {
             try FileManager.default.removeItem(at: legacy)

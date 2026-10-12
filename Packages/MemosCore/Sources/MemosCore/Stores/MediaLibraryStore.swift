@@ -410,7 +410,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     }
 
     /// The run itself, without a store's bookkeeping: shared with the Trip screen's Delete
-    /// (`TripMembershipStore.delete`), so both send the same requests and stop on the same answers.
+    /// (`TripMemberStore.delete`), so both send the same requests and stop on the same answers.
     /// `stillCurrent` is asked before each send and once after the last answer; `failed` is told
     /// the first failure, after which nothing further is sent.
     static func deleteRun(

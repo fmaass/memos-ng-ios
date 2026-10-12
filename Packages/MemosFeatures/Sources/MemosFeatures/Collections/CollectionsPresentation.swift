@@ -24,13 +24,23 @@ enum CollectionsPresentation {
     }
 
     /// The root header's subtitle (MEMNG-757): the trip count alone. No order phrase, because the
-    /// trips stand in the order they were arranged in, which is no rule a phrase could name.
+    /// trips stand in the order the server lists them, which is no rule a phrase could name.
     static func headerSubtitle(tripCount: Int) -> String {
         switch tripCount {
         case 0: "No trips yet"
         case 1: "1 trip"
         default: "\(tripCount) trips"
         }
+    }
+
+    /// What the header says while the list failed with no trip to show: never "No trips yet",
+    /// which the server did not say.
+    static let headerUnread = "Trips not read"
+
+    /// The header's subtitle over the trips the store holds: the count, or `headerUnread` when the
+    /// list failed and there is nothing to count.
+    static func headerSubtitle(tripCount: Int, listFailed: Bool) -> String {
+        tripCount == 0 && listFailed ? headerUnread : headerSubtitle(tripCount: tripCount)
     }
 
     /// How many pictures a trip or a tag holds: "1 photo", "3 photos".
@@ -54,18 +64,16 @@ enum CollectionsPresentation {
         return "\(counted) · \(text)"
     }
 
-    /// A trip card's second line: its span and its count, from the summary its record keeps; nil
-    /// before a summary was ever written.
-    static func cardDetail(_ summary: TripSummary?, locale: Locale, timeZone: TimeZone) -> String? {
-        guard let summary else { return nil }
-        let counted = photoCount(summary.count)
-        guard
-            let text = spanText(
-                first: summary.firstTaken,
-                last: summary.lastTaken,
-                locale: locale,
-                timeZone: timeZone
-            )
+    /// A trip card's second line: its taken dates and its count. The count is the server's for
+    /// this account (`memberCount`); the dates are the drained members' first and last taken once
+    /// they are read here (`summary`), else the trip's span, else none.
+    static func tripDetail(
+        _ trip: Trip, summary: TripMemberSummary?, locale: Locale, timeZone: TimeZone
+    ) -> String {
+        let counted = photoCount(trip.memberCount)
+        let first = summary?.firstTaken ?? trip.spanStart
+        let last = summary?.lastTaken ?? trip.spanEnd
+        guard let text = spanText(first: first, last: last, locale: locale, timeZone: timeZone)
         else { return counted }
         return "\(text) · \(counted)"
     }
@@ -90,25 +98,52 @@ enum CollectionsPresentation {
         }
     }
 
-    /// The cover a trip card shows: the member its summary names, once the membership has been
-    /// drained on this device. Nil draws the placeholder, never a broken tile.
-    ///
-    /// `live` is the summary over the membership as it stands NOW (`TripMembershipStore.summary`),
-    /// which reads the record's chosen cover at every call; the record's `lastSummary` is only
-    /// what the last drain wrote, so a cover chosen in the trip's viewer — or excluded — after that
-    /// drain would not reach the card until the next one (MEMNG-720). The written summary stands
-    /// in while nothing has been drained on this device.
-    static func cover(
-        of record: CollectionRecord, live: TripSummary? = nil, members: [LibraryRow]
-    ) -> MemoAttachment? {
-        guard let uid = (live ?? record.lastSummary)?.coverUid else { return nil }
-        return members.first { $0.id == uid }?.attachment
+    /// The cover a trip card shows: the chosen one while it is a drained member, else the first
+    /// member (`TripMemberStore.summary`); before the members are read here, the server's chosen
+    /// cover. Nil draws the placeholder, never a broken tile.
+    static func cover(of trip: Trip, summary: TripMemberSummary?) -> MemoAttachment? {
+        (summary?.cover ?? trip.cover)?.attachment
+    }
+
+    /// What each card shows for its trip: the store's summary, else the one it last showed while
+    /// that one still fits the trip — a change to any trip lets every trip's members go, and the
+    /// card keeps its dates and cover for the time the re-read takes. Only under the identity
+    /// it was read for: another account's trip of the same uid is not this one's.
+    static func shownSummary(
+        of trip: Trip, store: TripMemberSummary?, held: [String: HeldTripSummary],
+        under identity: TimelineSnapshotIdentity?
+    ) -> TripMemberSummary? {
+        store ?? held[trip.uid]?.summary(for: trip, under: identity)
     }
 
     /// The pushed trips that still exist: the stack up to the first trip `ids` no longer holds,
     /// since a screen pushed from a trip that is gone has nothing to stand on either.
-    static func trail(_ routes: [TripRoute], keeping ids: [UUID]) -> [TripRoute] {
+    static func trail(_ routes: [TripRoute], keeping ids: [String]) -> [TripRoute] {
         let kept = Set(ids)
         return Array(routes.prefix { kept.contains($0.id) })
+    }
+}
+
+/// A card's last summary, the trip it was read for and whose trip that was: it stands in only for
+/// a trip with the same tag, span and chosen cover under the same identity, since a summary of
+/// anything else would show the wrong dates — or another account's.
+struct HeldTripSummary: Equatable {
+    let identity: TimelineSnapshotIdentity?
+    let tag: String?
+    let span: TripSpan?
+    let cover: String?
+    let summary: TripMemberSummary
+
+    init(_ trip: Trip, _ summary: TripMemberSummary, under identity: TimelineSnapshotIdentity?) {
+        self.identity = identity
+        tag = trip.tag
+        span = trip.tripSpan
+        cover = trip.cover?.id
+        self.summary = summary
+    }
+
+    func summary(for trip: Trip, under identity: TimelineSnapshotIdentity?) -> TripMemberSummary? {
+        guard identity != nil, identity == self.identity else { return nil }
+        return tag == trip.tag && span == trip.tripSpan && cover == trip.cover?.id ? summary : nil
     }
 }

@@ -25,7 +25,7 @@ public final class TripMemberStore {
     public static let memberCap = 2000
 
     /// What the last drain could not do.
-    public private(set) var lastError: String?
+    public internal(set) var lastError: String?
 
     /// A drain that applied, with the lineage it belongs to: shown and reused only while that
     /// lineage is the current one.
@@ -41,11 +41,11 @@ public final class TripMemberStore {
         var uid: String
     }
 
-    private let trips: TripStore
-    private let pageSize: Int
+    let trips: TripStore
+    let pageSize: Int
     public let memberCap: Int
-    private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
-    private var session: (any SessionReporting)?
+    let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
+    var session: (any SessionReporting)?
     private var drained: [String: Drained] = [:]
     private var flights: [String: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
     private var removedResults: [String: (lineage: Lineage, state: TripRemovedState)] = [:]
@@ -55,6 +55,38 @@ public final class TripMemberStore {
 
     /// Test seam: awaited as a Removed read starts executing, before it reads anything.
     @ObservationIgnored var onRemovedStart: (@MainActor (String) async -> Void)?
+
+    // The journal, the New trip sheet's reads and Select's Delete (MEMNG-754), ported from the
+    // device-local membership store; their logic is in `TripMemberStore+Journal.swift`.
+
+    /// The count of every tag, every kind of file, in the server's order, for the New trip sheet.
+    public internal(set) var tagCounts: [LibraryTag] = []
+    /// Whether `tagCounts` is an answer, so the sheet can tell "no tag has a picture" from "not
+    /// read yet".
+    public internal(set) var tagCountsLoaded = false
+    /// The span of every tag the sheet has asked about, by tag.
+    public internal(set) var spans: [String: TripTagSpan] = [:]
+    /// A delete run is out: the Trip screen's toolbar takes no second tap meanwhile.
+    public internal(set) var isDeleting = false
+    var journals: [String: TripJournal] = [:]
+    /// What the last journal load of each trip could not do, by uid.
+    var journalErrors: [String: String] = [:]
+    var journalFlights: [String: TripJournalFlight] = [:]
+    var countsInFlight = false
+    /// Each tag's span read in flight: the generation and credential it was issued under, and its
+    /// token, so only that read's own end clears its slot.
+    var spansInFlight: [String: (generation: Int, credential: Int, token: Int)] = [:]
+    /// The callers that joined a span read, by its token; let go when it ends or on a reset.
+    @ObservationIgnored var spanJoiners: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    /// The pictures Delete took: absent from every trip's members and journal, so a page read
+    /// before the delete cannot put one back.
+    var deleted: Set<String> = []
+    /// Bumped by `sessionIdentityChanged()`: everything read before it belongs to somebody else.
+    var generation = 0
+    var journalToken = 0
+    /// Seams for tests: a journal load, or a span read, joining one already in flight.
+    @ObservationIgnored var onJournalJoin: (@MainActor () -> Void)?
+    @ObservationIgnored var onSpanJoin: (@MainActor () -> Void)?
 
     public init(
         trips: TripStore,
@@ -84,16 +116,18 @@ public final class TripMemberStore {
         return held.complete ? .complete : .truncated
     }
 
-    /// The drained members, oldest taken first; empty until a drain of the current lineage has
-    /// applied.
+    /// The drained members, oldest taken first, less any Delete took; empty until a drain of the
+    /// current lineage has applied.
     public func members(for trip: Trip) -> [LibraryRow] {
-        held(trip.uid)?.rows ?? []
+        let rows = held(trip.uid)?.rows ?? []
+        return deleted.isEmpty ? rows : rows.filter { !deleted.contains($0.id) }
     }
 
     /// The server's count, the drained rows' taken extrema, and the cover: the chosen one while it
     /// is a member, else the first member. Nil before a drain has applied.
     public func summary(for trip: Trip) -> TripMemberSummary? {
-        guard let rows = held(trip.uid)?.rows else { return nil }
+        guard held(trip.uid) != nil else { return nil }
+        let rows = members(for: trip)
         let dates = rows.compactMap(\.takenAt)
         let chosen = trip.cover.flatMap { cover in rows.first { $0.id == cover.id } }
         return TripMemberSummary(

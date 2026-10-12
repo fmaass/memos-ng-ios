@@ -5,28 +5,17 @@ import MemosAPI
 import OpenAPIRuntime
 import Testing
 
-/// A trip's span (MEMNG-737): a start and an end instant make every picture TAKEN in the window a
-/// member, whatever its memo's tags, beside the pictures of the trip's tag.
-///
-/// The span is drained with no server work: `GET /api/attachments?order=taken_desc`, no tag and no
-/// type, from the newest page down — rows taken after the end are skipped, rows in the window are
-/// kept, and the walk stops at the first row taken before the start. The server is a script under
-/// the REAL generated client (`StubTransport`); the record is a REAL `CollectionStore`.
+/// A trip's span on the server-backed trip (MEMNG-737, moved by MEMNG-754): the SERVER now lists a
+/// span's members, so the window walk this suite held the device's drain to is the Removed list's
+/// walk (`TripMemberStore.removed`) — the same newest-first library walk, the same window to the
+/// minute, the same fences — and the span's journal is read beside the tag's (decision 9: a trip
+/// without a tag has no journal, so the journal cases give the trip a tag as well as its span).
 @MainActor
 @Suite("Trip span")
 struct TripSpanTests {
-    private nonisolated static let listOperation = "list_attachments_api_attachments_get"
     private nonisolated static let memosOperation = "list_memos_api_memos_get"
     private nonisolated static let tag = "portugal2026"
     private nonisolated static let lisbonZone = TimeZone(identifier: "Europe/Lisbon")!
-
-    private let root = FileManager.default.temporaryDirectory
-        .appending(path: "trip-span")
-        .appending(path: UUID().uuidString)
-    private let alice = TimelineSnapshotIdentity(
-        server: URL(string: "https://memos.example.org")!,
-        subject: "alice"
-    )
 
     // MARK: - fixtures
 
@@ -114,58 +103,79 @@ struct TripSpanTests {
         }
     }
 
-    private func collections() -> CollectionStore {
-        CollectionStore(identity: alice, root: root, now: { Self.lisbon(1, 0, 0) })
+    /// The query a recorded path carried, by name.
+    private nonisolated static func query(path: String) -> [String: String] {
+        let items = URLComponents(string: path)?.queryItems ?? []
+        return Dictionary(
+            items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
     }
 
-    private func current(
-        _ record: CollectionRecord, in store: CollectionStore
-    ) -> CollectionRecord? {
-        store.records.first { $0.id == record.id }
+    /// The trip `server` lists first, and the stores a real refresh filled over it.
+    private func stores(
+        _ server: TripServer, pageSize: Int = TripMemberStore.pageSize,
+        memberCap: Int = TripMemberStore.memberCap,
+        onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
+            { _ in .superseded }
+    ) async throws -> (trip: Trip, trips: TripStore, members: TripMemberStore) {
+        let (trips, members) = await TripSeeder(server: server).members(
+            pageSize: pageSize, memberCap: memberCap, onUnauthorized: onUnauthorized)
+        return (try #require(trips.trips.first), trips, members)
     }
 
-    // MARK: - the span drain
+    /// A member listing of `named` pictures (uid and taken), less what `server` has excluded.
+    private nonisolated static func members(
+        _ named: [(String, Date)], excluding server: LockedValue<TripServer?>
+    ) -> (HTTPResponse, HTTPBody?) {
+        let excluded = Set(server.get()?.rows.first?.exclusions ?? [])
+        return page(named.filter { !excluded.contains($0.0) }.map { item($0.0, taken: $0.1) })
+    }
 
-    @Test("a span-only trip lists exactly the pictures taken in its window, to the minute")
+    /// The ids of an exact Removed list; nil for any other state.
+    private func removedIDs(_ state: TripRemovedState) -> [String]? {
+        guard case .exact(let rows) = state else { return nil }
+        return rows.map(\.id)
+    }
+
+    /// Narrows the trip's span on the server, through the trip store's own PATCH.
+    private func narrow(
+        _ trip: Trip, in trips: TripStore, on server: TripServer, start: Date
+    ) async throws -> Trip {
+        try await trips.update(
+            uid: trip.uid, patch: TripPatch(spanStart: .set(start)), using: server.client.handle,
+            baseURL: Stub.baseURL)
+    }
+
+    // MARK: - the span's walk
+
+    @Test("a span-only trip's Removed walk takes exactly the pictures taken in its window")
     func aSpanOnlyTripIsItsWindow() async throws {
-        let sent = LockedValue<[[String: String]]>([])
-        let operations = LockedValue<[String]>([])
-        let client = Stub.client { request, _, operation in
-            sent.set(sent.get() + [Self.query(request)])
-            operations.set(operations.get() + [operation])
-            return Self.library(request)
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections, pageSize: 5)
+        let server = TripServer(answer: { request, operation in
+            operation == TripWire.library ? Self.library(request) : nil
+        })
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, _, members) = try await stores(server, pageSize: 5)
 
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        await members.removed(for: trip, using: server.client.handle, baseURL: Stub.baseURL)
 
         #expect(
-            store.members(for: record).map(\.id)
+            removedIDs(members.removedState(for: trip))
                 == ["first-0000", "first-0959", "first-1001", "last-1359", "last-1400"],
             "not exactly the window, oldest first")
-        #expect(store.state(for: record) == .complete)
-        let written = try #require(current(record, in: collections)?.lastSummary)
-        #expect(written.count == 5, "the summary is not the window's")
-        #expect(written.firstTaken == Self.lisbon(10, 0, 0))
-        #expect(written.lastTaken == Self.lisbon(20, 14, 0))
-
-        let queries = sent.get()
-        #expect(queries.count == 2, "the walk did not stop at the first picture before the start")
-        #expect(operations.get().allSatisfy { $0 == Self.listOperation })
-        for query in queries {
+        let walk = server.calls.of(TripWire.library).map { Self.query(path: $0.path) }
+        #expect(walk.count == 2, "the walk did not stop at the first picture before the start")
+        for query in walk {
             #expect(query["order"] == "taken_desc", "not newest first: \(query)")
             #expect(query["tag"] == nil, "the span walk named a tag: \(query)")
             #expect(query["type"] == nil, "the span walk named a kind: \(query)")
             #expect(query["limit"] == "5", "\(query)")
         }
-        #expect(queries.map { $0["cursor"] } == [nil, "c1"])
+        #expect(walk.map { $0["cursor"] } == [nil, "c1"])
     }
 
-    @Test("a trip with a tag and a span lists the union, each picture once")
-    func theUnionHoldsEachPictureOnce() async {
-        let client = Stub.client { request, _, _ in
+    @Test("a trip with a tag and a span walks the union, each picture once")
+    func theUnionHoldsEachPictureOnce() async throws {
+        let server = TripServer(answer: { request, operation in
+            guard operation == TripWire.library else { return nil }
             let query = Self.query(request)
             if query["tag"] == Self.tag {
                 #expect(query["order"] == "taken_asc", "the tag lane changed its order")
@@ -179,209 +189,182 @@ struct TripSpanTests {
                 Self.item("both", taken: Self.lisbon(12, 12, 0)),
                 Self.item("eve", taken: Self.lisbon(9, 12, 0)),
             ])
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [Self.tag], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
+        })
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, _, members) = try await stores(server)
 
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
+        await members.removed(for: trip, using: server.client.handle, baseURL: Stub.baseURL)
 
         #expect(
-            store.members(for: record).map(\.id) == ["tagged-before", "both", "span-only"],
+            removedIDs(members.removedState(for: trip)) == ["tagged-before", "both", "span-only"],
             "not the union oldest first, each once")
-        #expect(current(record, in: collections)?.lastSummary?.count == 3)
     }
 
     @Test("an excluded span member never returns on a re-drain, nor an excluded tag member")
-    func anExclusionHoldsAcrossDrains() async {
-        let client = Stub.client { request, _, _ in
-            if Self.query(request)["tag"] == Self.tag {
-                return Self.page([Self.item("tagged", taken: Self.lisbon(5, 12, 0))])
-            }
+    func anExclusionHoldsAcrossDrains() async throws {
+        let box = LockedValue<TripServer?>(nil)
+        let named = [
+            ("tagged", Self.lisbon(5, 12, 0)), ("ours", Self.lisbon(12, 12, 0)),
+            ("dami", Self.lisbon(15, 12, 0)),
+        ]
+        let server = TripServer(answer: { _, operation in
+            operation == TripWire.members ? Self.members(named, excluding: box) : nil
+        })
+        box.set(server)
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, trips, members) = try await stores(server)
+        let handle = server.client.handle
+        await members.drain(trip, using: handle, baseURL: Stub.baseURL)
+        #expect(members.members(for: trip).count == 3, "control: the union before any exclusion")
+
+        try await members.remove(
+            ["dami", "tagged"], from: trip, using: handle, baseURL: Stub.baseURL)
+        let excluded = try #require(trips.trips.first)
+        await members.drain(excluded, using: handle, baseURL: Stub.baseURL)
+        await members.drain(excluded, using: handle, baseURL: Stub.baseURL)
+
+        #expect(members.members(for: excluded).map(\.id) == ["ours"], "an exclusion came back")
+        #expect(server.rows.first?.exclusions == ["dami", "tagged"])
+    }
+
+    @Test("Remove from trip takes a span member out, and a re-drain does not bring it back")
+    func removeASpanMember() async throws {
+        let box = LockedValue<TripServer?>(nil)
+        let named = [("ours", Self.lisbon(12, 12, 0)), ("dami", Self.lisbon(15, 12, 0))]
+        let server = TripServer(answer: { request, operation in
+            if operation == TripWire.members { return Self.members(named, excluding: box) }
+            guard operation == TripWire.library else { return nil }
             return Self.page([
                 Self.item("dami", taken: Self.lisbon(15, 12, 0)),
                 Self.item("ours", taken: Self.lisbon(12, 12, 0)),
                 Self.item("eve", taken: Self.lisbon(9, 12, 0)),
             ])
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [Self.tag], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.members(for: record).count == 3, "control: the union before any exclusion")
+        })
+        box.set(server)
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, trips, members) = try await stores(server)
+        let handle = server.client.handle
+        await members.drain(trip, using: handle, baseURL: Stub.baseURL)
+        #expect(members.members(for: trip).count == 2, "control: both are members")
 
-        collections.exclude(id: record.id, uid: "dami")
-        collections.exclude(id: record.id, uid: "tagged")
-        let excluded = current(record, in: collections) ?? record
-        await store.drain(excluded, using: client.handle, baseURL: Stub.baseURL)
-        await store.drain(excluded, using: client.handle, baseURL: Stub.baseURL)
+        try await members.remove(["dami"], from: trip, using: handle, baseURL: Stub.baseURL)
+        #expect(server.rows.first?.exclusions == ["dami"], "the span member was not removed")
 
-        #expect(store.members(for: excluded).map(\.id) == ["ours"], "an exclusion came back")
-        #expect(current(record, in: collections)?.lastSummary?.count == 1)
+        let after = try #require(trips.trips.first)
+        await members.drain(after, using: handle, baseURL: Stub.baseURL)
+        #expect(members.members(for: after).map(\.id) == ["ours"], "a re-drain brought it back")
+        await members.removed(for: after, using: handle, baseURL: Stub.baseURL)
+        #expect(removedIDs(members.removedState(for: after)) == ["dami"])
     }
 
-    @Test("Remove from trip takes a span member out, and a re-drain does not bring it back")
-    func removeASpanMember() async throws {
-        let client = Stub.client { _, _, _ in
-            Self.page([
-                Self.item("dami", taken: Self.lisbon(15, 12, 0)),
-                Self.item("ours", taken: Self.lisbon(12, 12, 0)),
-                Self.item("eve", taken: Self.lisbon(9, 12, 0)),
-            ])
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.members(for: record).count == 2, "control: both are members")
+    @Test("moving the end by one minute changes the window on the next walk")
+    func oneMinuteMovesTheCount() async throws {
+        let server = TripServer(answer: { request, operation in
+            operation == TripWire.library ? Self.library(request) : nil
+        })
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, trips, members) = try await stores(server, pageSize: 5)
+        let handle = server.client.handle
+        await members.removed(for: trip, using: handle, baseURL: Stub.baseURL)
+        #expect(removedIDs(members.removedState(for: trip))?.count == 5, "control")
 
-        store.remove(["dami"], from: record.id)
-        let after = try #require(current(record, in: collections))
-        #expect(after.excludedUids == ["dami"], "the span member was not removed")
-        #expect(after.lastSummary?.count == 1, "the summary was not written with the removal")
-
-        await store.drain(after, using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.members(for: after).map(\.id) == ["ours"], "a re-drain brought it back")
-        #expect(store.removedMembers(for: after).map(\.id) == ["dami"])
+        let later = Self.lisbon(20, 14, 1)
+        let moved = try await trips.update(
+            uid: trip.uid, patch: TripPatch(spanEnd: .set(later)), using: handle,
+            baseURL: Stub.baseURL)
+        #expect(moved.spanEnd == later, "the span was not written")
+        #expect(members.removedState(for: moved) == .notRequested, "the old walk's list stood")
+        await members.removed(for: moved, using: handle, baseURL: Stub.baseURL)
+        let window = removedIDs(members.removedState(for: moved))
+        #expect(window?.last == "last-1401", "14:01 did not join")
+        #expect(window?.count == 6)
     }
 
-    @Test("moving the end by one minute changes the count on the next drain")
-    func oneMinuteMovesTheCount() async {
-        let client = Stub.client { request, _, _ in Self.library(request) }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections, pageSize: 5)
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-        #expect(current(record, in: collections)?.lastSummary?.count == 5, "control")
-
-        var later = Self.span
-        later.end = Self.lisbon(20, 14, 1)
-        collections.setSpan(id: record.id, later)
-        let moved = current(record, in: collections) ?? record
-        #expect(moved.span == later, "the span was not written")
-        await store.drain(moved, using: client.handle, baseURL: Stub.baseURL)
-
-        #expect(store.members(for: moved).last?.id == "last-1401", "14:01 did not join")
-        #expect(current(record, in: collections)?.lastSummary?.count == 6)
+    @Test("a span walk past the cap stops reading, and the list says it is not available")
+    func theSpanStopsAtTheCap() async throws {
+        let server = TripServer(answer: { request, operation in
+            operation == TripWire.library ? Self.library(request) : nil
+        })
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, _, members) = try await stores(server, pageSize: 4, memberCap: 1)
+        await members.removed(for: trip, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(members.removedState(for: trip) == .unavailable)
+        let pages = server.calls.of(TripWire.library).count
+        #expect(pages == 1, "the walk read on past the cap: \(pages)")
     }
 
-    @Test("a span whose end lies before its start is refused and writes nothing")
-    func theStoreRefusesABackwardSpan() {
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        var backward = Self.span
-        backward.end = Self.span.start.addingTimeInterval(-60)
-        collections.setSpan(id: record.id, backward)
-        #expect(current(record, in: collections)?.span == Self.span, "a backward span was written")
-
-        var instant = Self.span
-        instant.end = instant.start
-        collections.setSpan(id: record.id, instant)
-        #expect(current(record, in: collections)?.span == instant, "a one-instant span is a span")
-        collections.setSpan(id: record.id, nil)
-        #expect(current(record, in: collections)?.span == nil, "the span was not taken away")
-    }
-
-    @Test("a span drain stops at the cap with more of the window unread, and says truncated")
-    func theSpanStopsAtTheCap() async {
-        let sent = LockedValue<Int>(0)
-        let client = Stub.client { request, _, _ in
-            sent.set(sent.get() + 1)
-            return Self.library(request)
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections, pageSize: 4, memberCap: 2)
-
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-
-        #expect(store.members(for: record).count == 2)
-        #expect(store.state(for: record) == .truncated)
-        #expect(sent.get() == 1, "the walk read on past the cap")
-    }
-
-    @Test("a drain issued under the old span publishes nothing once the span has changed")
-    func anOldSpansDrainIsDropped() async {
-        let entered = SpanSignal()
-        let release = SpanSignal()
-        let calls = LockedValue<Int>(0)
-        let client = Stub.client { request, _, _ in
-            calls.set(calls.get() + 1)
-            if calls.get() == 1 {
-                entered.signal()
+    @Test("a walk issued under the old span publishes nothing once the span has changed")
+    func anOldSpansDrainIsDropped() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = TripServer(
+            answer: { request, operation in
+                operation == TripWire.library ? Self.library(request) : nil
+            },
+            hold: { operation, count in
+                guard operation == TripWire.library, count == 1 else { return }
+                entered.open()
                 await release.wait()
-            }
-            return Self.library(request)
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections, pageSize: 5)
-
-        let held = Task { await store.drain(record, using: client.handle, baseURL: Stub.baseURL) }
+            })
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, trips, members) = try await stores(server, pageSize: 5)
+        let handle = server.client.handle
+        let held = Task { await members.removed(for: trip, using: handle, baseURL: Stub.baseURL) }
         #expect(await entered.wait(), "no request was sent")
-        var narrower = Self.span
-        narrower.start = Self.lisbon(20, 0, 0)
-        collections.setSpan(id: record.id, narrower)
-        release.signal()
+        let moved = try await narrow(trip, in: trips, on: server, start: Self.lisbon(20, 0, 0))
+        release.open()
         await held.value
 
-        let moved = current(record, in: collections) ?? record
-        #expect(store.members(for: moved).isEmpty, "the old span's drain published")
-        #expect(current(record, in: collections)?.lastSummary == nil, "the old span's summary")
-        #expect(store.state(for: moved) == .notLoaded)
-
-        await store.drain(moved, using: client.handle, baseURL: Stub.baseURL)
+        #expect(members.removedState(for: moved) == .notRequested, "the old span's walk published")
+        await members.removed(for: moved, using: handle, baseURL: Stub.baseURL)
         #expect(
-            store.members(for: moved).map(\.id) == ["last-1359", "last-1400"],
-            "control: the new span's drain lands")
+            removedIDs(members.removedState(for: moved)) == ["last-1359", "last-1400"],
+            "control: the new span's walk lands")
     }
 
-    @Test("a second drain of the same span in flight joins the first and sends nothing")
-    func twoDrainsOfOneSpanAreOneChain() async {
-        let entered = SpanSignal()
-        let release = SpanSignal()
-        let calls = LockedValue<Int>(0)
-        let client = Stub.client { request, _, _ in
-            calls.set(calls.get() + 1)
-            if calls.get() == 1 {
-                entered.signal()
+    @Test("a second Removed of the same span in flight joins the first and sends nothing")
+    func twoDrainsOfOneSpanAreOneChain() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = TripServer(
+            answer: { request, operation in
+                operation == TripWire.library ? Self.library(request) : nil
+            },
+            hold: { operation, count in
+                guard operation == TripWire.library, count == 1 else { return }
+                entered.open()
                 await release.wait()
-            }
-            return Self.library(request)
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections, pageSize: 5)
-        let joined = SpanSignal()
-        store.onJoin = { joined.signal() }
-
-        let first = Task { await store.drain(record, using: client.handle, baseURL: Stub.baseURL) }
+            })
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, _, members) = try await stores(server, pageSize: 5)
+        let handle = server.client.handle
+        let first = Task { await members.removed(for: trip, using: handle, baseURL: Stub.baseURL) }
         #expect(await entered.wait(), "no request was sent")
-        let second = Task { await store.drain(record, using: client.handle, baseURL: Stub.baseURL) }
-        #expect(await joined.wait(), "the second drain did not join")
-        release.signal()
+        // Main-actor work runs without a suspension from the latch to the join.
+        let started = TripLatch()
+        let second = Task {
+            started.open()
+            await members.removed(for: trip, using: handle, baseURL: Stub.baseURL)
+        }
+        #expect(await started.wait(), "the second walk never started")
+        release.open()
         await first.value
         await second.value
-
-        #expect(calls.get() == 2, "two drains were two chains: \(calls.get())")
-        #expect(store.members(for: record).count == 5)
+        let pages = server.calls.of(TripWire.library).count
+        #expect(pages == 2, "two walks were two chains: \(pages)")
+        #expect(removedIDs(members.removedState(for: trip))?.count == 5)
     }
 
     @Test("a tag spelling the query's syntax stays one value, and the span's walk names no tag")
-    func aTagWithQuerySyntaxBesideASpan() async {
-        let sent = LockedValue<[[String: String]]>([])
-        let client = Stub.client { request, _, _ in
-            sent.set(sent.get() + [Self.query(request)])
-            return Self.page([])
-        }
+    func aTagWithQuerySyntaxBesideASpan() async throws {
+        let server = TripServer(answer: { _, operation in
+            operation == TripWire.library ? Self.page([]) : nil
+        })
         let odd = "a&order=taken_desc&tag=b"
-        let collections = collections()
-        let record = collections.create(title: "Odd", tags: [odd], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-
-        let queries = sent.get()
+        server.seed(title: "Odd", tag: odd, span: Self.span)
+        let (trip, _, members) = try await stores(server)
+        await members.removed(for: trip, using: server.client.handle, baseURL: Stub.baseURL)
+        let queries = server.calls.of(TripWire.library).map { Self.query(path: $0.path) }
         #expect(queries.count == 2, "not one read per lane: \(queries)")
         #expect(queries.first?["tag"] == odd, "the tag did not travel as one value")
         #expect(queries.first?["order"] == "taken_asc")
@@ -389,56 +372,46 @@ struct TripSpanTests {
         #expect(queries.last?["order"] == "taken_desc")
     }
 
-    @Test("a refusal on the span's walk after the tag's pages reaches the session and applies none")
-    func aRefusalOnTheSpansWalk() async {
-        let handled = LockedValue<Int>(0)
-        let client = Stub.client { request, _, _ in
+    @Test("a refusal on the span's walk after the tag's pages reaches the session, lists nothing")
+    func aRefusalOnTheSpansWalk() async throws {
+        let handled = LockedValue(0)
+        let server = TripServer(answer: { request, operation in
+            guard operation == TripWire.library else { return nil }
             if Self.query(request)["tag"] == Self.tag {
                 return Self.page([Self.item("tagged", taken: Self.lisbon(5, 12, 0))])
             }
             return Stub.empty(.unauthorized)
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [Self.tag], span: Self.span)
-        let store = TripMembershipStore(
-            collections: collections,
+        })
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, _, members) = try await stores(
+            server,
             onUnauthorized: { (_: CredentialRefusal) in
                 handled.set(handled.get() + 1)
                 return .endedSession
             })
-
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-
+        await members.removed(for: trip, using: server.client.handle, baseURL: Stub.baseURL)
         #expect(handled.get() == 1, "the refusal did not reach the session")
-        #expect(store.lastError != nil, "an ended session said nothing")
-        #expect(store.members(for: record).isEmpty, "the tag's half was applied alone")
-        #expect(store.state(for: record) == .notLoaded)
-        #expect(current(record, in: collections)?.lastSummary == nil)
+        #expect(members.lastError != nil, "an ended session said nothing")
+        #expect(removedIDs(members.removedState(for: trip)) == nil, "the tag's half was listed")
     }
 
     // MARK: - the record
 
-    @Test("a record written before spans existed decodes, with no span")
-    func aRecordWithoutASpanDecodes() throws {
-        let id = UUID()
-        let file = """
-            {"formatVersion":1,"records":[{"id":"\(id.uuidString)","kind":"trip",\
-            "title":"Portugal 2026","tags":["portugal2026"],"order":0,\
-            "excludedUids":["p1"],"createdAt":"2026-03-12T00:00:00Z"}]}
-            """
-        let directory = root.appending(path: CollectionStore.scopeKey(for: alice))
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data(file.utf8).write(to: directory.appending(path: CollectionStore.fileName))
+    @Test("a trip listed with no span has none, and a span set on it reads back on a fresh list")
+    func aRecordWithoutASpanDecodes() async throws {
+        let server = TripServer()
+        server.seed(title: "Portugal 2026", tag: Self.tag)
+        let (trip, trips, _) = try await stores(server)
+        #expect(trip.span == nil && trip.tripSpan == nil)
+        #expect(trip.tag == "portugal2026")
 
-        let collections = collections()
-        let record = try #require(collections.records.first, "an old record did not decode")
-        #expect(record.id == id && record.tags == ["portugal2026"])
-        #expect(record.excludedUids == ["p1"])
-        #expect(record.span == nil)
-
-        collections.setSpan(id: id, Self.span)
-        let reread = CollectionStore(identity: alice, root: root)
-        #expect(reread.records.first?.span == Self.span, "the span did not survive a launch")
+        let span = Self.span
+        let patch = TripPatch(
+            spanStart: .set(span.start), spanEnd: .set(span.end), tz: .set(span.zone))
+        try await trips.update(
+            uid: trip.uid, patch: patch, using: server.client.handle, baseURL: Stub.baseURL)
+        let (reread, _, _) = try await stores(server)
+        #expect(reread.tripSpan == Self.span, "the span did not survive a fresh list")
     }
 
     @Test("a span set by its dates runs from 00:00 of the first day to 23:59:59 of the last")
@@ -475,43 +448,47 @@ struct TripSpanTests {
         )
     }
 
+    /// A server whose journal answers `tagged` on the tag lane and `spanned` on the span lane.
+    private nonisolated static func journalServer(
+        tagged: [String] = [], spanned: [String], box: LockedValue<TripServer?>? = nil,
+        named: [(String, Date)] = [], hold: TripServer.Hold? = nil
+    ) -> TripServer {
+        TripServer(
+            answer: { request, operation in
+                if operation == TripWire.members, let box { return members(named, excluding: box) }
+                guard operation == memosOperation else { return nil }
+                let lane = query(request)["tag"] == nil ? spanned : tagged
+                return Stub.json(Stub.page(lane, nextCursor: nil))
+            }, hold: hold)
+    }
+
     @Test("a span's journal is the memos placed in the window by their earliest picture")
     func theSpansJournal() async throws {
-        let queries = LockedValue<[[String: String]]>([])
-        let client = Stub.client { request, _, operation in
-            #expect(operation == Self.memosOperation)
-            queries.set(queries.get() + [Self.query(request)])
-            let memos = [
-                // Posted on the first day; its picture was taken the evening before: out.
-                Self.memo(
-                    "eve-picture", created: Self.lisbon(10, 8, 0), taken: [Self.lisbon(9, 23, 0)]),
-                // A text memo written in the window: in, by its date.
-                Self.memo("text", created: Self.lisbon(11, 9, 0)),
-                // Posted a week after, of the last morning: in, on the last day.
-                Self.memo(
-                    "later", created: Self.lisbon(27, 9, 0), taken: [Self.lisbon(20, 10, 0)]),
-                // Posted in the window, its earliest picture on the second day: in.
-                Self.memo(
-                    "two", created: Self.lisbon(12, 9, 0),
-                    taken: [Self.lisbon(12, 8, 0), Self.lisbon(11, 7, 0)]),
-                // A text memo written after the end: out.
-                Self.memo("after", created: Self.lisbon(21, 9, 0)),
-            ]
-            return Stub.json(Stub.page(memos, nextCursor: nil))
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-
-        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
-
+        let server = Self.journalServer(spanned: [
+            // Posted on the first day; its picture was taken the evening before: out.
+            Self.memo(
+                "eve-picture", created: Self.lisbon(10, 8, 0), taken: [Self.lisbon(9, 23, 0)]),
+            // A text memo written in the window: in, by its date.
+            Self.memo("text", created: Self.lisbon(11, 9, 0)),
+            // Posted a week after, of the last morning: in, on the last day.
+            Self.memo("later", created: Self.lisbon(27, 9, 0), taken: [Self.lisbon(20, 10, 0)]),
+            // Posted in the window, its earliest picture on the second day: in.
+            Self.memo(
+                "two", created: Self.lisbon(12, 9, 0),
+                taken: [Self.lisbon(12, 8, 0), Self.lisbon(11, 7, 0)]),
+            // A text memo written after the end: out.
+            Self.memo("after", created: Self.lisbon(21, 9, 0)),
+        ])
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, _, store) = try await stores(server)
+        await store.loadJournal(trip, using: server.client.handle, baseURL: Stub.baseURL)
         #expect(
-            store.journal(for: record).map(\.uid) == ["two", "text", "later"],
+            store.journal(for: trip).map(\.uid) == ["two", "text", "later"],
             "not the window's memos in the order of their days")
-        #expect(store.journalState(for: record) == .complete)
-        let query = try #require(queries.get().first)
-        #expect(queries.get().count == 1)
-        #expect(query["tag"] == nil, "the span lane named a tag: \(query)")
+        #expect(store.journalState(for: trip) == .complete)
+        let reads = server.calls.of(Self.memosOperation).map { Self.query(path: $0.path) }
+        let query = try #require(reads.first { $0["tag"] == nil }, "the span lane was not read")
+        #expect(reads.count == 2, "not one read per lane: \(reads)")
         #expect(query["sort"] == "created_at", "\(query)")
         let after = try #require(query["created_after"], "no created_after: \(query)")
         let bound = try #require(Self.instant(after), "not an instant: \(after)")
@@ -520,265 +497,202 @@ struct TripSpanTests {
     }
 
     @Test("a journal places a memo by its earliest picture, its date only without one")
-    func theJournalKeysOnTheEarliestPicture() async {
-        let client = Stub.client { _, _, _ in
-            Stub.json(
-                Stub.page(
-                    [
-                        // Written first, of pictures taken on the third day.
-                        Self.memo(
-                            "photos", created: Self.lisbon(11, 9, 0),
-                            taken: [Self.lisbon(13, 9, 0)]),
-                        Self.memo("words", created: Self.lisbon(12, 9, 0)),
-                    ], nextCursor: nil))
-        }
-        let collections = collections()
-        let record = collections.create(title: "Portugal 2026", tags: [Self.tag])
-        let store = TripMembershipStore(collections: collections)
-
-        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
-
-        #expect(store.journal(for: record).map(\.uid) == ["words", "photos"])
-        let photos = store.journal(for: record).last
-        #expect(photos.map(TripMembershipStore.journalInstant(of:)) == Self.lisbon(13, 9, 0))
+    func theJournalKeysOnTheEarliestPicture() async throws {
+        let server = Self.journalServer(
+            tagged: [
+                // Written first, of pictures taken on the third day.
+                Self.memo("photos", created: Self.lisbon(11, 9, 0), taken: [Self.lisbon(13, 9, 0)]),
+                Self.memo("words", created: Self.lisbon(12, 9, 0)),
+            ], spanned: [])
+        server.seed(title: "Portugal 2026", tag: Self.tag)
+        let (trip, _, store) = try await stores(server)
+        await store.loadJournal(trip, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(store.journal(for: trip).map(\.uid) == ["words", "photos"])
+        let photos = store.journal(for: trip).last
+        #expect(photos.map(TripMemberStore.journalInstant(of:)) == Self.lisbon(13, 9, 0))
     }
 
     @Test("a span memo whose every picture was removed from the trip leaves its journal")
-    func aRemovedPictureTakesItsMemo() async {
-        let client = Stub.client { _, _, _ in
-            Stub.json(
-                Stub.page(
-                    [
-                        Self.memo(
-                            "dami", created: Self.lisbon(12, 9, 0), taken: [Self.lisbon(12, 8, 0)]),
-                        Self.memo(
-                            "ours", created: Self.lisbon(13, 9, 0), taken: [Self.lisbon(13, 8, 0)]),
-                    ], nextCursor: nil))
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.journal(for: record).map(\.uid) == ["dami", "ours"], "control")
-
-        collections.exclude(id: record.id, uid: "dami-a0")
-        let excluded = current(record, in: collections) ?? record
+    func aRemovedPictureTakesItsMemo() async throws {
+        let box = LockedValue<TripServer?>(nil)
+        let server = Self.journalServer(
+            spanned: [
+                Self.memo("dami", created: Self.lisbon(12, 9, 0), taken: [Self.lisbon(12, 8, 0)]),
+                Self.memo("ours", created: Self.lisbon(13, 9, 0), taken: [Self.lisbon(13, 8, 0)]),
+            ], box: box,
+            named: [("dami-a0", Self.lisbon(12, 8, 0)), ("ours-a0", Self.lisbon(13, 8, 0))])
+        box.set(server)
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, trips, store) = try await stores(server)
+        let handle = server.client.handle
+        await store.loadJournal(trip, using: handle, baseURL: Stub.baseURL)
+        #expect(store.journal(for: trip).map(\.uid) == ["dami", "ours"], "control")
+        try await store.remove(["dami-a0"], from: trip, using: handle, baseURL: Stub.baseURL)
+        let excluded = try #require(trips.trips.first)
+        #expect(store.state(for: excluded) == .complete, "control: the members were read again")
         #expect(store.journal(for: excluded).map(\.uid) == ["ours"], "the removed memo stayed")
     }
 
     // MARK: - review round 1
 
-    @Test("a tag lane of exactly the cap still reads the span, and a member past it is truncated")
-    func anExactCapStillReadsTheSpan() async {
-        let sent = LockedValue<[[String: String]]>([])
+    @Test("a tag lane of exactly the cap still walks the span, and lists the picture past it")
+    func anExactCapStillReadsTheSpan() async throws {
         let tagged = [
             Self.item("tagged-a", taken: Self.lisbon(11, 12, 0)),
             Self.item("tagged-b", taken: Self.lisbon(12, 12, 0)),
         ]
-        let client = Stub.client { request, _, _ in
-            let query = Self.query(request)
-            sent.set(sent.get() + [query])
-            if query["tag"] == Self.tag { return Self.page(tagged) }
+        let server = TripServer(answer: { request, operation in
+            guard operation == TripWire.library else { return nil }
+            if Self.query(request)["tag"] == Self.tag { return Self.page(tagged) }
             return Self.page([
                 Self.item("span-new", taken: Self.lisbon(15, 12, 0)),
                 Self.item("eve", taken: Self.lisbon(9, 12, 0)),
             ])
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [Self.tag], span: Self.span)
-        let store = TripMembershipStore(collections: collections, memberCap: 2)
-
-        await store.drain(record, using: client.handle, baseURL: Stub.baseURL)
-
-        #expect(sent.get().contains { $0["order"] == "taken_desc" }, "the span was never read")
-        #expect(store.state(for: record) == .truncated, "a capped union said it was complete")
-        #expect(store.members(for: record).count == 2)
+        })
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, _, store) = try await stores(server, memberCap: 2)
+        await store.removed(for: trip, using: server.client.handle, baseURL: Stub.baseURL)
+        let walk = server.calls.of(TripWire.library).map { Self.query(path: $0.path) }
+        #expect(walk.contains { $0["order"] == "taken_desc" }, "the span was never read")
+        // Each lane is held to the cap on its own; the union of the two is exact.
+        #expect(
+            removedIDs(store.removedState(for: trip)) == ["tagged-a", "tagged-b", "span-new"],
+            "the span's picture past a full tag lane was not listed")
 
         // Control: a span that adds nothing new leaves the union whole at the cap.
-        let same = Stub.client { request, _, _ in
+        let same = TripServer(answer: { request, operation in
+            guard operation == TripWire.library else { return nil }
             if Self.query(request)["tag"] == Self.tag { return Self.page(tagged) }
             let eve = Self.item("eve", taken: Self.lisbon(9, 12, 0))
             return Self.page([tagged[1], tagged[0], eve])
-        }
-        let whole = TripMembershipStore(collections: collections, memberCap: 2)
-        await whole.drain(record, using: same.handle, baseURL: Stub.baseURL)
-        #expect(whole.state(for: record) == .complete)
+        })
+        same.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (wholeTrip, _, whole) = try await stores(same, memberCap: 2)
+        await whole.removed(for: wholeTrip, using: same.client.handle, baseURL: Stub.baseURL)
+        #expect(removedIDs(whole.removedState(for: wholeTrip)) == ["tagged-a", "tagged-b"])
     }
 
     @Test("a journal whose tag lane is exactly the cap still reads the span's memos")
-    func anExactCapJournalStillReadsTheSpan() async {
-        let client = Stub.client { request, _, _ in
-            if Self.query(request)["tag"] == Self.tag {
-                return Stub.json(
-                    Stub.page(
-                        [
-                            Self.memo("t1", created: Self.lisbon(11, 9, 0)),
-                            Self.memo("t2", created: Self.lisbon(12, 9, 0)),
-                        ], nextCursor: nil))
-            }
-            return Stub.json(
-                Stub.page([Self.memo("words", created: Self.lisbon(13, 9, 0))], nextCursor: nil))
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [Self.tag], span: Self.span)
-        let store = TripMembershipStore(collections: collections, memberCap: 2)
-
-        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
-
-        #expect(store.journalState(for: record) == .truncated, "a capped journal said complete")
-        #expect(store.journal(for: record).count == 2)
+    func anExactCapJournalStillReadsTheSpan() async throws {
+        let server = Self.journalServer(
+            tagged: [
+                Self.memo("t1", created: Self.lisbon(11, 9, 0)),
+                Self.memo("t2", created: Self.lisbon(12, 9, 0)),
+            ], spanned: [Self.memo("words", created: Self.lisbon(13, 9, 0))])
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, _, store) = try await stores(server, memberCap: 2)
+        await store.loadJournal(trip, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(store.journalState(for: trip) == .truncated, "a capped journal said complete")
+        #expect(store.journal(for: trip).count == 2)
     }
 
     @Test("a span memo stays in the journal only while one of its pictures is a current member")
-    func aSpanMemoNeedsACurrentMember() async {
-        let client = Stub.client { _, _, _ in
-            Stub.json(
-                Stub.page(
-                    [
-                        // One picture in the window, one taken after it.
-                        Self.memo(
-                            "mixed", created: Self.lisbon(12, 9, 0),
-                            taken: [Self.lisbon(12, 8, 0), Self.lisbon(25, 8, 0)]),
-                        Self.memo(
-                            "ours", created: Self.lisbon(13, 9, 0), taken: [Self.lisbon(13, 8, 0)]),
-                    ], nextCursor: nil))
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
-        #expect(store.journal(for: record).map(\.uid) == ["mixed", "ours"], "control")
-
-        collections.exclude(id: record.id, uid: "mixed-a0")
-        let excluded = current(record, in: collections) ?? record
+    func aSpanMemoNeedsACurrentMember() async throws {
+        let box = LockedValue<TripServer?>(nil)
+        let server = Self.journalServer(
+            spanned: [
+                // One picture in the window, one taken after it.
+                Self.memo(
+                    "mixed", created: Self.lisbon(12, 9, 0),
+                    taken: [Self.lisbon(12, 8, 0), Self.lisbon(25, 8, 0)]),
+                Self.memo("ours", created: Self.lisbon(13, 9, 0), taken: [Self.lisbon(13, 8, 0)]),
+            ], box: box,
+            named: [("mixed-a0", Self.lisbon(12, 8, 0)), ("ours-a0", Self.lisbon(13, 8, 0))])
+        box.set(server)
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, trips, store) = try await stores(server)
+        let handle = server.client.handle
+        await store.loadJournal(trip, using: handle, baseURL: Stub.baseURL)
+        #expect(store.journal(for: trip).map(\.uid) == ["mixed", "ours"], "control")
+        try await store.remove(["mixed-a0"], from: trip, using: handle, baseURL: Stub.baseURL)
+        let excluded = try #require(trips.trips.first)
         #expect(
             store.journal(for: excluded).map(\.uid) == ["ours"],
             "a picture outside the window kept its memo in the journal")
     }
 
     @Test("a picture deleted while the journal was read takes its span memo out of the journal")
-    func aDeletedPictureLeavesTheJournal() async {
-        let entered = SpanSignal()
-        let release = SpanSignal()
-        let client = Stub.client { _, _, operation in
-            guard operation == Self.memosOperation else { return Stub.empty(.noContent) }
-            entered.signal()
-            await release.wait()
-            return Stub.json(
-                Stub.page(
-                    [
-                        Self.memo(
-                            "gone", created: Self.lisbon(12, 9, 0), taken: [Self.lisbon(12, 8, 0)]),
-                        Self.memo(
-                            "kept", created: Self.lisbon(13, 9, 0), taken: [Self.lisbon(13, 8, 0)]),
-                    ], nextCursor: nil))
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-
-        let held = Task {
-            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
-        }
+    func aDeletedPictureLeavesTheJournal() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = Self.journalServer(
+            spanned: [
+                Self.memo("gone", created: Self.lisbon(12, 9, 0), taken: [Self.lisbon(12, 8, 0)]),
+                Self.memo("kept", created: Self.lisbon(13, 9, 0), taken: [Self.lisbon(13, 8, 0)]),
+            ],
+            hold: { operation, count in
+                guard operation == Self.memosOperation, count == 1 else { return }
+                entered.open()
+                await release.wait()
+            })
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, _, store) = try await stores(server)
+        let handle = server.client.handle
+        let held = Task { await store.loadJournal(trip, using: handle, baseURL: Stub.baseURL) }
         #expect(await entered.wait(), "no journal read was sent")
-        let outcome = await store.delete(["gone-a0"], using: client.handle)
+        let outcome = await store.delete(["gone-a0"], using: handle, baseURL: Stub.baseURL)
         #expect(outcome?.deleted == ["gone-a0"], "control: the delete went through")
-        release.signal()
+        release.open()
         await held.value
-
         #expect(
-            store.journal(for: record).map(\.uid) == ["kept"],
+            store.journal(for: trip).map(\.uid) == ["kept"],
             "a memo whose only picture was deleted stayed in the journal")
     }
 
     @Test("a drain failure under the old span writes no sentence once the span has changed")
-    func anOldSpansFailureSaysNothing() async {
-        let entered = SpanSignal()
-        let release = SpanSignal()
-        let client = Stub.client { _, _, _ in
-            entered.signal()
-            await release.wait()
-            return Stub.empty(.internalServerError)
+    func anOldSpansFailureSaysNothing() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = TripServer(
+            answer: { _, operation in
+                operation == TripWire.members ? Stub.empty(.internalServerError) : nil
+            },
+            hold: { operation, _ in
+                guard operation == TripWire.members else { return }
+                entered.open()
+                await release.wait()
+            })
+        server.seed(title: "Lisbon", span: Self.span)
+        let (trip, trips, store) = try await stores(server)
+        let held = Task {
+            await store.drain(trip, using: server.client.handle, baseURL: Stub.baseURL)
         }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(collections: collections)
-
-        let held = Task { await store.drain(record, using: client.handle, baseURL: Stub.baseURL) }
         #expect(await entered.wait(), "no request was sent")
-        var narrower = Self.span
-        narrower.start = Self.lisbon(20, 0, 0)
-        collections.setSpan(id: record.id, narrower)
-        release.signal()
+        _ = try await narrow(trip, in: trips, on: server, start: Self.lisbon(20, 0, 0))
+        release.open()
         await held.value
-
         #expect(store.lastError == nil, "the old span's failure was said over the new one")
     }
 
     @Test("a journal refusal under the old span reaches the session but writes no sentence")
-    func anOldSpansJournalRefusal() async {
-        let entered = SpanSignal()
-        let release = SpanSignal()
-        let handled = LockedValue<Int>(0)
-        let client = Stub.client { _, _, _ in
-            entered.signal()
-            await release.wait()
-            return Stub.empty(.unauthorized)
-        }
-        let collections = collections()
-        let record = collections.create(title: "Lisbon", tags: [], span: Self.span)
-        let store = TripMembershipStore(
-            collections: collections,
+    func anOldSpansJournalRefusal() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let handled = LockedValue(0)
+        let server = TripServer(
+            answer: { _, operation in
+                operation == Self.memosOperation ? Stub.empty(.unauthorized) : nil
+            },
+            hold: { operation, count in
+                guard operation == Self.memosOperation, count == 1 else { return }
+                entered.open()
+                await release.wait()
+            })
+        server.seed(title: "Lisbon", tag: Self.tag, span: Self.span)
+        let (trip, trips, store) = try await stores(
+            server,
             onUnauthorized: { (_: CredentialRefusal) in
                 handled.set(handled.get() + 1)
                 return .endedSession
             })
-
         let held = Task {
-            await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+            await store.loadJournal(trip, using: server.client.handle, baseURL: Stub.baseURL)
         }
         #expect(await entered.wait(), "no request was sent")
-        var narrower = Self.span
-        narrower.start = Self.lisbon(20, 0, 0)
-        collections.setSpan(id: record.id, narrower)
-        release.signal()
+        let moved = try await narrow(trip, in: trips, on: server, start: Self.lisbon(20, 0, 0))
+        release.open()
         await held.value
-
-        #expect(handled.get() == 1, "the refusal did not reach the session")
-        let moved = current(record, in: collections) ?? record
+        #expect(handled.get() >= 1, "the refusal did not reach the session")
         #expect(store.journalError(for: moved) == nil, "the old span's refusal was said")
-    }
-}
-
-/// A one-shot hand-off between a test and its scripted transport, bounded so a request that never
-/// comes fails the test instead of hanging it.
-private final class SpanSignal: Sendable {
-    private let stream: AsyncStream<Void>
-    private let continuation: AsyncStream<Void>.Continuation
-
-    init() {
-        let made = AsyncStream.makeStream(of: Void.self)
-        stream = made.stream
-        continuation = made.continuation
-    }
-
-    func signal() { continuation.yield() }
-
-    @discardableResult
-    func wait(seconds: Double = 5) async -> Bool {
-        let stream = self.stream
-        return await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                var iterator = stream.makeAsyncIterator()
-                return await iterator.next() != nil
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(seconds))
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
     }
 }
