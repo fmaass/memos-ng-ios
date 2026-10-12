@@ -128,11 +128,16 @@ struct HeaderGlassCircle: View {
 /// and 12): the sort, the kind, then "All tags" and every tag with its picture count. Each group is
 /// an inline Picker, which is what draws the checkmark on the chosen row — one selection each, so
 /// choosing a row un-chooses the others in its group and leaves the other groups alone.
+///
+/// LAST, below the pickers, the one action in the menu: clearing the media cache, labelled with
+/// its size (chrome trim, 2026-10-10 — its home since the Settings screen went). The size is the
+/// screen's, read when the header appears, and the item reads it again after clearing.
 struct LibraryOptionsMenuContent: View {
     @Binding var order: MediaLibraryOrder
     @Binding var filter: MediaLibraryFilter
     @Binding var tag: String?
     let tagRows: [LibraryTagRow]
+    @Binding var cache: MediaCacheMaintenance.Usage
 
     var body: some View {
         Picker("Sort", selection: $order) {
@@ -153,5 +158,7 @@ struct LibraryOptionsMenuContent: View {
             }
         }
         .pickerStyle(.inline)
+        Divider()
+        ClearMediaCacheItem(usage: $cache)
     }
 }

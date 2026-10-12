@@ -1446,9 +1446,10 @@ enum TripProbe {
         return found
     }
 
-    /// Runs the action titled `label` of the alert presented over `host` as UIKit runs it for a
-    /// tap — its handler, and the alert's own dismissal — and says whether there was one to run.
-    /// The handler is read by key: the action's view answers no `accessibilityActivate`.
+    /// Runs the action titled `label` of the alert presented over `host` — its handler, with the
+    /// alert's own dismissal started just before it — and says whether there was one to run. The
+    /// handler is read by key: the action's view answers no `accessibilityActivate`. Not UIKit's
+    /// order for a tap, which `pressAlert` keeps: there the handler runs after the alert has gone.
     static func pressDialog(_ label: String, in host: UIViewController) -> Bool {
         typealias Handler = @convention(block) (UIAlertAction) -> Void
         var next = host.presentedViewController
@@ -1461,6 +1462,27 @@ enum TripProbe {
         else { return false }
         alert.dismiss(animated: true)
         unsafeBitCast(block, to: Handler.self)(action)
+        return true
+    }
+
+    /// Runs the action titled `label` in the order UIKit runs a tap on an alert: the alert is
+    /// dismissed FIRST and the handler runs once it has gone. `pressDialog` runs the handler while
+    /// the dismissal is still animating, and a handler that raises the next question then presents
+    /// it over an alert that is still leaving — UIKit drops that presentation ("already
+    /// presenting"), and the test sees a question nobody asked. A person's tap never produces that
+    /// order, so the sign-out tests press this way.
+    static func pressAlert(_ label: String, in host: UIViewController) -> Bool {
+        typealias Handler = @convention(block) (UIAlertAction) -> Void
+        var next = host.presentedViewController
+        while let controller = next, !(controller is UIAlertController) {
+            next = controller.presentedViewController
+        }
+        guard let alert = next as? UIAlertController,
+            let action = alert.actions.first(where: { $0.title == label }),
+            let block = action.value(forKey: "handler") as AnyObject?
+        else { return false }
+        let handler = unsafeBitCast(block, to: Handler.self)
+        alert.dismiss(animated: true) { handler(action) }
         return true
     }
 

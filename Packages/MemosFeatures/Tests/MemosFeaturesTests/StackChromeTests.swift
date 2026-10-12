@@ -22,8 +22,9 @@ private final class TestPath {
 ///
 /// What is INSIDE each tab and destination is deliberately a stand-in, and only that. Everything
 /// that decides the question is production code — `MainTabs`, the bar it stands aside for, the real
-/// `SettingsRoute` and `MemoRoute`, the real `stackDestination`, and the chrome each route
-/// declares.
+/// `MemoRoute`, the real `stackDestination`, and the chrome each route declares — except the one
+/// route that takes the dock over: no screen of the app's does since the Settings screen went
+/// (chrome trim, 2026-10-10), so `TakeoverRoute` declares it here and the mechanism is still held.
 private struct ChromeHarness: View {
     @Bindable var nav: TestPath
 
@@ -37,8 +38,8 @@ private struct ChromeHarness: View {
                     Text("the timeline")
                         // As `TimelineView` keeps it: the bar's room inside the stack (MEMNG-690).
                         .leadingFootBar(on: .timeline)
-                        .stackDestination(for: SettingsRoute.self) { _ in
-                            Text("settings")
+                        .stackDestination(for: TakeoverRoute.self) { _ in
+                            Text("a screen for the whole app")
                         }
                         .stackDestination(for: MemoRoute.self) { route in
                             Text(route.uid)
@@ -205,16 +206,14 @@ private final class HostedTabs {
 /// Whether the app's tab bar is under a pushed screen, asked of the real hosted `MainTabs` rather
 /// than of the value that decides it.
 ///
-/// `SettingsView` itself cannot be hosted from this bundle — it reads `SessionStore` out of the
-/// environment, and constructing one inlines the API layer that Features reaches only through
-/// Core; `SettingsRenderTests` says the same at more length. So the screen under the push is a
-/// stand-in. The decision under test is not: put `SettingsRoute.chrome` back to `.withinTab` and
-/// the first test here goes red on the assertion.
+/// The screen under the push is a stand-in. The decision under test is not: declare
+/// `TakeoverRoute.chrome` `.withinTab` and the first test here goes red on the assertion — which
+/// is `stackDestination` reading the route's chrome, the mechanism every route goes through.
 @MainActor
 @Suite("The dock under a pushed screen")
 struct StackChromeTests {
-    @Test("Settings takes the dock over, and going back brings it straight back")
-    func settingsTakesTheBarOverAndGivesItBack() {
+    @Test("a screen for the whole app takes the dock over, and going back brings it straight back")
+    func aTakeoverTakesTheBarOverAndGivesItBack() {
         let nav = TestPath()
         let screen = HostedTabs(nav)
         defer { screen.tearDown() }
@@ -229,12 +228,12 @@ struct StackChromeTests {
         // The bar under a tab root is the app's, never UIKit's (MEMNG-690).
         #expect(!screen.systemTabBarShows)
 
-        withoutAnimation { nav.path.append(SettingsRoute()) }
+        withoutAnimation { nav.path.append(TakeoverRoute()) }
         screen.settle(waitingFor: { !screen.showsTab(MainTab.library.title) })
 
-        #expect(!screen.showsTab(MainTab.timeline.title), "on Settings — \(screen.labels)")
-        #expect(!screen.showsTab(MainTab.library.title), "on Settings — \(screen.labels)")
-        #expect(!screen.systemTabBarShows, "Settings brought the system tab bar back")
+        #expect(!screen.showsTab(MainTab.timeline.title), "on the takeover — \(screen.labels)")
+        #expect(!screen.showsTab(MainTab.library.title), "on the takeover — \(screen.labels)")
+        #expect(!screen.systemTabBarShows, "the takeover brought the system tab bar back")
 
         withoutAnimation { nav.path.removeLast() }
         screen.settle(waitingFor: { screen.dockShows })
@@ -267,9 +266,17 @@ struct StackChromeTests {
 
     @Test("which screens take the dock over is said once, on the route")
     func routesDeclareTheirChrome() {
-        #expect(SettingsRoute.chrome == .takesOverTab)
+        #expect(TakeoverRoute.chrome == .takesOverTab)
         #expect(MemoRoute.chrome == .withinTab)
         #expect(!ScreenChrome.takesOverTab.showsDock)
         #expect(ScreenChrome.withinTab.showsDock)
     }
+}
+
+/// A route that takes the dock over, declared the way a production route declares its chrome, so
+/// the takeover mechanism stays held now that no screen of the app's uses it.
+private struct TakeoverRoute: Hashable {}
+
+extension TakeoverRoute: @MainActor StackRoute {
+    static let chrome = ScreenChrome.takesOverTab
 }

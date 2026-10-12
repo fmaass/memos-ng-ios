@@ -3,10 +3,10 @@ import MemosCore
 import SwiftUI
 import UIKit
 
-// The decisions the Settings screen reads. Pure functions over the account's
-// settings, each one tested directly; the screens above them stay thin enough to be obvious.
+// The decisions the account sheet and the Library's cache item read. Pure functions over the
+// account's settings, each one tested directly; the views above them stay obvious.
 
-/// Which default visibilities the Settings screen offers, and what to say about one it does not.
+/// Which default visibilities the account sheet offers, and what to say about one it does not.
 enum DefaultVisibilityChoice {
     /// Public and Private. Two states, by decision rather than by omission.
     ///
@@ -82,11 +82,13 @@ enum AccountAvatar {
     }
 }
 
-/// What the About section can say about this build, kept apart from the bundle it reads.
+/// What can be said about this build — the Settings app's Version row (`SettingsBundleSync`) —
+/// kept apart from the bundle it reads.
 ///
-/// The split is not ceremony: inside a package `Bundle.main` is the APP at runtime and the test
-/// RUNNER under test, so a function that reached for it directly could only be tested against
-/// whatever the runner happened to declare. The decision is here and the reading is one line.
+/// The split is not ceremony: `Bundle.main` is the hosted APP in this project's test bundles as
+/// well as at runtime (`PrivacyManifestTests` reads the built manifests through it), so a function
+/// that reached for it directly could only be tested against whatever this one build declares.
+/// The decision is here, with every case a test can name, and the reading is one line.
 enum AboutInfo {
     /// `1.2 (34)`, or as much of it as the bundle actually declares.
     static func versionLine(shortVersion: String?, build: String?) -> String {
@@ -135,51 +137,4 @@ enum MediaCacheClearing {
     ) -> MediaCacheMaintenance.Usage {
         MediaCacheMaintenance.usage(of: cache)
     }
-}
-
-/// The Settings screen's sections, in the order they are read.
-///
-/// An explicit list rather than whatever the view body happens to contain, so that "these seven
-/// and no others" is a thing a test can hold. Notifications are coming and are NOT here: a section
-/// rendered as a disabled row or a "coming soon" line is a promise the app has not kept, and it
-/// costs a reader a tap to find that out. They arrive when they work.
-///
-/// Tokens are not a section either, and that is a decision rather than the same rule: both rows
-/// work, and both belong to the account already named at the top of the screen rather than beside
-/// Appearance and Storage. This device's row is what the phone may do to ITSELF
-/// (`DeviceTokenSection`); the account's whole list is a screen of its own behind a fresh sign-on
-/// (`ManageTokensRow`), because a device token may never mint or revoke a sibling (ADR-0015).
-enum SettingsScreen {
-    enum Section: String, CaseIterable, Equatable {
-        case account
-        case defaults
-        /// Where a capture may go, which is a decision about behaviour rather than about looks —
-        /// so it sits with the other decision about what a new memo does, not after Appearance.
-        case uploads
-        case appearance
-        case storage
-        case about
-        /// Last, and alone. Signing out was the FIRST thing this screen offered until MEMNG-185 —
-        /// a row in the Account section, beside the name it would sign out of, and a second copy
-        /// of the one in the toolbar's menu. It ends the session; it is done rarely and on
-        /// purpose; so it sits where a rare, deliberate thing is looked for, and nowhere else.
-        case signOut
-
-        /// `nil` for a section that prints no heading of its own.
-        var title: String? {
-            switch self {
-            case .account: "Account"
-            case .defaults: "Defaults"
-            case .uploads: "Uploads"
-            case .appearance: "Appearance"
-            case .storage: "Storage"
-            case .about: "About"
-            // The row underneath already says the word, and a heading repeating it would put back
-            // exactly the prominence this section was made to take away.
-            case .signOut: nil
-            }
-        }
-    }
-
-    static let sections: [Section] = Section.allCases
 }

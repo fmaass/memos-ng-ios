@@ -399,6 +399,47 @@ enum PressProbe {
             element(labelled: label)?.accessibilityActivate() ?? false
         }
 
+        /// Presses the segment titled `title` of a segmented control on the window, and says
+        /// whether an enabled control had that segment to press.
+        ///
+        /// `press` cannot reach one: its walk takes only a node that reads the label AND carries
+        /// the button trait, and a segment of the `UISegmentedControl` SwiftUI draws for a
+        /// segmented `Picker` is not such a node in a test host. So the segment reading its title
+        /// is activated as VoiceOver would, and when that left the control where it was, the
+        /// segment is chosen and the control's events sent, the way a tap on it ends — the same
+        /// two paths `ScopeBarProbe.choose` takes on the Library's scope control, the second only
+        /// when the first did nothing, so one press is one choice. A segment already chosen is no
+        /// press: a tap there changes nothing.
+        func pressSegment(_ title: String) -> Bool {
+            let deadline = Date().addingTimeInterval(0.4)
+            repeat {
+                layOut()
+                if case let (control, index)? = PressProbe.segment(titled: title, in: window) {
+                    guard control.isEnabled, control.selectedSegmentIndex != index else {
+                        return false
+                    }
+                    _ = PressProbe.segmentElement(titled: title, in: control)?
+                        .accessibilityActivate()
+                    if control.selectedSegmentIndex != index {
+                        control.selectedSegmentIndex = index
+                        control.sendActions(for: .valueChanged)
+                        control.sendActions(for: .primaryActionTriggered)
+                    }
+                    return true
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(slice))
+            } while Date() < deadline
+            return false
+        }
+
+        /// The titles of every segmented control on the window, for a message that has to say
+        /// what was there when a segment was not.
+        var segmentTitles: [[String]] {
+            PressProbe.segmentedControls(in: window).map { control in
+                (0..<control.numberOfSegments).map { control.titleForSegment(at: $0) ?? "?" }
+            }
+        }
+
         /// Whether the control is there and would take a press now: the same element `press`
         /// finds, not marked `.notEnabled`. What a press started can still be holding a control
         /// disabled after the effect a test waits for has landed, so the next press waits on this.
@@ -454,6 +495,45 @@ enum PressProbe {
             for subview in view.subviews where reads(sentence, in: subview) { return true }
         }
         return false
+    }
+
+    /// Every segmented control in the window's view tree that is drawn: not hidden, and inside
+    /// the window's bounds — a control the window does not show is one nobody can tap.
+    static func segmentedControls(in window: UIWindow) -> [UISegmentedControl] {
+        var found: [UISegmentedControl] = []
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if let control = view as? UISegmentedControl, !control.isHidden,
+                control.convert(control.bounds, to: window).intersects(window.bounds)
+            {
+                found.append(control)
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return found
+    }
+
+    /// The first drawn control with a segment titled `title`, and that segment's index.
+    static func segment(titled title: String, in window: UIWindow) -> (UISegmentedControl, Int)? {
+        for control in segmentedControls(in: window) {
+            for index in 0..<control.numberOfSegments
+            where control.titleForSegment(at: index) == title {
+                return (control, index)
+            }
+        }
+        return nil
+    }
+
+    /// The node under `control` that reads `title`, by its accessibility elements and its views.
+    static func segmentElement(titled title: String, in control: UISegmentedControl) -> NSObject? {
+        var stack: [Any] = [control]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject else { continue }
+            if object !== control, object.accessibilityLabel == title { return object }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
     }
 
     private static func element(labelled label: String, in node: Any) -> NSObject? {

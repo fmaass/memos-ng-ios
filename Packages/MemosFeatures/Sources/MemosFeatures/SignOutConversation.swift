@@ -6,8 +6,9 @@ import SwiftUI
 /// A protocol rather than `SessionStore` itself, so the conversation can be DRIVEN in a test: this
 /// module's test bundle cannot construct a `SessionStore` (its defaults reach into MemosAPI, which
 /// Features does not link — see `SettingsRenderTests`), and since MEMNG-185 the row on the
-/// Settings screen is the only way to sign out at all. A wiring no test can drive is a wiring that
-/// can be cut without anything going red, and this is not the one to leave in that state.
+/// account sheet (the Settings screen until 2026-10-10) is the only way to sign out at all. A
+/// wiring no test can drive is a wiring that can be cut without anything going red, and this is
+/// not the one to leave in that state.
 @MainActor
 protocol SignOutRevoking {
     func signOut() async -> SignOutOutcome
@@ -21,12 +22,12 @@ extension SessionStore: SignOutRevoking {}
 /// One conversation, not one per screen. `SignOutFlow` guarantees that exactly one revoke leaves
 /// the device however many times a tap arrives, and that guarantee is about ONE machine: two
 /// screens each keeping a stage of their own would be two machines, each correct, and between them
-/// two revokes. Signing out is started from the row at the bottom of Settings and nowhere else
-/// (MEMNG-185), but the alerts are raised by the navigation stack that screen is pushed inside, so
-/// the stage still has to outlive the screen — which is what this object is for.
+/// two revokes. Signing out is started from the row at the bottom of the account sheet and nowhere
+/// else (MEMNG-185, chrome trim 2026-10-10), but a revoke can outlive that sheet, so the stage has
+/// to outlive it too — which is what this object is for.
 ///
-/// So the stage lives here, the alerts are attached once at the navigation stack (`signOutAlerts`),
-/// and the screens only send events.
+/// So the stage lives here, handed to the sheet by the Timeline that owns it; the alerts
+/// (`signOutAlerts`) ask from whichever level is on top; and the views only send events.
 @MainActor
 @Observable
 final class SignOutConversation {
@@ -52,6 +53,20 @@ final class SignOutConversation {
     }
 
     func settle() { stage = .idle }
+
+    // The alerts' presentation bindings, with setters that send nothing. A setter used to send
+    // `.cancelled`, but it fires when its alert has GONE — after that alert's own button — so a
+    // "Sign out?" put away after a revoke that failed at once cancelled the explanation asked in
+    // the meantime, and the retry was lost; a second fast failure did the same to its own next
+    // question. Every button sends its own answer, Cancel included, so the buttons are the
+    // answers and a dismissal says nothing.
+    func askingPresented(muted: Bool) -> Binding<Bool> {
+        Binding(get: { !muted && self.isAsking }, set: { _ in })
+    }
+
+    func explanationPresented(muted: Bool) -> Binding<Bool> {
+        Binding(get: { !muted && self.explanation != nil }, set: { _ in })
+    }
 }
 
 extension View {
@@ -63,20 +78,20 @@ extension View {
     /// to "Sign out?" was "Sign out". An alert dims, shows both answers, and hands both to
     /// VoiceOver.
     ///
-    /// Attached to the navigation STACK rather than to the screen that asks, so the Settings
-    /// screen pushed inside that stack shares the one conversation instead of starting a second —
-    /// and so the question survives the screen being popped out from under it.
+    /// Attached once per presentation level, every one asking the SAME conversation: the
+    /// Timeline's stack, and the account sheet's own stack while that sheet is up — an alert
+    /// raised under a presented sheet does not appear. `muted` is how the level underneath stands
+    /// aside meanwhile (`accountSheet`), so exactly one level ever asks, and a question still
+    /// outstanding when the sheet goes is asked by the level the sheet leaves behind.
     func signOutAlerts(
         _ conversation: SignOutConversation,
-        session: any SignOutRevoking
+        session: any SignOutRevoking,
+        muted: Bool = false
     ) -> some View {
         self
             .alert(
                 "Sign out?",
-                isPresented: .init(
-                    get: { conversation.isAsking },
-                    set: { if !$0 { conversation.send(.cancelled, to: session) } }
-                )
+                isPresented: conversation.askingPresented(muted: muted)
             ) {
                 Button("Sign out", role: .destructive) {
                     conversation.send(.confirmed, to: session)
@@ -87,11 +102,8 @@ extension View {
             }
             .alert(
                 "Could not sign out",
-                isPresented: .init(
-                    get: { conversation.explanation != nil },
-                    set: { if !$0 { conversation.send(.cancelled, to: session) } }
-                ),
-                presenting: conversation.explanation
+                isPresented: conversation.explanationPresented(muted: muted),
+                presenting: muted ? nil : conversation.explanation
             ) { decision in
                 Button("Try again") { conversation.send(.confirmed, to: session) }
                 Button(decision.discardTitle, role: .destructive) {

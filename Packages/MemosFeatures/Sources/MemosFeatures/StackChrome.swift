@@ -5,9 +5,9 @@ import SwiftUI
 /// The dock belongs to the tabs, not to the navigation stack inside a tab, so it stays under
 /// everything the timeline pushes unless the pushed screen says otherwise. Nearly nothing should
 /// say otherwise: a memo is a thing inside the Timeline tab, and the dock under it is how you
-/// leave. Settings is the exception — it is the whole app's screen, reached from a tab it does not
-/// belong to, so the Timeline and Library icons under it were the previous screen's controls left
-/// sitting on somebody else's (MEMNG-220).
+/// leave. Settings was the exception until the chrome trim (2026-10-10) deleted that screen — the
+/// whole app's screen, reached from a tab it did not belong to, so the Timeline and Library icons
+/// under it were the previous screen's controls left sitting on somebody else's (MEMNG-220).
 enum ScreenChrome: Equatable, Sendable {
     /// A screen inside its tab. The dock stays exactly as it was on the tab's root.
     case withinTab
@@ -38,12 +38,8 @@ protocol StackRoute: Hashable {
 // everything else in this layer, so the `Hashable` conformance it already had is main-actor
 // isolated, and a protocol refining `Hashable` inherits that — which is the whole of what the
 // compiler means by a conformance "crossing into main actor-isolated code". Isolating the
-// conformance is the sanctioned answer to exactly that, and it costs nothing here: both
-// destinations are declared from `body`, which is on the main actor already.
-extension SettingsRoute: @MainActor StackRoute {
-    static let chrome = ScreenChrome.takesOverTab
-}
-
+// conformance is the sanctioned answer to exactly that, and it costs nothing here: every
+// destination is declared from `body`, which is on the main actor already.
 extension MemoRoute: @MainActor StackRoute {
     static let chrome = ScreenChrome.withinTab
 }

@@ -40,16 +40,18 @@ public enum AppearancePreference: String, CaseIterable, Sendable, Equatable {
 /// second device may reasonably disagree, and the server's own `theme` field is the web app's
 /// answer to a different question.
 ///
-/// `UserDefaults` rather than the app group: the share extension is presented by whichever app the
-/// person is sharing from and takes its appearance from the system, so publishing this where the
-/// extension could read it would buy nothing it could act on.
+/// Kept in the app group's suite, because that is the one domain the Settings app's pane writes:
+/// its root names the group so that the mobile-data switch beside this row lands where the outbox
+/// reads it, and a pane writes every row into that one domain. The share extension still never
+/// reads this key — it is presented by whichever app the person is sharing from and takes its
+/// appearance from the system — so the key moved domain and gained no reader.
 
 @MainActor
 @Observable
 public final class AppSettings {
-    /// The instance the app composes. Tests build their own over a scratch `UserDefaults`, which
-    /// is why the initialiser takes one at all.
-    public static let shared = AppSettings()
+    /// The instance the app composes, over the pane's suite. Tests build their own over a scratch
+    /// `UserDefaults`, which is why the initialiser takes one at all.
+    public static let shared = AppSettings(defaults: SettingsBundleSync.paneDefaults)
 
     /// Namespaced and stable. Renaming it would silently reset everyone's choice, because an
     /// unknown key reads as "System".
@@ -59,7 +61,7 @@ public final class AppSettings {
 
     public private(set) var appearance: AppearancePreference
 
-    public init(defaults: UserDefaults = .standard) {
+    public init(defaults: UserDefaults) {
         self.defaults = defaults
         self.appearance = Self.appearance(fromStored: defaults.string(forKey: Self.appearanceKey))
     }
@@ -69,6 +71,12 @@ public final class AppSettings {
     public func select(_ preference: AppearancePreference) {
         appearance = preference
         defaults.set(preference.rawValue, forKey: Self.appearanceKey)
+    }
+
+    /// Reads the stored choice again, writing nothing. The Settings app writes the same key while
+    /// this process is away, and the only moment this one can notice is when it comes back.
+    public func reload() {
+        appearance = Self.appearance(fromStored: defaults.string(forKey: Self.appearanceKey))
     }
 
     /// What the ROOT view applies, which is not quite the same question as what was chosen.

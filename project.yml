@@ -77,6 +77,11 @@ targets:
       # build phase copies it flat, and it cannot be renamed on the way in.
       - path: Support/MemosNG/PrivacyInfo.xcprivacy
         buildPhase: resources
+      # The phone's Settings app reads its pane for this app from a bundle of exactly this name at
+      # the app bundle's root (appearance, uploads over mobile data, the version). Copied whole, as
+      # one resource; the tests read it back out of the built app through `Bundle.main`.
+      - path: Support/MemosNG/Settings.bundle
+        buildPhase: resources
     dependencies:
       - package: MemosFeatures
       - package: MemosCore

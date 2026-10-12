@@ -48,6 +48,9 @@ struct MediaLibraryView: View {
     @State private var deleting = LibraryDeleteFlow()
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
     @State private var dockClaim = UUID()
+    /// The media cache's size, for the options menu's Clear item: read when the header appears,
+    /// and again by the item after it clears.
+    @State private var cacheUsage = MediaCacheMaintenance.Usage(usedBytes: 0, capacityBytes: 0)
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
     /// Which direction this device reads the library in, across launches. Read once, when the
@@ -476,9 +479,11 @@ struct MediaLibraryView: View {
                 order: sortBinding(library),
                 filter: filterBinding(library),
                 tag: tagBinding(library),
-                tagRows: tagRows(library)
+                tagRows: tagRows(library),
+                cache: $cacheUsage
             )
         }
+        .onAppear { cacheUsage = MediaCacheClearing.usage() }
     }
 
     /// Choosing a kind resets the paging (`setFilter`) and reads the first page of the kind that

@@ -11,11 +11,10 @@ import SwiftUI
 ///
 /// The arrangement, settled 2026-08-26:
 ///
-/// - LEADING: a gear, which opens Settings. It was the account's own face until MEMNG-185, and
-///   the face opened a menu of two items — a heading naming the account, and Settings. A menu
-///   that exists to offer one destination is a tap nobody asked for, so the destination is now
-///   the button: one press, straight to the screen. Who is signed in is still said, in the place
-///   it was always said properly — the top of Settings, with the avatar beside it.
+/// - LEADING: the account's own face, which opens the account sheet (chrome trim, 2026-10-10:
+///   the gear and the Settings screen went; appearance and uploads moved to the Settings app).
+///   One press, straight to the sheet — no menu, for the reason below. It was a gear from
+///   MEMNG-185 until then, and before that the face opened a two-item menu.
 /// - TRAILING: New memo — the screen's primary action, the RIGHTMOST thing in the bar. A search
 ///   loupe sat immediately to its left from MEMNG-120 until MEMNG-513 retired the Timeline's text
 ///   search (pictures are found by tag in the Library now), so the bar holds two controls.
@@ -25,20 +24,23 @@ import SwiftUI
 /// simplification: a menu opens with its first row directly under the anchor that opened it, and
 /// when that row was a destructive "Sign out" a second tap on the anchor — the reflex when a tap
 /// seems not to have registered — revoked a live credential (MEMNG-119). The heading row was put
-/// there to stand in the way. Nothing in this corner can take anything away now: the gear
-/// navigates, and signing out is the last row on the Settings screen, behind a confirmation
-/// (`SignOutFlow`).
+/// there to stand in the way. Nothing in this corner can take anything away now: the face opens
+/// a sheet, and signing out is the last row on that sheet, behind a confirmation (`SignOutFlow`).
 struct TimelineToolbar: ToolbarContent {
     /// Bumped once per memo made, so the pencil bounces. A plain count rather than the feedback
     /// trigger itself: `symbolEffect` wants a value it can compare, and nothing else here needs
     /// the rest of the trigger.
     let composed: Int
-    let openSettings: () -> Void
+    /// The account's picture, decoded once by the screen; nil draws the monogram.
+    let avatar: Image?
+    /// The account's name, for the monogram when there is no picture.
+    let name: String
+    let openAccount: () -> Void
     let newMemo: () -> Void
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            SettingsToolbarButton(openSettings: openSettings)
+            AccountToolbarButton(avatar: avatar, name: name, openAccount: openAccount)
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button(action: newMemo) {
@@ -50,21 +52,28 @@ struct TimelineToolbar: ToolbarContent {
     }
 }
 
-/// The way into Settings, as a view of its own.
+/// The way into the account sheet, as a view of its own.
 ///
 /// A view rather than a `Button` written inline in the toolbar body, and for a reason a placement
 /// test cannot cover: SwiftUI wraps a bar item in a host of its own, and that host carries the
 /// accessibility label while refusing to be activated — so a press driven through the hosted
 /// navigation bar does nothing whether the button is wired up or not, which is a test that passes
-/// and proves nothing. Hosted on its own it is an ordinary button, and pressing it either runs the
-/// navigation or does not (`TimelineToolbarTests`).
-struct SettingsToolbarButton: View {
-    let openSettings: () -> Void
+/// and proves nothing. Hosted on its own it is an ordinary button, and pressing it either opens
+/// the sheet or does not (`TimelineToolbarTests`).
+///
+/// The face at the shared avatar metric (28 pt), labelled "Account" for VoiceOver: the picture
+/// itself is hidden from it, so the label is what the control is called.
+struct AccountToolbarButton: View {
+    let avatar: Image?
+    let name: String
+    let openAccount: () -> Void
 
     var body: some View {
-        Button(action: openSettings) {
-            Image(systemName: "gearshape")
+        Button(action: openAccount) {
+            AccountAvatarView(image: avatar, name: name)
         }
-        .accessibilityLabel("Settings")
+        // Plain, so a bar button's template tint cannot paint the photograph over in the accent.
+        .buttonStyle(.plain)
+        .accessibilityLabel("Account")
     }
 }

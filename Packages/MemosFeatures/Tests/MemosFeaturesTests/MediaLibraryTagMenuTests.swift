@@ -137,6 +137,7 @@ struct LibraryOptionsMenuRenderTests {
         @State var filter: MediaLibraryFilter
         @State var tag: String?
         let tags: [LibraryTag]
+        @State var cache = MediaCacheMaintenance.Usage(usedBytes: 0, capacityBytes: 0)
 
         var body: some View {
             List {
@@ -144,7 +145,8 @@ struct LibraryOptionsMenuRenderTests {
                     order: $order,
                     filter: $filter,
                     tag: $tag,
-                    tagRows: MediaLibraryPresentation.tagRows(tags, selected: tag)
+                    tagRows: MediaLibraryPresentation.tagRows(tags, selected: tag),
+                    cache: $cache
                 )
             }
         }

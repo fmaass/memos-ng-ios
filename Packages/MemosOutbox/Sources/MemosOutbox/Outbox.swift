@@ -144,6 +144,7 @@ public final class Outbox {
         // toggle a promise the app keeps tomorrow.
         network.onPathChange { [weak self] in await self?.reconsiderUploads() }
         preferences.onChange { [weak self] in await self?.reconsiderUploads() }
+        preferences.onChangeNow { [weak self] in self?.refreshUploadVerdict() }
         uploadVerdict = UploadVerdict(
             policy: UploadNetworkPolicy(allowsMobileData: preferences.allowsMobileData),
             path: network.currentPath()
@@ -335,11 +336,18 @@ public final class Outbox {
     /// exactly ONE handler, so this is the registration the drain already had, not a second
     /// observer beside it.
     private func reconsiderUploads() async {
+        refreshUploadVerdict()
+        await drain()
+    }
+
+    /// What the queue says it is waiting for, recomputed from the choice and the path as they are
+    /// now — the half of `reconsiderUploads` that needs no drain, and the one a preference change
+    /// arriving through `UploadPreferences.apply` is answered with before the foreground drains.
+    private func refreshUploadVerdict() {
         uploadVerdict = UploadVerdict(
             policy: UploadNetworkPolicy(allowsMobileData: uploadPreferences.allowsMobileData),
             path: network.currentPath()
         )
-        await drain()
     }
 
     public func drain() async {

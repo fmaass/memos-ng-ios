@@ -79,14 +79,11 @@ struct AppSettingsTests {
     }
 }
 
-/// The upload toggle: the value, the sentence under it, and that the switch writes where the
-/// drain reads.
-///
-/// The screen itself is not rendered here — `SettingsView` reads a `SessionStore`, which this
-/// bundle cannot construct (see `SettingsRenderTests`) — so what the row IS made of is asserted
-/// directly, the same way every other decision on that screen is.
+/// The upload choice: the value, and that the switch writes where the drain reads. Its row is in
+/// the Settings app since the chrome trim (2026-10-10); the words on it are held against the
+/// pane's own plist (`SettingsBundlePaneTests`).
 @MainActor
-@Suite("The upload toggle on the Settings screen")
+@Suite("The upload choice")
 struct UploadSettingsTests {
     private func scratchPreferences() -> (preferences: UploadPreferences, name: String) {
         let (defaults, name) = scratchDefaults()
@@ -98,7 +95,8 @@ struct UploadSettingsTests {
         let (preferences, name) = scratchPreferences()
         defer { forgetting(name) }
 
-        #expect(UploadSettings(preferences: preferences).allowsMobileData == false)
+        let settings = UploadSettings(preferences: preferences)
+        #expect(settings.allowsMobileData == false)
     }
 
     /// The switch and the store are the same fact: choosing moves the screen AND writes where the
@@ -109,21 +107,12 @@ struct UploadSettingsTests {
         defer { forgetting(name) }
         let settings = UploadSettings(preferences: preferences)
 
-        await settings.select(true)
+        await settings.select(true).value
 
         #expect(settings.allowsMobileData)
         #expect(preferences.allowsMobileData)
-        #expect(UploadSettings(preferences: preferences).allowsMobileData)
-    }
-
-    /// The footer is a promise about behaviour, not decoration: it names the one thing the toggle
-    /// does NOT override. A row whose words claimed "always send" would be a lie about Low Data
-    /// Mode, which the policy refuses whatever this switch says.
-    @Test("the row says what it does, and what it does not")
-    func theWordsOnTheRow() {
-        #expect(UploadSettings.title == "Upload over mobile data")
-        #expect(UploadSettings.footer.contains("home network"))
-        #expect(UploadSettings.footer.contains("Low Data Mode always waits"))
+        let reread = UploadSettings(preferences: preferences)
+        #expect(reread.allowsMobileData)
     }
 }
 
@@ -248,7 +237,7 @@ struct AboutInfoTests {
 }
 
 @MainActor
-@Suite("Clearing the media cache from Settings")
+@Suite("Clearing the media cache")
 struct MediaCacheClearingTests {
     /// The defect this exists to prevent: there are TWO caches behind a photo, and emptying only
     /// the `URLCache` looks exactly like emptying both until the timeline is scrolled — every

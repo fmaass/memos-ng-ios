@@ -2232,19 +2232,38 @@ extension MediaImageLoaderTests {
 
     /// The fold's whole ask: the capsule's leading edge, read from the pixels of every frame of
     /// the transition, never moves by more than two points. The edge is a brightness threshold
-    /// read on a 33 ms cadence, so one mid-drag frame reads up to a point and a half inside the
-    /// rest (1.0 pt before the tab roots lost their titles, 1.5 pt since, on the same device);
-    /// a bar that really walked would show up as a run of frames, not one, and would fail the
-    /// inset check below long before it reached two points.
+    /// read on a 33 ms cadence, so ONE mid-drag frame can read inside the rest while the glass
+    /// itself has not moved (1.0 pt before the tab roots lost their titles, then 1.5 and 2.5 pt
+    /// on the same device, the glass at 21.0 on every frame of each of those runs). So the spread
+    /// is judged with the single reading farthest from the rest left out, and that reading, like
+    /// every other, is still held within three points of the inset. Leaving one reading out can
+    /// also drop the only frame before a walk began, which is why this judge is never alone: the
+    /// glass's own frame is held to the inset on every sample by `judgeGlass`, beside it.
     fileprivate func judgeEdge(_ clip: String, _ frames: [FilmFrame]) {
         let edges = frames.compactMap(\.edge)
-        let spread = (edges.max() ?? 0) - (edges.min() ?? 0)
         let seen = "\(clip): edges \(edges.map { Int(($0 * 10).rounded()) }) (tenths of a pt)"
         #expect(
             edges.count * 2 >= frames.count, "\(clip): the edge read on too few frames: \(seen)")
+        let rest = Self.droppingTheOutlier(edges)
+        let spread = (rest.max() ?? 0) - (rest.min() ?? 0)
         #expect(spread <= 2, "\(clip): the leading edge moved \(spread) pt: \(seen)")
         let inset = LeadingMainBar.leadingInset
         #expect(abs((edges.first ?? -100) - inset) <= 2, "\(clip): not at the inset: \(seen)")
+        let farthest = edges.map { abs($0 - inset) }.max() ?? 100
+        #expect(farthest <= 3, "\(clip): a frame read \(farthest) pt off the inset: \(seen)")
+    }
+
+    /// `edges` without the one reading farthest from their median: the single frame the
+    /// threshold can misread mid-drag. Fewer than three readings are returned whole.
+    fileprivate static func droppingTheOutlier(_ edges: [CGFloat]) -> [CGFloat] {
+        guard edges.count >= 3 else { return edges }
+        let median = edges.sorted()[edges.count / 2]
+        guard
+            let far = edges.indices.max(by: { abs(edges[$0] - median) < abs(edges[$1] - median) })
+        else { return edges }
+        var rest = edges
+        rest.remove(at: far)
+        return rest
     }
 
     /// The frames between the clip's first shape and its last: those whose bar band is as far from

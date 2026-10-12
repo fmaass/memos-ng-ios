@@ -55,12 +55,15 @@ public struct TimelineView: View {
     /// answer may write. The SAME coordinator the memo's own screen uses — a second delete path
     /// would be a second set of rules about when a memo may be removed.
     @State private var memoDelete = MemoEditFlow()
-    /// One conversation for the whole screen, shared with the Settings screen pushed from it —
-    /// two stages would be two machines and, between them, two revokes.
+    /// One conversation for the whole screen, handed to the account sheet opened from it — two
+    /// stages would be two machines and, between them, two revokes.
     @State private var signOut = SignOutConversation()
-    /// The account's picture, decoded once here and handed to Settings.
+    /// The account's picture, decoded once here and handed to the toolbar and the account sheet.
     @State private var avatar: Image?
-    /// Type-erased because the stack now leads to two different places: a memo, and Settings.
+    /// Whether the account sheet is up; the avatar top-left opens it (`accountSheet`).
+    @State private var accountOpen = false
+    /// Type-erased: the stack led to a memo and to Settings until the chrome trim (2026-10-10), and
+    /// is left so rather than re-typed in a change that is about the toolbar.
     @State private var path = NavigationPath()
     @State private var feedback = MemoFeedbackTrigger()
     /// The media a tile tap opened, full screen. A tapped video opens it too — on the video's
@@ -93,11 +96,8 @@ public struct TimelineView: View {
             // controls exactly where they were.
             .modifier(TabRootChrome())
             // `stackDestination`, not `navigationDestination`: what the tab bar does under a
-            // pushed screen is the route's to say, and saying it here is how Settings came to be
-            // drawn under the Timeline and Library icons it has nothing to do with (MEMNG-220).
-            .stackDestination(for: SettingsRoute.self) { _ in
-                SettingsView(signOut: signOut, avatar: avatar)
-            }
+            // pushed screen is the route's to say (MEMNG-220).
+            //
             // The memo is looked for in the timeline, and then as the one a Library jump read
             // for this push (`holder(of:)`); either way the detail screen edits through the
             // timeline store.
@@ -106,8 +106,8 @@ public struct TimelineView: View {
                     MemoDetailView(uid: route.uid, initial: found.memo, timeline: found.store)
                 }
             }
-            // Top-LEFT is the gear into Settings; top-RIGHT is New memo, alone since the loupe
-            // went (MEMNG-513). Which is which is decided in `TimelineToolbar` rather
+            // Top-LEFT is the account's face, opening its sheet; top-RIGHT is New memo, alone since
+            // the loupe went (MEMNG-513). Which is which is decided in `TimelineToolbar` rather
             // than here — a placement written inline in a screen that needs a live session to
             // construct is one no test can read back.
             //
@@ -115,7 +115,9 @@ public struct TimelineView: View {
             .toolbar {
                 TimelineToolbar(
                     composed: feedback.count,
-                    openSettings: { path.append(SettingsRoute()) },
+                    avatar: avatar,
+                    name: session.state.user?.name ?? "",
+                    openAccount: { accountOpen = true },
                     newMemo: { composing = .create(restoring: nil) }
                 )
             }
@@ -162,9 +164,12 @@ public struct TimelineView: View {
             // instead; here there is nothing to leave, so the sheet is what goes.
             if gone { composing = nil }
         }
-        .signOutAlerts(signOut, session: session)
+        // The sheet and the sign-out alerts together: while the sheet is up its own stack asks and
+        // this one is muted, and once it is down this one asks again — so a revoke the sheet's
+        // dismissal outlived is still explained here.
+        .accountSheet(isPresented: $accountOpen, signOut: signOut, avatar: avatar)
         // Decoded once, here, because the toolbar shows it on every frame of the timeline and the
-        // Settings screen shows it again — one decode, handed to both.
+        // account sheet shows it again — one decode, handed to both.
         .task(id: session.avatar) { avatar = await AccountAvatar.image(from: session.avatar) }
         // The foreground trigger, and one of only two the re-validation has. `initial: true`
         // because a timeline created while the app is ALREADY active never sees a change — which

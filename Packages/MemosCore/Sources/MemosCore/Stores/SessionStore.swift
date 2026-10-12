@@ -215,7 +215,11 @@ public final class SessionStore {
     /// reliably cancelled by dropping the client that made it, so an answer about account A can
     /// arrive after someone has signed in as B, and anything that assigns it without checking
     /// would be telling B a fact about A.
-    private var sessionGeneration = 0
+    private(set) var sessionGeneration = 0
+    /// The default-visibility PATCH and the token rename on the wire, each the one a second caller
+    /// joins or is refused by (`setDefaultVisibility`, `renameDeviceToken`).
+    @ObservationIgnored private var visibilityWrite: InFlightWrite<MemoVisibility>?
+    @ObservationIgnored private var tokenRename: InFlightWrite<String>?
     /// The generation a client was last INSTALLED under. Moved by an establishment, and by
     /// nothing else — a withdrawal leaves it exactly where it was.
     ///
@@ -2245,10 +2249,37 @@ public final class SessionStore {
     /// the PATCH response, so a change that did not take cannot leave the screen claiming it did.
     /// The generation guard is the one `loadSettings` carries and is there for the same reason: a
     /// reply can outlive the session that asked.
+    ///
+    /// One write at a time (CLAUDE.md, «A store serializes its own mutations»): a second call with
+    /// the SAME visibility while one is on the wire JOINS it and answers with its result; a call
+    /// with a DIFFERENT one is REFUSED — false, nothing sent — because two PATCHes racing each
+    /// other would leave whichever the server answered last as the default. A slot left by an
+    /// earlier session generation is never joined.
+    ///
+    /// The slot's task runs a turn later than the call that made it, and a session can end or be
+    /// replaced in between, so the sender is handed the generation the CALLER asked in and checks
+    /// it before it reads the client: a default asked for in one session is never sent in the next.
     @discardableResult
     public func setDefaultVisibility(_ visibility: MemoVisibility) async -> Bool {
-        guard let client else { return false }
-        let generation = sessionGeneration
+        if let pending = visibilityWrite, pending.generation == sessionGeneration {
+            guard pending.payload == visibility else { return false }
+            return await pending.task.value
+        }
+        let asked = sessionGeneration
+        let slot = InFlightWrite(
+            payload: visibility, generation: asked,
+            task: Task { await self.sendDefaultVisibility(visibility, askedIn: asked) }
+        )
+        visibilityWrite = slot
+        let saved = await slot.task.value
+        if visibilityWrite?.id == slot.id { visibilityWrite = nil }
+        return saved
+    }
+
+    func sendDefaultVisibility(
+        _ visibility: MemoVisibility, askedIn generation: Int
+    ) async -> Bool {
+        guard generation == sessionGeneration, let client else { return false }
         do {
             let settings = try await Self.updateSettings(client, defaultVisibility: visibility)
             guard generation == sessionGeneration else {
@@ -2309,16 +2340,36 @@ public final class SessionStore {
     ///
     /// Nothing moves optimistically. What the screen shows afterwards is the SERVER's copy out of
     /// the PATCH response, so a rename that did not take cannot leave the row claiming it did.
+    ///
+    /// One rename at a time, the rule `setDefaultVisibility` keeps: the same name while one is on
+    /// the wire joins it, a different name is refused with nothing sent — and, the same way, the
+    /// sender checks the generation the caller asked in before it reads the client.
     @discardableResult
     public func renameDeviceToken(to name: String) async -> Bool {
-        guard let client else { return false }
+        guard client != nil else { return false }
         // Checked here rather than by the field alone, so that the one rule is the one the request
         // is built from: a name the server would refuse is never sent.
         guard let sanitized = DeviceTokenName.sanitized(name) else {
             deviceTokenNotice = Self.tokenNameRefused
             return false
         }
-        let generation = sessionGeneration
+        if let pending = tokenRename, pending.generation == sessionGeneration {
+            guard pending.payload == sanitized else { return false }
+            return await pending.task.value
+        }
+        let asked = sessionGeneration
+        let slot = InFlightWrite(
+            payload: sanitized, generation: asked,
+            task: Task { await self.sendDeviceTokenRename(sanitized, askedIn: asked) }
+        )
+        tokenRename = slot
+        let renamed = await slot.task.value
+        if tokenRename?.id == slot.id { tokenRename = nil }
+        return renamed
+    }
+
+    func sendDeviceTokenRename(_ sanitized: String, askedIn generation: Int) async -> Bool {
+        guard generation == sessionGeneration, let client else { return false }
         do {
             let row = try await Self.renameDeviceToken(client, to: sanitized)
             guard generation == sessionGeneration else {
@@ -2971,4 +3022,13 @@ extension SessionStore: SessionReporting {
     public func nothingEstablishedSince(_ handle: SessionHandle) -> Bool {
         nothingEstablishedSince(handle.generation)
     }
+}
+
+/// A write on the wire, as the slot a second caller is judged against: what it sends, the session
+/// generation that sent it, and the answer to wait for when the second caller asks for the same.
+private struct InFlightWrite<Payload: Equatable> {
+    let id = UUID()
+    let payload: Payload
+    let generation: Int
+    let task: Task<Bool, Never>
 }

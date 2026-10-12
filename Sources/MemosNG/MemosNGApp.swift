@@ -21,6 +21,18 @@ struct MemosNGApp: App {
         URLCache.shared = MediaSession.shared.cache
         let holds = MediaSession.sharedSessionHolds(MediaSession.shared.cache)
         MemosLog.media.info("shared session holds the media cache: \(holds, privacy: .public)")
+        // Before anything reads a preference: `AppSettings.shared` is first read by the body below
+        // and `UploadSettings` reads the group's value when the delegate builds it, so the pane's
+        // defaults, an earlier build's appearance carried into the group and the version row are
+        // all in place first. The group is the pane's one suite; `.standard` is only where earlier
+        // builds kept the appearance.
+        SettingsBundleSync.launch(
+            from: .main,
+            standard: .standard,
+            domain: Bundle.main.bundleIdentifier ?? "",
+            group: SettingsBundleSync.paneDefaults,
+            groupDomain: OutboxDefaults.appGroup
+        )
     }
 
     var body: some Scene {
@@ -102,7 +114,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 await MainActor.run { session.credentialGrant() }
             }
         )
-        uploadSettings = outbox.map { UploadSettings(preferences: $0.uploadPreferences) }
+        uploadSettings = outbox.map {
+            UploadSettings(preferences: $0.uploadPreferences)
+        }
         // ATTACHED AT LAUNCH, ahead of everything. The system can deliver a finished chunk's
         // result the instant this process exists, and a result that finds no handler is discarded
         // with the server's own byte count in it. Nothing here waits on a session: recording what
@@ -116,7 +130,15 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
             ) { _ in
-                MainActor.assumeIsolated { _ = self.outbox?.appBecameActive() }
+                // The Settings app may have changed a preference while the app was away; the
+                // one activation path reads it back before it opens scheduling and drains.
+                MainActor.assumeIsolated {
+                    _ = SettingsBundleSync.activate(
+                        settings: AppSettings.shared,
+                        uploads: self.uploadSettings,
+                        outbox: self.outbox
+                    )
+                }
             },
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main

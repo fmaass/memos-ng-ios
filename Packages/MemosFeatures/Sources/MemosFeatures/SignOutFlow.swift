@@ -38,7 +38,9 @@ public enum SignOutFlow {
         case requested
         /// The question was answered yes — in the alert, or "Try again" after a failed revoke.
         case confirmed
-        /// The question was dismissed, whether by Cancel or by the sheet going away.
+        /// The question was answered no, by its Cancel button. An alert's own dismissal sends
+        /// nothing (`SignOutConversation.askingPresented`): a question the sheet leaves behind is
+        /// asked again by the level underneath.
         case cancelled
         case revokeReturned(SignOutOutcome)
     }

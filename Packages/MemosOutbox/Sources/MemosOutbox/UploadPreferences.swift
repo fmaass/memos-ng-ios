@@ -18,6 +18,7 @@ public final class UploadPreferences: @unchecked Sendable {
     private let defaults: UserDefaults
     private let lock = NSLock()
     private var observer: OutboxTrigger?
+    private var nowObservers: [UploadPreferenceNotice] = []
 
     public init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -40,11 +41,45 @@ public final class UploadPreferences: @unchecked Sendable {
         lock.withLock { observer = handler }
     }
 
+    /// The synchronous half: told once after every write, in registration order, before anything
+    /// is awaited. What the queue SAYS it is waiting for has to follow the choice in the same
+    /// instant, on both paths — the in-app switch and the Settings app's, which writes this suite
+    /// itself and is applied to the app's model when the app becomes active, draining through
+    /// `appBecameActive` rather than `onChange`.
+    public func onChangeNow(_ handler: @escaping UploadPreferenceNotice) {
+        lock.withLock { nowObservers.append(handler) }
+    }
+
     /// Writes the choice down and then lets whatever was waiting on it move, in that order — a
     /// drain that ran before the write landed would read the old answer and hold the job again.
     public func set(_ value: Bool) async {
         defaults.set(value, forKey: Self.allowsMobileDataKey)
+        await MainActor.run { self.notifyNow() }
+        await drainAfterApply()
+    }
+
+    /// The asynchronous half alone, for a caller that has already written the choice with `apply`
+    /// on the main actor before its first await — so that a process ended inside this drain has
+    /// already written every suite it was going to, and is not left with only some of them.
+    public func drainAfterApply() async {
         let observer = lock.withLock { self.observer }
         await observer?()
     }
+
+    /// The same write, with only the synchronous notice: the caller starts the drain itself, so
+    /// the asynchronous observer would be a second drain racing it.
+    @MainActor
+    public func apply(_ value: Bool) {
+        defaults.set(value, forKey: Self.allowsMobileDataKey)
+        notifyNow()
+    }
+
+    @MainActor
+    private func notifyNow() {
+        let told = lock.withLock { nowObservers }
+        for notice in told { notice() }
+    }
 }
+
+/// Told on the main actor, synchronously, after a write of the mobile-data choice.
+public typealias UploadPreferenceNotice = @MainActor @Sendable () -> Void

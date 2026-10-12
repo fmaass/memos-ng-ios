@@ -8,7 +8,7 @@ import UIKit
 /// Which end of the timeline's top bar each control sits at — measured in a real
 /// `UINavigationBar` rather than asserted against a list this file also wrote.
 ///
-/// The arrangement is an IA decision (see `TimelineToolbar`): the way into Settings LEADING, New
+/// The arrangement is an IA decision (see `TimelineToolbar`): the way into the account LEADING, New
 /// memo TRAILING and rightmost. A search loupe sat immediately left of New memo from MEMNG-120
 /// until MEMNG-513 retired the Timeline's text search. That is exactly the kind of decision a
 /// refactor undoes in silence — both controls were
@@ -17,7 +17,8 @@ import UIKit
 /// MEMNG-185 changed WHAT sits in the leading corner — a gear rather than the account's face, and
 /// a straight navigation rather than a menu — without changing where anything sits. The placement
 /// assertions below are unchanged for that reason; what is new is that pressing the thing is
-/// tested rather than only its presence.
+/// tested rather than only its presence. The chrome trim (2026-10-10) put the face back in place
+/// of the gear, opening a sheet rather than a menu; the placements held again.
 ///
 /// MEASURED, not read out of `UINavigationItem`. A SwiftUI `.toolbar` on iOS 26 leaves
 /// `leftBarButtonItems` and `rightBarButtonItems` EMPTY — both were 0 with two `.topBarTrailing`
@@ -61,7 +62,7 @@ struct TimelineToolbarTests {
     }
 
     private func toolbar() -> TimelineToolbar {
-        TimelineToolbar(composed: 0, openSettings: {}, newMemo: {})
+        TimelineToolbar(composed: 0, avatar: nil, name: "Fabian", openAccount: {}, newMemo: {})
     }
 
     /// Hosted in a real key window and laid out around a run-loop spin, for the reason
@@ -142,24 +143,23 @@ struct TimelineToolbarTests {
         return contents(of: hosted)
     }
 
-    /// The assertion the move is for: the way into Settings is in the LEADING half of the bar,
-    /// not wedged against the button at the other end of it. This is what fails on the old
-    /// arrangement.
-    @Test("the settings button is the leading control")
-    func settingsIsTheLeadingControl() throws {
+    /// The assertion the move is for: the way into the account is in the LEADING half of the
+    /// bar, not wedged against the button at the other end of it.
+    @Test("the account avatar is the leading control")
+    func accountIsTheLeadingControl() throws {
         let bar = try hostedBar()
         print("MEMOSNG_TOOLBAR_BEGIN\n\(bar.description)\nMEMOSNG_TOOLBAR_END")
         let account = try #require(
-            bar.control("Settings"),
-            "no control called Settings: \(bar.description)"
+            bar.control("Account"),
+            "no control called Account: \(bar.description)"
         )
         let newMemo = try #require(
             bar.control("New memo"),
             "no control called New memo: \(bar.description)"
         )
 
-        #expect(account.frame.midX < bar.middle, "the gear is not in the leading half")
-        #expect(account.frame.minX < newMemo.frame.minX, "the gear is not left of New memo")
+        #expect(account.frame.midX < bar.middle, "the avatar is not in the leading half")
+        #expect(account.frame.minX < newMemo.frame.minX, "the avatar is not left of New memo")
     }
 
     /// The other half of the same decision: New memo is in the trailing half and nothing sits to
@@ -192,42 +192,56 @@ struct TimelineToolbarTests {
         let drawn = bar.controls.map(\.label)
         let labels = Set(drawn)
 
-        #expect(labels.contains("Settings"), "\(bar.description)")
+        #expect(labels.contains("Account"), "\(bar.description)")
         #expect(labels.contains("New memo"), "\(bar.description)")
-        #expect(labels == ["Settings", "New memo"], "\(bar.description)")
+        #expect(labels == ["Account", "New memo"], "\(bar.description)")
         #expect(drawn.count == 2, "a control is drawn twice: \(bar.description)")
         // Positive control: the walk above reaches labelled views at all, so a label it does not
         // find is an absence rather than a walk that visited nothing.
         #expect(!labels.isEmpty)
     }
 
-    /// The half a placement test cannot reach: the gear is not a PICTURE of a way into Settings,
-    /// pressing it has to BE the way there. So the button is pressed the way VoiceOver presses it
-    /// and the navigation the screen handed the toolbar is watched for — a gear wired to nothing
-    /// fails here rather than in a screenshot nobody takes.
+    /// The gear is gone, not renamed or moved (chrome trim, 2026-10-10): nothing in the bar is
+    /// called Settings, whichever control it would be. Read off the hosted bar, beside the
+    /// Account control as the control that the walk reached the leading end at all.
+    @Test("no control in the bar is called Settings")
+    func nothingIsCalledSettings() throws {
+        let bar = try hostedBar()
+        let labels = bar.controls.map(\.label)
+
+        #expect(labels.contains("Account"), "the walk did not reach the avatar: \(bar.description)")
+        #expect(
+            !labels.contains { $0.localizedCaseInsensitiveContains("settings") },
+            "a control still says Settings: \(bar.description)"
+        )
+    }
+
+    /// The half a placement test cannot reach: the avatar is not a PICTURE of a way into the
+    /// account, pressing it has to OPEN the sheet. So the button is pressed the way VoiceOver
+    /// presses it and the opening the screen handed the toolbar is watched for — an avatar wired to
+    /// nothing fails here rather than in a screenshot nobody takes.
     ///
-    /// Pressed on `SettingsToolbarButton` hosted alone rather than through the bar above, because
+    /// Pressed on `AccountToolbarButton` hosted alone rather than through the bar above, because
     /// SwiftUI's bar-item host carries the label but refuses activation: driven through the bar,
-    /// this passes for a wired and an unwired gear alike. The bar tests hold WHERE it is and what
+    /// this passes for a wired and an unwired avatar alike. The bar tests hold WHERE it is and what
     /// it is called; this holds what it does.
-    @Test("pressing the settings button performs the navigation")
-    func pressingSettingsNavigates() {
-        let navigation = NavigationSpy()
+    @Test("pressing the avatar opens the account sheet")
+    func pressingTheAvatarOpensTheAccount() {
+        let opening = OpeningSpy()
         let pressed = PressProbe.withElement(
-            labelled: "Settings",
-            in: SettingsToolbarButton(openSettings: { navigation.open() })
+            labelled: "Account",
+            in: AccountToolbarButton(avatar: nil, name: "Fabian", openAccount: { opening.open() })
         ) { $0?.accessibilityActivate() ?? false }
 
-        #expect(pressed, "the settings button refused an activation")
-        #expect(navigation.opened == 1, "pressing the gear did not open Settings")
+        #expect(pressed, "the avatar refused an activation")
+        #expect(opening.opened == 1, "pressing the avatar did not open the account sheet")
     }
 }
 
-/// What the screen does when the toolbar asks for Settings, standing in for the navigation path
-/// `TimelineView` appends to — which cannot be reached from here, since that screen needs a
-/// `SessionStore` this bundle cannot build.
+/// What the screen does when the toolbar asks for the account, standing in for the `accountOpen`
+/// state `TimelineView` sets.
 @MainActor
-private final class NavigationSpy {
+private final class OpeningSpy {
     private(set) var opened = 0
 
     func open() { opened += 1 }
