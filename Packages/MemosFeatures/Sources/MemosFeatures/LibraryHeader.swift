@@ -162,3 +162,58 @@ struct LibraryOptionsMenuContent: View {
         ClearMediaCacheItem(usage: $cache)
     }
 }
+
+/// RED stub (MEMNG-779): the round filter button's menu, today's options menu as it stands.
+struct LibraryFilterMenuContent: View {
+    /// RED stub: the round button's glyph as it stands.
+    static let symbol = "ellipsis"
+
+    @Binding var filter: MediaLibraryFilter
+    @Binding var order: MediaLibraryOrder
+
+    var body: some View {
+        LibraryOptionsMenuContent(
+            order: $order,
+            filter: $filter,
+            tag: .constant(nil),
+            tagRows: MediaLibraryPresentation.tagRows([], selected: nil),
+            cache: .constant(MediaCacheMaintenance.Usage(usedBytes: 0, capacityBytes: 0))
+        )
+    }
+}
+
+/// RED stub (MEMNG-779): the Sort By submenu's label.
+struct SortByMenuLabel: View {
+    let order: MediaLibraryOrder
+
+    var body: some View {
+        Text("Sort By")
+    }
+}
+
+/// RED stub (MEMNG-779): the Sort By submenu's rows, today's sort picker.
+struct SortByMenuContent: View {
+    @Binding var order: MediaLibraryOrder
+
+    var body: some View {
+        Picker("Sort", selection: $order) {
+            ForEach(MediaLibraryOrder.allCases) { order in
+                Text(MediaLibraryPresentation.sortLabel(for: order)).tag(order)
+            }
+        }
+        .pickerStyle(.inline)
+    }
+}
+
+/// RED stub (MEMNG-779): the nested Sort By menu.
+struct SortByMenu: View {
+    @Binding var order: MediaLibraryOrder
+
+    var body: some View {
+        Menu {
+            SortByMenuContent(order: $order)
+        } label: {
+            SortByMenuLabel(order: order)
+        }
+    }
+}

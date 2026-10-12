@@ -25,6 +25,15 @@ struct LibrarySelectionPresentationTests {
         #expect(LibrarySelectionPresentation.countText(120) == "120 Items Selected")
     }
 
+    /// MEMNG-779: the Library's centre is a button — "Select Items", looking disabled, before
+    /// anything is chosen, and "Show Selected (N)" after.
+    @Test("the centre button says Select Items with nothing chosen, Show Selected (N) after")
+    func showSelectedText() {
+        #expect(LibrarySelectionPresentation.showSelectedText(0) == "Select Items")
+        #expect(LibrarySelectionPresentation.showSelectedText(1) == "Show Selected (1)")
+        #expect(LibrarySelectionPresentation.showSelectedText(3) == "Show Selected (3)")
+    }
+
     @Test("outside select mode every tile opens, mine or not")
     func browsingTiles() {
         let selection = LibrarySelection()

@@ -214,7 +214,7 @@ extension MediaImageLoaderTests {
     /// reporting the dock — so the test can ask the dock which bar it says stands.
     private func chromeHost(
         opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true,
-        witness: DockWitness? = nil
+        witness: DockWitness? = nil, height: CGFloat = 874
     ) async -> UIWindow {
         let transport = ChromeTransport(days: days, mine: mine)
         let session = SessionStore(
@@ -234,7 +234,7 @@ extension MediaImageLoaderTests {
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_chrome")
         #expect(session.state.user?.subject == "fabian", "precondition: signed in")
 
-        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let frame = CGRect(x: 0, y: 0, width: 402, height: height)
         let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
         let window: UIWindow
         if let scene = scene as? UIWindowScene {
@@ -1049,6 +1049,101 @@ extension MediaImageLoaderTests {
             #expect(!deleteLive, "Delete is offered for a picture that is not mine: \(evidence)")
 
             await closeSelect(window)
+        }
+    }
+
+    /// Presses the tile showing `uid` through its own accessibility activation — the action a
+    /// finger's tap runs — once: the first node carrying its identifier that takes the press.
+    private static func pressTile(_ uid: String, in window: UIWindow) -> Bool {
+        let wanted = LibraryGrid.tileIdentifier(uid)
+        var stack: [Any] = [window]
+        var candidates: [NSObject] = []
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject else { continue }
+            if object.responds(to: Selector(("accessibilityIdentifier"))),
+                object.value(forKey: "accessibilityIdentifier") as? String == wanted
+            {
+                candidates.append(object)
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return candidates.contains { $0.accessibilityActivate() }
+    }
+
+    /// MEMNG-779 (WPN-12 phase 1): select mode's centre is a button. With 3 of 20 pictures chosen
+    /// it reads "Show Selected (3)", and a press through the host narrows the grid to those 3 in
+    /// the grid's own order; a second press gives the 20 back; and leaving select mode while
+    /// narrowed shows the 20 too. A line of text in the button's place takes no press, and fails
+    /// here. The window is tall enough for the lazy grid to build all twenty tiles.
+    @Test("Show Selected (3) narrows the grid to the chosen three in order, and back to twenty")
+    func showSelectedNarrowsTheGrid() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library, days: 1...5, height: 2600)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window, pictures: 20)
+            var all = TripProbe.tiles(in: window)
+            for _ in 0..<200 where all.count < 20 {
+                await chromeSettle(window)
+                all = TripProbe.tiles(in: window)
+            }
+            guard all.count == 20 else {
+                Issue.record("the grid did not draw its twenty pictures: \(all)")
+                return
+            }
+
+            let select = Self.elements(labelled: "Select", in: window)
+            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
+            for _ in 0..<200 where Self.elements(labelled: "Share", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let chosen = [all[15], all[2], all[9]]
+            for uid in chosen {
+                #expect(Self.pressTile(uid, in: window), "no tile \(uid) took the press")
+                await chromeSettle(window, turns: 5)
+            }
+            let button = "Show Selected (3)"
+            for _ in 0..<200 where Self.elements(labelled: button, in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            @MainActor func press() -> Bool {
+                Self.elements(labelled: button, in: window).contains {
+                    $0.accessibilityTraits.contains(.button) && $0.accessibilityActivate()
+                }
+            }
+            @MainActor func settled(on count: Int) async -> [String] {
+                var tiles = TripProbe.tiles(in: window)
+                for _ in 0..<200 where tiles.count != count {
+                    await chromeSettle(window)
+                    tiles = TripProbe.tiles(in: window)
+                }
+                await chromeSettle(window, turns: 10)
+                return TripProbe.tiles(in: window)
+            }
+            let selectedLines = Self.labels(in: window).filter { $0.contains("Select") }
+
+            #expect(press(), "no \(button) button took the press: \(selectedLines)")
+            let narrowed = await settled(on: 3)
+            #expect(
+                narrowed == all.filter(chosen.contains),
+                "narrowed to \(narrowed), wanted \(all.filter(chosen.contains))")
+            Self.shoot("779-narrowed", window)
+
+            #expect(press(), "the second press found no \(button) button")
+            let widened = await settled(on: 20)
+            #expect(widened == all, "the second press gave back \(widened.count) tiles")
+
+            // Narrowed again, then Close: leaving select mode shows the whole grid.
+            #expect(press(), "the third press found no \(button) button")
+            _ = await settled(on: 3)
+            await closeSelect(window)
+            let closed = await settled(on: 20)
+            #expect(closed == all, "leaving select mode left \(closed.count) tiles")
         }
     }
 

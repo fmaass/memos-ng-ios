@@ -27,6 +27,9 @@ enum LibrarySelectionPresentation {
         count == 1 ? "1 Item Selected" : "\(count) Items Selected"
     }
 
+    /// RED stub (MEMNG-779): the toolbar's centre button.
+    static func showSelectedText(_ count: Int) -> String { countText(count) }
+
     /// The row a placed picture was drawn from: the list entry at its index, when that entry is
     /// still the same file. A grid drawn between two lists must not let a tap choose the wrong one.
     static func row(at index: Int, uid: String, in items: [LibraryRow]) -> LibraryRow? {

@@ -24,6 +24,15 @@ public struct LibrarySelection: Sendable, Equatable {
 
     public var count: Int { uids.count }
 
+    /// RED stub (MEMNG-779): whether the grid shows only the chosen pictures.
+    public private(set) var narrowed = false
+
+    /// RED stub (MEMNG-779): the toolbar's "Show Selected (N)".
+    public mutating func toggleNarrowed() {}
+
+    /// RED stub (MEMNG-779): the rows the grid draws.
+    public func visible(in rows: [LibraryRow]) -> [LibraryRow] { rows }
+
     public func contains(_ uid: String) -> Bool { members.contains(uid) }
 
     /// The header's Select capsule.

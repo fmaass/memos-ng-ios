@@ -401,6 +401,37 @@ struct MediaLibraryRenderTests {
         #expect(all.contains { $0.accessibilityLabel == "Deselect All" }, "no way to clear")
     }
 
+    /// The header's controls, each read once in reading order: what carries the button trait.
+    private static func controls(in found: [NSObject]) -> [String] {
+        var seen: Set<String> = []
+        return found.filter { $0.accessibilityTraits.contains(.button) }
+            .compactMap(\.accessibilityLabel)
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// MEMNG-779 (WPN-12 phase 1): browsing, the header holds exactly the round filter button and
+    /// Select; in select mode with nothing chosen there is no Select All or Deselect All, and the
+    /// trailing capsule holds only the close button — its actions menu has no rows on the Library.
+    @Test("the header shows the filter button and Select; select mode shows only its close button")
+    func filterHeaderAndSelectChrome() async throws {
+        #expect(LibraryFilterMenuContent.symbol == "line.3.horizontal.decrease")
+        let browsing = try await Self.elements(
+            of: LibraryHeader(subtitle: "All", select: {}) { Text("row") }, waitFor: "Select")
+        #expect(
+            Self.controls(in: browsing) == ["Filter", "Select"],
+            "browsing controls: \(Self.controls(in: browsing))")
+
+        let selecting = try await Self.elements(
+            of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
+            waitFor: "Close")
+        let labels = selecting.compactMap(\.accessibilityLabel)
+        #expect(!labels.contains("Select All"), "a Select All control: \(labels)")
+        #expect(!labels.contains("Deselect All"), "a Deselect All control: \(labels)")
+        #expect(
+            Self.controls(in: selecting) == ["Close"],
+            "select mode controls: \(Self.controls(in: selecting))")
+    }
+
     /// MEMNG-588 and MEMNG-589: the bottom bar says how many are chosen, and share and delete take
     /// a tap while something is chosen and nothing is running.
     @Test("the select toolbar counts the selection, with share and delete live")
