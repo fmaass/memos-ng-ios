@@ -914,7 +914,7 @@ extension MediaImageLoaderTests {
     }
 
     /// MEMNG-684, the owner's first sentence: in select mode a tap on one of my own pictures
-    /// chooses it — "1 Item Selected" — and a second tap lets it go again. The fixture's pictures
+    /// chooses it — "Show Selected (1)" — and a second tap lets it go again. The fixture's pictures
     /// are all the signed-in account's (`mine`), across twelve day bands.
     ///
     /// The tap goes through the tile's own accessibility activation, which SwiftUI answers with
@@ -942,7 +942,7 @@ extension MediaImageLoaderTests {
 
             let select = Self.elements(labelled: "Select", in: window)
             #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
-            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Select Items", in: window).isEmpty {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 20)
@@ -952,11 +952,12 @@ extension MediaImageLoaderTests {
 
             let tile = Self.photoTile(near: centre, in: window)
             let took = tile?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 5)
-            let chosen = !Self.elements(labelled: "1 Item Selected", in: window).isEmpty
+            let chosen = !Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
             let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
             let marked = traits.contains(.selected)
             Self.shoot("684-tap-selected", window)
@@ -964,7 +965,7 @@ extension MediaImageLoaderTests {
                 "dimmed=\(dimmed) browsing=\(browsing) selecting=\(selecting) "
                 + "tile=\(tile != nil) activated=\(took) oneSelected=\(chosen) "
                 + "markedSelected=\(marked) counts="
-                + "\(Self.labels(in: window).filter { $0.hasSuffix("Selected") })"
+                + "\(Self.labels(in: window).filter { $0.contains("Select") })"
             print("MEMNG684 tap \(evidence)")
             Attachment.record(evidence, named: "684-tap-evidence")
             #expect(!dimmed, "my picture was dimmed in select mode: \(evidence)")
@@ -972,17 +973,18 @@ extension MediaImageLoaderTests {
             #expect(marked, "the chosen tile is not marked selected: \(evidence)")
 
             let again = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Select Items", in: window).isEmpty {
                 await chromeSettle(window)
             }
             #expect(again, "the second tap reached no tile")
             #expect(
-                !Self.elements(labelled: "0 Items Selected", in: window).isEmpty,
+                !Self.elements(labelled: "Select Items", in: window).isEmpty,
                 "the second tap kept the picture: \(Self.labels(in: window))")
 
             // Chosen again, then Close: nothing stays chosen and select mode's toolbar goes.
             _ = Self.photoTile(near: centre, in: window)?.accessibilityActivate()
-            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            {
                 await chromeSettle(window)
             }
             await closeSelect(window)
@@ -1016,7 +1018,7 @@ extension MediaImageLoaderTests {
 
             let select = Self.elements(labelled: "Select", in: window)
             #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
-            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Select Items", in: window).isEmpty {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 20)
@@ -1024,11 +1026,12 @@ extension MediaImageLoaderTests {
             let dimmed = zip(browsing, selecting).contains { abs($0 - $1) > 0.08 }
 
             let took = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 5)
-            let chosen = !Self.elements(labelled: "1 Item Selected", in: window).isEmpty
+            let chosen = !Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
             let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
             let marked = traits.contains(.selected)
             let share = Self.elements(labelled: "Share", in: window).first

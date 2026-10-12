@@ -340,11 +340,6 @@ public enum MediaLibraryPresentation {
         }
     }
 
-    /// The name of a sort row in the options menu. The subtitle says the order without the verb.
-    public static func sortLabel(for order: MediaLibraryOrder) -> String {
-        "Sort by \(order.label)"
-    }
-
     /// What a tab says when it holds nothing.
     ///
     /// One message per tab rather than one for the screen: "No attachments yet" under Videos, on a

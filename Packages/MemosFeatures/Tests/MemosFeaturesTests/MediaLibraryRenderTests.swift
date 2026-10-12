@@ -208,9 +208,9 @@ struct MediaLibraryRenderTests {
     }
 
     /// Plan page 3929 decision 10: a large title with the subtitle under it, then on the right the
-    /// round options button and, after it, the Select capsule — drawn, and inert where there is
+    /// round filter button and, after it, the Select capsule — drawn, and inert where there is
     /// nothing to select (no `select` action: Years and Months).
-    @Test("the header draws the title, the subtitle, the options button and a disabled Select")
+    @Test("the header draws the title, the subtitle, the filter button and a disabled Select")
     func headerChrome() async throws {
         let subtitle = "Videos · Oldest First · #travel"
         let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
@@ -239,11 +239,11 @@ struct MediaLibraryRenderTests {
         let title = try #require(element("Library"), "no title")
         #expect(title.accessibilityTraits.contains(.header), "the title is not a heading")
         #expect(element(subtitle) != nil, "no subtitle line")
-        let options = try #require(element("Options"), "no options button")
+        let options = try #require(element("Filter"), "no filter button")
         let select = try #require(element("Select"), "no Select capsule")
-        #expect(!options.accessibilityTraits.contains(.notEnabled), "the options button is inert")
+        #expect(!options.accessibilityTraits.contains(.notEnabled), "the filter button is inert")
         #expect(select.accessibilityTraits.contains(.notEnabled), "Select is live too early")
-        // Right of the title, the options button first and the capsule after it.
+        // Right of the title, the filter button first and the capsule after it.
         let left = title.accessibilityFrame.midX
         let middle = options.accessibilityFrame.midX
         let right = select.accessibilityFrame.midX
@@ -380,27 +380,6 @@ struct MediaLibraryRenderTests {
         #expect(!select.accessibilityTraits.contains(.notEnabled), "Select is still inert in All")
     }
 
-    /// MEMNG-588, the mockup's section 7: in select mode the options button and the capsule give
-    /// way to a round select-all toggle and a round close button.
-    @Test("select mode swaps the header's controls for select all and close")
-    func selectModeHeader() async throws {
-        let found = try await Self.elements(
-            of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
-            waitFor: "Close")
-        let labels = found.compactMap(\.accessibilityLabel)
-        #expect(labels.contains("Select All"), "no select-all toggle: \(labels)")
-        #expect(labels.contains("Close"), "no close button: \(labels)")
-        #expect(!labels.contains("Options"), "the options button stayed in select mode")
-        #expect(!labels.contains("Select"), "the Select capsule stayed in select mode")
-
-        let all = try await Self.elements(
-            of: LibraryHeader(subtitle: "All", selecting: true, allSelected: true) {
-                Text("row")
-            },
-            waitFor: "Close")
-        #expect(all.contains { $0.accessibilityLabel == "Deselect All" }, "no way to clear")
-    }
-
     /// The header's controls, each read once in reading order: what carries the button trait.
     private static func controls(in found: [NSObject]) -> [String] {
         var seen: Set<String> = []
@@ -430,6 +409,20 @@ struct MediaLibraryRenderTests {
         #expect(
             Self.controls(in: selecting) == ["Close"],
             "select mode controls: \(Self.controls(in: selecting))")
+    }
+
+    /// MEMNG-779: once select mode's actions menu has rows (WPN-14 gives the Library some), the
+    /// trailing capsule holds that menu and then the close button.
+    @Test("select mode's capsule holds the actions menu and the close button once it has rows")
+    func selectChromeWithRows() async throws {
+        let rows = [
+            SelectAction(id: "share", title: "Share", systemImage: "square.and.arrow.up") {}
+        ]
+        let found = try await Self.elements(
+            of: SelectChrome(menuRows: rows, close: {}), waitFor: "Close")
+        #expect(
+            Self.controls(in: found) == ["More", "Close"],
+            "capsule controls: \(Self.controls(in: found))")
     }
 
     /// MEMNG-588 and MEMNG-589: the bottom bar says how many are chosen, and share and delete take

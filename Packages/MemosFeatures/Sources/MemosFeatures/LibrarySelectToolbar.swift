@@ -21,14 +21,17 @@ enum LibrarySelectionPresentation {
         return .selectable(selected: selection.contains(row.id))
     }
 
-    /// The toolbar's middle line, "N Items Selected" as the design of record writes it — "0 Items
-    /// Selected" before anything is chosen — and "1 Item Selected" for one.
+    /// The toolbar's middle line over a trip, "N Items Selected" as the design of record writes it —
+    /// "0 Items Selected" before anything is chosen — and "1 Item Selected" for one.
     static func countText(_ count: Int) -> String {
         count == 1 ? "1 Item Selected" : "\(count) Items Selected"
     }
 
-    /// RED stub (MEMNG-779): the toolbar's centre button.
-    static func showSelectedText(_ count: Int) -> String { countText(count) }
+    /// The Library's centre button (MEMNG-779): "Select Items", drawn disabled, before anything is
+    /// chosen, and "Show Selected (N)" after — the Photos app's words.
+    static func showSelectedText(_ count: Int) -> String {
+        count == 0 ? "Select Items" : "Show Selected (\(count))"
+    }
 
     /// The row a placed picture was drawn from: the list entry at its index, when that entry is
     /// still the same file. A grid drawn between two lists must not let a tap choose the wrong one.
@@ -90,7 +93,9 @@ struct SelectableTile: ViewModifier {
 /// Select mode's bottom bar, in the dock's place (plan page 3929 decision 6): a flat toolbar, as
 /// in the Photos app, with a round glass share button on the left, the count in the middle and a
 /// round glass delete button on the right — over a trip, with a round glass remove button before
-/// it.
+/// it. On the Library the middle is a button, "Show Selected (N)", that narrows the grid to the
+/// chosen pictures and back (MEMNG-779); over a trip it stays the count until the trip's chrome
+/// follows (WPN-12 phase 2).
 struct LibrarySelectToolbar: View {
     let count: Int
     /// How many of the chosen pictures are mine, the only ones Delete may take (MEMNG-684).
@@ -104,6 +109,11 @@ struct LibrarySelectToolbar: View {
     /// Remove from Trip (MEMNG-722): drawn beside Delete only where the toolbar stands over a
     /// trip. The Library passes nil and has no such button.
     var remove: (() -> Void)? = nil
+    /// "Show Selected (N)" (MEMNG-779): the Library passes it and draws the middle as that button;
+    /// nil draws the count line, as over a trip.
+    var showSelected: (() -> Void)? = nil
+    /// Whether the grid is narrowed to the selection: the button is drawn tinted, and selected.
+    var narrowed = false
 
     /// Remove from Trip's name, read by VoiceOver.
     static let removeLabel = "Remove from Trip"
@@ -144,9 +154,7 @@ struct LibrarySelectToolbar: View {
             .disabled(!enabled)
             .accessibilityLabel("Share")
             Spacer(minLength: DesignTokens.Space.snug)
-            Text(LibrarySelectionPresentation.countText(count))
-                .font(.headline)
-                .lineLimit(1)
+            centre
             Spacer(minLength: DesignTokens.Space.snug)
             // Asks nothing: what it takes is only this trip's on this device, and the trip's Show
             // Removed gives it back.
@@ -181,6 +189,32 @@ struct LibrarySelectToolbar: View {
         .padding(.horizontal, DesignTokens.Space.roomy)
         .padding(.vertical, DesignTokens.Space.snug)
         .background(.bar)
+    }
+}
+
+extension LibrarySelectToolbar {
+    /// The middle: the Library's Show Selected button, or the count line over a trip.
+    @ViewBuilder
+    private var centre: some View {
+        if let showSelected {
+            Button(action: showSelected) {
+                Text(LibrarySelectionPresentation.showSelectedText(count))
+                    .font(.headline)
+                    .lineLimit(1)
+            }
+            // Tinted while narrowed; the system's disabled look before anything is chosen.
+            .foregroundStyle(
+                narrowed
+                    ? AnyShapeStyle(.tint)
+                    : count == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary)
+            )
+            .disabled(count == 0)
+            .accessibilityAddTraits(narrowed ? .isSelected : [])
+        } else {
+            Text(LibrarySelectionPresentation.countText(count))
+                .font(.headline)
+                .lineLimit(1)
+        }
     }
 }
 

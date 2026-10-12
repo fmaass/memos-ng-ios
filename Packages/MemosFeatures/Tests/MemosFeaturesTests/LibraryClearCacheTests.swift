@@ -6,46 +6,25 @@ import UIKit
 
 @testable import MemosFeatures
 
-/// The cache's one control since the Settings screen went: the LAST row of the Library's ⋯ menu,
-/// labelled with the size, unavailable when there is nothing to clear, and emptying BOTH halves.
+/// The cache's one control since the Settings screen went: labelled with the size, unavailable when
+/// there is nothing to clear, and emptying BOTH halves. Out of the Library's menu since MEMNG-779
+/// (WPN-12 phase 1), until a later phase gives it a Settings group.
 @MainActor
-@Suite("Clearing the media cache from the Library menu")
+@Suite("Clearing the media cache")
 struct LibraryClearCacheTests {
-    private struct Harness: View {
-        @State var order = MediaLibraryOrder.newestFirst
-        @State var filter = MediaLibraryFilter.all
-        @State var tag: String?
-        @State var usage: MediaCacheMaintenance.Usage
-
-        var body: some View {
-            List {
-                LibraryOptionsMenuContent(
-                    order: $order, filter: $filter, tag: $tag,
-                    tagRows: MediaLibraryPresentation.tagRows([], selected: nil),
-                    cache: $usage
-                )
-            }
-        }
-    }
-
     private let used = MediaCacheMaintenance.Usage(usedBytes: 412 << 20, capacityBytes: 1 << 30)
     private let empty = MediaCacheMaintenance.Usage(usedBytes: 0, capacityBytes: 1 << 30)
 
-    @Test("the menu's last row is the clear button, and it says how much it would clear")
-    func theLastRowIsTheClearButton() throws {
+    @Test("the clear button says how much it would clear")
+    func theClearButtonSaysItsSize() {
         let title = ClearMediaCacheItem.title(for: used)
         #expect(title.contains(MediaCacheMaintenance.summary(used)))
 
-        let labels = ScreenProbe.labels(of: Harness(tag: nil, usage: used))
-
-        // The control: the pickers above it were drawn, so the order read below is real.
-        #expect(labels.contains("Videos"), "the menu's rows were not drawn: \(labels)")
-        let clear = try #require(labels.lastIndex(of: title), "no clear button: \(labels)")
-        let pickers = ["Sort by Newest First", "Videos", "All tags"].compactMap {
-            labels.firstIndex(of: $0)
-        }
-        #expect(pickers.count == 3, "a picker row is missing: \(labels)")
-        #expect(pickers.allSatisfy { $0 < clear }, "the clear button is not last: \(labels)")
+        let drawn = PressProbe.withElement(
+            labelled: title,
+            in: ClearMediaCacheItem(usage: .constant(used))
+        ) { $0 != nil }
+        #expect(drawn, "no clear button reading \(title)")
     }
 
     @Test("with nothing to clear the button is there and cannot be pressed")
