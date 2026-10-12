@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import MemosOutbox
 import Testing
 
@@ -37,13 +38,44 @@ private func row(keyed key: String, in rows: [[String: Any]]) throws -> [String:
 @MainActor
 @Suite("The Settings app's pane")
 struct SettingsBundlePaneTests {
-    @Test("the pane holds exactly the three keys the app reads, in the order it shows them")
-    func exactlyThreeKeys() throws {
+    @Test("the pane holds exactly the five keys the app reads, in the order it shows them")
+    func exactlyFiveKeys() throws {
         let keys = try bundledRows().compactMap { $0["Key"] as? String }
         let expected = [
-            AppSettings.appearanceKey, UploadSettings.key, SettingsBundleSync.versionKey,
+            AppSettings.appearanceKey, UploadSettings.key, SettingsBundleSync.mediaCacheSizeKey,
+            SettingsBundleSync.clearMediaCacheKey, SettingsBundleSync.versionKey,
         ]
         #expect(keys == expected)
+    }
+
+    /// The cache is cleared from the phone's Settings (MEMNG-781): the size the app last wrote,
+    /// and a switch read at the next cold launch, both under a Storage group of their own between
+    /// Uploads and About.
+    @Test("the size and the clear switch stand under Storage, between Uploads and About")
+    func storageGroupHoldsTheCacheRows() throws {
+        let rows = try bundledRows()
+        let groupTitles = rows.filter { $0["Type"] as? String == "PSGroupSpecifier" }
+            .compactMap { $0["Title"] as? String }
+        #expect(groupTitles == ["Appearance", "Uploads", "Storage", "About"])
+        // Each new row's group is the nearest group row above it.
+        func group(of key: String) -> [String: Any]? {
+            guard let at = rows.firstIndex(where: { $0["Key"] as? String == key }) else {
+                return nil
+            }
+            return rows[..<at].last { $0["Type"] as? String == "PSGroupSpecifier" }
+        }
+        #expect(group(of: SettingsBundleSync.mediaCacheSizeKey)?["Title"] as? String == "Storage")
+        #expect(group(of: SettingsBundleSync.clearMediaCacheKey)?["Title"] as? String == "Storage")
+        #expect(
+            group(of: SettingsBundleSync.clearMediaCacheKey)?["FooterText"] as? String
+                == SettingsBundleSync.clearMediaCacheFooter)
+        let size = try row(keyed: SettingsBundleSync.mediaCacheSizeKey, in: rows)
+        #expect(size["Type"] as? String == "PSTitleValueSpecifier")
+        #expect(size["Title"] as? String == "Media cache")
+        let toggle = try row(keyed: SettingsBundleSync.clearMediaCacheKey, in: rows)
+        #expect(toggle["Type"] as? String == "PSToggleSwitchSpecifier")
+        #expect(toggle["Title"] as? String == "Clear media cache on next launch")
+        #expect(toggle["DefaultValue"] as? Bool == false)
     }
 
     @Test("the appearance row offers the app's own choices, by their stored names, System first")
@@ -558,5 +590,104 @@ struct SettingsBundleOutboxActivationTests {
         #expect(rig.outbox.uploadVerdict == before)
         #expect(rig.asyncNotices.value == 0)
         #expect(rig.http.requests.isEmpty)
+    }
+}
+
+/// A derived cache that counts its clears and answers the sizes a test sets.
+private nonisolated final class CountingCache: DerivedMediaCache {
+    var currentDiskUsage: Int
+    let diskCapacity: Int
+    private(set) var clears = 0
+
+    init(used: Int, capacity: Int = 256 << 20) {
+        currentDiskUsage = used
+        diskCapacity = capacity
+    }
+
+    func removeAllCachedResponses() {
+        clears += 1
+        currentDiskUsage = 0
+    }
+}
+
+/// The media cache from the phone's Settings (MEMNG-781, decision 2): cleared at a cold launch
+/// when the switch is on, never on a return to the front, and its size written for the pane.
+@MainActor
+@Suite("The media cache in the Settings app")
+struct SettingsBundleMediaCacheTests {
+    private func launch(_ group: UserDefaults, _ groupName: String, cache: CountingCache) {
+        let (standard, name) = scratchSuite()
+        defer { forget(name) }
+        SettingsBundleSync.launch(
+            from: .main, standard: standard, domain: name, group: group, groupDomain: groupName,
+            cache: cache)
+    }
+
+    private func size(_ used: Int, of cache: CountingCache) -> String {
+        MediaCacheMaintenance.summary(
+            MediaCacheMaintenance.Usage(usedBytes: used, capacityBytes: cache.diskCapacity))
+    }
+
+    @Test("the switch on at launch: cleared once, the switch off again, the new size written")
+    func launchClearsWhenAsked() {
+        let (group, groupName) = scratchSuite()
+        defer { forget(groupName) }
+        group.set(true, forKey: SettingsBundleSync.clearMediaCacheKey)
+        let cache = CountingCache(used: 12 << 20)
+
+        launch(group, groupName, cache: cache)
+
+        #expect(cache.clears == 1)
+        let written = group.persistentDomain(forName: groupName)
+        #expect(written?[SettingsBundleSync.clearMediaCacheKey] as? Bool == false)
+        #expect(written?[SettingsBundleSync.mediaCacheSizeKey] as? String == size(0, of: cache))
+    }
+
+    @Test("the switch off at launch: nothing cleared, the size as it stands written")
+    func launchLeavesTheCacheAlone() {
+        let (group, groupName) = scratchSuite()
+        defer { forget(groupName) }
+        let cache = CountingCache(used: 12 << 20)
+
+        launch(group, groupName, cache: cache)
+
+        #expect(cache.clears == 0)
+        #expect(group.bool(forKey: SettingsBundleSync.clearMediaCacheKey) == false)
+        #expect(
+            group.string(forKey: SettingsBundleSync.mediaCacheSizeKey) == "12.0 MB of 256.0 MB")
+    }
+
+    @Test("the switch turned on after launch: a return to the front clears nothing, keeps it on")
+    func activationNeverClears() {
+        let (group, groupName) = scratchSuite()
+        defer { forget(groupName) }
+        let cache = CountingCache(used: 12 << 20)
+        launch(group, groupName, cache: cache)
+        group.set(true, forKey: SettingsBundleSync.clearMediaCacheKey)
+        cache.currentDiskUsage = 20 << 20
+
+        SettingsBundleSync.activate(
+            settings: AppSettings(defaults: group), uploads: nil, outbox: nil, cache: cache,
+            group: group)
+
+        #expect(cache.clears == 0, "a return to the front cleared the cache")
+        #expect(group.bool(forKey: SettingsBundleSync.clearMediaCacheKey) == true)
+        #expect(
+            group.string(forKey: SettingsBundleSync.mediaCacheSizeKey) == size(20 << 20, of: cache))
+    }
+
+    @Test("going to the background writes the size as it stands, and clears nothing")
+    func backgroundWritesTheSize() {
+        let (group, groupName) = scratchSuite()
+        defer { forget(groupName) }
+        group.set(true, forKey: SettingsBundleSync.clearMediaCacheKey)
+        let cache = CountingCache(used: 3 << 20)
+
+        SettingsBundleSync.writeCacheSize(of: cache, into: group)
+
+        #expect(cache.clears == 0)
+        #expect(
+            group.string(forKey: SettingsBundleSync.mediaCacheSizeKey) == "3.0 MB of 256.0 MB")
+        #expect(group.bool(forKey: SettingsBundleSync.clearMediaCacheKey) == true)
     }
 }

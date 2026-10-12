@@ -1049,6 +1049,45 @@ struct TripScreenRenderTests {
         #expect(wire.transport.trips.rows.map(\.uid) == [other.uid], "the server kept the trip")
     }
 
+    /// A press on Collections while it shows takes its stack back to the root (MEMNG-781): through
+    /// the bar's own press binding and the dock, into the root's own stack. A press on another
+    /// tab, and the press that comes back to Collections from there, leave the trip pushed.
+    @Test("a press on the selected Collections tab pops the trip; a press elsewhere does not")
+    func reselectingCollectionsPopsToTheRoot() async {
+        let wire = TripWire()
+        let stores = stores()
+        _ = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let access = wire.access
+        let dock = AppDock()
+        let stack = TripStackLog()
+        let view = TrailHost(log: stack) { trail in
+            CollectionsRootView.stack(trail: trail) {
+                CollectionsScreen(
+                    trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
+                    access: { access }, openTag: { _ in }, trail: trail)
+            }
+        }
+        .environment(dock)
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            #expect(await screen.until { screen.element(labelled: "Portugal 2026") != nil })
+            #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
+            let pushed = await screen.until { stack.paths.last?.count == 1 }
+            #expect(pushed, "the trip was not pushed: \(stack.paths.map(\.count))")
+            // The bar's press binding over a selection that shows Collections.
+            let bar = MainTabs<EmptyView>.pressing(
+                selection: .constant(.collections), dock: dock)
+            bar.wrappedValue = .timeline
+            dock.send(.pressedTab(.collections, showing: .timeline))
+            let early = await screen.until(seconds: 1) { stack.paths.last?.isEmpty == true }
+            #expect(!early, "a press from another tab popped the stack")
+            bar.wrappedValue = .collections
+            let popped = await screen.until { stack.paths.last?.isEmpty == true }
+            #expect(popped, "the re-tap left the stack at \(stack.paths.map(\.count))")
+        }
+    }
+
     @Test("the root's drain and the trip's are one request chain")
     func theDrainsJoin() async {
         let wire = TripWire()
@@ -1254,6 +1293,18 @@ struct TripStack<Root: View>: View {
 
     var body: some View {
         NavigationStack(path: $trail) { root($trail) }
+            .onChange(of: trail, initial: true) { _, now in log.paths.append(now) }
+    }
+}
+
+/// A trail the test's root makes its own stack over, as the Collections tab owns its own.
+struct TrailHost<Root: View>: View {
+    var log = TripStackLog()
+    @ViewBuilder let root: (Binding<[TripRoute]>) -> Root
+    @State private var trail: [TripRoute] = []
+
+    var body: some View {
+        root($trail)
             .onChange(of: trail, initial: true) { _, now in log.paths.append(now) }
     }
 }

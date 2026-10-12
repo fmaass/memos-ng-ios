@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import MemosOutbox
 
 /// The device's preferences, now that they live in the phone's Settings app.
@@ -16,6 +17,14 @@ import MemosOutbox
 public enum SettingsBundleSync {
     /// The read-only Version row's key. Written by the app; the pane only displays it.
     public static let versionKey = "settings.version"
+    /// The Storage group's read-only size row (MEMNG-781): written by the app at launch, on every
+    /// return to the front and on the way to the background; the pane only displays it.
+    public static let mediaCacheSizeKey = "settings.mediaCacheSize"
+    /// The Storage group's switch: read once, at the next cold launch, and turned off again there.
+    public static let clearMediaCacheKey = "settings.clearMediaCacheOnLaunch"
+    /// What the Storage group says under the switch — the pane's footer, held to this text.
+    public static let clearMediaCacheFooter =
+        "Cleared the next time the app opens; the switch then turns off again."
 
     /// The one suite the pane writes and the app reads the pane's keys from: the app group's,
     /// falling back to the app's own when the group is unreachable — the outbox's own degradation
@@ -96,7 +105,8 @@ public enum SettingsBundleSync {
     /// - Parameter group: the pane's suite — `paneDefaults` in the app.
     public static func launch(
         from bundle: Bundle, standard: UserDefaults, domain: String, group: UserDefaults,
-        groupDomain: String
+        groupDomain: String,
+        cache: (any DerivedMediaCache)? = nil
     ) {
         if let plist = rootPlist(in: bundle) {
             registerDefaults(from: plist, into: group)
@@ -118,10 +128,16 @@ public enum SettingsBundleSync {
     public static func activate(
         settings: AppSettings,
         uploads: UploadSettings?,
-        outbox: Outbox?
+        outbox: Outbox?,
+        cache: (any DerivedMediaCache)? = nil,
+        group: UserDefaults? = nil
     ) -> Task<Void, Never>? {
         settings.reload()
         uploads?.reload()
         return outbox?.appBecameActive()
+    }
+
+    /// The size row's text, for the cache as it stands now.
+    public static func writeCacheSize(of cache: any DerivedMediaCache, into group: UserDefaults) {
     }
 }
