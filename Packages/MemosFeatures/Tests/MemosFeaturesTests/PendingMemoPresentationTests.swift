@@ -607,6 +607,7 @@ struct TimelinePostRoutingTests {
     private final class Routing {
         var resubmitted: [(UUID, RestoredDraft)] = []
         var enqueued: [ComposeSubmission] = []
+        var enqueuedDefaults: [MemoVisibility?] = []
         var answer: ResubmitOutcome = .accepted
     }
 
@@ -625,13 +626,18 @@ struct TimelinePostRoutingTests {
         await TimelineView.post(
             submission,
             restoring: restored,
-            accountDefault: accountDefault,
+            accountDefault: ComposedAccountDefault(
+                visibility: accountDefault,
+                account: AccountBinding(
+                    serverBaseURL: URL(string: "https://memos.example.invalid")!,
+                    ownerSubject: "alice")),
             resubmit: {
                 routing.resubmitted.append(($0, $1))
                 return routing.answer
             },
-            enqueue: {
-                routing.enqueued.append($0)
+            enqueue: { submission, accountDefault in
+                routing.enqueued.append(submission)
+                routing.enqueuedDefaults.append(accountDefault?.visibility)
                 return true
             }
         )
@@ -667,11 +673,15 @@ struct TimelinePostRoutingTests {
         let submission = ComposeSubmission(
             content: "on the beach", visibility: .private, attachments: [])
 
-        let posted = await post(routing, submission, restoring: draft(jobID, visibility: .private))
+        let posted = await post(
+            routing, submission, restoring: draft(jobID, visibility: .private),
+            accountDefault: .public)
 
         #expect(posted == .saved)
         #expect(routing.resubmitted.count == 1, "the job was asked for first")
         #expect(routing.enqueued.count == 1)
+        // The fresh capture resolves Default as any new one does (MEMNG-776).
+        #expect(routing.enqueuedDefaults == [.public], "the account default was not handed on")
     }
 
     /// A refusal is not a vanished job. The queue still holds the capture and its key, so posting

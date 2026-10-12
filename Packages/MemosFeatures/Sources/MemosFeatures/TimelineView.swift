@@ -698,12 +698,19 @@ public struct TimelineView: View {
         switch mode {
         case .create(let restored):
             guard let outbox else { return .failed(.authorization) }
+            // Read together, in one synchronous step: the default is only true of the account it
+            // was read under, and that account travels with it to the enqueue.
+            let composed = session.snapshotIdentity.map {
+                ComposedAccountDefault(
+                    visibility: session.defaultVisibility,
+                    account: AccountBinding(serverBaseURL: $0.server, ownerSubject: $0.subject))
+            }
             switch await Self.post(
                 submission,
                 restoring: restored,
-                accountDefault: session.defaultVisibility,
+                accountDefault: composed,
                 resubmit: { await outbox.resubmit($0, draft: $1) },
-                enqueue: { await Self.enqueue($0, into: outbox) }
+                enqueue: { await Self.enqueue($0, into: outbox, accountDefault: $1) }
             ) {
             case .saved:
                 outcome = .saved
@@ -759,11 +766,14 @@ public struct TimelineView: View {
     static func post(
         _ submission: ComposeSubmission,
         restoring restored: ComposeRestore?,
-        accountDefault: MemoVisibility? = nil,
+        accountDefault composed: ComposedAccountDefault? = nil,
         resubmit: (UUID, RestoredDraft) async -> ResubmitOutcome,
-        enqueue: (ComposeSubmission) async -> Bool
+        enqueue: (ComposeSubmission, ComposedAccountDefault?) async -> Bool
     ) async -> PostOutcome {
-        guard let restored else { return await enqueue(submission) ? .saved : .enqueueFailed }
+        guard let restored else {
+            return await enqueue(submission, composed) ? .saved : .enqueueFailed
+        }
+        let accountDefault = composed?.visibility
         // "Default" with no account default known is a word this app cannot turn into a value.
         // Sending nothing would hand the queue its own fallback — the visibility the job already
         // has, which is the one the person just stopped choosing — so Post refuses. A capture
@@ -777,22 +787,34 @@ public struct TimelineView: View {
         case .accepted: return .saved
         // Only a job that is GONE becomes a second capture. A refusal is not that: the capture
         // may already have committed a memo, and a fresh key would be a second one.
-        case .vanished: return await enqueue(submission) ? .saved : .enqueueFailed
+        case .vanished: return await enqueue(submission, composed) ? .saved : .enqueueFailed
         case .refused(let reason): return .refused(.captureUnchanged(reason))
         }
     }
 
+    /// A new capture is stamped with the visibility it was composed under. "Default" resolves to
+    /// the account's choice as it stands NOW, because sending nothing would let the server apply
+    /// whatever the default is when the queue drains — hours later, after the person may have
+    /// changed it (MEMNG-776). With no account default known yet, nil still goes: that is a
+    /// capture staged before the account had an answer, and refusing it would lose the capture.
+    /// The account the default was read under goes along, and the outbox refuses the capture if
+    /// another account is the one it would be bound to.
     @MainActor
-    static func enqueue(_ submission: ComposeSubmission, into outbox: Outbox) async -> Bool {
+    static func enqueue(
+        _ submission: ComposeSubmission,
+        into outbox: Outbox,
+        accountDefault composed: ComposedAccountDefault?
+    ) async -> Bool {
         await outbox.enqueue(
             content: submission.content,
-            visibility: submission.visibility?.rawValue,
+            visibility: (submission.visibility ?? composed?.visibility)?.rawValue,
             // A backdated capture keeps the date it was given all the way through the queue: the
             // job's capture stamp IS what the create call sends as `created_at`. On Auto that date
             // is the earliest instant the attached files carried, resolved before the sheet would
             // let this be tapped.
             capturedAt: submission.capturedAt(),
-            sources: submission.attachments.map(\.stagedSource)
+            sources: submission.attachments.map(\.stagedSource),
+            composedUnder: composed?.account
         )
     }
 
@@ -947,6 +969,15 @@ extension ComposeView.Mode: Identifiable {
         case .edit(let uid, _, _, _): "edit-\(uid)"
         }
     }
+}
+
+/// The account's default visibility as Post read it, and the account it was read under. One
+/// value, because the default is an account-scoped read: judged against any other account it is
+/// somebody else's answer.
+struct ComposedAccountDefault: Sendable {
+    /// Nil while the account has not said yet.
+    var visibility: MemoVisibility?
+    var account: AccountBinding
 }
 
 extension SessionStore {

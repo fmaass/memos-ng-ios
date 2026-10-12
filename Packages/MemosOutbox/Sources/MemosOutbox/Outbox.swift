@@ -348,16 +348,30 @@ public final class Outbox {
 
     /// Writes a capture to disk and only then tries the network. The return value says whether it
     /// was PERSISTED, not whether it was sent: the compose screen closes on the former.
+    ///
+    /// `account` is the account the caller read something account-scoped under — the visibility
+    /// "Default" resolved to. The credentials are acquired after a hop, so a different account can
+    /// be current by then, and its grant passes every check below: the authority fences the GRANT,
+    /// not what the caller read. A capture is therefore refused, before any file is copied, when
+    /// the account it would be bound to is not the one it was composed under.
     @discardableResult
     public func enqueue(
         content: String,
         visibility: String?,
         capturedAt: Date = Date(),
-        sources: [StagedSource]
+        sources: [StagedSource],
+        composedUnder account: AccountBinding? = nil
     ) async -> Bool {
         guard let credentials = await credentials.currentCredentials(),
             self.credentials.isCurrent(credentials)
         else {
+            enqueueError = "Sign in before writing a memo."
+            lastEnqueueFailure = .notSignedIn
+            return false
+        }
+        // The same answer a grant withdrawn during the copy gets below: the session this capture
+        // was written in is not the one that would send it.
+        if let account, account != credentials.binding {
             enqueueError = "Sign in before writing a memo."
             lastEnqueueFailure = .notSignedIn
             return false

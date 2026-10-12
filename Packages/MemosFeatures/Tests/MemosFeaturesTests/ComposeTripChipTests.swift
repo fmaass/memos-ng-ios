@@ -53,10 +53,13 @@ private final class RecordingHTTP: OutboxHTTPPerforming, @unchecked Sendable {
 }
 
 private struct SignedIn: OutboxCredentialsProviding {
+    /// Who the session answers as at the moment the outbox acquires its credentials.
+    var owner = "alice"
+
     func currentCredentials() async -> OutboxCredentials? {
         OutboxCredentials(
             serverBaseURL: URL(string: "https://memos.example.invalid")!,
-            ownerSubject: "alice", token: "pat-token")
+            ownerSubject: owner, token: "pat-token")
     }
     func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
     func stillCurrent(epoch: Int) -> Bool { true }
@@ -80,10 +83,22 @@ private struct OnWiFi: NetworkPathProviding {
     func onPathChange(_ handler: @escaping OutboxTrigger) {}
 }
 
+/// The account default as Post reads it, under `owner` on the stub server.
+private func composed(_ visibility: MemoVisibility?, under owner: String = "alice")
+    -> ComposedAccountDefault
+{
+    ComposedAccountDefault(
+        visibility: visibility,
+        account: AccountBinding(
+            serverBaseURL: URL(string: "https://memos.example.invalid")!, ownerSubject: owner))
+}
+
 /// The real outbox, signed in and on Wi-Fi, sending through `http` from a queue under `root`.
 @MainActor
-private func signedInOutbox(over http: RecordingHTTP, at root: URL) throws -> Outbox {
-    let credentials = SignedIn()
+private func signedInOutbox(
+    over http: RecordingHTTP, at root: URL, as owner: String = "alice"
+) throws -> Outbox {
+    let credentials = SignedIn(owner: owner)
     let repository = try OutboxRepository(
         root: root.appending(path: "outbox"),
         stillCurrent: { credentials.stillCurrent(epoch: $0) })
@@ -300,7 +315,7 @@ struct ComposeTripChipTests {
         await PressProbe.withScreen(
             sheet("Lisbon at dusk", pinnedTrip: trip) { submission in
                 _ = await log.take(submission)
-                let ok = await TimelineView.enqueue(submission, into: outbox)
+                let ok = await TimelineView.enqueue(submission, into: outbox, accountDefault: nil)
                 log.enqueued.append(ok)
                 return ok ? .saved : .failed(.storage)
             },
@@ -381,9 +396,9 @@ struct ComposeTripVisibilityTests {
         ComposeView(mode: .create(restoring: nil), pinnedTrip: pinnedTrip) { submission in
             _ = await log.take(submission)
             let outcome = await TimelineView.post(
-                submission, restoring: nil, accountDefault: .public,
+                submission, restoring: nil, accountDefault: composed(.public),
                 resubmit: { _, _ in .accepted },
-                enqueue: { await TimelineView.enqueue($0, into: outbox) })
+                enqueue: { await TimelineView.enqueue($0, into: outbox, accountDefault: $1) })
             log.enqueued.append(outcome == .saved)
             return outcome == .saved ? .saved : .failed(.storage)
         }
@@ -455,7 +470,7 @@ struct ComposeTripVisibilityTests {
         #expect(body["visibility"] as? String == "PROTECTED")
     }
 
-    @Test("with no trip pinned, the new memo states no visibility and the account default applies")
+    @Test("with no trip pinned, the new memo states the account default it was composed under")
     func unpinnedPostIsTheAccountDefault() async throws {
         let http = RecordingHTTP()
         let log = PostLog()
@@ -467,7 +482,9 @@ struct ComposeTripVisibilityTests {
         #expect(log.sent.map(\.visibility) == [nil])
         let body = try await createBody(http)
         #expect(body["content"] as? String == "Lisbon at dusk", "positive control: body was read")
-        #expect(body["visibility"] == nil, "a visibility was stated where the default applies")
+        #expect(
+            body["visibility"] as? String == "PUBLIC",
+            "Default went out unresolved: the server would apply its default at upload time")
     }
 
     @Test("the x before Post puts an untouched pill back on the account default")
@@ -483,7 +500,9 @@ struct ComposeTripVisibilityTests {
         #expect(log.sent.map(\.visibility) == [nil])
         let body = try await createBody(http)
         #expect(body["content"] as? String == "Lisbon at dusk", "positive control: body was read")
-        #expect(body["visibility"] == nil, "a visibility was stated where the default applies")
+        #expect(
+            body["visibility"] as? String == "PUBLIC",
+            "Default went out unresolved: the server would apply its default at upload time")
     }
 
     @Test("a pill set to Public by hand stays Public with the trip pinned, the x or not")
@@ -506,14 +525,88 @@ struct ComposeTripVisibilityTests {
             let queue = try signedInOutbox(
                 over: http, at: root.appending(path: UUID().uuidString))
             let outcome = await TimelineView.post(
-                submission, restoring: nil, accountDefault: .private,
+                submission, restoring: nil, accountDefault: composed(.private),
                 resubmit: { _, _ in .accepted },
-                enqueue: { await TimelineView.enqueue($0, into: queue) })
+                enqueue: { await TimelineView.enqueue($0, into: queue, accountDefault: $1) })
             #expect(outcome == .saved)
             let body = try await createBody(http)
             #expect(body["content"] as? String == content, "positive control: body was read")
             #expect(body["visibility"] as? String == "PUBLIC")
         }
+    }
+
+    // MARK: - Default is resolved when the memo is composed (MEMNG-776)
+
+    /// A fresh capture through `TimelineView.post` with nothing on the pill, into the real outbox.
+    private func postFresh(
+        _ visibility: MemoVisibility?, accountDefault: ComposedAccountDefault?
+    ) async throws -> (outcome: MemosFeatures.TimelineView.PostOutcome, body: [String: Any]) {
+        let http = RecordingHTTP()
+        let queue = try signedInOutbox(over: http, at: root.appending(path: UUID().uuidString))
+        let outcome = await TimelineView.post(
+            ComposeSubmission(content: "Lisbon at dusk", visibility: visibility),
+            restoring: nil, accountDefault: accountDefault,
+            resubmit: { _, _ in .accepted },
+            enqueue: { await TimelineView.enqueue($0, into: queue, accountDefault: $1) })
+        return (outcome, try await createBody(http))
+    }
+
+    /// Composed while the account default is Private: the job states PRIVATE, so a default
+    /// changed to Public before the queue drains cannot reach this memo.
+    @Test("a fresh capture on Default carries the account default it was composed under")
+    func freshDefaultCarriesTheComposedDefault() async throws {
+        let (outcome, body) = try await postFresh(nil, accountDefault: composed(.private))
+        #expect(outcome == .saved)
+        #expect(body["content"] as? String == "Lisbon at dusk", "positive control: body was read")
+        #expect(body["visibility"] as? String == "PRIVATE")
+    }
+
+    /// No account default known yet: the capture still goes, stating nothing, rather than being
+    /// refused — a capture staged before the account had an answer is not lost for it.
+    @Test("a fresh capture on Default with no known account default states nothing and is kept")
+    func freshDefaultWithUnknownAccountDefaultStatesNothing() async throws {
+        let (outcome, body) = try await postFresh(nil, accountDefault: composed(nil))
+        #expect(outcome == .saved, "the capture was refused instead of queued")
+        #expect(body["content"] as? String == "Lisbon at dusk", "positive control: body was read")
+        #expect(body["visibility"] == nil)
+    }
+
+    @Test("a fresh capture's own pick wins over the account default")
+    func freshPickWinsOverTheAccountDefault() async throws {
+        let (outcome, body) = try await postFresh(.public, accountDefault: composed(.private))
+        #expect(outcome == .saved)
+        #expect(body["content"] as? String == "Lisbon at dusk", "positive control: body was read")
+        #expect(body["visibility"] as? String == "PUBLIC")
+    }
+
+    /// The default was read while alice was signed in; by the time the outbox acquires its
+    /// credentials the session answers as bob. Alice's PRIVATE must not be stamped on a capture
+    /// bound to bob, so the capture is refused before anything reaches the disk or the wire.
+    @Test("a capture composed under one account is refused when another would send it")
+    func aCaptureComposedUnderAnotherAccountIsRefused() async throws {
+        let http = RecordingHTTP()
+        let queue = try signedInOutbox(
+            over: http, at: root.appending(path: UUID().uuidString), as: "bob")
+        let outcome = await TimelineView.post(
+            ComposeSubmission(content: "Lisbon at dusk", visibility: nil),
+            restoring: nil, accountDefault: composed(.private, under: "alice"),
+            resubmit: { _, _ in .accepted },
+            enqueue: { await TimelineView.enqueue($0, into: queue, accountDefault: $1) })
+        #expect(outcome == .enqueueFailed)
+        #expect(queue.lastEnqueueFailure == .notSignedIn)
+        await queue.refresh()
+        #expect(queue.jobs.isEmpty, "a job was written for the other account")
+        #expect(http.requests.isEmpty, "something reached the wire")
+
+        // Positive control: the same outbox takes a capture composed under its own account.
+        let mine = await TimelineView.post(
+            ComposeSubmission(content: "Lisbon at dusk", visibility: nil),
+            restoring: nil, accountDefault: composed(.private, under: "bob"),
+            resubmit: { _, _ in .accepted },
+            enqueue: { await TimelineView.enqueue($0, into: queue, accountDefault: $1) })
+        #expect(mine == .saved)
+        let body = try await createBody(http)
+        #expect(body["visibility"] as? String == "PRIVATE")
     }
 
     // MARK: - Who chose it
