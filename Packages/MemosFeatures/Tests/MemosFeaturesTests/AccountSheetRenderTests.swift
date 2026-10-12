@@ -332,6 +332,86 @@ struct AccountSheetRenderTests {
 
         #expect(opened, "Manage tokens did not open over the account sheet")
     }
+
+    /// The version line at the foot of the sheet (MEMNG-497): it reads this build as the Settings
+    /// app's Version row does, and ONE press on it pushes What's new in the sheet's own stack, the
+    /// running build's section heading the screen. Pressed through the element the probe finds,
+    /// not by building the destination: the link's wiring is what is under test.
+    @Test("the version line at the foot opens What's new, the running build's section first")
+    func theVersionLineOpensWhatsNew() async {
+        let session = await signedIn(over: AccountSheetServer(displayName: "Fabian"))
+        let running = AboutInfo.versionLine(from: .main)
+        #expect(running != "Unknown", "precondition: the host app declares its version")
+        let versions = Set(ReleaseNotes.bundled.map(\.version))
+        #expect(versions.contains(running), "precondition: the notes name \(running)")
+
+        let shown = await PressProbe.withScreen(
+            AccountSheet(signOut: SignOutConversation(), avatar: nil).environment(session),
+            height: 2400
+        ) { screen -> [String] in
+            #expect(screen.element(labelled: running) != nil, "the foot does not read \(running)")
+            #expect(screen.press(running), "the version line took no press")
+            let pushed = await TripProbe.settled(seconds: 5) {
+                screen.says(WhatsNewView.title) && screen.element(labelled: running) == nil
+            }
+            #expect(pushed, "What's new was not pushed over the sheet's own screen")
+            return WhatsNewProbe.labels(in: screen.window, among: versions)
+        }
+
+        #expect(shown.first == running, "the first section is not the running build's: \(shown)")
+        #expect(shown.count >= 2, "the earlier builds were not drawn after it: \(shown)")
+    }
+
+    /// The destination alone, over notes whose running build sits in the MIDDLE of the file: the
+    /// order on the screen is the running build, then the rest as written, and each body is drawn.
+    @Test("What's new draws the running build first and the rest in file order")
+    func whatsNewDrawsTheRunningBuildFirst() async {
+        let notes = ReleaseNotes.sections(
+            markdown: "## 3.0 (3)\n- Three.\n## 2.0 (2)\n- Two.\n## 1.0 (1)\n- One.\n")
+        let versions: Set = ["3.0 (3)", "2.0 (2)", "1.0 (1)"]
+
+        let (shown, bodies) = await PressProbe.withScreen(
+            NavigationStack { WhatsNewView(running: "2.0 (2)", notes: notes) },
+            height: tall.height
+        ) { screen -> ([String], Bool) in
+            let bodies = await TripProbe.settled(seconds: 5) {
+                ["Three.", "Two.", "One."].allSatisfy { screen.says($0) }
+            }
+            return (WhatsNewProbe.labels(in: screen.window, among: versions), bodies)
+        }
+
+        #expect(shown == ["2.0 (2)", "3.0 (3)", "1.0 (1)"], "drawn in this order: \(shown)")
+        #expect(bodies, "a section's Markdown was not drawn")
+    }
+}
+
+/// The section headings on a window, top to bottom, each once. Ordered by where each one is drawn
+/// rather than by the view tree: a list's cells sit in its hierarchy in whatever order it reused
+/// them, and a hosting view can expose the same text both as itself and as an element.
+@MainActor
+private enum WhatsNewProbe {
+    static func labels(in window: UIWindow, among wanted: Set<String>) -> [String] {
+        var found: [(label: String, top: CGFloat)] = []
+        collect(window, wanted: wanted, into: &found)
+        var seen = Set<String>()
+        return found.sorted { $0.top < $1.top }.map(\.label).filter { seen.insert($0).inserted }
+    }
+
+    private static func collect(
+        _ node: Any, wanted: Set<String>, into found: inout [(label: String, top: CGFloat)]
+    ) {
+        if let element = node as? NSObject {
+            if let label = element.accessibilityLabel, wanted.contains(label) {
+                found.append((label, element.accessibilityFrame.minY))
+            }
+            for child in element.accessibilityElements ?? [] {
+                collect(child, wanted: wanted, into: &found)
+            }
+        }
+        if let view = node as? UIView {
+            for subview in view.subviews { collect(subview, wanted: wanted, into: &found) }
+        }
+    }
 }
 
 /// Signing out from the account sheet, end to end over the modifier the Timeline uses: the

@@ -121,6 +121,18 @@ git -C "$w" add -A >/dev/null
 git -C "$w" commit --quiet -m "a test-count baseline"
 check "the test-count baseline alone" full "$w"
 
+# A bundled resource is not documentation, whatever its extension: the release notes are a .md
+# the app ships and the What's new screen reads, and the gate's notes step holds them to the version
+# (MEMNG-497). A change to that file alone must meet the full gate that runs the step.
+w="$(new_repo bundled-markdown)" || exit 1
+git -C "$w" checkout --quiet -b fix/notes
+mkdir -p "$w/Packages/MemosFeatures/Sources/MemosFeatures/Resources"
+printf '## 1.0.0 (1)\n\n- Notes.\n' \
+  > "$w/Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md"
+git -C "$w" add -A >/dev/null
+git -C "$w" commit --quiet -m "release notes"
+check "a bundled resource .md alone" full "$w"
+
 # The version file is the release-number authority; it never fast-paths.
 w="$(new_repo project-yml)" || exit 1
 git -C "$w" checkout --quiet -b fix/bump

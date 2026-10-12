@@ -94,6 +94,23 @@ class ReleaseNotesTest < Minitest::Test
     assert_equal([:ok, "~~~\n## 1.5.4 (23)\n~~~\n- after"], section(text))
   end
 
+  # CommonMark: a fence closes only on the character that opened it, at least as many times. A
+  # three-backtick line inside a four-backtick fence is text, so the heading after it is too.
+  LONG_FENCE = "## 2.0 (2)\n````\n```\n## 9.9 (99)\n````\n## 1.0 (1)\n- One.\n"
+
+  def test_a_shorter_fence_line_does_not_close_a_longer_fence
+    assert_refused(section(LONG_FENCE, version: "9.9", build: "99"), /no section/)
+    assert_equal([:ok, "- One."], section(LONG_FENCE, version: "1.0", build: "1"))
+    assert_equal([:ok, "````\n```\n## 9.9 (99)\n````"],
+                 section(LONG_FENCE, version: "2.0", build: "2"))
+  end
+
+  def test_a_fence_closes_only_on_its_own_character
+    text = "## 2.0 (2)\n~~~\n```\n## 9.9 (99)\n~~~\n## 1.0 (1)\n- One.\n"
+    assert_refused(section(text, version: "9.9", build: "99"), /no section/)
+    assert_equal([:ok, "- One."], section(text, version: "1.0", build: "1"))
+  end
+
   def test_a_duplicated_section_is_refused_as_ambiguous
     text = "## 1.5.5 (24)\n- a\n## 1.5.5 (24)\n- b\n"
     assert_refused(section(text), /2 sections "## 1\.5\.5 \(24\)"/)
@@ -122,7 +139,8 @@ class ReleaseNotesTest < Minitest::Test
   end
 
   def test_the_tracked_file_carries_the_notes_for_build_24
-    tracked = File.expand_path("../TESTFLIGHT_NOTES.md", __dir__)
+    tracked = File.expand_path(
+      "../../Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md", __dir__)
     status, notes = ReleaseNotes.load(tracked, version: "1.5.5", build: "24")
     assert_equal(:ok, status, notes)
     refute_empty(notes)

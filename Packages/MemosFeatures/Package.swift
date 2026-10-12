@@ -35,8 +35,13 @@ let package = Package(
             // own catalogue: the app's copy is what the SYSTEM reads for the global tint, this
             // one is what `Color(_:bundle: .module)` resolves. `DesignTokensTests` asserts the
             // two are the same colour, so the pair cannot drift.
+            //
+            // The release notes are copied, not processed: the file is read as written by both the
+            // What's new screen and the TestFlight cut (fastlane/Fastfile `NOTES`), and the gate's
+            // `notes` step holds it to project.yml's version and build.
             resources: [
-                .process("Resources/DesignTokens.xcassets")
+                .process("Resources/DesignTokens.xcassets"),
+                .copy("Resources/ReleaseNotes.md"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

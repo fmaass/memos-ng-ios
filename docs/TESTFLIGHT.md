@@ -247,8 +247,11 @@ GUI, no Mac login password:
   it saw. The verdict is a pure function in `fastlane/lib/asc_readback.rb` so each of those
   assertions is unit-tested without talking to Apple:
   `ruby -Ifastlane/lib fastlane/test/asc_readback_test.rb`.
-- **The "What to Test" text comes from a tracked file.** `fastlane/TESTFLIGHT_NOTES.md` holds one
-  `## <marketing> (<build>)` section per build, newest first, and `fastlane beta` passes the
+- **The "What to Test" text comes from a tracked file.**
+  `Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md` holds one
+  `## <marketing> (<build>)` section per build, newest first — the same file the app's What's new
+  screen shows, and the gate's `notes` step fails a tree whose project.yml pair has no section in
+  it — and `fastlane beta` passes the
   section matching the numbers read off the archive as `upload_to_testflight`'s `changelog:`. The
   lane asks for it right after the archive, before the dSYM copy and the upload, and refuses when
   the section is missing, empty, duplicated or longer than TestFlight's 4000 characters — a blank

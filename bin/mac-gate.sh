@@ -10,8 +10,8 @@
 #
 # The ordered checks are: the gate's own classifier test, generate the project, lint, test, rebuild
 # every package with warnings as errors, check the dependency rule, the share-link rule, the
-# text-selection rule, the refusal-sites rule and the openapi-coverage rule, read the SHIPPING
-# bundles back, and count the tests that actually ran.
+# text-selection rule, the refusal-sites rule, the openapi-coverage rule and the release-notes
+# rule, read the SHIPPING bundles back, and count the tests that actually ran.
 #
 # A change set of documentation and repository metadata only takes a FAST PATH. What the branch
 # changed against origin/main (merge-base, renames not followed, so a rename is judged by both of
@@ -56,7 +56,7 @@
 #
 # What the quick mode SKIPS is the whole difference: the package rebuilds with warnings fatal, the
 # warnings canary, the pin check, the entitlement, dependency-rule, share-link, text-selection,
-# refusal-sites and openapi-coverage rules, the
+# refusal-sites, openapi-coverage and release-notes rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
 # lane lock, the run admission, the simulator slot and the private simulator — and the lint, which costs seconds and which
@@ -461,9 +461,12 @@ ORIGIN_FETCHED=0
 # every Package.swift and Package.resolved, xcconfig, entitlements and plist files, this script,
 # the tests, and anything under Packages/, Sources/ or an App directory. LICENSE is spelled out
 # rather than globbed, because a LICENSE* glob would also read LICENSEChecker.swift as metadata.
+# A package's bundled resource is never metadata, whatever its extension: the release notes are a
+# .md the app ships and the notes step checks (MEMNG-497).
 gate_path_is_metadata() {
   local path="$1" base="${1##*/}"
   case "$path" in
+    Packages/*/Sources/*/Resources/*) return 1 ;;
     docs/*) return 0 ;;
     *.md) return 0 ;;
   esac
@@ -971,10 +974,11 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These eight must be there: the main-bar freeze's (ADR-0008 is the owner's, and a freeze
+# directory. These nine must be there: the main-bar freeze's (ADR-0008 is the owner's, and a freeze
 # whose test can vanish unnoticed is not one), the mount guard's two (a run on the wrong disk looks
-# exactly like a green one) and the TestFlight cut's (the one other write path to the Mac).
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh; do
+# exactly like a green one), the TestFlight cut's (the one other write path to the Mac) and the
+# release-notes rule's (the one file both the cut and the What's new screen read, MEMNG-497).
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -987,7 +991,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -2729,6 +2733,24 @@ s_apicover() {
   return 1
 }
 
+s_notes() {
+  # One notes file is read twice: the TestFlight cut sends the archived build's section as "What to
+  # Test", and the app's What's new screen shows the running build's section first (MEMNG-497). A
+  # version bump that forgot its notes is otherwise caught only by the cut, after the archive, and
+  # the build in between would open What's new on an older build's words. So the first version and
+  # build key lines of project.yml must head exactly one section of the file, with the count of
+  # sections read as the control, in a script of its own like the rules above.
+  echo "--- release-notes rule (project.yml's version and build have their section) ---"
+  local notes_rule="$GATE_TARGET/scripts/release-notes-rule.sh"
+  if [ -x "$notes_rule" ]; then
+    "$notes_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "NOTES FAIL: $notes_rule is missing or not executable, so the notes were never checked"
+  echo "            against the version and this step proves nothing"
+  return 1
+}
+
 s_testcount() {
   # Swift Testing does not emit XCTest's "Executed N tests" line (a correct Swift Testing bundle
   # reads 0 there), so the per-bundle counts come from the result bundle, which is authoritative
@@ -3018,6 +3040,7 @@ step buttonstyle s_buttonstyle
 step picturelist s_picturelist
 step mainbar    s_mainbar
 step apicover   s_apicover
+step notes      s_notes
 step testcount  s_testcount
 
 # A failed run removes its own package-rebuild trees (scripts/reap-gate-lanes.sh); it never

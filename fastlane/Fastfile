@@ -25,7 +25,7 @@ ROOT     = File.expand_path("..", __dir__)
 ARCHIVE  = "#{ROOT}/build/MemosNG.xcarchive"
 IPA      = "#{ROOT}/build/MemosNG.ipa"
 GROUP    = "household"
-NOTES    = "#{ROOT}/fastlane/TESTFLIGHT_NOTES.md"
+NOTES    = "#{ROOT}/Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md"
 
 # Off-host first: merkur's build dirs are reaped for disk and its disk is the single point of
 # failure, so the primary store is the NAS. lexosaurus is the local fallback and says so loudly.

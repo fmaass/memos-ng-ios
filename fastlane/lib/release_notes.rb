@@ -3,15 +3,19 @@
 # MEMNG-571: the "What to Test" text a TestFlight upload carries, read from a tracked file.
 #
 # `upload_to_testflight` without `changelog:` leaves every build's notes blank, and nothing in
-# the lane noticed. The notes live in fastlane/TESTFLIGHT_NOTES.md, one `## <version> (<build>)`
-# section per build, and the lane asks for the section of the numbers it actually archived. A
+# the lane noticed. The notes live in
+# Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md — the same file the app's
+# What's new screen reads (MEMNG-497) — one `## <version> (<build>)` section per build, and the
+# lane asks for the section of the numbers it actually archived. A
 # missing, empty, duplicated or oversized section refuses before anything is uploaded: a blank
 # changelog is the defect, so it cannot be the fallback. Pure apart from `load`'s one file read.
 module ReleaseNotes
   # App Store Connect's limit on a build's "What to Test" text.
   MAX_CHARACTERS = 4000
 
-  FENCE = /\A\s*(```|~~~)/.freeze
+  # A fence opens on a run of three or more backticks or tildes, and (CommonMark) closes only on
+  # a line that is nothing but a run of the SAME character at least as long as the opening one.
+  FENCE = /\A\s*(`{3,}|~{3,})/.freeze
   # A level-1 or level-2 heading ends a section; deeper headings belong to it.
   SECTION_END = /\A\#{1,2}(\s|\z)/.freeze
 
@@ -49,20 +53,30 @@ module ReleaseNotes
   def self.sections_titled(text, heading)
     found = []
     current = nil
-    fenced = false
+    fence = nil
     text.each_line do |raw|
       line = raw.chomp
-      if !fenced && line.rstrip.match?(SECTION_END)
+      if fence.nil? && line.rstrip.match?(SECTION_END)
         current = line.rstrip == heading ? [] : nil
         found << current if current
         next
       end
-      fenced = !fenced if line.match?(FENCE)
+      fence = fence_after(line, fence)
       current << line if current
     end
     found
   end
   private_class_method :sections_titled
+
+  # The fence open after `line`: the run that opened it, or nil when none is.
+  def self.fence_after(line, fence)
+    return line[FENCE, 1] if fence.nil?
+
+    closing = line.strip
+    closes = closing.length >= fence.length && closing.delete(fence[0]).empty?
+    closes ? nil : fence
+  end
+  private_class_method :fence_after
 
   def self.blank?(value)
     value.nil? || value.to_s.strip.empty?

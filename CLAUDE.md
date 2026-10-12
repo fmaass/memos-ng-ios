@@ -77,7 +77,13 @@ least two `safeAreaBar(edge: .bottom)` lines and each test file's `@Test(` count
 its own test, `tests/gate/mainbar-freeze-rule-test.sh`, is a selftest every run names) → the
 generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
 document is either named in the generator config's inclusion list or is one of the named
-exclusions, with the operation count it read as the control) → the
+exclusions, with the operation count it read as the control) → the release-notes rule
+(`scripts/release-notes-rule.sh`, step `notes`: the first `MARKETING_VERSION` and
+`CURRENT_PROJECT_VERSION` key lines of `project.yml` head exactly one `## <version> (<build>)`
+section, outside code fences, of `Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md`
+— the one file the TestFlight cut sends and the What's new screen shows — with the count of
+sections read as the control; its selftest `tests/gate/release-notes-rule-test.sh` is one every run
+names) → the
 per-bundle test-count check, which asks two questions: whether every bundle EXECUTED at least one
 case, and whether each bundle's executed count is still at or above the row
 `tests/gate/testcount-baseline.tsv` records for it (`bundle<TAB>count`, one row per bundle, no
@@ -126,7 +132,9 @@ metadata — `docs/`, any `.md`, `.gitignore`, `.gitattributes`, `.editorconfig`
 `LICENSE` — and none of them is a symbolic link, the gate reports `PASS (fast path: docs-only)`,
 names every changed path and the base it measured from, and copies nothing to the build host.
 Anything else meets the full gate: `project.yml`, every manifest, xcconfig, entitlement and plist,
-every source file, this script and its own tests. The release-version check runs on both paths, so
+every source file, this script and its own tests. A package's bundled resource
+(`Packages/*/Sources/*/Resources/*`) is never docs-only, whatever its extension, so a change to the
+release notes alone meets the full gate and its `notes` step. The release-version check runs on both paths, so
 a version bump can never take the fast path. Every run writes what it classified to
 `.gate-artifacts/classification.txt`, fast path or not. `bin/mac-gate.sh --classify-only` prints
 that classification and stops, without needing a build host.

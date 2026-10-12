@@ -30,6 +30,8 @@ struct AccountSheet: View {
     /// Where the two preferences that left the app are now.
     static let footer = "Appearance and uploads: Settings app › memos"
     static let refusedVisibility = "The server did not accept that. The default is unchanged."
+    /// This build, as `2.2.3 (45)`: the line at the foot of the sheet that opens What's new.
+    static let versionLine = AboutInfo.versionLine(from: .main)
 
     var body: some View {
         NavigationStack {
@@ -45,8 +47,18 @@ struct AccountSheet: View {
                 Section {
                     card { SignOutSection(conversation: signOut, session: session) }
                 } footer: {
-                    SettingsCaption(Self.footer)
-                        .padding(.horizontal, DesignTokens.Space.roomy)
+                    VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
+                        SettingsCaption(Self.footer)
+                        // A caption that happens to open something, not a control (MEMNG-497):
+                        // the plain style keeps it reading as the build's version line.
+                        NavigationLink {
+                            WhatsNewView(running: Self.versionLine)
+                        } label: {
+                            SettingsCaption(Self.versionLine)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, DesignTokens.Space.roomy)
                 }
             }
             .listStyle(.plain)
