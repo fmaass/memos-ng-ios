@@ -76,7 +76,11 @@ public enum APIClientFactory {
             serverURL: configuration.baseURL,
             configuration: runtimeConfiguration,
             transport: transport,
-            middlewares: [BearerAuthMiddleware(token: token), BusyAnswerMiddleware()]
+            middlewares: [
+                BearerAuthMiddleware(token: token),
+                BusyAnswerMiddleware(),
+                ExplicitNullMiddleware(),
+            ]
         )
     }
 
@@ -105,7 +109,11 @@ public enum APIClientFactory {
             serverURL: configuration.baseURL,
             configuration: runtimeConfiguration,
             transport: transport,
-            middlewares: [BearerAuthMiddleware(credential: credential), BusyAnswerMiddleware()]
+            middlewares: [
+                BearerAuthMiddleware(credential: credential),
+                BusyAnswerMiddleware(),
+                ExplicitNullMiddleware(),
+            ]
         )
     }
 

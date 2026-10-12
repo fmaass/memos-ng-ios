@@ -105,6 +105,26 @@ public enum StoreFailure {
         return reason
     }
 
+    /// Whether a failed request reached the server: an answered status, or a body this device
+    /// could not read — what `ServerReachability.classify` calls `.reached`. A refusal has its own
+    /// funnel and a cancellation is nobody's answer, so neither counts.
+    public static func reachedServer(_ error: any Error) -> Bool {
+        guard !isCancellation(error), case .reached = ServerReachability.classify(error) else {
+            return false
+        }
+        return true
+    }
+
+    /// The failure a generated operation's DOCUMENTED refusal answer stands for.
+    ///
+    /// The collection operations (memos-ng 2.1.0) are the first whose contract documents the
+    /// refused-credential status, so their generated answers carry a case of their own for it.
+    /// A store's switch cannot name that case outside the refusal rule's allow-list, so it reaches
+    /// it as `default` and throws this, which `refusal(_:)` reads exactly as it reads the same
+    /// status left undocumented. An installed credential never gets that far: the bearer middleware
+    /// throws the epoch-stamped refusal before the answer is decoded.
+    public static let documentedRefusal: APIError = .unauthorized
+
     /// The failure a store should report, or nil for one it must swallow.
     ///
     /// Only cancellation is swallowed. Everything else — a 500, a decode, a phone with no network
