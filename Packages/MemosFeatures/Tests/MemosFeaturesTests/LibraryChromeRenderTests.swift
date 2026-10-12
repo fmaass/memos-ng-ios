@@ -1055,6 +1055,36 @@ extension MediaImageLoaderTests {
         }
     }
 
+    /// The headings on screen, top to bottom, each once: what carries the header trait.
+    private static func headings(in window: UIWindow) -> [String] {
+        var found: [String: CGFloat] = [:]
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            if object.accessibilityTraits.contains(.header), let label = object.accessibilityLabel,
+                !label.isEmpty, found[label] == nil
+            {
+                found[label] = object.accessibilityFrame.minY
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.map(\.key)
+    }
+
+    /// The September day a fixture tile was taken on: `shot-<day>-<index>`.
+    private static func day(ofTile uid: String) -> Int? {
+        let parts = uid.split(separator: "-")
+        return parts.count == 3 ? Int(parts[1]) : nil
+    }
+
+    /// The day a day heading names — "Tue 1 Sep" — or nil for any other heading.
+    private static func day(ofHeading label: String) -> Int? {
+        let parts = label.split(separator: " ")
+        return parts.count == 3 ? Int(parts[1]) : nil
+    }
+
     /// Presses the tile showing `uid` through its own accessibility activation — the action a
     /// finger's tap runs — once: the first node carrying its identifier that takes the press.
     private static func pressTile(_ uid: String, in window: UIWindow) -> Bool {
@@ -1114,8 +1144,8 @@ extension MediaImageLoaderTests {
             for _ in 0..<200 where Self.elements(labelled: button, in: window).isEmpty {
                 await chromeSettle(window)
             }
-            @MainActor func press() -> Bool {
-                Self.elements(labelled: button, in: window).contains {
+            @MainActor func press(_ label: String) -> Bool {
+                Self.elements(labelled: label, in: window).contains {
                     $0.accessibilityTraits.contains(.button) && $0.accessibilityActivate()
                 }
             }
@@ -1128,22 +1158,45 @@ extension MediaImageLoaderTests {
                 await chromeSettle(window, turns: 10)
                 return TripProbe.tiles(in: window)
             }
+            let whole = Self.headings(in: window)
             let selectedLines = Self.labels(in: window).filter { $0.contains("Select") }
 
-            #expect(press(), "no \(button) button took the press: \(selectedLines)")
+            #expect(press(button), "no \(button) button took the press: \(selectedLines)")
             let narrowed = await settled(on: 3)
             #expect(
                 narrowed == all.filter(chosen.contains),
                 "narrowed to \(narrowed), wanted \(all.filter(chosen.contains))")
+            // The month and the days the three were taken on keep their headings; the days with
+            // none of them chosen lose theirs.
+            let days = Set(chosen.compactMap(Self.day(ofTile:)))
+            let kept = Self.headings(in: window)
+            #expect(
+                kept == whole.filter { Self.day(ofHeading: $0).map(days.contains) ?? true },
+                "headings narrowed: \(kept), whole grid: \(whole)")
+            #expect(
+                kept.compactMap(Self.day(ofHeading:)).count == days.count,
+                "not one heading per chosen day: \(kept)")
             Self.shoot("779-narrowed", window)
 
-            #expect(press(), "the second press found no \(button) button")
+            // A tile of the narrowed grid resolves to ITS file: the tap lets that one go, and the
+            // other two stay (an index read against the whole list would find no row, or another).
+            guard narrowed.count == 3 else { return }
+            let middle = narrowed[1]
+            #expect(Self.pressTile(middle, in: window), "the narrowed tile \(middle) took no press")
+            let two = await settled(on: 2)
+            #expect(two == narrowed.filter { $0 != middle }, "after the tap: \(two)")
+            let button2 = "Show Selected (2)"
+            for _ in 0..<200 where Self.elements(labelled: button2, in: window).isEmpty {
+                await chromeSettle(window)
+            }
+
+            #expect(press(button2), "the second press found no \(button2) button")
             let widened = await settled(on: 20)
             #expect(widened == all, "the second press gave back \(widened.count) tiles")
 
             // Narrowed again, then Close: leaving select mode shows the whole grid.
-            #expect(press(), "the third press found no \(button) button")
-            _ = await settled(on: 3)
+            #expect(press(button2), "the third press found no \(button2) button")
+            _ = await settled(on: 2)
             await closeSelect(window)
             let closed = await settled(on: 20)
             #expect(closed == all, "leaving select mode left \(closed.count) tiles")

@@ -138,6 +138,18 @@ struct LibraryFilterMenuRenderTests {
     }
 
     /// The order a list row of the Sort By menu reads from: the store's, as the screen binds it.
+    /// The Sort By menu's label on its own: a list draws its two lines as two rows, so what the
+    /// label SHOWS is read, not what the menu tells VoiceOver.
+    private struct SortLabelHarness: View {
+        let store: MediaLibraryStore
+
+        var body: some View {
+            List {
+                SortByMenuLabel(order: store.order)
+            }
+        }
+    }
+
     private struct SortHarness: View {
         let store: MediaLibraryStore
 
@@ -228,6 +240,19 @@ struct LibraryFilterMenuRenderTests {
         let ticked = found.filter(\.selected).map(\.label)
         #expect(ticked == ["All Items"], "ticked: \(ticked)")
 
+        // A kind other than the default ticks its own row and no other: a picker that drew its
+        // tick on All Items whatever the kind would pass the case above.
+        for (kind, row) in [(MediaLibraryFilter.videos, "Videos"), (.photos, "Photos")] {
+            let other = Self.host(FilterHarness(filter: kind, order: .oldestFirst))
+            let under = await Self.settle(other) { rows in
+                rows.contains { $0.selected && $0.label == row }
+            }
+            let chosen = under.filter(\.selected).map(\.label)
+            other.isHidden = true
+            other.rootViewController = nil
+            #expect(chosen == [row], "under \(kind) the menu ticks \(chosen)")
+        }
+
         // The divider between the kinds and Sort By: a list draws a Divider as nothing it reads
         // out, so it is read from the menu's own body — the picker, the Divider, then the nested
         // menu, in that order and nothing between.
@@ -268,6 +293,17 @@ struct LibraryFilterMenuRenderTests {
                 == ["Newest First"], "ticked under Newest First: \(found.map(\.label))")
         #expect(label(found).contains("Newest First"), "the label reads \(label(found))")
 
+        // What the label SHOWS: "Sort By", and under it the order in force.
+        let shown = Self.host(SortLabelHarness(store: store))
+        defer {
+            shown.isHidden = true
+            shown.rootViewController = nil
+        }
+        var lines = await Self.settle(shown) { $0.contains { $0.label == "Newest First" } }
+        #expect(
+            lines.map(\.label) == ["Sort By", "Newest First"],
+            "the label shows \(lines.map(\.label))")
+
         store.setOrder(.oldestFirst)
         found = await Self.settle(window) { rows in
             label(rows).contains("Oldest First")
@@ -278,5 +314,9 @@ struct LibraryFilterMenuRenderTests {
                 == ["Oldest First"], "ticked under Oldest First: \(found.map(\.label))")
         #expect(label(found).contains("Oldest First"), "the label reads \(label(found))")
         #expect(!label(found).contains("Newest First"), "the label kept the old order")
+        lines = await Self.settle(shown) { $0.contains { $0.label == "Oldest First" } }
+        #expect(
+            lines.map(\.label) == ["Sort By", "Oldest First"],
+            "the label shows \(lines.map(\.label)) under Oldest First")
     }
 }

@@ -380,25 +380,94 @@ struct MediaLibraryRenderTests {
         #expect(!select.accessibilityTraits.contains(.notEnabled), "Select is still inert in All")
     }
 
-    /// The header's controls, each read once in reading order: what carries the button trait.
+    /// The header's controls, leading to trailing: what carries the button trait, each CONTROL
+    /// once. The walk can meet one control twice — a view and the element it hosts — at one frame;
+    /// two controls never share a frame, so two close buttons count as two.
     private static func controls(in found: [NSObject]) -> [String] {
         var seen: Set<String> = []
         return found.filter { $0.accessibilityTraits.contains(.button) }
+            .filter { element in
+                let frame = element.accessibilityFrame.integral
+                let key =
+                    "\(element.accessibilityLabel ?? "")@\(frame.minX),\(frame.minY),"
+                    + "\(frame.width),\(frame.height)"
+                return seen.insert(key).inserted
+            }
+            .sorted { $0.accessibilityFrame.minX < $1.accessibilityFrame.minX }
             .compactMap(\.accessibilityLabel)
-            .filter { seen.insert($0).inserted }
+    }
+
+    /// How many separate bands of ink, one under another, the glyph inside `frame` draws, read
+    /// from the window as drawn (its middle half, clear of the glass's rim): the filter glyph is
+    /// three lines stacked, an ellipsis one row of dots.
+    private static func inkBands(in frame: CGRect, of window: UIWindow) -> Int {
+        let inner = frame.insetBy(dx: frame.width / 4, dy: frame.height / 4)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 3
+        let image = UIGraphicsImageRenderer(bounds: inner, format: format).image { _ in
+            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        guard let drawn = image.cgImage else { return -1 }
+        let width = drawn.width
+        let height = drawn.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        bytes.withUnsafeMutableBytes { raw in
+            let context = CGContext(
+                data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            context?.draw(drawn, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        var bands = 0
+        var inBand = false
+        for y in 0..<height {
+            let inked = (0..<width).contains { x in
+                let at = (y * width + x) * 4
+                let luminance =
+                    0.299 * Double(bytes[at]) + 0.587 * Double(bytes[at + 1])
+                    + 0.114 * Double(bytes[at + 2])
+                return luminance < 0.4 * 255
+            }
+            if inked && !inBand { bands += 1 }
+            inBand = inked
+        }
+        return bands
     }
 
     /// MEMNG-779 (WPN-12 phase 1): browsing, the header holds exactly the round filter button and
-    /// Select; in select mode with nothing chosen there is no Select All or Deselect All, and the
-    /// trailing capsule holds only the close button — its actions menu has no rows on the Library.
+    /// Select, and the round button DRAWS the filter glyph — three stacked lines, read from the
+    /// window, not from a constant; in select mode with nothing chosen there is no Select All or
+    /// Deselect All, and the trailing capsule holds one control, the close button — its actions
+    /// menu has no rows on the Library.
     @Test("the header shows the filter button and Select; select mode shows only its close button")
     func filterHeaderAndSelectChrome() async throws {
-        #expect(LibraryFilterMenuContent.symbol == "line.3.horizontal.decrease")
-        let browsing = try await Self.elements(
-            of: LibraryHeader(subtitle: "All", select: {}) { Text("row") }, waitFor: "Select")
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = UIHostingController(
+            rootView: VStack {
+                LibraryHeader(subtitle: "All", select: {}) { Text("row") }
+                Spacer()
+            }
+            .background(Color.white))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var browsing: [NSObject] = []
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            browsing = []
+            Self.collectElements(window, into: &browsing)
+            if browsing.contains(where: { $0.accessibilityLabel == "Select" }) { break }
+        }
         #expect(
             Self.controls(in: browsing) == ["Filter", "Select"],
             "browsing controls: \(Self.controls(in: browsing))")
+        let filter = try #require(browsing.first { $0.accessibilityLabel == "Filter" })
+        let bands = Self.inkBands(in: filter.accessibilityFrame, of: window)
+        #expect(bands == 3, "the round button draws \(bands) band(s) of ink, not the filter glyph")
 
         let selecting = try await Self.elements(
             of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
