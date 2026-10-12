@@ -31,6 +31,14 @@ public struct ComposePinnedTrip: Equatable, Sendable {
     public static func offered(by pins: TripPins?, now: Date) -> ComposePinnedTrip? {
         pins?.activePin(now: now).flatMap(ComposePinnedTrip.init(pin:))
     }
+
+    public static func offered(among trips: [Trip], now: Date) -> ComposePinnedTrip? {
+        nil
+    }
+
+    public static func offered(from store: TripStore?, now: Date) -> ComposePinnedTrip? {
+        nil
+    }
 }
 
 /// The chip one compose sheet shows, and what it does to the words that are posted.

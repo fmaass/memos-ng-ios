@@ -29,3 +29,12 @@ extension View {
         onChange(of: identity) { _, identity in perform(identity) }
     }
 }
+
+extension View {
+    func readsTrips(
+        _ trips: TripStore?, under identity: TimelineSnapshotIdentity?,
+        access: @escaping () -> CollectionsAccess?
+    ) -> some View {
+        self
+    }
+}

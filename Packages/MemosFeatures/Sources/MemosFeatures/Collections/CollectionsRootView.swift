@@ -23,8 +23,16 @@ struct CollectionsRootView: View {
     @State private var trail: [TripRoute] = []
 
     var body: some View {
-        NavigationStack(path: $trail) {
-            content
+        Self.stack(trail: $trail) { content }
+    }
+
+    /// The tab's stack over `root`: the trips pushed on `trail`, the main bar's room at the root's
+    /// foot.
+    static func stack(
+        trail: Binding<[TripRoute]>, @ViewBuilder root: () -> some View
+    ) -> some View {
+        NavigationStack(path: trail) {
+            root()
                 // The app's main bar's room, inside the stack (MEMNG-690).
                 .leadingFootBar(on: .collections)
         }
