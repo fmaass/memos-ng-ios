@@ -186,29 +186,61 @@ if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "BUNDLE FAIL: extension dec
 else
   bad "the gate's read-back let an extension bundle without the user-defaults entry through (exit $rc)"; show "$out"
 fi
-# The Settings pane the built app carries (MEMNG-781): the tracked pane passes above; a pane whose
-# Storage rows are gone, and one whose rows stand under another group, are each refused by name.
-python3 - "$APP_PANE" "$tmp/pane-no-storage.plist" "$tmp/pane-wrong-group.plist" <<'PY'
-import plistlib, sys
+# The Settings pane the built app carries (MEMNG-781): the tracked pane passes above. Each pane
+# below is the tracked one with one thing wrong, made from it here so the cases follow the file,
+# and each is refused naming what is wrong. A keyed row retyped to a group keeps the key list
+# whole, so only the row's own type can refuse it.
+panes="no-storage wrong-group retyped-group swapped-types wrong-title default-on order footer"
+python3 - "$APP_PANE" "$tmp" <<'PY'
+import copy, plistlib, sys
 with open(sys.argv[1], "rb") as handle:
     pane = plistlib.load(handle)
 rows = pane["PreferenceSpecifiers"]
-storage = ("settings.mediaCacheSize", "settings.clearMediaCacheOnLaunch")
-gone = [row for row in rows if row.get("Key") not in storage and row.get("Title") != "Storage"]
-with open(sys.argv[2], "wb") as handle:
-    plistlib.dump(dict(pane, PreferenceSpecifiers=gone), handle)
-moved = [row for row in rows if row.get("Title") != "Storage"]
-with open(sys.argv[3], "wb") as handle:
-    plistlib.dump(dict(pane, PreferenceSpecifiers=moved), handle)
+SIZE, CLEAR = "settings.mediaCacheSize", "settings.clearMediaCacheOnLaunch"
+
+def write(name, changed):
+    with open("%s/pane-%s.plist" % (sys.argv[2], name), "wb") as handle:
+        plistlib.dump(dict(pane, PreferenceSpecifiers=changed), handle)
+
+def edited(change):
+    changed = copy.deepcopy(rows)
+    for row in changed:
+        change(row)
+    return changed
+
+def retype(kinds):
+    return lambda row: row.update(Type=kinds[row["Key"]]) if row.get("Key") in kinds else None
+
+write("no-storage", [row for row in rows
+                     if row.get("Key") not in (SIZE, CLEAR) and row.get("Title") != "Storage"])
+write("wrong-group", [row for row in rows if row.get("Title") != "Storage"])
+write("retyped-group", edited(retype({SIZE: "PSGroupSpecifier", CLEAR: "PSGroupSpecifier"})))
+write("swapped-types", edited(retype({SIZE: "PSToggleSwitchSpecifier",
+                                      CLEAR: "PSTitleValueSpecifier"})))
+write("wrong-title", edited(lambda row: row.update(Title="Clear cache")
+                            if row.get("Key") == CLEAR else None))
+write("default-on", edited(lambda row: row.update(DefaultValue=True)
+                           if row.get("Key") == CLEAR else None))
+at = [index for index, row in enumerate(rows) if row.get("Title") == "Storage"][0]
+storage, rest = rows[at:at + 3], rows[:at] + rows[at + 3:]
+write("order", rest + storage)
+write("footer", edited(lambda row: row.pop("FooterText", None)
+                       if row.get("Title") == "Storage" else None))
 PY
-for pane in no-storage wrong-group; do
+for pane in $panes; do
   pane_dir="$tmp/pane-$pane/MemosNG.app"
   fake_bundle "$pane_dir" live.discomarder.memosng "$APP_MANIFEST" "$tmp/pane-$pane.plist"
   fake_bundle "$pane_dir/PlugIns/MemosShare.appex" live.discomarder.memosng.share "$EXT_MANIFEST"
   out="$(python3 "$step_py" "$pane_dir" "$pane_dir/PlugIns/MemosShare.appex" 9.9.9 "$VERDICT" 2>&1)"; rc=$?
   case "$pane" in
     no-storage) says="BUNDLE FAIL: Settings.bundle keys are" ;;
-    wrong-group) says="BUNDLE FAIL: Settings.bundle settings.mediaCacheSize stands under 'Uploads'" ;;
+    wrong-group) says="BUNDLE FAIL: Settings.bundle settings.mediaCacheSize is 'PSTitleValueSpecifier' titled 'Media cache' under 'Uploads'" ;;
+    retyped-group) says="BUNDLE FAIL: Settings.bundle settings.clearMediaCacheOnLaunch is 'PSGroupSpecifier'" ;;
+    swapped-types) says="BUNDLE FAIL: Settings.bundle settings.mediaCacheSize is 'PSToggleSwitchSpecifier'" ;;
+    wrong-title) says="titled 'Clear cache' under 'Storage'" ;;
+    default-on) says="BUNDLE FAIL: Settings.bundle settings.clearMediaCacheOnLaunch defaults to True" ;;
+    order) says="BUNDLE FAIL: Settings.bundle groups are ['Appearance', 'Uploads', 'About', 'Storage']" ;;
+    footer) says="BUNDLE FAIL: Settings.bundle Storage footers are [None]" ;;
   esac
   if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -qF "$says"; then
     ok "the gate's read-back fails a Settings pane ($pane), naming it"
@@ -216,6 +248,15 @@ for pane in no-storage wrong-group; do
     bad "the gate's read-back let a Settings pane ($pane) through (exit $rc)"; show "$out"
   fi
 done
+# The refusal reaches the step: the read-back ends on its own exit code, and the python that
+# carries it is the last command of the step's function, so its status is the step's.
+tail_line="$(awk '/<<.PY.$/ && /"\$privacy_verdict"/ { f = 1; next } f && /^PY$/ { getline; print; exit }' "$GATE")"
+last_code="$(grep -v '^[[:space:]]*$' "$step_py" | tail -n 1)"
+if [ "$last_code" = "sys.exit(rc)" ] && [ "$tail_line" = "}" ]; then
+  ok "the read-back's exit code is the step's: sys.exit(rc), then the function ends"
+else
+  bad "the read-back's exit code may not reach the step (last line '$last_code', after PY '$tail_line')"
+fi
 
 echo "gate privacy manifest: $((cases - fails)) of $cases checks passed"
 [ "$fails" -eq 0 ]
