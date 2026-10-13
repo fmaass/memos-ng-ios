@@ -79,8 +79,11 @@ public final class TripMemberStore {
     /// The callers that joined a span read, by its token; let go when it ends or on a reset.
     @ObservationIgnored var spanJoiners: [Int: [CheckedContinuation<Void, Never>]] = [:]
     /// The pictures Delete took: absent from every trip's members and journal, so a page read
-    /// before the delete cannot put one back.
-    var deleted: Set<String> = []
+    /// before the delete cannot put one back. A screen hands them to a viewer open over them.
+    public internal(set) var deleted: Set<String> = []
+    /// The exclusions this app wrote and the server acknowledged, by trip and picture, each with
+    /// the token it was recorded under; what overrides one is `noteAcknowledged`'s rule.
+    var ownExclusions: [String: [String: Int]] = [:]
     /// Bumped by `sessionIdentityChanged()`: everything read before it belongs to somebody else.
     var generation = 0
     var journalToken = 0
@@ -103,6 +106,9 @@ public final class TripMemberStore {
         trips.onReconcile.append { [weak self] uid, handle, baseURL in
             await self?.drain(uid: uid, using: handle, baseURL: baseURL)
         }
+        trips.onAcknowledged.append { [weak self] kind, uid, picture in
+            self?.noteAcknowledged(kind, trip: uid, picture: picture)
+        }
     }
 
     /// Names the session this store's transport outcomes belong to. Idempotent.
@@ -116,11 +122,21 @@ public final class TripMemberStore {
         return held.complete ? .complete : .truncated
     }
 
-    /// The drained members, oldest taken first, less any Delete took; empty until a drain of the
-    /// current lineage has applied.
+    /// The drained members, oldest taken first, less what this app has taken out of the trip
+    /// (`stillMembers`); empty until a drain of the current lineage has applied.
     public func members(for trip: Trip) -> [LibraryRow] {
-        let rows = held(trip.uid)?.rows ?? []
-        return deleted.isEmpty ? rows : rows.filter { !deleted.contains($0.id) }
+        stillMembers(held(trip.uid)?.rows ?? [], of: trip)
+    }
+
+    /// Of `rows`, read as `trip`'s members at some moment, the ones still its members as far as
+    /// this app knows: less every picture Delete took and every exclusion from the trip this app
+    /// wrote and the server acknowledged (`noteAcknowledged`). A drain read before either can land
+    /// after it, and a screen keeps the rows it last showed while no read lands; both are read
+    /// through here, so neither shows the picture again.
+    public func stillMembers(_ rows: [LibraryRow], of trip: Trip) -> [LibraryRow] {
+        let removed = ownExclusions[trip.uid] ?? [:]
+        guard !deleted.isEmpty || !removed.isEmpty else { return rows }
+        return rows.filter { !deleted.contains($0.id) && removed[$0.id] == nil }
     }
 
     /// The server's count, the drained rows' taken extrema, and the cover: the chosen one while it
@@ -189,7 +205,40 @@ public final class TripMemberStore {
         }
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: lineage.uid)
         drained[lineage.uid] = Drained(lineage: landed, rows: rows, complete: complete)
+        contradict(uid: lineage.uid, listed: rows, askedAt: token)
         lastError = nil
+    }
+
+    // MARK: - The app's own exclusions (MEMNG-793)
+
+    /// Records an exclusion the server acknowledged, or ends one at Add Back's acknowledgement.
+    ///
+    /// Which source wins when: the record is this app's own knowledge, the drain is the server's.
+    /// The record is kept apart from the drain, so nothing that drops a drain — a list, a pin, a
+    /// write's invalidation — drops it, and the journal leaves the picture out while it stands,
+    /// drained or not. It ends at Add Back's acknowledgement, or when a drain ASKED FOR AFTER it
+    /// was recorded lists the picture: the server has it back, from another device, and its later
+    /// word wins (`contradict`). A drain asked for earlier answered about the trip before the
+    /// exclusion and says nothing against it; a later one that does not list the picture agrees,
+    /// and the record stays, because the next list or pin drops that drain again. A change of
+    /// identity drops it with everything else the outgoing session read.
+    func noteAcknowledged(_ kind: TripStore.BatchKind, trip uid: String, picture: String) {
+        switch kind {
+        case .exclude:
+            nextToken += 1
+            ownExclusions[uid, default: [:]][picture] = nextToken
+        case .include:
+            ownExclusions[uid]?[picture] = nil
+            if ownExclusions[uid]?.isEmpty == true { ownExclusions[uid] = nil }
+        }
+    }
+
+    /// Ends the record of each picture a drain of `uid` asked for at `token` lists, when the
+    /// record is older than the drain (`noteAcknowledged`).
+    private func contradict(uid: String, listed rows: [LibraryRow], askedAt token: Int) {
+        guard var own = ownExclusions[uid] else { return }
+        for row in rows where (own[row.id] ?? .max) < token { own[row.id] = nil }
+        ownExclusions[uid] = own.isEmpty ? nil : own
     }
 
     // MARK: - Remove and add back
@@ -224,8 +273,19 @@ public final class TripMemberStore {
 
     /// The Removed list of the current lineage; one computed under an earlier revision or session
     /// is not shown.
+    ///
+    /// A picture Delete took is left out of an exact list here, as it is read, so one computed
+    /// before the delete and one whose candidates were read before it and landed after it alike
+    /// never offer it: the delete moves no revision, and the picture is no candidate on the server
+    /// any more, so the list without it is still exact (criterion 5). Every reader comes through
+    /// here; the list is not filtered again when it is stored.
     public func removedState(for trip: Trip) -> TripRemovedState {
-        if let result = removedResults[trip.uid], current(result.lineage) { return result.state }
+        if let result = removedResults[trip.uid], current(result.lineage) {
+            guard case .exact(let rows) = result.state, !deleted.isEmpty else {
+                return result.state
+            }
+            return .exact(rows.filter { !deleted.contains($0.id) })
+        }
         return removedFlights[trip.uid] != nil ? .loading : .notRequested
     }
 
@@ -280,7 +340,8 @@ public final class TripMemberStore {
             removedResults[uid] = (stamp(uid, handle), .unavailable)
             return
         }
-        let members = Set(held.rows.map(\.id))
+        // A picture this app took out is no member, whatever a drain read before it says.
+        let members = Set(stillMembers(held.rows, of: current).map(\.id))
         let gone = candidates.filter { !members.contains($0.id) }
         removedResults[uid] = (stamp(uid, handle), .exact(Self.oldestFirst(gone)))
     }

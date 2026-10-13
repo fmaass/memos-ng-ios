@@ -257,6 +257,23 @@ struct TripJournalTests {
         #expect(store.journalState(for: renamed) == .notLoaded)
     }
 
+    @Test("a journal loaded before the trip's tag changed is not read through the old record")
+    func aRetaggedTripsOldRecordReadsNothing() async throws {
+        let client = Stub.client { _, _, _ in Self.page(0..<1) }
+        let (record, trips, store) = await journalTrip("Portugal 2026", tag: Self.tag)
+        await store.loadJournal(record, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.journal(for: record).map(\.uid) == ["m0"], "control: the journal applied")
+
+        // A view still holding the old record asks after the tag moved on the server.
+        seeder.server.edit(record.uid) { $0.tag = "lisbon2026" }
+        await trips.refresh(using: seeder.server.client.handle, baseURL: Stub.baseURL)
+        let renamed = try #require(trips.trips.first { $0.uid == record.uid })
+        #expect(renamed.tag == "lisbon2026", "control: the rule changed")
+
+        #expect(store.journal(for: record).isEmpty, "the old record read the old rule's journal")
+        #expect(store.journalState(for: record) == .notLoaded)
+    }
+
     @Test("a journal answered for a trip deleted while it was out publishes nothing")
     func aDeletedTripsJournalIsDropped() async throws {
         let entered = TripLatch()

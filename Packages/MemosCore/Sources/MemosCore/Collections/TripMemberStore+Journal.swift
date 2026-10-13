@@ -15,6 +15,14 @@ struct TripJournalRule: Equatable {
 }
 
 /// What a journal load in flight was issued under — what a second caller has to match to join it.
+///
+/// A load is fenced by this store's identity generation, the credential and the trip's rule (its
+/// tag and span), not by the trip store's revision. The rule is asked again of the trip the trip
+/// store holds when the answer lands (`isLive`) and whenever the journal is read (`journal(of:)`),
+/// so a changed tag or span, or a deleted trip, hides it. A picture the app removed from the trip
+/// (`ownExclusions`) or deleted is taken out when the journal is read (`journal(for:)`), never
+/// when it lands, so neither a load that was out meanwhile nor a list or pin that dropped the
+/// member drain brings it back.
 struct TripJournalLineage: Equatable {
     var generation: Int
     var session: Int
@@ -59,23 +67,44 @@ extension TripMemberStore {
     }
 
     /// The memos of the trip's tag and of its span, oldest first by their journal instant
-    /// (`journalInstant(of:)`), less a span memo none of whose files is a member now. Empty until a
-    /// journal load under the trip's rule has applied, for a trip the trip store no longer holds,
-    /// and for a trip without a tag.
+    /// (`journalInstant(of:)`), less a span memo none of whose files is a member now, and every
+    /// memo less the files Delete took. Empty until a journal load under the trip's rule has
+    /// applied, for a trip the trip store no longer holds, and for a trip without a tag.
     public func journal(for trip: Trip) -> [Memo] {
         guard let journal = journal(of: trip) else { return [] }
+        return withoutDeleted(kept(journal, of: trip))
+    }
+
+    /// A deleted file leaves every memo the journal hands out, whatever kept the memo — its tag,
+    /// another file, no file at all — and whenever its page was read (MEMNG-794). Asked of the
+    /// memos `kept(_:of:)` chose by their files as read, so a span memo of nothing but deleted
+    /// pictures has already gone rather than staying as a memo without one.
+    private func withoutDeleted(_ memos: [Memo]) -> [Memo] {
+        guard !deleted.isEmpty else { return memos }
+        return memos.map { memo in
+            var memo = memo
+            memo.attachments.removeAll { deleted.contains($0.uid) }
+            return memo
+        }
+    }
+
+    /// The journal's memos that are in the trip now, their files as read.
+    private func kept(_ journal: TripJournal, of trip: Trip) -> [Memo] {
         guard let span = journal.rule.span else { return journal.memos }
         // The server's members say which files are in the trip once a drain has read them all;
         // before that the window is the only rule this device knows.
         let members: Set<String>? =
             state(for: trip) == .complete ? Set(members(for: trip).map(\.id)) : nil
+        // What this app removed from the trip stays out whether or not a drain is held
+        // (`noteAcknowledged` says when the server's word overrides it).
+        let removed = ownExclusions[trip.uid] ?? [:]
         // A span memo stays while one of its files is a member now: taken in the window (its memo's
-        // date standing in for an undated one), not deleted, and listed by the server when the
-        // members are known.
+        // date standing in for an undated one), not deleted, not removed by this app, and listed by
+        // the server when the members are known.
         return journal.memos.filter { memo in
             journal.tagged.contains(memo.uid) || memo.attachments.isEmpty
                 || memo.attachments.contains { file in
-                    !deleted.contains(file.uid)
+                    !deleted.contains(file.uid) && removed[file.uid] == nil
                         && span.contains(file.captureInstant ?? memo.createdAt)
                         && (members?.contains(file.uid) ?? true)
                 }
@@ -191,10 +220,12 @@ extension TripMemberStore {
         }.map(\.element)
     }
 
-    /// Only for a trip the trip store still holds, under the rule it was read for.
+    /// Only for a trip the trip store still holds, under the rule that trip has now — never the
+    /// rule of the record the caller passed, which can be older.
     private func journal(of trip: Trip) -> TripJournal? {
-        guard let journal = journals[trip.uid], journal.rule == TripJournalRule(trip),
-            trips.trips.contains(where: { $0.uid == trip.uid })
+        guard let journal = journals[trip.uid],
+            let held = trips.trips.first(where: { $0.uid == trip.uid }),
+            journal.rule == TripJournalRule(held)
         else { return nil }
         return journal
     }
@@ -219,6 +250,10 @@ extension TripMemberStore {
     }
 
     // MARK: - The New trip sheet
+
+    // These reads name tags, not trips, and are fenced by the identity generation and the
+    // credential alone. Open gap: an answer issued before a picture delete lands unchanged after
+    // it, so a count or a span can still include the deleted picture (MEMNG-795).
 
     /// Reads every tag's count, videos included. Refused, not sent, while the same read is in
     /// flight.
@@ -353,7 +388,8 @@ extension TripMemberStore {
 
     // MARK: - Session
 
-    /// Forgets every count, span, journal and deleted picture because this device is signed in as
+    /// Forgets every count, span, journal, deleted picture and recorded exclusion because this
+    /// device is signed in as
     /// somebody else; whatever is in flight was asked for by them, and drops on arrival. The
     /// members go with the trip store's own identity change (`invalidate(uid: nil)`).
     public func sessionIdentityChanged() {
@@ -369,6 +405,7 @@ extension TripMemberStore {
         journalFlights = [:]
         journalErrors = [:]
         deleted = []
+        ownExclusions = [:]
         generation += 1
     }
 

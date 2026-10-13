@@ -8,6 +8,11 @@ import Testing
 /// The server-backed trip store (MEMNG-751 Phase 2): `/api/collections` through the REAL generated
 /// client over a scripted transport, so the request the store builds, the body bytes and the
 /// decoding are all exercised. `@testable` for the join seam only.
+/// The fields of a frozen create, each changed alone under the same key.
+enum TripCreateField: CaseIterable, Sendable {
+    case title, tag, spanStart, spanEnd, tz
+}
+
 @MainActor
 @Suite("Trip store")
 struct TripStoreTests {
@@ -112,6 +117,65 @@ struct TripStoreTests {
         #expect(calls.of(TripWire.create).count == 1, "overlapping Creates sent more than one POST")
         #expect(one == other)
         #expect(one.uid == "t1")
+        #expect(store.trips.map(\.uid) == ["t1"])
+    }
+
+    /// The frozen request with one field changed and its key kept.
+    private nonisolated static func changing(
+        _ field: TripCreateField, of frozen: NewTripRequest
+    ) -> NewTripRequest {
+        let later = instant("2026-05-01T00:00:00Z")
+        return NewTripRequest(
+            scope: frozen.scope,
+            title: field == .title ? "Porto" : frozen.title,
+            tag: field == .tag ? "porto" : frozen.tag,
+            spanStart: field == .spanStart ? later : frozen.spanStart,
+            spanEnd: field == .spanEnd ? later : frozen.spanEnd,
+            tz: field == .tz ? "Europe/Zurich" : frozen.tz,
+            idempotencyKey: frozen.idempotencyKey)
+    }
+
+    @Test(
+        "a second Create under the same key with one field changed sends nothing and is busy",
+        arguments: TripCreateField.allCases)
+    func differentCreatesUnderOneKeyRefuse(_ field: TripCreateField) async throws {
+        let calls = TripCalls()
+        let entered = TripLatch()
+        let release = TripLatch()
+        let settled = TripLatch()
+        let client = Stub.client { request, body, operation in
+            _ = await calls.record(request, body, operation)
+            let trip = TripWire.collection("t1", title: "Lisbon", tag: "lisbon")
+            // Only the POST is held; the re-read after it answers at once.
+            guard operation == TripWire.create else { return Stub.json(trip) }
+            entered.open()
+            await release.wait()
+            return Stub.json(trip, status: .created)
+        }
+        let store = store()
+        let frozen = NewTripRequest(
+            scope: TripWire.alice, title: "Lisbon", tag: "lisbon",
+            spanStart: Self.instant("2026-03-12T00:00:00Z"),
+            spanEnd: Self.instant("2026-03-20T23:59:59Z"), tz: "Europe/Lisbon",
+            idempotencyKey: "key-0003")
+        let other = Self.changing(field, of: frozen)
+        #expect(other != frozen, "control: the field changed")
+        let first = Task {
+            try await store.create(frozen, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the first POST never reached the wire")
+        let second = Task {
+            defer { settled.open() }
+            return try await store.create(other, using: client.handle, baseURL: Stub.baseURL)
+        }
+        // Waited on before the first POST is released: a joined caller would only settle after it.
+        #expect(await settled.wait(), "the second Create waited on the first instead of refusing")
+        release.open()
+        let trip = try await first.value
+        await #expect(throws: TripStore.Failure.busy) { try await second.value }
+
+        #expect(calls.of(TripWire.create).count == 1, "the refused Create reached the wire")
+        #expect(trip.uid == "t1")
         #expect(store.trips.map(\.uid) == ["t1"])
     }
 
