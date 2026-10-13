@@ -73,14 +73,18 @@ public final class TripMemberStore {
     var journalErrors: [String: String] = [:]
     var journalFlights: [String: TripJournalFlight] = [:]
     var countsInFlight = false
-    /// Each tag's span read in flight: the generation and credential it was issued under, and its
-    /// token, so only that read's own end clears its slot.
-    var spansInFlight: [String: (generation: Int, credential: Int, token: Int)] = [:]
+    /// A span joins only reads issued before the same deletes; its token keeps an old read's end
+    /// from clearing a newer read's slot.
+    var spansInFlight:
+        [String: (generation: Int, credential: Int, deletionRevision: Int, token: Int)] = [:]
     /// The callers that joined a span read, by its token; let go when it ends or on a reset.
     @ObservationIgnored var spanJoiners: [Int: [CheckedContinuation<Void, Never>]] = [:]
     /// The pictures Delete took: absent from every trip's members and journal, so a page read
     /// before the delete cannot put one back. A screen hands them to a viewer open over them.
     public internal(set) var deleted: Set<String> = []
+    /// A count or extremum cannot subtract deleted ids: `forget` advances this fence so an
+    /// answer issued before the delete is dropped whole, even though the trip revision stays.
+    var deletionRevision = 0
     /// The exclusions this app wrote and the server acknowledged, by trip and picture, each with
     /// the token it was recorded under; what overrides one is `noteAcknowledged`'s rule.
     var ownExclusions: [String: [String: Int]] = [:]

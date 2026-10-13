@@ -251,9 +251,9 @@ extension TripMemberStore {
 
     // MARK: - The New trip sheet
 
-    // These reads name tags, not trips, and are fenced by the identity generation and the
-    // credential alone. Open gap: an answer issued before a picture delete lands unchanged after
-    // it, so a count or a span can still include the deleted picture (MEMNG-795).
+    // These reads name tags, not trips: `deletionRevision` fences the deletes that move no trip
+    // revision. Counts carry no picture ids and extrema name no successor, so stale answers are
+    // dropped whole rather than reconciled (MEMNG-795).
 
     /// Reads every tag's count, videos included. Refused, not sent, while the same read is in
     /// flight.
@@ -261,11 +261,14 @@ extension TripMemberStore {
         guard !countsInFlight else { return }
         countsInFlight = true
         let issued = generation
+        let issuedDeletion = deletionRevision
         defer { if issued == generation { countsInFlight = false } }
         do {
             let rows = try await LibraryTagStore.tags(handle.client, filter: .all)
-            guard issued == generation, credentialCurrent(handle) else {
-                MemosLog.api.info("a trip sheet's tag counts answered for a session that moved on")
+            guard issued == generation, issuedDeletion == deletionRevision,
+                credentialCurrent(handle)
+            else {
+                MemosLog.api.info("a trip sheet's tag counts answered for a scope that moved on")
                 return
             }
             tagCounts = rows
@@ -274,23 +277,26 @@ extension TripMemberStore {
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             guard issued == generation else { return }
-            await say(error, issuedUnder: handle, lane: .members)
+            await say(error, issuedUnder: handle, lane: .members) {
+                issued == self.generation && issuedDeletion == self.deletionRevision
+            }
         }
     }
 
     /// Reads one tag's first and last taken date among its files. A second read of the same tag,
-    /// under the same generation and the same credential, while one is in flight joins it:
-    /// nothing is sent, and it returns when that read ends. A read issued under another credential
-    /// or generation is never joined — its answer is dropped — so the caller sends its own and
-    /// takes the slot; the old read's end then lets its own joiners go and leaves the new slot
-    /// alone. A caller whose credential is no longer the session's sends nothing.
+    /// under the same generation, credential and deletion revision, while one is in flight joins
+    /// it: nothing is sent, and it returns when that read ends. A read issued under another
+    /// credential, generation or deletion revision is never joined — its answer is dropped — so
+    /// the caller sends its own and takes the slot; the old read's end then lets its own joiners
+    /// go and leaves the new slot alone. A caller whose credential is no longer the session's
+    /// sends nothing. A delete retires cached spans too, so a joiner cannot read an older answer.
     public func loadSpan(ofTag tag: String, using handle: SessionHandle, baseURL: URL) async {
         guard credentialCurrent(handle) else {
             MemosLog.api.info("a trip sheet's span was asked for under a session that moved on")
             return
         }
         if let flight = spansInFlight[tag], flight.generation == generation,
-            flight.credential == handle.generation
+            flight.credential == handle.generation, flight.deletionRevision == deletionRevision
         {
             onSpanJoin?()
             await withCheckedContinuation { spanJoiners[flight.token, default: []].append($0) }
@@ -298,25 +304,32 @@ extension TripMemberStore {
         }
         journalToken += 1
         let token = journalToken
-        spansInFlight[tag] = (generation, handle.generation, token)
+        spansInFlight[tag] = (generation, handle.generation, deletionRevision, token)
         let issued = generation
+        let issuedDeletion = deletionRevision
         defer {
             if spansInFlight[tag]?.token == token { spansInFlight[tag] = nil }
             for joiner in spanJoiners.removeValue(forKey: token) ?? [] { joiner.resume() }
         }
         do {
             let first = try await extremum(.oldestFirst, tag: tag, handle, baseURL)
-            guard issued == generation, credentialCurrent(handle) else { return }
+            guard issued == generation, issuedDeletion == deletionRevision,
+                credentialCurrent(handle)
+            else { return }
             let last = try await extremum(.newestFirst, tag: tag, handle, baseURL)
-            guard issued == generation, credentialCurrent(handle) else {
-                MemosLog.api.info("a trip sheet's span answered for a session that moved on")
+            guard issued == generation, issuedDeletion == deletionRevision,
+                credentialCurrent(handle)
+            else {
+                MemosLog.api.info("a trip sheet's span answered for a scope that moved on")
                 return
             }
             spans[tag] = TripTagSpan(firstTaken: first, lastTaken: last)
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             guard issued == generation else { return }
-            await say(error, issuedUnder: handle, lane: .members)
+            await say(error, issuedUnder: handle, lane: .members) {
+                issued == self.generation && issuedDeletion == self.deletionRevision
+            }
         }
     }
 
@@ -380,6 +393,12 @@ extension TripMemberStore {
             members(for: trip).contains { gone.contains($0.id) }
         }
         deleted.formUnion(gone)
+        deletionRevision += 1
+        // Neither aggregate identifies every contributing picture, so no cached answer can be
+        // repaired here; a later read must establish the new count or extrema.
+        tagCounts = []
+        tagCountsLoaded = false
+        spans = [:]
         for trip in touched {
             guard issued == generation, credentialCurrent(handle) else { return }
             _ = try? await trips.reload(uid: trip.uid, using: handle, baseURL: baseURL)
