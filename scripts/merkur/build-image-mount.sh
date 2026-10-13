@@ -1,7 +1,11 @@
 #!/bin/bash
 #
-# The LaunchAgent program that mounts the merkur_build image AT the build root at login, and the
-# manual recovery after an unmount (`launchctl kickstart -k gui/501/live.discomarder.merkur-build-image`).
+# The LaunchAgent program that mounts the build host's image AT the build root at login, and the
+# manual recovery after an unmount (`launchctl kickstart -k gui/501/<label>`). One file serves every
+# build host: the guard's profile for the host it runs on (gate_mg_select_profile, keyed on its
+# LocalHostName AND IOPlatformUUID as one pair) names the root, bundle, sentinel and label — merkur_build and
+# live.discomarder.merkur-build-image on merkur, mars_build and live.discomarder.mars-build-image on
+# mars — and a host without a profile exits 1 before anything is read or attached.
 #
 # The agent it replaces ran `hdiutil attach` directly; on an image that was already attached but
 # not mounted that returns 0 and mounts nothing, and launchd then never ran it again: every gate
@@ -19,17 +23,21 @@
 #   (6) exit 0 only if the predicate now passes, else exit 1.
 # launchd retries a non-zero exit after ThrottleInterval (KeepAlive SuccessfulExit=false) and
 # gives an exit 0 no further trigger. Installed beside its copy of scripts/gate-mount-guard.sh in
-# ~/Library/Application Support/merkur-build-image/; logs to ~/Library/Logs/merkur-build-image.log.
+# ~/Library/Application Support/<host>-build-image/; logs to ~/Library/Logs/<host>-build-image.log
+# (the label without its live.discomarder. prefix), the file the host's plist also sends stdout
+# and stderr to (scripts/<host>/live.discomarder.<host>-build-image.plist).
 
 here="$(cd "$(dirname "$0")" && pwd -P)" || exit 1
-WRAPPER_LOG="$HOME/Library/Logs/merkur-build-image.log"
-WRAPPER_VOLUME=/Volumes/lexosaurus
+# Empty until the profile is known: a line before that goes to stderr, which launchd sends to the
+# same per-host log through the plist's StandardErrorPath.
+WRAPPER_LOG=""
 GATE_MG_LS="${GATE_MG_LS:-ls}"
 # Every project's subtrees on the build root, the one inventory of them: the shared helper names no
 # project, so this host's wrapper hands it the list it proves. A root added on the host is added here.
 BUILD_IMAGE_SUBTREES="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate"
 
 wlog() {
+  [ -n "$WRAPPER_LOG" ] || { printf '%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" >&2; return; }
   mkdir -p "${WRAPPER_LOG%/*}" 2>/dev/null
   printf '%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" >> "$WRAPPER_LOG"
 }
@@ -38,6 +46,10 @@ finish() { wlog "exit $1: $2"; exit "$1"; }
 [ -r "$here/gate-mount-guard.sh" ] || finish 1 "the guard helper $here/gate-mount-guard.sh is not readable"
 # shellcheck source=../gate-mount-guard.sh
 . "$here/gate-mount-guard.sh"
+gate_mg_select_profile || finish 1 "$GATE_MG_WHY"
+# Both hosts keep the bundle at <volume>/caches/<name>.sparsebundle, so the volume is its grandparent.
+WRAPPER_VOLUME="${GATE_MG_BUNDLE%/*/*}"
+WRAPPER_LOG="$HOME/Library/Logs/${GATE_MG_LABEL#live.discomarder.}.log"
 M="$GATE_MG_ROOT"
 
 # (1) Proof first: a healthy mount is left alone, whatever it holds. The proof is the gates' own

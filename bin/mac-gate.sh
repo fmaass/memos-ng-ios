@@ -146,8 +146,8 @@
 #                 slot was claimed, so it stopped waiting instead of testing for nobody;
 #            15 = MAC_GATE_ESTATE_LOCK names a lock this run could not open or take (nothing was
 #                 copied, run or written to the run ledger);
-#            16 = mount=16: the build host's build root is not proven to be the designated
-#                 merkur_build image (the guard refused, or its answer could not be read), and no
+#            16 = mount=16: the build host's build root is not proven to be that host's designated
+#                 build image (the guard refused, or its answer could not be read), and no
 #                 valid pending marker allowed the refusal to be reported instead; nothing was
 #                 written on the host, no slot was claimed and no device was created;
 #             1 = also locallint=1: `swift format lint` failed on the calling machine before the
@@ -1192,9 +1192,9 @@ if [ "$CLASSIFY_VERDICT" = fastpath ]; then
 fi
 
 # --- (1b) the build root is the designated image ------------------------------------------------
-# The build host's ~/build is meant to be the merkur_build disk image (MEMNG-602). When the image is
-# not mounted there macOS leaves the plain directory, and every byte this run would write lands
-# silently on the internal disk. So before the first ssh that writes (the preflight's mkdir), the
+# The build host's ~/build is meant to be ITS build image (MEMNG-602), keyed on its LocalHostName
+# (merkur, mars; any other host refuses). Unmounted, macOS leaves the plain directory and every
+# byte lands on the internal disk. So before the first ssh that writes (the preflight's mkdir), the
 # guard from this run's private copy (scripts/gate-mount-guard.sh) reads the volume and this repo's
 # two subtrees on it, read-only, in report mode: while a valid pending marker
 # (~/.config/build-mount-guard/pending on the host) exists, a refusal is reported as
@@ -1244,7 +1244,7 @@ else
     [ "$mount_rc" -eq 0 ] || mount_state=enforced
   fi
   [ "$mount_rc" -eq 0 ] \
-    || say "mount       : REFUSE (guard exit $mount_ssh_rc) — the build root is not proven to be the merkur_build image; nothing was written on the host"
+    || say "mount       : REFUSE (guard exit $mount_ssh_rc) — the build root is not proven to be the build host's designated image; nothing was written on the host"
 fi
 record mount "$mount_rc"
 SUMMARY_INFO="$SUMMARY_INFO mountguard=$mount_state"

@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# The mount guard of the SHARED Mac build host: a gate may write under the build root only when
-# that root is the designated merkur_build APFS image, mounted there, owned, and attached from its
-# one sparse bundle. Every other state — the image unmounted (macOS leaves the plain directory, and
-# builds land silently on the internal disk), another volume named merkur_build, the image mounted
-# without ownership, a repo root symlinked off the volume — refuses before the first remote write.
+# The mount guard of the SHARED Mac build hosts: a gate may write under the build root only when
+# that root is the designated APFS image OF THE HOST IT RUNS ON (merkur_build on merkur, mars_build
+# on mars), mounted there, owned, and attached from its one sparse bundle. Every other state — the
+# image unmounted (macOS leaves the plain directory, and builds land silently on the internal disk),
+# another volume of that name, the image mounted without ownership, a repo root symlinked off the
+# volume, a host this file has no profile for — refuses before the first remote write.
 #
 # Source this file and call gate_mount_guard, or run it: `bash gate-mount-guard.sh <mode> <sub…|->`.
 # Vendored BYTE-IDENTICAL into every project that gates on the host; each records the reference
@@ -23,8 +24,19 @@
 #                 (relative paths), at least one; a single "-" = the volume identity only. The
 #                 helper holds no inventory: each caller names what it proves, and a mode with
 #                 neither is refused as a usage error (16, never softened by a marker).
-# Output: exactly one verdict line, `MOUNT OK uuid=<uuid> dev=<device>` or `MOUNT REFUSE <reason>`,
-# then one state line `mountguard=<enforced|pending:OK|pending:REFUSE> marker=<state>`.
+# Output: exactly one verdict line, `MOUNT OK host=<host> uuid=<uuid> dev=<device>` or
+# `MOUNT REFUSE host=<host> <reason>` (`MOUNT REFUSE usage: …` and `MOUNT REFUSE no mount profile
+# for host <name|unmeasured …>` carry no host= token: no profile was chosen), then one state line
+# `mountguard=<enforced|pending:OK|pending:REFUSE> marker=<state>`.
+#
+# The profile is chosen once per call, before any other reader, by a PAIR: the host's
+# LocalHostName (`scutil --get LocalHostName`, lower-cased) and its IOPlatformUUID (ioreg), both
+# literal in the profile, so a host renamed to the other's name selects nothing. merkur and mars
+# each have one pair; any other name, a name on the other host's or unknown hardware, or a reader
+# that fails, times out or prints something unparsable refuses with mountguard=enforced
+# marker=not-read, rc 16, in either mode — a pending marker softens a known host's unproved image,
+# and a host without a profile has no image to be pending on. The marker is judged against the
+# hardware UUID the selection read; it is never read twice.
 #
 # The predicate (plan MEMNG-602, Decision 2), every term required:
 #   (a) diskutil info -plist <root>: VolumeUUID literally the recorded one, FilesystemType apfs,
@@ -40,12 +52,9 @@
 # no fallback reader. Recovery after an unmount is manual (launchd gives the wrapper no trigger
 # after it exited 0), and the refusal names the command.
 
-# The designated root, image and volume. Literals by design: no environment can move them.
-GATE_MG_ROOT=/Users/fabian/build
-GATE_MG_UUID=EE4304C8-021C-489D-B57B-6D846E76B1CF
-GATE_MG_BUNDLE=/Volumes/lexosaurus/caches/merkur_build.sparsebundle
-GATE_MG_SENTINEL=.NOT-MOUNTED-merkur_build
-GATE_MG_LABEL=live.discomarder.merkur-build-image
+# The designated root, image and volume: empty until gate_mg_select_profile sets them, from
+# literals, for the host it runs on — so a value in the environment never survives sourcing.
+GATE_MG_HOST=""; GATE_MG_HW=""; GATE_MG_ROOT=""; GATE_MG_UUID=""; GATE_MG_BUNDLE=""; GATE_MG_SENTINEL=""; GATE_MG_LABEL=""
 GATE_MG_MAX_PENDING_S=259200
 # The readers, so a test can make each one fail, hang or lie with plausible output.
 GATE_MG_STAT="${GATE_MG_STAT:-stat}"
@@ -53,6 +62,7 @@ GATE_MG_DISKUTIL="${GATE_MG_DISKUTIL:-diskutil}"
 GATE_MG_HDIUTIL="${GATE_MG_HDIUTIL:-hdiutil}"
 GATE_MG_IOREG="${GATE_MG_IOREG:-ioreg}"
 GATE_MG_PLUTIL="${GATE_MG_PLUTIL:-plutil}"
+GATE_MG_SCUTIL="${GATE_MG_SCUTIL:-scutil}"
 # Seconds one reader may take (diskutil info measured 0.024 s idle on the host, 2026-10-01).
 GATE_MG_READ_S="${GATE_MG_READ_S:-20}"
 
@@ -67,6 +77,59 @@ gate_mg_run() {
     alarm $t; waitpid $pid, 0; alarm 0;
     exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
   ' "$GATE_MG_READ_S" "$@"
+}
+
+# gate_mg_oneline <text>: the text with every control character (a newline included) masked, so a
+# value read from a reader or an argument can never add a line to the two-line answer.
+gate_mg_oneline() { printf '%s' "$1" | tr '[:cntrl:]' '?'; }
+
+# gate_mg_hw_uuid: this host's IOPlatformUUID on stdout, rc 0; rc 1 with the reason on stdout.
+gate_mg_hw_uuid() {
+  local out rc=0 v
+  out="$(gate_mg_run $GATE_MG_IOREG -rd1 -c IOPlatformExpertDevice 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || { echo "unmeasured: ioreg rc $rc"; return 1; }
+  v="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*"IOPlatformUUID" = "\([0-9A-F-]*\)"[[:space:]]*$/\1/p')"
+  case "$v" in
+    [0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]) printf '%s\n' "$v" ;;
+    *) echo "unmeasured: no IOPlatformUUID"; return 1 ;;
+  esac
+}
+
+# gate_mg_select_profile: GATE_MG_HOST, GATE_MG_HW and the five constants for this host, rc 0; rc 1
+# with the refusal in GATE_MG_WHY (and every constant empty) unless the host's name AND hardware
+# UUID are one allowlisted pair. Literals by design: no environment can move them; only the readers
+# are replaceable. Call it directly, never in $(…): its answers are these variables.
+gate_mg_select_profile() {
+  local name hw shown rc=0
+  GATE_MG_HOST=""; GATE_MG_HW=""; GATE_MG_ROOT=""; GATE_MG_UUID=""; GATE_MG_BUNDLE=""; GATE_MG_SENTINEL=""; GATE_MG_LABEL=""; GATE_MG_WHY=""
+  name="$(gate_mg_run $GATE_MG_SCUTIL --get LocalHostName 2>/dev/null)" || rc=$?
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+  # The name is echoed into a one-line verdict: anything but a host-name character is masked.
+  if [ "$rc" -ne 0 ]; then shown="unmeasured (scutil rc $rc)"
+  elif [ -z "$name" ]; then shown="unmeasured (empty LocalHostName)"
+  else shown="$(printf '%s' "$name" | tr -c 'a-z0-9-' '?' | cut -c1-64)"
+  fi
+  hw="$(gate_mg_hw_uuid)" || { GATE_MG_WHY="no mount profile for host $shown ($hw)"; return 1; }
+  [ "$rc" -eq 0 ] || { GATE_MG_WHY="no mount profile for host $shown ($hw)"; return 1; }
+  case "$name:$hw" in
+    merkur:ABED54FD-4031-53B1-9951-E8FF4DE51F69)
+      GATE_MG_ROOT=/Users/fabian/build
+      GATE_MG_UUID=EE4304C8-021C-489D-B57B-6D846E76B1CF
+      GATE_MG_BUNDLE=/Volumes/lexosaurus/caches/merkur_build.sparsebundle
+      GATE_MG_SENTINEL=.NOT-MOUNTED-merkur_build
+      GATE_MG_LABEL=live.discomarder.merkur-build-image
+      ;;
+    mars:639B86D9-17FA-5EBE-8A66-530B948476BE)
+      GATE_MG_ROOT=/Users/fabian/build
+      GATE_MG_UUID=4FBC8F45-0C6B-45C4-AF86-411A2B7B2789
+      GATE_MG_BUNDLE=/Volumes/flexosaurus/caches/mars_build.sparsebundle
+      GATE_MG_SENTINEL=.NOT-MOUNTED-mars_build
+      GATE_MG_LABEL=live.discomarder.mars-build-image
+      ;;
+    *) GATE_MG_WHY="no mount profile for host $shown ($hw)"; return 1 ;;
+  esac
+  GATE_MG_HOST="$name"; GATE_MG_HW="$hw"
+  return 0
 }
 
 # gate_mg_plist_get <plist text> <keypath>: the raw value, or rc != 0. An array or dictionary
@@ -87,6 +150,7 @@ gate_mg_bundle_entities() {
   local info n i path m j dev ent mp found=0 nl='
 '
   GATE_MG_WHY=""; GATE_MG_ENTS=""
+  [ -n "$GATE_MG_BUNDLE" ] || { GATE_MG_WHY="no mount profile selected"; return 2; }
   info="$(gate_mg_run $GATE_MG_HDIUTIL info -plist 2>/dev/null)" || { GATE_MG_WHY="hdiutil info failed (rc $?)"; return 2; }
   [ -n "$info" ] || { GATE_MG_WHY="hdiutil info printed nothing"; return 2; }
   n="$(gate_mg_plist_get "$info" images)" || { GATE_MG_WHY="hdiutil info has no images array"; return 2; }
@@ -140,6 +204,7 @@ gate_mg_dev_of() {
 gate_mg_predicate() {
   local M="$GATE_MG_ROOT" info v devnode rc mdev hdev sub rel comp p r
   GATE_MG_WHY=""; GATE_MG_DEVNODE=""
+  [ -n "$GATE_MG_HOST" ] && [ -n "$M" ] || { GATE_MG_WHY="no mount profile selected"; return 1; }
   # (a) the volume's identity, from the volume itself.
   info="$(gate_mg_run $GATE_MG_DISKUTIL info -plist "$M" 2>/dev/null)" || { GATE_MG_WHY="diskutil info $M failed (rc $?): not a mounted volume"; return 1; }
   [ -n "$info" ] || { GATE_MG_WHY="diskutil info $M printed nothing"; return 1; }
@@ -223,8 +288,9 @@ gate_mg_marker() {
   gate_mg_is_count "$now" || { echo unmeasured:clock; return; }
   [ "$created" -le "$now" ] || { echo malformed:created-in-future; return; }
   [ "$now" -lt "$expires" ] || { echo expired; return; }
-  me="$(gate_mg_run $GATE_MG_IOREG -rd1 -c IOPlatformExpertDevice 2>/dev/null)" || { echo unmeasured:ioreg; return; }
-  me="$(printf '%s\n' "$me" | sed -n 's/^[[:space:]]*"IOPlatformUUID" = "\([0-9A-F-]*\)"[[:space:]]*$/\1/p')"
+  # The hardware UUID the profile selection read (never a second read): absent only when no
+  # profile was selected, and then no marker can count.
+  me="$GATE_MG_HW"
   [ -n "$me" ] || { echo unmeasured:ioreg; return; }
   [ "$host" = "$me" ] || { echo other-host; return; }
   echo valid
@@ -235,7 +301,7 @@ gate_mount_guard() {
   [ "$#" -eq 0 ] || shift
   case "$mode" in
     enforce|report) ;;
-    *) echo "MOUNT REFUSE usage: gate_mount_guard <enforce|report> <subtree…|-> (got '$mode')"
+    *) echo "MOUNT REFUSE usage: gate_mount_guard <enforce|report> <subtree…|-> (got '$(gate_mg_oneline "$mode" | cut -c1-64)')"
        echo "mountguard=enforced marker=not-read"
        return 16 ;;
   esac
@@ -246,10 +312,15 @@ gate_mount_guard() {
   elif [ "$#" -eq 1 ] && [ "$1" = - ]; then
     set --
   fi
+  if ! gate_mg_select_profile; then
+    echo "MOUNT REFUSE $(gate_mg_oneline "$GATE_MG_WHY")"
+    echo "mountguard=enforced marker=not-read"
+    return 16
+  fi
   if gate_mg_predicate "$@"; then
-    pass=1; echo "MOUNT OK uuid=$GATE_MG_UUID dev=$GATE_MG_DEVNODE"
+    pass=1; echo "MOUNT OK host=$GATE_MG_HOST uuid=$GATE_MG_UUID dev=$GATE_MG_DEVNODE"
   else
-    pass=0; echo "MOUNT REFUSE $GATE_MG_WHY; recovery once the image is mounted correctly: launchctl kickstart -k gui/$(id -u)/$GATE_MG_LABEL"
+    pass=0; echo "MOUNT REFUSE host=$GATE_MG_HOST $(gate_mg_oneline "$GATE_MG_WHY"); recovery once the image is mounted correctly: launchctl kickstart -k gui/$(id -u)/$GATE_MG_LABEL"
   fi
   if [ "$mode" = report ]; then marker="$(gate_mg_marker)"; else marker=not-read; fi
   if [ "$marker" = valid ]; then
