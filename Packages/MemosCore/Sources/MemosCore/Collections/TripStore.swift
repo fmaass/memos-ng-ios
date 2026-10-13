@@ -584,7 +584,7 @@ public final class TripStore {
     /// so nothing in the packages names an old file whole and a search for either name finds no
     /// reader or writer of it left: the pilot's trips file (MEMNG-754) and the composer pin's file
     /// (MEMNG-781 — the pin is gone; the composer offers the trip whose span holds today).
-    static let legacyFileNames = [
+    nonisolated static let legacyFileNames = [
         ["collections", "json"].joined(separator: "."),
         ["pins", "json"].joined(separator: "."),
     ]
