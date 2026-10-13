@@ -15,7 +15,7 @@ import Testing
 struct TagCoverStoreTests {
     private static let operation = "list_attachments_api_attachments_get"
 
-    private static func one(_ uid: String) -> (HTTPResponse, HTTPBody?) {
+    private nonisolated static func one(_ uid: String) -> (HTTPResponse, HTTPBody?) {
         Stub.json("[\(Stub.libraryItem(uid: uid))]")
     }
 
