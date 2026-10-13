@@ -7,7 +7,8 @@ import Observation
 /// **Writes are direct online calls, one logical request per trip.** Each write takes its trip's
 /// slot, keyed by (scope, uid, operation, payload): a second call with the identical key JOINS the
 /// one on the wire and gets its result; any other write on that trip meanwhile is refused with
-/// `Failure.busy` and sends nothing. A create's slot is keyed by (scope, idempotency key).
+/// `Failure.busy` and sends nothing. A create's slot is held by (scope, idempotency key) and keeps
+/// its frozen request: the identical request joins, another one under the same key is `.busy`.
 ///
 /// **A revision arbitrates reads; a write is judged by its own slot.** `revision` moves on every
 /// applied mutation (create, update, delete, exclusion, pin), every applied list and every identity
@@ -110,7 +111,10 @@ public final class TripStore {
         key: WriteKey, authority: Authority, task: Task<WriteResult, Never>
     )
     private var writes: [String: WriteSlot] = [:]
-    private var creates: [String: (authority: Authority, task: Task<WriteResult, Never>)] = [:]
+    private typealias CreateSlot = (
+        request: NewTripRequest, authority: Authority, task: Task<WriteResult, Never>
+    )
+    private var creates: [String: CreateSlot] = [:]
     /// The token of the latest slot taken on each trip (and each create key): a caller is answered
     /// only while the slot it waited on is still the latest one, held or released.
     private var latestWrite: [String: Int] = [:]
@@ -225,7 +229,8 @@ public final class TripStore {
     // MARK: - Writing
 
     /// Creates the frozen request's trip and returns it. A second call with the same request joins
-    /// the first; a request frozen under another scope sends nothing.
+    /// the first; another request under the same key is refused `.busy` and sends nothing; a
+    /// request frozen under another scope sends nothing.
     @discardableResult
     public func create(
         _ frozen: NewTripRequest, using handle: SessionHandle, baseURL: URL
@@ -233,6 +238,10 @@ public final class TripStore {
         guard let scope = identity, frozen.scope == scope else { throw Failure.superseded }
         let key = frozen.idempotencyKey
         if let running = creates[key], running.authority.scope == scope {
+            guard running.request == frozen else {
+                MemosLog.api.info("a trip create under a running key with another body is refused")
+                throw Failure.busy
+            }
             onJoin?()
             let joined = await running.task.value
             if let onDelivery { await onDelivery(key, true) }
@@ -243,7 +252,7 @@ public final class TripStore {
         let authority = Authority(
             scope: scope, uid: key, token: nextToken, generation: handle.generation)
         let task = Task { await self.runCreate(frozen, authority, handle, baseURL) }
-        creates[key] = (authority, task)
+        creates[key] = (frozen, authority, task)
         latestCreate[key] = authority.token
         let result = await task.value
         if let onDelivery { await onDelivery(key, false) }

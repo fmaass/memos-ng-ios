@@ -15,6 +15,14 @@ struct TripJournalRule: Equatable {
 }
 
 /// What a journal load in flight was issued under — what a second caller has to match to join it.
+///
+/// A load is fenced by this store's identity generation, the credential and the trip's rule (its
+/// tag and span), not by the trip store's revision. The rule is asked again of the trip the trip
+/// store holds when the answer lands (`isLive`) and whenever the journal is read (`journal(of:)`),
+/// so a changed tag or span, or a deleted trip, hides it. Open gaps: an exclusion keeps a span memo
+/// out only while a complete drain is held, and a list or pin drops the drain, so the memo shows
+/// again (MEMNG-793); a picture deleted while a load is out, or after it landed, stays among a
+/// tagged memo's files as `journal(for:)` returns them (MEMNG-794).
 struct TripJournalLineage: Equatable {
     var generation: Int
     var session: Int
@@ -191,10 +199,12 @@ extension TripMemberStore {
         }.map(\.element)
     }
 
-    /// Only for a trip the trip store still holds, under the rule it was read for.
+    /// Only for a trip the trip store still holds, under the rule that trip has now — never the
+    /// rule of the record the caller passed, which can be older.
     private func journal(of trip: Trip) -> TripJournal? {
-        guard let journal = journals[trip.uid], journal.rule == TripJournalRule(trip),
-            trips.trips.contains(where: { $0.uid == trip.uid })
+        guard let journal = journals[trip.uid],
+            let held = trips.trips.first(where: { $0.uid == trip.uid }),
+            journal.rule == TripJournalRule(held)
         else { return nil }
         return journal
     }
@@ -219,6 +229,10 @@ extension TripMemberStore {
     }
 
     // MARK: - The New trip sheet
+
+    // These reads name tags, not trips, and are fenced by the identity generation and the
+    // credential alone. Open gap: an answer issued before a picture delete lands unchanged after
+    // it, so a count or a span can still include the deleted picture (MEMNG-795).
 
     /// Reads every tag's count, videos included. Refused, not sent, while the same read is in
     /// flight.
