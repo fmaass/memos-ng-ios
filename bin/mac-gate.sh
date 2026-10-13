@@ -2348,6 +2348,31 @@ def check(label, bundle, bundle_id):
 check("app", app, "live.discomarder.memosng")
 check("extension", appex, "live.discomarder.memosng.share")
 
+# The Settings app's pane as the BUILT app carries it: every key the app reads, in order, and the
+# Storage group's two rows under it (MEMNG-781). The three keys that were there before are the
+# positive control — a reader that came back empty fails on them first.
+SETTINGS_KEYS = ["settings.appearance", "uploadOverMobileData", "settings.mediaCacheSize",
+                 "settings.clearMediaCacheOnLaunch", "settings.version"]
+try:
+    pane = load(os.path.join(app, "Settings.bundle", "Root.plist"))
+    rows = pane.get("PreferenceSpecifiers", [])
+    keys = [row.get("Key") for row in rows if row.get("Key")]
+    if keys == SETTINGS_KEYS:
+        print("--- ok: Settings.bundle keys = %s" % ", ".join(keys))
+    else:
+        fail("Settings.bundle keys are %r, expected %r" % (keys, SETTINGS_KEYS))
+    group = None
+    for row in rows:
+        if row.get("Type") == "PSGroupSpecifier":
+            group = row.get("Title")
+        elif row.get("Key") in ("settings.mediaCacheSize", "settings.clearMediaCacheOnLaunch"):
+            if group == "Storage":
+                print("--- ok: %s stands under Storage" % row.get("Key"))
+            else:
+                fail("Settings.bundle %s stands under %r, expected Storage" % (row.get("Key"), group))
+except Exception as error:
+    fail("could not read the built app's Settings.bundle/Root.plist: %s" % error)
+
 # An extension's CFBundleVersion must equal its host's or the host will not install.
 try:
     host_build = load(os.path.join(app, "Info.plist")).get("CFBundleVersion")

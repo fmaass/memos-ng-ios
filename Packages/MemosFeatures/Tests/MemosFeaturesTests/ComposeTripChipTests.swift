@@ -146,43 +146,6 @@ struct ComposeTripChipTests {
         ComposeView(mode: draft(content), pinnedTrip: pinnedTrip, submit: submit)
     }
 
-    // MARK: - The offer, read from the store
-
-    /// A trip as the server lists it, made at `now`.
-    private func listed(_ title: String, tag: String?, at now: Date) -> Trip {
-        Trip(uid: "trip-1", title: title, tag: tag, createdAt: now, updatedAt: now)
-    }
-
-    @Test("the offer is the pinned trip's title and tag, while the pin lasts")
-    func offerFollowsThePin() throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let pins = TripPins(identity: alice, root: root)
-        let made = listed("Portugal 2026", tag: "portugal2026", at: now)
-        #expect(ComposePinnedTrip.offered(by: pins, now: now) == nil, "an unpinned trip offered")
-
-        pins.pin(made, lastTaken: nil, now: now)
-        let until = try #require(pins.pinnedUntil(uid: made.uid))
-        #expect(ComposePinnedTrip.offered(by: pins, now: now) == trip)
-        #expect(
-            ComposePinnedTrip.offered(by: pins, now: until.addingTimeInterval(-1)) == trip)
-        #expect(
-            ComposePinnedTrip.offered(by: pins, now: until) == nil,
-            "a pin that ends exactly now is over and must not be offered")
-        #expect(ComposePinnedTrip.offered(by: nil, now: now) == nil)
-    }
-
-    @Test("a pinned record with no tag offers nothing")
-    func untaggedRecordOffersNothing() {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let pins = TripPins(identity: alice, root: root)
-        pins.pin(listed("Nowhere", tag: nil, at: now), lastTaken: nil, now: now)
-        #expect(pins.activePin(now: now) != nil, "the case needs the pin to be active")
-        #expect(ComposePinnedTrip.offered(by: pins, now: now) == nil)
-        #expect(
-            ComposePinnedTrip(
-                pin: TripPin(uid: "blank", title: "Blank", tag: "", pinnedUntil: now)) == nil)
-    }
-
     // MARK: - The chip's state
 
     @Test("a new memo gets the chip; an edit never does")
@@ -225,24 +188,6 @@ struct ComposeTripChipTests {
         #expect(!chipShown(ScreenProbe.labels(of: editing)), "an edit showed the chip")
     }
 
-    @Test("the timeline's sheet shows the chip for an active pin and not for an expired one")
-    func timelineSheetFollowsThePin() throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let pins = TripPins(identity: alice, root: root)
-        pins.pin(listed("Portugal 2026", tag: "portugal2026", at: now), lastTaken: nil, now: now)
-        let until = try #require(pins.pinnedUntil(uid: "trip-1"))
-
-        func sheet(at instant: Date) -> some View {
-            TimelineView.editSheet(
-                mode: .create(restoring: nil), isAsking: false, failure: nil,
-                pinnedTrip: ComposePinnedTrip.offered(by: pins, now: instant),
-                send: { _ in }, submit: { _ in .saved })
-        }
-        #expect(chipShown(ScreenProbe.labels(of: sheet(at: now))))
-        #expect(
-            !chipShown(ScreenProbe.labels(of: sheet(at: until))), "an expired pin showed a chip")
-    }
-
     @Test("Post sends the tag line; after the x it does not; a new sheet has the chip back")
     func postCarriesTheTag() async {
         let log = PostLog()
@@ -255,7 +200,7 @@ struct ComposeTripChipTests {
             // waits for Post to be live again, not only for the log.
             let sentOnce = await screen.until { log.sent.count == 1 && screen.isLive("Post") }
             let removed = screen.press("Remove trip tag")
-            let chipGone = await screen.until { !screen.says("Pinned trip") }
+            let chipGone = await screen.until { !screen.says("Trip, Portugal 2026") }
             let postedAgain = screen.press("Post")
             let sentTwice = await screen.until { log.sent.count == 2 }
             return (posted, removed, postedAgain, (sentOnce, chipGone, sentTwice))
@@ -449,7 +394,7 @@ struct ComposeTripVisibilityTests {
             var removed = true
             if removingTheTrip {
                 removed = screen.press("Remove trip tag")
-                await screen.settle(until: { !screen.says("Pinned trip") })
+                await screen.settle(until: { !screen.says("Trip, Portugal 2026") })
             }
             let pill = MemoVisibility.allCases.map { "Visibility: \($0.label)" }
                 .first { screen.says($0) && !screen.says("\($0), the account default") }

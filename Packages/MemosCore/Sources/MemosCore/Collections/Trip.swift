@@ -1,8 +1,7 @@
 import Foundation
 import MemosAPI
 
-/// One trip as the server holds it (`CollectionOut`), plus the one thing that stays on this
-/// device: until when its tag is pinned in the composer.
+/// One trip as the server holds it (`CollectionOut`).
 ///
 /// A trip is a household object: every signed-in member lists, opens and edits it, and the last
 /// write wins. Its identity is the server's `uid`.
@@ -23,8 +22,6 @@ public struct Trip: Sendable, Equatable, Identifiable {
     public var createdBy: String?
     public var createdAt: Date
     public var updatedAt: Date
-    /// Until when the composer offers this trip's tag (`TripPins`), or nil when it is not pinned.
-    public var pinnedUntil: Date?
 
     public var id: String { uid }
 
@@ -39,8 +36,7 @@ public struct Trip: Sendable, Equatable, Identifiable {
         memberCount: Int = 0,
         createdBy: String? = nil,
         createdAt: Date,
-        updatedAt: Date,
-        pinnedUntil: Date? = nil
+        updatedAt: Date
     ) {
         self.uid = uid
         self.title = title
@@ -53,11 +49,10 @@ public struct Trip: Sendable, Equatable, Identifiable {
         self.createdBy = createdBy
         self.createdAt = createdAt
         self.updatedAt = updatedAt
-        self.pinnedUntil = pinnedUntil
     }
 
-    /// The projection of the server's record; the pin is the device's own.
-    init(_ generated: Components.Schemas.CollectionOut, baseURL: URL, pinnedUntil: Date?) {
+    /// The projection of the server's record.
+    init(_ generated: Components.Schemas.CollectionOut, baseURL: URL) {
         self.init(
             uid: generated.uid,
             title: generated.title,
@@ -69,8 +64,7 @@ public struct Trip: Sendable, Equatable, Identifiable {
             memberCount: generated.memberCount,
             createdBy: generated.createdBy,
             createdAt: generated.createdAt,
-            updatedAt: generated.updatedAt,
-            pinnedUntil: pinnedUntil
+            updatedAt: generated.updatedAt
         )
     }
 

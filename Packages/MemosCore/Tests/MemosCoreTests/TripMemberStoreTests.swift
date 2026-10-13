@@ -133,7 +133,10 @@ struct TripMemberStoreTests {
             await members.drain(trip, using: client.handle, baseURL: Stub.baseURL)
         }
         #expect(await entered.wait(), "the page never reached the wire")
-        trips.pin(uid: "t1", lastTaken: nil, now: Date())
+        // An applied list moves the revision while the page is out.
+        let before = trips.revision
+        await trips.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(trips.revision > before, "control: the list moved the revision")
         release.open()
         await draining.value
         #expect(members.members(for: trip).isEmpty, "a page of the old revision was applied")

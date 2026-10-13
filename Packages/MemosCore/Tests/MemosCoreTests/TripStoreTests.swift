@@ -303,37 +303,6 @@ struct TripStoreTests {
         #expect(store.trips.map(\.title) == ["New t1", "New t2"])
     }
 
-    @Test("a pin applied while a create is out leaves the create returning its trip and listed")
-    func pinDuringCreate() async throws {
-        let entered = TripLatch()
-        let release = TripLatch()
-        let client = Stub.client { _, _, operation in
-            guard operation == TripWire.create else {
-                return Stub.json("[\(TripWire.collection("t0"))]")
-            }
-            entered.open()
-            await release.wait()
-            return Stub.json(TripWire.collection("t1", title: "New"), status: .created)
-        }
-        let store = store()
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let creating = Task {
-            try await store.create(
-                NewTripRequest(scope: TripWire.alice, title: "New"), using: client.handle,
-                baseURL: Stub.baseURL)
-        }
-        #expect(await entered.wait(), "the create never reached the wire")
-        let before = store.revision
-        store.pin(uid: "t0", lastTaken: nil, now: Date())
-        #expect(store.revision > before, "a pin did not move the revision")
-        release.open()
-        let trip = try await creating.value
-
-        #expect(trip.uid == "t1")
-        #expect(store.trips.map(\.uid) == ["t0", "t1"])
-        #expect(store.trips.first?.pinnedUntil != nil, "the pin went")
-    }
-
     @Test("a held GET released after a successful DELETE leaves trips without the trip")
     func heldListAfterDelete() async throws {
         let lists = LockedValue(0)
@@ -359,31 +328,6 @@ struct TripStoreTests {
         await reading.value
 
         #expect(store.trips.isEmpty, "a list asked before the delete brought the trip back")
-    }
-
-    @Test("a held GET released after a pin leaves the pin")
-    func heldListAfterPin() async {
-        let lists = LockedValue(0)
-        let entered = TripLatch()
-        let release = TripLatch()
-        let client = Stub.client { _, _, _ in
-            lists.set(lists.get() + 1)
-            guard lists.get() == 2 else { return Stub.json("[\(TripWire.collection("t1"))]") }
-            entered.open()
-            await release.wait()
-            return Stub.json("[\(TripWire.collection("t1", title: "Changed"))]")
-        }
-        let store = store()
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let reading = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
-        #expect(await entered.wait(), "the second list never reached the wire")
-        store.pin(uid: "t1", lastTaken: nil, now: Date())
-        release.open()
-        await reading.value
-
-        #expect(store.trips.first?.pinnedUntil != nil, "the pin went")
-        #expect(store.pins.activePin(now: Date())?.uid == "t1")
-        #expect(store.trips.first?.title == "Trip", "a list asked before the pin was applied")
     }
 
     @Test("a refusal reaches the session's handle with its generation, silent after a switch")
@@ -477,12 +421,33 @@ struct TripStoreTests {
         #expect(session.failures == 1, "control: the unreachable request was a failure")
     }
 
-    @Test("the legacy file is removed on first load and never read")
-    func legacyFileIsRemoved() throws {
-        // The pilot's file, as 2.2 wrote it: one per scope, beside where pins.json goes.
+    /// Moved with the scope's directory from the pin's store, which is gone (MEMNG-781): the same
+    /// identity must find the same directory, so the digest cannot change.
+    @Test("the scope key is a stable SHA-256 of server and subject")
+    func scopeKeyIsStable() {
+        let alice = TimelineSnapshotIdentity(
+            server: URL(string: "https://memos.example.org")!, subject: "alice")
+        let bob = TimelineSnapshotIdentity(
+            server: URL(string: "https://memos.example.org")!, subject: "bob")
+        #expect(
+            TripStore.scopeKey(for: alice)
+                == "2fadd696398bbc1c29a8a5a985567f0c09974af439ccf5ea7555c859d734b177")
+        #expect(
+            TripStore.scopeKey(for: bob)
+                == "14113c8d6747916a0cf6def8f590493e2bc8c0ab4dd40e9192fddd6e9d4bb317")
+        let otherServer = TimelineSnapshotIdentity(
+            server: URL(string: "https://other.example.org")!, subject: "alice")
+        #expect(TripStore.scopeKey(for: otherServer) != TripStore.scopeKey(for: alice))
+    }
+
+    @Test(
+        "each legacy file is removed on first load and never read",
+        arguments: TripStore.legacyFileNames)
+    func legacyFileIsRemoved(name: String) throws {
+        // The pilot's trips file as 2.2 wrote it, and the composer pin's file (MEMNG-781): one
+        // per scope.
         let file = { (identity: TimelineSnapshotIdentity) in
-            root.appending(path: TripPins.scopeKey(for: identity))
-                .appending(path: TripStore.legacyFileName).path
+            root.appending(path: TripStore.scopeKey(for: identity)).appending(path: name).path
         }
         for identity in [TripWire.alice, TripWire.bob] {
             let url = URL(filePath: file(identity))

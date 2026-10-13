@@ -204,29 +204,3 @@ enum ReleaseNotes {
         return after == nil || after == " " || after == "\t" ? hashes : nil
     }
 }
-
-/// Emptying the derived media cache — BOTH halves of it, which is the whole reason this exists.
-///
-/// There are two caches behind a photo and clearing one of them looks exactly like clearing both
-/// until the timeline is scrolled: the `URLCache` holds the bytes across launches, and
-/// `MediaImageLoader.store` holds the DECODED images for this launch. A Clear button that emptied
-/// only the first would report a smaller number and still paint every picture that was on screen,
-/// out of memory, with nothing to re-fetch.
-///
-/// It reaches neither the outbox's queued captures nor its quarantine, and it cannot: both are
-/// files in the app group container, and nothing here can name a file (see `DerivedMediaCache`).
-enum MediaCacheClearing {
-    static func clearDerived(
-        cache: any DerivedMediaCache = MediaSession.shared.cache,
-        decoded: MediaImageStore = MediaImageLoader.store
-    ) {
-        MediaCacheMaintenance.clear(cache)
-        decoded.purge()
-    }
-
-    static func usage(
-        of cache: any DerivedMediaCache = MediaSession.shared.cache
-    ) -> MediaCacheMaintenance.Usage {
-        MediaCacheMaintenance.usage(of: cache)
-    }
-}

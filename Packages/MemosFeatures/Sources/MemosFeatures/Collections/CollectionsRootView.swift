@@ -27,7 +27,8 @@ struct CollectionsRootView: View {
     }
 
     /// The tab's stack over `root`: the trips pushed on `trail`, the main bar's room at the root's
-    /// foot.
+    /// foot, and a press on Collections while it shows taking the stack back to the root
+    /// (MEMNG-781). A press on another tab, or the one that comes back here, keeps the trail.
     static func stack(
         trail: Binding<[TripRoute]>, @ViewBuilder root: () -> some View
     ) -> some View {
@@ -36,6 +37,7 @@ struct CollectionsRootView: View {
                 // The app's main bar's room, inside the stack (MEMNG-690).
                 .leadingFootBar(on: .collections)
         }
+        .onTabReselected(.collections) { trail.wrappedValue = [] }
     }
 
     @ViewBuilder
@@ -274,7 +276,6 @@ struct CollectionsScreen: View {
                 .padding(.horizontal, DesignTokens.Space.roomy)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: DesignTokens.Space.regular) {
-                    let pinned = trips.pins.activePin(now: now())?.uid
                     ForEach(trips.trips) { trip in
                         NavigationLink(value: TripRoute(trip)) {
                             TripCard(
@@ -283,8 +284,7 @@ struct CollectionsScreen: View {
                                     of: trip, summary: shownSummary(of: trip)),
                                 detail: CollectionsPresentation.tripDetail(
                                     trip, summary: shownSummary(of: trip), locale: locale,
-                                    timeZone: timeZone),
-                                pinned: trip.uid == pinned
+                                    timeZone: timeZone)
                             )
                         }
                         .buttonStyle(.plain)
@@ -391,28 +391,17 @@ struct CollectionsScreen: View {
     }
 }
 
-/// One trip: its cover, then its title, then its span and count. While the trip is the scope's
-/// active pin a `pin.fill` badge stands in the cover's top trailing corner, and VoiceOver hears
-/// "Pinned" before the detail. Whether it is pinned is the host's to say (`activePin(now:)` on the
-/// host's clock); the card reads no clock.
+/// One trip: its cover, then its title, then its span and count. The card reads no clock.
 struct TripCard: View {
     let trip: Trip
     let cover: MemoAttachment?
     let detail: String?
-    var pinned = false
 
     static let width: CGFloat = 160
-    /// What VoiceOver hears for a pinned card, ahead of its detail.
-    static let pinnedValue = "Pinned"
 
     /// The card's identifier when its cover draws `uid`, and when it draws the placeholder.
     static func coverIdentifier(_ uid: String?) -> String {
         uid.map { "trip-card-cover-\($0)" } ?? "trip-card-no-cover"
-    }
-
-    /// The card's accessibility value: "Pinned" (when pinned) and the detail, in that order.
-    static func accessibilityValue(detail: String?, pinned: Bool) -> String {
-        [pinned ? pinnedValue : nil, detail].compactMap { $0 }.joined(separator: ", ")
     }
 
     var body: some View {
@@ -420,9 +409,6 @@ struct TripCard: View {
             coverImage
                 .frame(width: Self.width, height: Self.width)
                 .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
-                .overlay(alignment: .topTrailing) {
-                    if pinned { pinBadge }
-                }
                 .padding(.bottom, DesignTokens.Space.tight)
             Text(trip.title)
                 .font(.headline)
@@ -437,19 +423,9 @@ struct TripCard: View {
         .frame(width: Self.width, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(trip.title)
-        .accessibilityValue(Self.accessibilityValue(detail: detail, pinned: pinned))
+        .accessibilityValue(detail ?? "")
         // From the very value `coverImage` draws, so what a test reads is what the card renders.
         .accessibilityIdentifier(Self.coverIdentifier(cover?.uid))
-    }
-
-    /// The pin glyph, white on the accent in a small circle, inset from the cover's corner.
-    private var pinBadge: some View {
-        Image(systemName: "pin.fill")
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(DesignTokens.Space.tight)
-            .background(DesignTokens.accent, in: .circle)
-            .padding(DesignTokens.Space.tight)
     }
 
     @ViewBuilder

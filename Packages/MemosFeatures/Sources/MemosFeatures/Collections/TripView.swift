@@ -50,11 +50,9 @@ extension TripRoute: @MainActor StackRoute {
 /// re-read is on the wire the screen keeps the members it last showed (`TripSettledMembers`), so
 /// a change to another trip never empties this one's grid.
 ///
-/// **Manage.** Rename, Trip Dates, Pin or Unpin, Show Removed and Delete Trip, through
-/// `TripManage`, whose writes are the server's (`TripStore.update`/`delete`): while one is out the
-/// hero shows it, and a write that failed says why under the title. Trip Dates opens
-/// `TripSpanSheet`. Pin or Unpin is one item, named by whether this trip is the scope's active pin
-/// now (`TripPins.activePin(now:)`), so a pin that has expired offers Pin again. A trip that
+/// **Manage.** Rename, Trip Dates, Show Removed and Delete Trip, through `TripManage`, whose
+/// writes are the server's (`TripStore.update`/`delete`): while one is out the hero shows it, and
+/// a write that failed says why under the title. Trip Dates opens `TripSpanSheet`. A trip that
 /// is no longer in the store — deleted here or anywhere — leaves the stack by the stack's own
 /// state (`trail`, the Collections tab's path), drawn as it last was on the way out.
 ///
@@ -139,7 +137,7 @@ struct TripView: View {
     /// Where select mode's Share fetches the chosen originals; nil for the session's own lane. A
     /// test hands in one it can watch and hold.
     private let shareLane: TripShareLane?
-    /// The clock Pin and Unpin are judged and written by.
+    /// The clock Trip Dates is opened with.
     private let now: () -> Date
 
     init(
@@ -174,8 +172,6 @@ struct TripView: View {
     static let renameButton = "Rename"
     /// The Manage item that opens the trip's span.
     static let spanButton = TripSpanSheet.title
-    static let pinButton = "Pin"
-    static let unpinButton = "Unpin"
     static let showRemovedButton = "Show Removed"
     /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
     /// to go.
@@ -816,12 +812,6 @@ struct TripView: View {
                 manage.askRename(current: live?.title ?? trip.title)
             }
             Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
-            let pinAction = TripManage.pinAction(of: trip.uid, in: trips, now: now())
-            Button(pinAction.title, systemImage: pinAction.symbol) {
-                manage.apply(
-                    pinAction, to: trip.uid, in: trips,
-                    lastTaken: memberStore.summary(for: live ?? trip)?.lastTaken, now: now())
-            }
             // Offered before anything is known: its sheet computes the list when it opens.
             Button(Self.showRemovedButton, systemImage: "eye.slash") { manage.showRemoved() }
             Divider()
@@ -1091,15 +1081,6 @@ struct TripModeRow: View {
     }
 }
 
-/// What the Manage menu's pin item offers: Pin for a trip that is not the active pin (an expired
-/// pin included), Unpin for the one that is.
-enum TripPinAction: Equatable {
-    case pin, unpin
-
-    var title: String { self == .pin ? TripView.pinButton : TripView.unpinButton }
-    var symbol: String { self == .pin ? "pin" : "pin.slash" }
-}
-
 /// The Trip screen's Manage menu, as a flow: the question on screen, and what its answer may do.
 ///
 /// **An answer is claimed once.** Asking arms the question; the first yes takes it, and a second
@@ -1189,23 +1170,6 @@ final class TripManage {
             try await trips.update(
                 uid: uid, patch: TripPatch(cover: .set(picture)), using: access.handle,
                 baseURL: access.baseURL)
-        }
-    }
-
-    /// Pin or Unpin, named by whether trip `uid` is the scope's active pin at `now`.
-    static func pinAction(of uid: String, in trips: TripStore, now: Date) -> TripPinAction {
-        trips.pins.activePin(now: now)?.uid == uid ? .unpin : .pin
-    }
-
-    /// Pins trip `uid` (until seven days past `lastTaken`, or past `now` without it) or unpins
-    /// it. The pin is this device's own: nothing is sent.
-    func apply(
-        _ action: TripPinAction, to uid: String, in trips: TripStore, lastTaken: Date?, now: Date
-    ) {
-        guard trips.trips.contains(where: { $0.uid == uid }) else { return }
-        switch action {
-        case .pin: trips.pin(uid: uid, lastTaken: lastTaken, now: now)
-        case .unpin: trips.unpin(uid: uid)
         }
     }
 

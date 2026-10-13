@@ -44,6 +44,13 @@ struct MainTabView: View {
             tabs
         }
         .task { makeTripStores() }
+        // The trip list at once, not when the Collections root first appears: the composer's
+        // offer of today's trip reads it (MEMNG-781).
+        .readsTrips(trips, under: session.snapshotIdentity) { [session] in
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+            else { return nil }
+            return CollectionsAccess(handle: handle, baseURL: baseURL)
+        }
     }
 
     /// Builds the trip and member stores, once, under the identity signed in now. Both report to
