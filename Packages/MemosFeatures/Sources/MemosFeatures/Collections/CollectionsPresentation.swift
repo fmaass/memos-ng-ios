@@ -116,6 +116,17 @@ enum CollectionsPresentation {
         store ?? held[trip.uid]?.summary(for: trip, under: identity)
     }
 
+    /// One card of the Months row.
+    struct MonthCard: Equatable, Identifiable {
+        let key: String
+        let title: String
+        let count: Int
+        var id: String { key }
+    }
+
+    /// The Months row's cards.
+    static func monthCards(_ buckets: [LibraryBucket]) -> [MonthCard] { [] }
+
     /// The pushed trips that still exist: the stack up to the first trip `ids` no longer holds,
     /// since a screen pushed from a trip that is gone has nothing to stand on either.
     static func trail(_ routes: [TripRoute], keeping ids: [String]) -> [TripRoute] {

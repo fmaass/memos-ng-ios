@@ -940,6 +940,11 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var releasedYears: [String] = []
     private nonisolated(unsafe) var answeredYears: [String] = []
     private nonisolated(unsafe) var heldSpans: Set<String> = []
+    private nonisolated(unsafe) var tagsAnswer: String?
+    private nonisolated(unsafe) var monthsAnswer: String?
+    private nonisolated(unsafe) var yearsAnswer: String?
+    private nonisolated(unsafe) var coversFail = false
+    private nonisolated(unsafe) var coversHeld = false
     /// The trips the server holds; a trip's members are its tag's listing below, and so is its
     /// count: `portugal2026` three, `family` two, less what was removed.
     nonisolated let trips = TripRows(counter: { row in
@@ -977,10 +982,61 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
         }.count
     }
 
-    /// The tag a span read is of: one row (`limit=1`) under a tag; nil for every other read.
+    /// The tag a span read is of: one row (`limit=1`) of every kind under a tag; nil for every
+    /// other read — a tag card's cover lookup names a kind.
     nonisolated static func spanTag(_ path: String) -> String? {
         let query = URLComponents(string: path)?.queryItems ?? []
-        guard query.contains(where: { $0.name == "limit" && $0.value == "1" }) else { return nil }
+        guard query.contains(where: { $0.name == "limit" && $0.value == "1" }),
+            !query.contains(where: { $0.name == "type" })
+        else { return nil }
+        return query.first { $0.name == "tag" }?.value
+    }
+
+    /// Answers the tag list with `json` instead of `portugal2026` and `family`.
+    nonisolated func answerTags(_ json: String) {
+        lock.withLock { tagsAnswer = json }
+    }
+
+    /// Answers every month read with `json`; unset, a month read is not found.
+    nonisolated func answerMonths(_ json: String) {
+        lock.withLock { monthsAnswer = json }
+    }
+
+    /// Answers fabian's year reads with `json` instead of 2026 and 2019.
+    nonisolated func answerYears(_ json: String) {
+        lock.withLock { yearsAnswer = json }
+    }
+
+    /// Answers every tag cover lookup 500.
+    nonisolated func failCovers() {
+        lock.withLock { coversFail = true }
+    }
+
+    /// Holds every tag cover lookup until `releaseCovers()`.
+    nonisolated func holdCovers() {
+        lock.withLock { coversHeld = true }
+    }
+
+    nonisolated func releaseCovers() {
+        lock.withLock { coversHeld = false }
+    }
+
+    /// How many cover lookups of `tag` were sent; every tag's with nil.
+    nonisolated func coverReads(of tag: String? = nil) -> Int {
+        sent.filter { line in
+            let path = line.split(separator: " ", maxSplits: 1).last.map(String.init) ?? ""
+            guard let read = Self.coverTag(path) else { return false }
+            return tag == nil || read == tag
+        }.count
+    }
+
+    /// The tag a cover lookup is of: one picture (`type=image`, `limit=1`) under a tag; nil for
+    /// every other read.
+    nonisolated static func coverTag(_ path: String) -> String? {
+        let query = URLComponents(string: path)?.queryItems ?? []
+        guard query.contains(where: { $0.name == "limit" && $0.value == "1" }),
+            query.contains(where: { $0.name == "type" && $0.value == "image" })
+        else { return nil }
         return query.first { $0.name == "tag" }?.value
     }
 
@@ -1029,12 +1085,18 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
                     + #"","email":null,"role":"user","auth_kind":"oidc"}"#
             )
         case "attachment_tags_api_attachments_tags_get":
+            if let answer = lock.withLock({ tagsAnswer }) { return Self.json(answer) }
             return Self.json(
                 #"[{"name":"portugal2026","count":3},{"name":"family","count":40}]"#)
         case "attachment_buckets_api_attachments_buckets_get":
             // Years only (MEMNG-720): 2026 three pictures, 2019 forty. Every other size stays
             // unanswered, as it was before the Years row.
             let query = URLComponents(string: path)?.queryItems ?? []
+            if query.contains(where: { $0.name == "size" && $0.value == "month" }),
+                let months = lock.withLock({ monthsAnswer })
+            {
+                return Self.json(months)
+            }
             guard query.contains(where: { $0.name == "size" && $0.value == "year" }) else {
                 return (HTTPResponse(status: .notFound), nil)
             }
@@ -1053,11 +1115,20 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
             }
             lock.withLock { answeredYears.append(owner) }
             if owner == "bob" || lock.withLock({ noYears }) { return Self.json("[]") }
+            if let years = lock.withLock({ yearsAnswer }) { return Self.json(years) }
             let thumb = #""tags":[],"coverThumbnailUrl":"/api/attachments/p0/thumb""#
             return Self.json(
                 #"[{"key":"2026","count":3,"coverUid":"p0","# + thumb + "},"
                     + #"{"key":"2019","count":40,"coverUid":"p0","# + thumb + "}]")
         case "list_attachments_api_attachments_get":
+            if Self.coverTag(path) != nil {
+                while lock.withLock({ coversHeld }) {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                if lock.withLock({ coversFail }) {
+                    return (HTTPResponse(status: .internalServerError), nil)
+                }
+            }
             if let tag = Self.spanTag(path) {
                 while lock.withLock({ heldSpans.contains(tag) }) {
                     try await Task.sleep(for: .milliseconds(20))

@@ -112,6 +112,10 @@ struct CollectionsScreen: View {
     let tags: LibraryTagStore
     /// The Years row's buckets; with none — a host that reads no years — there is no row.
     var years: LibraryBucketStore? = nil
+    /// The Months row's buckets.
+    var months: LibraryBucketStore? = nil
+    /// The tag cards' covers.
+    var tagCovers: TagCoverStore? = nil
     /// Whose root this is — the server and the subject, since the same subject on another server
     /// is another account; a change of either reads it all again.
     let identity: TimelineSnapshotIdentity?
@@ -121,6 +125,8 @@ struct CollectionsScreen: View {
     let openTag: (String) -> Void
     /// A year chip was tapped: the Library opens at that year, in Months.
     var openYear: (String) -> Void = { _ in }
+    /// A month card was tapped.
+    var openMonth: (String) -> Void = { _ in }
     var now: () -> Date = { Date() }
     /// The trips pushed onto the stack this screen is the root of. A trip that leaves the store —
     /// deleted from its own screen, or filed under an identity that has gone — leaves the stack
