@@ -1071,7 +1071,8 @@ struct TripScreenRenderTests {
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
         await CollectionsHost.with(view, height: 3000) { screen in
-            #expect(await screen.until { screen.element(labelled: "Portugal 2026") != nil })
+            let listed = await screen.until { screen.element(labelled: "Portugal 2026") != nil }
+            #expect(listed, "the trip's card was not drawn")
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
             let pushed = await screen.until { stack.paths.last?.count == 1 }
             #expect(pushed, "the trip was not pushed: \(stack.paths.map(\.count))")
