@@ -136,6 +136,8 @@ public struct TimelineView: View {
             .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
         }
         .tint(DesignTokens.accent)
+        // A press on the Timeline while it shows goes back to the list (MEMNG-781).
+        .onTabReselected(.timeline) { path = NavigationPath() }
         .sensoryFeedback(trigger: feedback) { _, latest in latest.act?.feedback }
         .sheet(item: $composing, onDismiss: { memoDelete.dismiss() }) { mode in
             if let timeline {
@@ -144,7 +146,7 @@ public struct TimelineView: View {
                     isAsking: memoDelete.deleteStage == .asking,
                     failure: memoDelete.lastError,
                     // Read from the store as the sheet opens; the sheet keeps the first answer.
-                    pinnedTrip: ComposePinnedTrip.offered(by: trips?.pins, now: Date()),
+                    pinnedTrip: ComposePinnedTrip.offered(from: trips, now: Date()),
                     send: { event in
                         memoDelete.sendDelete(event) { uid in
                             await delete(uid: uid, in: timeline)

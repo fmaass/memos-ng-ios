@@ -204,7 +204,7 @@ public struct ComposeView: View {
     @FocusState private var editorFocused: Bool
 
     /// - Parameter pinnedTrip: the trip a new memo is offered, decided by the presenter when the
-    ///   sheet opens (`ComposePinnedTrip.offered(by:now:)`). Ignored on an edit.
+    ///   sheet opens (`ComposePinnedTrip.offered(from:now:)`). Ignored on an edit.
     public init(
         mode: Mode,
         delete: ComposeDelete? = nil,

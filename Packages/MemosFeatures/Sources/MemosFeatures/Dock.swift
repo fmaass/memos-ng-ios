@@ -82,7 +82,10 @@ final class AppDock {
         let shown = showing
         switch event {
         // A press moves the selection to the tab pressed, the tab showing pressed again included.
-        case .pressedTab(let tab, _), .selected(let tab):
+        case .pressedTab(let tab, let from):
+            showing = tab
+            if tab == from { reselections[tab, default: 0] += 1 }
+        case .selected(let tab):
             showing = tab
         case .pressedLibraryIcon, .scrolled, .scrolledTab:
             break

@@ -121,8 +121,7 @@ struct HeaderGlassCircle: View {
 /// chosen row; a divider; then a nested "Sort By" menu whose label says the order in force.
 ///
 /// The tags are not here — they are reached from Collections — and neither is clearing the media
-/// cache, which moves to a Settings group in a later phase (`ClearMediaCacheItem` stays until
-/// then, out of every menu).
+/// cache, which is the Settings app's Storage group (MEMNG-781).
 struct LibraryFilterMenuContent: View {
     /// The round button's glyph: Photos' filter symbol.
     static let symbol = "line.3.horizontal.decrease"

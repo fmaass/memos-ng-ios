@@ -187,12 +187,6 @@ public final class TripMemberStore {
             }
             return
         }
-        // A fresh summary moves a pinned trip's pin (decision 8). That is this drain's own write,
-        // made in the same turn as its last fence with nothing awaited between, so the members it
-        // read belong to the revision the pin leaves behind.
-        let dates = rows.compactMap(\.takenAt)
-        trips.noteMembers(
-            uid: lineage.uid, firstTaken: dates.min(), lastTaken: dates.max(), now: Date())
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: lineage.uid)
         drained[lineage.uid] = Drained(lineage: landed, rows: rows, complete: complete)
         lastError = nil

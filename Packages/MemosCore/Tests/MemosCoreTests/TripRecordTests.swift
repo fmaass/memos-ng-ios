@@ -14,7 +14,6 @@ import Testing
 struct TripRecordTests {
     private let seeder = TripSeeder()
     private var server: TripServer { seeder.server }
-    private let october7 = Date(timeIntervalSince1970: 1_791_374_400)  // 2026-10-07T12:00:00Z
 
     private func request(_ title: String, tag: String?) -> NewTripRequest {
         NewTripRequest(scope: TripWire.alice, title: title, tag: tag)
@@ -29,7 +28,7 @@ struct TripRecordTests {
             baseURL: Stub.baseURL)
         #expect(writer.trips.map(\.title) == ["Earlier", "Portugal 2026"])
         #expect(first.tag == "portugal2026")
-        #expect(first.cover == nil && first.pinnedUntil == nil && first.memberCount == 0)
+        #expect(first.cover == nil && first.memberCount == 0)
         #expect(await seeder.store().trips == writer.trips)
     }
 
@@ -96,9 +95,7 @@ struct TripRecordTests {
         await #expect(throws: TripStore.Failure.server(status: 404)) {
             try await writer.delete(uid: "ghost", using: server.client.handle)
         }
-        writer.pin(uid: "ghost", lastTaken: nil, now: october7)
         #expect(writer.trips == before)
-        #expect(writer.pins.rows.isEmpty)
         #expect(await seeder.store().trips == before)
     }
 
@@ -144,10 +141,8 @@ struct TripRecordTests {
         let bobServer = TripServer()
         server.seed(title: "Portugal 2026", tag: "portugal2026")
         let session = await seeder.store()
-        let uid = try #require(session.trips.first?.uid)
-        session.pin(uid: uid, lastTaken: nil, now: october7)
         let aliceTrips = session.trips
-        #expect(aliceTrips.first?.pinnedUntil != nil)
+        #expect(aliceTrips.map(\.title) == ["Portugal 2026"])
 
         session.sessionIdentityChanged(to: nil)
         #expect(session.trips.isEmpty)
@@ -158,7 +153,6 @@ struct TripRecordTests {
         bobServer.seed(title: "Bob's", tag: "bob")
         await session.refresh(using: bobServer.client.handle, baseURL: Stub.baseURL)
         #expect(session.trips.map(\.title) == ["Bob's"])
-        #expect(!session.trips.contains { $0.pinnedUntil != nil })
 
         session.sessionIdentityChanged(to: TripWire.alice)
         await session.refresh(using: server.client.handle, baseURL: Stub.baseURL)
