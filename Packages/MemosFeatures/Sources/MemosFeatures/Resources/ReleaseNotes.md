@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.3.0 (46)
+
+- Trips now live on the server. Every phone signed in to my server sees the same trips with the same pictures, and the trips this phone kept for itself are gone; the Portugal 2026 trip is already listed.
+- Creating a trip, renaming it, choosing its cover, changing its start and end, removing a picture, adding it back and deleting the trip all happen on the server and show up on the other phone after a refresh.
+- Show Removed lists the pictures the server has removed from the trip and says not available while that list is still loading.
+- Creating a trip twice in quick succession with different details is refused instead of answering with the first trip.
+- A picture removed from a trip stays out of its grid, map and summary, and a picture deleted while the viewer is open leaves the viewer instead of coming back on the next swipe.
+- Please open Collections and check that Portugal 2026 is listed with its pictures, create a trip on one phone and look for it on the other, and remove a picture from a trip and add it back.
+
 ## 2.2.3 (45)
 
 - The gear is gone: my avatar in the Timeline's toolbar opens an Account sheet with my account, the token this phone holds, Manage tokens, the default visibility and Sign out.
