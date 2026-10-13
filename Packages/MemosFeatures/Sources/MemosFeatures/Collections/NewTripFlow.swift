@@ -64,6 +64,9 @@ final class NewTripFlow: Identifiable {
     @ObservationIgnored private var suggestedTitle = ""
     /// The span last prefilled from a tag, so an edited span survives another choice.
     @ObservationIgnored private var suggestedSpan: TripSpanDraft?
+    /// The tags listed trips are made of, as last told (`drop`), so a Create that fails can
+    /// still let go of a tag that became one while it was out.
+    @ObservationIgnored private var excluded: Set<String> = []
 
     nonisolated let id = UUID()
 
@@ -101,8 +104,14 @@ final class NewTripFlow: Identifiable {
 
     /// The chosen tag became one of `excluded` — a listed trip is made of it now — so it is no
     /// longer chosen, and the title and span it filled go with it; a title somebody typed and a
-    /// span somebody edited stay. A Create out or done keeps its tag: its request is frozen.
+    /// span somebody edited stay. A Create done keeps its tag, and so does a Create out until it
+    /// ends: one that fails lets go of it then, against the exclusions told last.
     func drop(_ excluded: Set<String>) {
+        self.excluded = excluded
+        dropExcludedTag()
+    }
+
+    private func dropExcludedTag() {
         guard let tag = chosenTag, excluded.contains(tag), created == nil, !isCreating else {
             return
         }
@@ -183,20 +192,24 @@ final class NewTripFlow: Identifiable {
         let request = request(under: scope)
         frozen = request
         isCreating = true
-        defer { isCreating = false }
+        let trip: Trip
         do {
-            let trip = try await trips.create(
-                request, using: access.handle, baseURL: access.baseURL)
-            failure = nil
-            created = trip
-            return trip
+            trip = try await trips.create(request, using: access.handle, baseURL: access.baseURL)
         } catch TripStore.Failure.superseded {
+            isCreating = false
             abandon()
             return nil
         } catch {
+            isCreating = false
             failure = TripManage.sentence(error) ?? Self.notSaved
+            // A tag that became a trip's while this Create was out goes now that none is out.
+            dropExcludedTag()
             return nil
         }
+        isCreating = false
+        failure = nil
+        created = trip
+        return trip
     }
 
     /// The account changed: the sheet closes with no result, and nothing is sent again.

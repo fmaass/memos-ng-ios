@@ -362,6 +362,8 @@ struct CollectionCardsTests {
         #expect(await creating.value == nil, "precondition: the Create failed")
         #expect(flow.chosenTag == nil, "the tag that became a trip's is still chosen")
         #expect(!flow.canCreate, "the tag that became a trip's can be sent again")
+        // The failure was about a request no longer on the form: it goes with the tag.
+        #expect(flow.failure == nil)
     }
 
     @Test("a month card asks for its month, a year card for its year")
@@ -479,6 +481,7 @@ struct CollectionCardsTests {
             #expect(drawn, "the root never drew its rows: \(wire.transport.sent)")
             await screen.settle(turns: 20)
         }
+        #expect(stores.0.trips.count == 3, "precondition: the three trips were listed")
         let sent = wire.transport.sent
         let buckets = sent.filter { $0.hasPrefix("attachment_buckets") }
         let lookups = wire.transport.coverReads()
@@ -491,6 +494,8 @@ struct CollectionCardsTests {
                 + "tag-covers=\(lookups) per-tag=\(perTag)")
         #expect(buckets.count == 2, "\(buckets)")
         #expect(perTag.allSatisfy { $0 <= 1 }, "a tag's cover was looked up twice: \(perTag)")
+        // Every lookup is one of a fixture tag's: none for a trip's tag, a month or a year.
+        #expect(perTag.reduce(0, +) == lookups, "a lookup of another name: \(sent)")
         #expect(lookups >= 1, "no tag card looked its cover up")
     }
 }
