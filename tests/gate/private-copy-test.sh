@@ -35,7 +35,7 @@ tmp="$(cd "$tmp" && pwd -P)" || exit 1
 trap 'rm -rf "$tmp"' EXIT
 # The gates this suite starts never queue behind an estate lock a parent gate holds, and their run
 # ledger rows land here rather than in the estate's ledger.
-unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS
+unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS MAC_GATE_SIMULATOR
 export MAC_GATE_RUNS_LEDGER="$tmp/gate-runs.tsv"
 
 fails=0

@@ -19,7 +19,7 @@
 #
 # Exit: 0 = every case judged as expected; 1 otherwise.
 set -uo pipefail
-unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS
+unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS MAC_GATE_SIMULATOR
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 GATE="${MAC_GATE_SCRIPT:-$repo_root/bin/mac-gate.sh}"
