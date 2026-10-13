@@ -380,9 +380,33 @@ struct MediaLibraryRenderTests {
         #expect(!select.accessibilityTraits.contains(.notEnabled), "Select is still inert in All")
     }
 
+    /// The labels and the controls of `view` as hosted, read while its window is still up: once
+    /// the window is gone every frame is zero, and `controls(in:)` tells controls apart by frame.
+    private static func hostedControls(
+        of view: some View, waitFor: String
+    ) async throws -> (labels: [String], controls: [String]) {
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(rootView: view)
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var found: [NSObject] = []
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            found = []
+            collectElements(window, into: &found)
+            if found.contains(where: { $0.accessibilityLabel == waitFor }) { break }
+        }
+        return (found.compactMap(\.accessibilityLabel), controls(in: found))
+    }
+
     /// The header's controls, leading to trailing: what carries the button trait, each CONTROL
     /// once. The walk can meet one control twice — a view and the element it hosts — at one frame;
-    /// two controls never share a frame, so two close buttons count as two.
+    /// two controls never share a frame, so two close buttons count as two. A control read with no
+    /// frame (its window already gone) says so in its label rather than merging with the others.
     private static func controls(in found: [NSObject]) -> [String] {
         var seen: Set<String> = []
         return found.filter { $0.accessibilityTraits.contains(.button) }
@@ -394,7 +418,10 @@ struct MediaLibraryRenderTests {
                 return seen.insert(key).inserted
             }
             .sorted { $0.accessibilityFrame.minX < $1.accessibilityFrame.minX }
-            .compactMap(\.accessibilityLabel)
+            .map { element in
+                let label = element.accessibilityLabel ?? ""
+                return element.accessibilityFrame.isEmpty ? "\(label) (no frame)" : label
+            }
     }
 
     /// The bands of ink, one under another, that the glyph inside `frame` draws, read from the
@@ -490,15 +517,12 @@ struct MediaLibraryRenderTests {
         #expect(
             ink.bands == 3, "the round button draws \(ink.bands) band(s) of ink: \(ink.profile)")
 
-        let selecting = try await Self.elements(
+        let (labels, selecting) = try await Self.hostedControls(
             of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
             waitFor: "Close")
-        let labels = selecting.compactMap(\.accessibilityLabel)
         #expect(!labels.contains("Select All"), "a Select All control: \(labels)")
         #expect(!labels.contains("Deselect All"), "a Deselect All control: \(labels)")
-        #expect(
-            Self.controls(in: selecting) == ["Close"],
-            "select mode controls: \(Self.controls(in: selecting))")
+        #expect(selecting == ["Close"], "select mode controls: \(selecting)")
     }
 
     /// MEMNG-779: once select mode's actions menu has rows (WPN-14 gives the Library some), the
@@ -508,11 +532,9 @@ struct MediaLibraryRenderTests {
         let rows = [
             SelectAction(id: "share", title: "Share", systemImage: "square.and.arrow.up") {}
         ]
-        let found = try await Self.elements(
+        let (_, found) = try await Self.hostedControls(
             of: SelectChrome(menuRows: rows, close: {}), waitFor: "Close")
-        #expect(
-            Self.controls(in: found) == ["More", "Close"],
-            "capsule controls: \(Self.controls(in: found))")
+        #expect(found == ["More", "Close"], "capsule controls: \(found)")
     }
 
     /// MEMNG-588 and MEMNG-589: the bottom bar says how many are chosen, and share and delete take
