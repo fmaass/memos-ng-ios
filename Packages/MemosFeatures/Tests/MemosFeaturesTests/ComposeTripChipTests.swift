@@ -782,48 +782,80 @@ struct ComposeColdLaunchTripTests {
         ISO8601DateFormatter().string(from: date)
     }
 
-    /// A trip on `wire` whose span holds the real today, as the Timeline's sheet reads the clock.
-    private static func seedToday(_ title: String, tag: String, on wire: CollectionsWire) {
+    /// A trip on `rows` whose span holds the real today, as the Timeline's sheet reads the clock.
+    private static func seedToday(_ title: String, tag: String, on rows: TripRows) {
         let now = Date()
-        wire.transport.trips.seed(
+        rows.seed(
             title, tag: tag, spanStart: stamp(now.addingTimeInterval(-86_400)),
             spanEnd: stamp(now.addingTimeInterval(86_400)), tz: "UTC")
     }
 
-    private func sheetLabels(_ trips: TripStore) -> [String] {
-        ScreenProbe.labels(
-            of: TimelineView.editSheet(
-                mode: .create(restoring: nil), isAsking: false, failure: nil,
-                pinnedTrip: ComposePinnedTrip.offered(from: trips, now: Date()),
-                send: { _ in }, submit: { _ in .saved }))
+    /// Polls `ready` for at most five seconds, for a case with no screen to settle.
+    private static func until(_ ready: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if ready() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return ready()
     }
 
-    @Test("an unanswered list offers no chip; once it answers, a newly opened sheet has it")
+    /// Presses the Timeline's New memo and waits for the sheet's Post.
+    private static func openNewMemo(on screen: PressProbe.Screen) async -> Bool {
+        let pressed = CollectionsHost.pressBarItem("New memo", on: screen)
+        guard pressed.took else { return false }
+        return await screen.until(seconds: 10) { screen.element(labelled: "Post") != nil }
+    }
+
+    /// Presses the sheet's Cancel and waits for the sheet to go.
+    private static func cancelSheet(on screen: PressProbe.Screen) async -> Bool {
+        guard CollectionsHost.pressBarItem("Cancel", on: screen).took else { return false }
+        return await screen.until(seconds: 10) { screen.element(labelled: "Post") == nil }
+    }
+
+    /// The app as it launches: the real tab view over a signed-in session, opening on the
+    /// Timeline, its New memo the real sheet. Nothing in the case reads the trips itself, so the
+    /// list is asked for by the app's own launch read (`MainTabView`), and the chip comes from
+    /// what the Timeline hands its sheet.
+    @Test("the app's Timeline offers today's trip on New memo once the launch's list answers")
     func coldLaunchOffersOnceTheListAnswers() async {
-        let wire = CollectionsWire()
-        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wire)
-        wire.transport.trips.hold(TripRows.list)
-        let trips = TripStore(identity: alice, root: nil)
-        let access = wire.access
-        let view = TripsReader(box: IdentityBox(alice), trips: trips) { _ in access }
-        await CollectionsHost.with(view) { screen in
-            let asked = await screen.until { !wire.transport.trips.calls(TripRows.list).isEmpty }
-            #expect(asked, "no trip list was asked for at launch")
-            #expect(!sheetLabels(trips).contains("Trip, Portugal 2026"), "a chip before the answer")
-            wire.transport.trips.release(TripRows.list)
-            let answered = await screen.until { !trips.trips.isEmpty }
-            #expect(answered, "the list never answered")
-            #expect(sheetLabels(trips).contains("Trip, Portugal 2026"), "the new sheet has no chip")
+        let transport = CollectionsTransport()
+        Self.seedToday("Lisbon now", tag: "lisbonnow", on: transport.trips)
+        transport.trips.hold(TripRows.list)
+        let session = CollectionsWire.signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let chip = "Trip, Lisbon now"
+        let tabs = MainTabView(opening: .timeline).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let asked = await screen.until(seconds: 10) {
+                !transport.trips.calls(TripRows.list).isEmpty
+            }
+            #expect(asked, "the launch asked for no trip list: \(transport.sent)")
+            let opened = await Self.openNewMemo(on: screen)
+            #expect(opened, "New memo opened no sheet")
+            #expect(!screen.says(chip), "a chip before the list answered")
+            let closed = await Self.cancelSheet(on: screen)
+            #expect(closed, "the sheet did not close")
+            transport.trips.release(TripRows.list)
+            let listed = await screen.until { transport.trips.answered(TripRows.list) >= 1 }
+            #expect(listed, "the held list never answered")
+            let reopened = await Self.openNewMemo(on: screen)
+            #expect(reopened, "New memo opened no second sheet")
+            let shown = await screen.until { screen.says(chip) }
+            #expect(shown, "the newly opened sheet has no chip")
+            _ = await Self.cancelSheet(on: screen)
         }
     }
 
-    @Test("a list asked for one identity and answered after another's drops on arrival")
-    func identityChangeDropsTheOldList() async {
+    @Test("an identity change reads the new identity's list at once")
+    func identityChangeReadsTheNewList() async {
         let wireA = CollectionsWire()
-        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wireA)
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wireA.transport.trips)
         wireA.transport.trips.hold(TripRows.list)
         let wireB = CollectionsWire()
-        Self.seedToday("Bob's trip", tag: "bobs", on: wireB)
+        Self.seedToday("Bob's trip", tag: "bobs", on: wireB.transport.trips)
         let trips = TripStore(identity: alice, root: nil)
         let box = IdentityBox(alice)
         let (accessA, accessB) = (wireA.access, wireB.access)
@@ -834,11 +866,79 @@ struct ComposeColdLaunchTripTests {
             box.identity = bob
             let moved = await screen.until { trips.trips.map(\.title) == ["Bob's trip"] }
             #expect(moved, "the new identity's list was not read: \(trips.trips.map(\.title))")
-            wireA.transport.trips.release(TripRows.list)
-            // Long enough for the held answer to land; it must change nothing when it does.
-            _ = await screen.until(seconds: 1) { trips.trips.count != 1 }
-            #expect(trips.trips.map(\.title) == ["Bob's trip"], "the old identity's list came back")
             #expect(trips.identity == bob)
+            // Fabian's list goes too, so no held read outlives the case.
+            wireA.transport.trips.release(TripRows.list)
+            _ = await screen.until { wireA.transport.trips.answered(TripRows.list) == 1 }
         }
+    }
+
+    // MARK: - The list's fences, on the store
+    //
+    // Driven on the store itself so each answer's delivery is awaited rather than waited out: a
+    // refresh returns only once its answer has been judged, applied or dropped.
+
+    @Test("a list asked for one identity and answered after the switch is dropped on arrival")
+    func staleListIsDropped() async {
+        let wireA = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wireA.transport.trips)
+        wireA.transport.trips.hold(TripRows.list)
+        let wireB = CollectionsWire()
+        Self.seedToday("Bob's trip", tag: "bobs", on: wireB.transport.trips)
+        let trips = TripStore(identity: alice, root: nil)
+        let (accessA, accessB) = (wireA.access, wireB.access)
+        let first = Task { await trips.refresh(using: accessA.handle, baseURL: accessA.baseURL) }
+        let asked = await Self.until { !wireA.transport.trips.calls(TripRows.list).isEmpty }
+        #expect(asked, "fabian's list was never asked for")
+        trips.sessionIdentityChanged(to: bob)
+        await trips.refresh(using: accessB.handle, baseURL: accessB.baseURL)
+        #expect(trips.trips.map(\.title) == ["Bob's trip"], "precondition: bob's list")
+        wireA.transport.trips.release(TripRows.list)
+        await first.value
+        #expect(wireA.transport.trips.answered(TripRows.list) == 1, "fabian's list never answered")
+        #expect(trips.trips.map(\.title) == ["Bob's trip"], "fabian's late list replaced bob's")
+        #expect(trips.identity == bob)
+        #expect(trips.lastError == nil, "the late answer was taken for a failure")
+    }
+
+    @Test("a list still out when the session signs out fills nothing once it answers")
+    func signOutWhileListed() async {
+        let wire = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wire.transport.trips)
+        wire.transport.trips.hold(TripRows.list)
+        let trips = TripStore(identity: alice, root: nil)
+        let access = wire.access
+        let first = Task { await trips.refresh(using: access.handle, baseURL: access.baseURL) }
+        let asked = await Self.until { !wire.transport.trips.calls(TripRows.list).isEmpty }
+        #expect(asked, "the list was never asked for")
+        trips.sessionIdentityChanged(to: nil)
+        wire.transport.trips.release(TripRows.list)
+        await first.value
+        #expect(wire.transport.trips.answered(TripRows.list) == 1, "the list never answered")
+        #expect(trips.trips.isEmpty, "a signed-out store took the list")
+        #expect(trips.identity == nil)
+        await trips.refresh(using: access.handle, baseURL: access.baseURL)
+        #expect(wire.transport.trips.calls(TripRows.list).count == 1, "signed out, it asked again")
+    }
+
+    @Test("two refreshes while one list is out are one request, and both see its answer")
+    func overlappingRefreshesJoin() async {
+        let wire = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wire.transport.trips)
+        wire.transport.trips.hold(TripRows.list)
+        let trips = TripStore(identity: alice, root: nil)
+        let access = wire.access
+        let first = Task { await trips.refresh(using: access.handle, baseURL: access.baseURL) }
+        let asked = await Self.until { !wire.transport.trips.calls(TripRows.list).isEmpty }
+        #expect(asked, "the list was never asked for")
+        // Released and asked again in one turn of the main actor: the first answer cannot be
+        // applied before the second refresh has either joined it or sent a list of its own.
+        wire.transport.trips.release(TripRows.list)
+        await trips.refresh(using: access.handle, baseURL: access.baseURL)
+        let joinerSaw = trips.trips.map(\.title)
+        await first.value
+        #expect(wire.transport.trips.calls(TripRows.list).count == 1, "the second sent its own")
+        #expect(joinerSaw == ["Portugal 2026"], "the joiner returned before the answer")
+        #expect(trips.trips.map(\.title) == ["Portugal 2026"])
     }
 }

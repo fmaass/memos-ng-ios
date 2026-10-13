@@ -469,6 +469,23 @@ struct CollectionsRootRenderTests {
         #expect(trip.flatMap { stores.1.summary(for: $0)?.count } == 3)
     }
 
+    /// What VoiceOver hears of a card past its title — the ordinary half of the pin's retired
+    /// accessibility cases (MEMNG-781): its detail exactly, or nothing when it has none.
+    @Test(
+        "a card's accessibility value is its detail, or empty when it has none",
+        arguments: [nil, "3 photos"] as [String?])
+    func cardValueIsItsDetail(detail: String?) async {
+        let made = Date(timeIntervalSince1970: 1_791_460_800)
+        let record = Trip(
+            uid: "trip-1", title: "Lisbon", tag: "lisbon", createdAt: made, updatedAt: made)
+        let card = TripCard(trip: record, cover: nil, detail: detail)
+        let value = await PressProbe.withScreen(card, height: 400) { screen in
+            _ = await screen.until { Self.value(of: "Lisbon", on: screen) != nil }
+            return Self.value(of: "Lisbon", on: screen)
+        }
+        #expect(value == (detail ?? ""), "the card said \(value ?? "nothing")")
+    }
+
     /// The accessibility value of the node labelled `title`, whatever its traits: a card is one
     /// element whose label is its title.
     private static func value(of title: String, on screen: PressProbe.Screen) -> String? {
@@ -849,16 +866,7 @@ struct CollectionsRootRenderTests {
     }
 
     private func signedOutSession(_ transport: CollectionsTransport) -> SessionStore {
-        SessionStore(
-            credentials: CollectionsCredentials(),
-            makeClient: { configuration, credential in
-                APIClientFactory.make(
-                    configuration: configuration, credential: credential, transport: transport)
-            },
-            sleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
-            noticeSleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
-            identity: MediaIdentity()
-        )
+        CollectionsWire.signedOutSession(transport)
     }
 
     @Test("a session's identity is its server and its subject, and nothing when signed out")
@@ -900,6 +908,23 @@ final class CollectionsWire {
             transport: transport)
         access = CollectionsAccess(
             handle: SessionHandle(client: client, generation: 1), baseURL: Self.baseURL)
+    }
+}
+
+extension CollectionsWire {
+    /// The app's session over `transport`, signed out: the real store, its client made over the
+    /// scripted server, its sleeps an hour long so no retry or notice fires in a case.
+    static func signedOutSession(_ transport: CollectionsTransport) -> SessionStore {
+        SessionStore(
+            credentials: CollectionsCredentials(),
+            makeClient: { configuration, credential in
+                APIClientFactory.make(
+                    configuration: configuration, credential: credential, transport: transport)
+            },
+            sleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
+            noticeSleeper: { _ in try await Task.sleep(for: .seconds(3600)) },
+            identity: MediaIdentity()
+        )
     }
 }
 
