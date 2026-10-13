@@ -99,6 +99,21 @@ final class NewTripFlow: Identifiable {
         suggestedSpan = days
     }
 
+    /// The chosen tag became one of `excluded` — a listed trip is made of it now — so it is no
+    /// longer chosen, and the title and span it filled go with it; a title somebody typed and a
+    /// span somebody edited stay. A Create out or done keeps its tag: its request is frozen.
+    func drop(_ excluded: Set<String>) {
+        guard let tag = chosenTag, excluded.contains(tag), created == nil, !isCreating else {
+            return
+        }
+        chosenTag = nil
+        datesAnswered = false
+        failure = nil
+        if title == suggestedTitle { title = "" }
+        suggestedTitle = ""
+        if span == suggestedSpan { clearSuggestedSpan() }
+    }
+
     /// A span for a trip made of dates: the day of `now`, whole, in `zone`.
     func addDates(now: Date, zone: TimeZone) {
         guard span == nil else { return }

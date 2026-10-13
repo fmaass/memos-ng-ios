@@ -35,6 +35,7 @@ struct MediaLibraryView: View {
     @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
     /// A year asked for from the Collections root, shown in Months (MEMNG-720).
     @Environment(LibraryYearJump.self) private var yearJump: LibraryYearJump?
+    @Environment(LibraryMonthJump.self) private var monthJump: LibraryMonthJump?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -228,6 +229,15 @@ struct MediaLibraryView: View {
         .onChange(of: YearJumpKey(year: yearJump?.pending, ready: library != nil), initial: true) {
             guard let yearJump, let library,
                 LibraryYearJumpRouting.apply(yearJump, to: library, scope: choice)
+            else { return }
+            Task { await load() }
+        }
+        // A month asked for from Collections: Months at that month's days, the same way.
+        .onChange(
+            of: MonthJumpKey(month: monthJump?.pending, ready: library != nil), initial: true
+        ) {
+            guard let monthJump, let library,
+                LibraryMonthJumpRouting.apply(monthJump, to: library, scope: choice)
             else { return }
             Task { await load() }
         }
@@ -607,6 +617,11 @@ struct MediaLibraryView: View {
 
     private struct YearJumpKey: Equatable {
         let year: String?
+        let ready: Bool
+    }
+
+    private struct MonthJumpKey: Equatable {
+        let month: String?
         let ready: Bool
     }
 

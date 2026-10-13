@@ -257,4 +257,201 @@ struct CollectionCardsTests {
             #expect(!said.contains { $0.contains(span) }, "the root says the span: \(said)")
         }
     }
+
+    // MARK: - The rest of the phase
+
+    private func trip(_ tag: String?) -> Trip {
+        let made = Self.now
+        return Trip(uid: "t-\(tag ?? "-")", title: "T", tag: tag, createdAt: made, updatedAt: made)
+    }
+
+    @Test("a listed trip's tag is left out, in order; nothing is while the list failed")
+    func tripTagExclusion() {
+        let trips = [trip("gaggiano"), trip(nil), trip("lisbon")]
+        let tags = ["garden", "gaggiano", "lisbon", "porto"].map { LibraryTag(name: $0, count: 1) }
+        let excluded = CollectionsPresentation.tripTags(trips, listFailed: false)
+        #expect(excluded == ["gaggiano", "lisbon"])
+        let kept = CollectionsPresentation.tags(tags, excluding: excluded)
+        #expect(kept.map(\.name) == ["garden", "porto"])
+        #expect(CollectionsPresentation.tripTags(trips, listFailed: true).isEmpty)
+        #expect(CollectionsPresentation.tripTags([], listFailed: false).isEmpty)
+    }
+
+    @Test("with every tag a trip's, the root draws no Tags row")
+    func noTagLeftNoRow() async {
+        let wire = CollectionsWire()
+        wire.transport.answerTags(#"[{"name":"gaggiano","count":5}]"#)
+        wire.transport.trips.seed("Gaggiano", tag: "gaggiano")
+        let stores = stores()
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            #expect(await screen.until { !stores.0.trips.isEmpty && !stores.2.tags.isEmpty })
+            #expect(await screen.until { screen.says("Gaggiano") })
+            await screen.settle(turns: 10)
+            #expect(!screen.says(CollectionsScreen.tagsHeader), "a Tags row with no card")
+        }
+    }
+
+    @Test("with every pictured tag a trip's, the sheet says so rather than that none has a photo")
+    func everyTagIsATrip() async {
+        let wire = CollectionsWire()
+        wire.transport.answerTags(#"[{"name":"gaggiano","count":5}]"#)
+        wire.transport.trips.seed("Gaggiano", tag: "gaggiano")
+        let stores = stores()
+        await stores.0.refresh(using: wire.access.handle, baseURL: CollectionsWire.baseURL)
+        let sheet = NewTripSheet(
+            flow: NewTripFlow(), trips: stores.0, members: stores.1,
+            access: { [access = wire.access] in access }, now: { Self.now })
+        await CollectionsHost.with(sheet) { screen in
+            #expect(await screen.until { screen.says(NewTripSheet.everyTagIsATrip) })
+            #expect(!screen.says(NewTripSheet.noTags))
+        }
+    }
+
+    @Test("a chosen tag that becomes a trip's is dropped with what it filled; a typed title stays")
+    func aChosenTagThatBecomesATripIsDropped() {
+        let flow = NewTripFlow()
+        let first = Date(timeIntervalSince1970: 1_773_316_800)
+        let span = TripTagSpan(firstTaken: first, lastTaken: first)
+        let utc = TimeZone(identifier: "UTC")!
+        flow.choose("garden", span: span, zone: utc)
+        #expect(flow.span != nil, "precondition: the span was prefilled")
+        flow.drop(["lisbon"])
+        #expect(flow.chosenTag == "garden", "a tag that is no trip's was dropped")
+        flow.drop(["garden"])
+        #expect(flow.chosenTag == nil)
+        #expect(flow.title.isEmpty, "the suggested title stayed")
+        #expect(flow.span == nil, "the prefilled span stayed")
+        #expect(!flow.canCreate)
+        flow.choose("porto", zone: utc)
+        flow.title = "My own"
+        flow.drop(["porto"])
+        #expect(flow.chosenTag == nil)
+        #expect(flow.title == "My own", "a typed title went with the tag")
+    }
+
+    @Test("a month card asks for its month, a year card for its year")
+    func monthAndYearCardsAsk() async {
+        let wire = CollectionsWire()
+        wire.transport.answerTags("[]")
+        wire.transport.answerMonths(
+            "[\(Self.bucket("2026-10", 12)),\(Self.bucket("2026-09", 4))]")
+        let months = LibraryBucketStore()
+        let years = LibraryBucketStore()
+        let opened = Box<[String]>([])
+        let access = wire.access
+        let held = stores()
+        let view = NavigationStack {
+            CollectionsScreen(
+                trips: held.0, members: held.1, tags: held.2, years: years,
+                months: months, identity: alice, access: { access }, openTag: { _ in },
+                openYear: { opened.value.append("year \($0)") },
+                openMonth: { opened.value.append("month \($0)") }, now: { Self.now })
+        }
+        await CollectionsHost.with(view) { screen in
+            #expect(await screen.until { screen.element(labelled: "Sep 2026") != nil })
+            let value = screen.element(labelled: "Oct 2026")?.accessibilityValue
+            #expect(value == "12 items")
+            #expect(screen.press("Sep 2026"), "the month card took no press")
+            #expect(await screen.until { screen.element(labelled: "2019") != nil })
+            #expect(screen.press("2019"), "the year card took no press")
+        }
+        #expect(opened.value == ["month 2026-09", "year 2019"])
+    }
+
+    @Test("a month request widens the tag, shows Months at that month, and is applied once")
+    func monthJumpAppliedOnce() {
+        let jump = LibraryMonthJump()
+        let scope = LibraryScopeChoice()
+        let library = MediaLibraryStore()
+        library.setTag("portugal2026")
+        let resting = LibraryMonthJumpRouting.tab(showing: .collections, whenOpening: nil)
+        #expect(resting == .collections)
+        jump.request("2026-03")
+        let asked = LibraryMonthJumpRouting.tab(showing: .collections, whenOpening: jump.pending)
+        #expect(asked == .library)
+        #expect(LibraryMonthJumpRouting.apply(jump, to: library, scope: scope), "no re-read")
+        #expect(library.tag == nil, "the tag was kept")
+        #expect(scope.scope == .months)
+        #expect(scope.monthTarget == "2026-03")
+        #expect(scope.year == nil)
+        #expect(jump.pending == nil)
+        scope.choose(.all)
+        #expect(!LibraryMonthJumpRouting.apply(jump, to: library, scope: scope), "applied twice")
+        #expect(scope.scope == .all, "a taken request moved the scope again")
+    }
+
+    @Test("a month card on the Collections root opens the Library in Months")
+    func aMonthCardReachesTheLibrary() async {
+        let transport = CollectionsTransport()
+        transport.answerMonths("[\(Self.bucket("2026-03", 3))]")
+        let session = CollectionsWire.signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let tabs = MainTabView(opening: .collections).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let card = await screen.until { screen.element(labelled: "Mar 2026") != nil }
+            #expect(card, "the Months row never appeared: \(transport.sent)")
+            #expect(!Self.monthsChosen(screen), "control: the Library already showed Months")
+            #expect(screen.press("Mar 2026"), "the card took no press")
+            let reached = await screen.until(seconds: 10) { Self.monthsChosen(screen) }
+            #expect(reached, "the Library never showed Months")
+        }
+    }
+
+    /// Whether the Library's scope control is drawn with Months chosen.
+    private static func monthsChosen(_ screen: PressProbe.Screen) -> Bool {
+        guard let found = PressProbe.segment(titled: "Months", in: screen.window) else {
+            return false
+        }
+        return found.0.selectedSegmentIndex == found.1
+    }
+
+    /// The verification gate's count: a root open with 3 trips, 6 tags, 12 months and 3 years.
+    /// The numbers are information, printed for the record, not a threshold — but a month or year
+    /// card that looked a cover up, or a tag card that looked one up twice, fails.
+    @Test("a root open with 3 trips, 6 tags, 12 months and 3 years: its requests, counted")
+    func requestCount() async {
+        let wire = CollectionsWire()
+        for tag in ["lisbon", "porto", "faro"] {
+            wire.transport.trips.seed(tag.capitalized, tag: tag)
+        }
+        let names = ["garden", "harbour", "market", "river", "school", "winter"]
+        let tags = names.map { #"{"name":""# + $0 + #"","count":4}"# }
+        wire.transport.answerTags("[\(tags.joined(separator: ","))]")
+        let monthKeys = (1...12).map { String(format: "2026-%02d", $0) }
+        wire.transport.answerMonths(
+            "[\(monthKeys.reversed().map { Self.bucket($0, 2) }.joined(separator: ","))]")
+        wire.transport.answerYears(
+            "[\(["2026", "2025", "2024"].map { Self.bucket($0, 9) }.joined(separator: ","))]")
+        let stores = stores()
+        let months = LibraryBucketStore()
+        let years = LibraryBucketStore()
+        let covers = TagCoverStore()
+        let view = screen(stores, wire, years: years, months: months, covers: covers)
+        await CollectionsHost.with(view) { screen in
+            let drawn = await screen.until(seconds: 10) {
+                screen.element(labelled: "#garden") != nil
+                    && screen.element(labelled: "Dec 2026") != nil
+                    && screen.element(labelled: "2026") != nil
+                    && stores.0.trips.allSatisfy { stores.1.summary(for: $0) != nil }
+                    && covers.cover(for: "garden") != nil
+            }
+            #expect(drawn, "the root never drew its rows: \(wire.transport.sent)")
+            await screen.settle(turns: 20)
+        }
+        let sent = wire.transport.sent
+        let buckets = sent.filter { $0.hasPrefix("attachment_buckets") }
+        let lookups = wire.transport.coverReads()
+        let baseline = sent.count - buckets.count - lookups
+        let perTag = names.map { wire.transport.coverReads(of: $0) }
+        print(
+            "REQUEST-COUNT baseline=\(baseline) buckets=\(buckets.count) "
+                + "(month=\(buckets.filter { $0.contains("size=month") }.count) "
+                + "year=\(buckets.filter { $0.contains("size=year") }.count)) "
+                + "tag-covers=\(lookups) per-tag=\(perTag)")
+        #expect(buckets.count == 2, "\(buckets)")
+        #expect(perTag.allSatisfy { $0 <= 1 }, "a tag's cover was looked up twice: \(perTag)")
+        #expect(lookups >= 1, "no tag card looked its cover up")
+    }
 }

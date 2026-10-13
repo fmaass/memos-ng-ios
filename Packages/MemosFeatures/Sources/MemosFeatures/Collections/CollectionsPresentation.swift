@@ -116,16 +116,51 @@ enum CollectionsPresentation {
         store ?? held[trip.uid]?.summary(for: trip, under: identity)
     }
 
-    /// One card of the Months row.
+    /// One card of the Months row: the bucket's key, its title, its count and its cover.
     struct MonthCard: Equatable, Identifiable {
         let key: String
         let title: String
         let count: Int
+        let cover: MemoAttachment?
         var id: String { key }
     }
 
-    /// The Months row's cards.
-    static func monthCards(_ buckets: [LibraryBucket]) -> [MonthCard] { [] }
+    /// The Months row's cards (MEMNG-783): each month bucket titled with its short month and year
+    /// (`monthBucketLabel`, "Sep 2026"), newest first, with its count and its own cover. A key
+    /// that names no month has no card.
+    static func monthCards(_ buckets: [LibraryBucket]) -> [MonthCard] {
+        buckets.compactMap { bucket in
+            monthBucketLabel(bucket.key).map {
+                MonthCard(
+                    key: bucket.key, title: $0, count: bucket.count,
+                    cover: LibraryBucketCover.attachment(for: bucket))
+            }
+        }
+        .sorted { $0.key > $1.key }
+    }
+
+    /// The buckets `store` holds while they answer a read of `size`, every kind and every tag, in
+    /// its own zone — else nil, so a failed or another read puts no row on screen.
+    static func bucketsShown(_ store: LibraryBucketStore, size: LibraryBucketSize)
+        -> [LibraryBucket]?
+    {
+        guard let request = store.loadedRequest, request.size == size, request.filter == .all,
+            request.tag == nil, request.timeZoneIdentifier == store.timeZoneIdentifier
+        else { return nil }
+        return store.buckets
+    }
+
+    /// The tags the listed trips are made of (decision H) — none while the list is unread or
+    /// failed, since a list nobody has read says nothing about which tags are trips.
+    static func tripTags(_ trips: [Trip], listFailed: Bool) -> Set<String> {
+        listFailed ? [] : Set(trips.compactMap(\.tag))
+    }
+
+    /// `tags` in their order, less every one in `tripTags`: a trip's tag is the trip's card, not a
+    /// tag's, and no second trip is made of it.
+    static func tags(_ tags: [LibraryTag], excluding tripTags: Set<String>) -> [LibraryTag] {
+        tags.filter { !tripTags.contains($0.name) }
+    }
 
     /// The pushed trips that still exist: the stack up to the first trip `ids` no longer holds,
     /// since a screen pushed from a trip that is gone has nothing to stand on either.

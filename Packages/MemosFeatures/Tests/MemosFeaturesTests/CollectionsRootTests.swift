@@ -454,15 +454,18 @@ struct CollectionsRootRenderTests {
         }
     }
 
-    @Test("a trip's card shows its title, and its span and count from the scripted membership")
+    @Test("a trip's card shows its title and the server's count, and the drain's cover")
     func oneTripCard() async {
         let wire = CollectionsWire()
         let stores = stores()
         wire.transport.trips.seed("Portugal 2026", tag: "portugal2026", count: 3)
         #expect(wire.transport.trips.rows.count == 1, "precondition: the trip is on the server")
         await CollectionsHost.with(screen(stores, wire)) { screen in
-            #expect(await screen.until { screen.says("\(range) · 3 photos") })
-            #expect(screen.says("Portugal 2026"))
+            let drained = await screen.until {
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p0"), in: screen.window)
+            }
+            #expect(drained, "the card never drew its first member")
+            #expect(Self.value(of: "Portugal 2026", on: screen) == "3 items")
             #expect(!screen.says(CollectionsScreen.emptyTitle))
         }
         let trip = stores.0.trips.first
@@ -470,20 +473,26 @@ struct CollectionsRootRenderTests {
     }
 
     /// What VoiceOver hears of a card past its title — the ordinary half of the pin's retired
-    /// accessibility cases (MEMNG-781): its detail exactly, or nothing when it has none.
+    /// accessibility cases (MEMNG-781): its count, and never a date (MEMNG-783).
     @Test(
-        "a card's accessibility value is its detail, or empty when it has none",
-        arguments: [nil, "3 photos"] as [String?])
-    func cardValueIsItsDetail(detail: String?) async {
-        let made = Date(timeIntervalSince1970: 1_791_460_800)
-        let record = Trip(
-            uid: "trip-1", title: "Lisbon", tag: "lisbon", createdAt: made, updatedAt: made)
-        let card = TripCard(trip: record, cover: nil, detail: detail)
+        "a card's accessibility value is its count",
+        arguments: [(1, "1 item"), (3, "3 items")])
+    func cardValueIsItsCount(count: Int, expected: String) async {
+        let card = CollectionCard(cover: nil, title: "Lisbon", count: count)
         let value = await PressProbe.withScreen(card, height: 400) { screen in
             _ = await screen.until { Self.value(of: "Lisbon", on: screen) != nil }
             return Self.value(of: "Lisbon", on: screen)
         }
-        #expect(value == (detail ?? ""), "the card said \(value ?? "nothing")")
+        #expect(value == expected, "the card said \(value ?? "nothing")")
+    }
+
+    /// Whether the card titled `title` stands for a trip whose members have been read.
+    private static func cardDrained(
+        _ title: String, _ stores: (TripStore, TripMemberStore, LibraryTagStore),
+        _ screen: PressProbe.Screen
+    ) -> Bool {
+        guard let trip = stores.0.trips.first(where: { $0.title == title }) else { return false }
+        return stores.1.summary(for: trip) != nil && value(of: title, on: screen) != nil
     }
 
     /// The accessibility value of the node labelled `title`, whatever its traits: a card is one
@@ -499,7 +508,7 @@ struct CollectionsRootRenderTests {
         return nil
     }
 
-    @Test("a tag chip opens the Library narrowed to it")
+    @Test("a tag card opens the Library narrowed to it")
     func aTagChipOpensTheLibrary() async {
         let wire = CollectionsWire()
         let opened = Box<String?>(nil)
@@ -531,7 +540,7 @@ struct CollectionsRootRenderTests {
         }
     }
 
-    @Test("Create files the trip and the root shows its card with span and count")
+    @Test("Create files the trip and the root shows its card")
     func theCreateFlow() async {
         let wire = CollectionsWire()
         let stores = stores()
@@ -546,7 +555,7 @@ struct CollectionsRootRenderTests {
             #expect(screen.press("portugal2026"))
             #expect(await screen.until { screen.says("Portugal 2026") }, "the title was not filled")
             #expect(screen.press(NewTripSheet.create), "Create took no press")
-            #expect(await screen.until { screen.says("\(range) · 3 photos") })
+            #expect(await screen.until { Self.cardDrained("Portugal 2026", stores, screen) })
             #expect(await screen.until { screen.element(labelled: NewTripSheet.create) == nil })
             #expect(!screen.says(CollectionsScreen.emptyTitle))
         }
@@ -1375,7 +1384,7 @@ extension CollectionsRootRenderTests {
         let handle = wire.access.handle
         await CollectionsHost.with(screen(stores, wire)) { screen in
             let drained = await screen.until {
-                CollectionsHost.identified(TripCard.coverIdentifier("p0"), in: screen.window)
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p0"), in: screen.window)
             }
             #expect(drained, "precondition: the drained card draws its first member p0")
             // What the trip's viewer's Use as Cover does (`TripView.useAsCover`).
@@ -1383,7 +1392,7 @@ extension CollectionsRootRenderTests {
                 uid: uid, patch: TripPatch(cover: .set("p2")), using: handle,
                 baseURL: CollectionsWire.baseURL)
             let chosen = await screen.until {
-                CollectionsHost.identified(TripCard.coverIdentifier("p2"), in: screen.window)
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p2"), in: screen.window)
             }
             #expect(chosen, "the card kept the cover its drain wrote, not the chosen p2")
             if let record = stores.0.trips.first(where: { $0.uid == uid }) {
@@ -1391,7 +1400,7 @@ extension CollectionsRootRenderTests {
                     ["p2"], from: record, using: handle, baseURL: CollectionsWire.baseURL)
             }
             let fellBack = await screen.until {
-                CollectionsHost.identified(TripCard.coverIdentifier("p0"), in: screen.window)
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p0"), in: screen.window)
             }
             #expect(fellBack, "the card kept an excluded cover instead of the first member")
         }
@@ -1546,7 +1555,7 @@ extension CollectionsRootRenderTests {
         let stores = stores()
         await CollectionsHost.with(screen(stores, wire)) { screen in
             #expect(await screen.until { screen.says("Portugal 2026") && screen.says("Family") })
-            #expect(await screen.until { screen.says("\(range) · 3 photos") })
+            #expect(await screen.until { Self.cardDrained("Portugal 2026", stores, screen) })
             #expect(screen.says(CollectionsScreen.tripsHeader))
             #expect(!screen.says(CollectionsScreen.emptyTitle))
         }
@@ -1597,7 +1606,7 @@ extension CollectionsRootRenderTests {
             let again = screen.press(NewTripSheet.create)
             #expect(!again, "Create took a press while one was out")
             wire.transport.trips.release(TripRows.create)
-            #expect(await screen.until { screen.says("\(range) · 3 photos") })
+            #expect(await screen.until { Self.cardDrained("Portugal 2026", stores, screen) })
             #expect(await screen.until { screen.element(labelled: NewTripSheet.create) == nil })
             // A second answer, were one coming, has a second to arrive.
             try? await Task.sleep(for: .seconds(1))
@@ -1661,16 +1670,28 @@ struct LibraryYearJumpTests {
         #expect(scope.year == "2019")
     }
 
-    @Test("the later of a tag request and a year request is the one left pending")
+    @Test("the latest of a tag, a month and a year request is the one left pending")
     func theLaterRequestWins() {
         let tags = LibraryTagJump()
         let years = LibraryYearJump()
-        LibraryJumpRequests.openTag("family", tags: tags, years: years)
-        LibraryJumpRequests.openYear("2026", tags: tags, years: years)
+        let months = LibraryMonthJump()
+        LibraryJumpRequests.openTag("family", tags: tags, years: years, months: months)
+        LibraryJumpRequests.openYear("2026", tags: tags, years: years, months: months)
         #expect(tags.pending == nil, "a tag asked for before the year stayed pending")
         #expect(years.pending == "2026")
-        LibraryJumpRequests.openTag("family", tags: tags, years: years)
+        LibraryJumpRequests.openTag("family", tags: tags, years: years, months: months)
         #expect(years.pending == nil, "a year asked for before the tag stayed pending")
+        #expect(tags.pending == "family")
+        LibraryJumpRequests.openMonth("2026-03", tags: tags, years: years, months: months)
+        #expect(tags.pending == nil, "a tag asked for before the month stayed pending")
+        #expect(months.pending == "2026-03")
+        LibraryJumpRequests.openYear("2019", tags: tags, years: years, months: months)
+        #expect(months.pending == nil, "a month asked for before the year stayed pending")
+        #expect(years.pending == "2019")
+        LibraryJumpRequests.openMonth("2019-01", tags: tags, years: years, months: months)
+        #expect(years.pending == nil, "a year asked for before the month stayed pending")
+        LibraryJumpRequests.openTag("family", tags: tags, years: years, months: months)
+        #expect(months.pending == nil, "a month asked for before the tag stayed pending")
         #expect(tags.pending == "family")
     }
 }
@@ -1699,7 +1720,7 @@ extension CollectionsRootRenderTests {
     /// The same subject on another server is another account: the session's move clears the
     /// trips, and the root reads the other server's list at once — and while that server's
     /// members are still out, no card shows the dates this server's members gave it.
-    @Test("the same subject on another server reads the list again, and keeps no card's dates")
+    @Test("the same subject on another server reads the list again, and keeps no card's cover")
     func aServerSwitchReadsTheListAgain() async {
         let wire = CollectionsWire()
         wire.transport.trips.seed("Plain", tag: "portugal2026", count: 3)
@@ -1708,9 +1729,10 @@ extension CollectionsRootRenderTests {
         let there = TimelineSnapshotIdentity(
             server: URL(string: "https://elsewhere.example.invalid")!, subject: alice.subject)
         await CollectionsHost.with(switching(stores, wire, source)) { screen in
-            let detail = "\(range) · 3 photos"
-            let drawn = await screen.until { Self.value(of: "Plain", on: screen) == detail }
-            #expect(drawn, "precondition: the card never showed its dates")
+            let drawn = await screen.until {
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p0"), in: screen.window)
+            }
+            #expect(drawn, "precondition: the card never showed its drained cover")
             let lists = wire.transport.trips.calls(TripRows.list).count
             wire.transport.trips.hold(TripRows.members)
             // As `CollectionsSession` moves the stores, then the identity the screen is given.
@@ -1723,8 +1745,11 @@ extension CollectionsRootRenderTests {
             let listed = await screen.until { Self.value(of: "Plain", on: screen) != nil }
             #expect(listed, "the other server's trip was never shown")
             await screen.settle(turns: 10)
-            let shown = Self.value(of: "Plain", on: screen)
-            #expect(shown == "3 photos", "the card kept the first server's dates: \(shown ?? "-")")
+            let kept = CollectionsHost.identified(
+                CollectionCard.coverIdentifier("p0"), in: screen.window)
+            #expect(!kept, "the card kept the first server's drained cover")
+            #expect(
+                CollectionsHost.identified(CollectionCard.coverIdentifier(nil), in: screen.window))
             wire.transport.trips.release(TripRows.members)
         }
     }

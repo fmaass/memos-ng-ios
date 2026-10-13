@@ -15,6 +15,10 @@ struct CollectionsAccess {
 /// The counts and spans are `TripMemberStore`'s sheet reads — one count read for every tag,
 /// then a span read per tag, in the server's order — and each row fills in as its answer arrives.
 /// A tag already read under this session is not read again.
+///
+/// A tag a listed trip is made of is not offered (decision H, as on the root): it is that trip's.
+/// While the list of trips is unread or failed nothing is left out, and a chosen tag that becomes
+/// a trip's while the sheet is up is no longer chosen (`NewTripFlow.drop`).
 struct NewTripSheet: View {
     @Bindable var flow: NewTripFlow
     let trips: TripStore
@@ -46,6 +50,9 @@ struct NewTripSheet: View {
     static let readingDates = "Reading the tag's dates…"
     /// What the sheet says while no tag has a picture.
     static let noTags = "No tag has a photo yet. Tag a memo's photos to make a trip of them."
+    /// What the sheet says while every tag with a picture is already a trip's.
+    static let everyTagIsATrip =
+        "Every tag with a photo is already a trip. Tag a memo's photos to make another."
     /// The identifier a suggested row carries, so a test can tell it from the same tag's row in
     /// the full list.
     static func suggestedRowID(_ tag: String) -> String { "new-trip-suggested-\(tag)" }
@@ -83,7 +90,8 @@ struct NewTripSheet: View {
                 if let error = members.lastError {
                     Section { NoticeCard(text: error, tone: .error) }
                 }
-                let tags = members.tagCounts.filter { $0.count > 0 }
+                let pictured = members.tagCounts.filter { $0.count > 0 }
+                let tags = CollectionsPresentation.tags(pictured, excluding: tripTags)
                 let suggested = CollectionsPresentation.suggested(
                     tags, spans: members.spans, now: now())
                 if !suggested.isEmpty {
@@ -95,7 +103,8 @@ struct NewTripSheet: View {
                 }
                 Section(Self.allTagsHeader) {
                     if tags.isEmpty, members.tagCountsLoaded {
-                        Text(Self.noTags).foregroundStyle(.secondary)
+                        Text(pictured.isEmpty ? Self.noTags : Self.everyTagIsATrip)
+                            .foregroundStyle(.secondary)
                     }
                     ForEach(tags) { tag in row(tag) }
                 }
@@ -131,6 +140,8 @@ struct NewTripSheet: View {
             flow.abandon()
             dismiss()
         }
+        // A tag that became a trip's is no longer a choice.
+        .onChange(of: tripTags, initial: true) { _, excluded in flow.drop(excluded) }
         // The chosen tag's dates are read at once, ahead of the other tags'.
         .task(id: flow.chosenTag) { await readChosenDates() }
         // A tag chosen before its span arrived takes the span once it does.
@@ -138,6 +149,11 @@ struct NewTripSheet: View {
             guard let tag = flow.chosenTag else { return }
             flow.prefill(span, of: tag, zone: timeZone)
         }
+    }
+
+    /// The tags the listed trips are made of, left out of every list on the sheet.
+    private var tripTags: Set<String> {
+        CollectionsPresentation.tripTags(trips.trips, listFailed: trips.lastError != nil)
     }
 
     private func row(_ tag: LibraryTag) -> some View {
