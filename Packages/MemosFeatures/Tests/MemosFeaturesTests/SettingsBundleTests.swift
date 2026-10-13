@@ -683,7 +683,7 @@ struct SettingsBundleMediaCacheTests {
         group.set(true, forKey: SettingsBundleSync.clearMediaCacheKey)
         let cache = CountingCache(used: 3 << 20)
 
-        SettingsBundleSync.writeCacheSize(of: cache, into: group)
+        SettingsBundleSync.enteredBackground(outbox: nil, cache: cache, group: group)
 
         #expect(cache.clears == 0)
         #expect(

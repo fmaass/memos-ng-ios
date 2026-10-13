@@ -149,10 +149,11 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
             ) { _ in
                 MainActor.assumeIsolated {
-                    self.outbox?.appEnteredBackground()
-                    // The pane's size row, as the cache stands when the app leaves the front.
-                    SettingsBundleSync.writeCacheSize(
-                        of: MediaSession.shared.cache, into: SettingsBundleSync.paneDefaults)
+                    // The outbox closes, and the pane's size row is written as the cache stands
+                    // when the app leaves the front.
+                    SettingsBundleSync.enteredBackground(
+                        outbox: self.outbox, cache: MediaSession.shared.cache,
+                        group: SettingsBundleSync.paneDefaults)
                 }
             },
         ]

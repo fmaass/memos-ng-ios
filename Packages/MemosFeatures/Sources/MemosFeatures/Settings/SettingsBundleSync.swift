@@ -152,6 +152,16 @@ public enum SettingsBundleSync {
         return outbox?.appBecameActive()
     }
 
+    /// The way to the background, as `activate` is the way back: the outbox stops opening new
+    /// work, and the pane's size row is written as the cache stands now — never a clear. The app's
+    /// one background observer calls this and nothing else, so what it does is what is tested.
+    public static func enteredBackground(
+        outbox: Outbox?, cache: any DerivedMediaCache, group: UserDefaults
+    ) {
+        outbox?.appEnteredBackground()
+        writeCacheSize(of: cache, into: group)
+    }
+
     /// The size row's text for the cache as it stands now: what it holds against what it may
     /// (`MediaCacheMaintenance.summary`, the arithmetic the in-app row used, the same on every
     /// locale). Also written on the way to the background, so the pane shows a size from this
