@@ -381,7 +381,7 @@ struct TripAuthorityTests {
         }
     }
 
-    // MARK: - R2: the empty Removed answer and a pin that cannot extend
+    // MARK: - R2: the empty Removed answer, and a drain that changes nothing
 
     @Test("an empty Removed answer issued before a change adds criteria is not current after it")
     func emptyRemovedIssuedBeforeACriteriaChange() async throws {
@@ -446,5 +446,22 @@ struct TripAuthorityTests {
         #expect(
             members.removedState(for: bare) == .notRequested,
             "an empty answer of an earlier revision is shown as current")
+    }
+
+    /// What the retired repeated-summary case held besides the pin (MEMNG-781): a second drain
+    /// of a trip nothing changed reads again, moves no revision, and leaves the members complete.
+    @Test("a second drain of an unchanged trip reads again, moves no revision, stays complete")
+    func repeatedDrainMovesNothing() async throws {
+        let calls = TripCalls()
+        let client = client(calls, members: { _ in TripWire.page([1, 200]) })
+        let (trips, members) = await stores(client)
+        await members.drain(try trip(trips), using: client.handle, baseURL: Stub.baseURL)
+        #expect(members.state(for: try trip(trips)) == .complete, "control: the first completed")
+        let revision = trips.revision
+        await members.drain(try trip(trips), using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(calls.of(TripWire.members).count == 2, "control: the second drain read again")
+        #expect(trips.revision == revision, "a drain that changed nothing moved the revision")
+        #expect(members.state(for: try trip(trips)) == .complete, "the second drain voided itself")
     }
 }

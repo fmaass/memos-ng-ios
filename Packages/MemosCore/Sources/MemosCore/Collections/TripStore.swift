@@ -590,8 +590,10 @@ public final class TripStore {
     ]
 
     /// Nothing device-local of a trip is kept any more: the scope's legacy files
-    /// (`legacyFileNames`) are removed, best effort, the first time the scope loads, and never
-    /// read.
+    /// (`legacyFileNames`) are removed, best effort, every time the store enters the scope (at
+    /// init and at each identity change), and never read. No attempt is recorded: nothing in the
+    /// app writes either file any more, so a later entry only retries a removal that failed, or
+    /// removes one an older build wrote back — both wanted.
     private func dropLegacyFiles() {
         guard let root, let identity else { return }
         let directory = root.appending(path: Self.scopeKey(for: identity))

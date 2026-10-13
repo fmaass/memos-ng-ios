@@ -423,6 +423,38 @@ struct TripStoreTests {
 
     /// Moved with the scope's directory from the pin's store, which is gone (MEMNG-781): the same
     /// identity must find the same directory, so the digest cannot change.
+    /// What the retired pin-during-create case held besides the pin (MEMNG-781): a create out
+    /// while something unrelated moves the revision still returns its trip, and lists it.
+    @Test("a list read while a create is out leaves the create returning its trip and listed")
+    func createSurvivesARevisionMove() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Stub.client { _, _, operation in
+            guard operation == TripWire.create else {
+                return Stub.json("[\(TripWire.collection("t0"))]")
+            }
+            entered.open()
+            await release.wait()
+            return Stub.json(TripWire.collection("t1", title: "New"), status: .created)
+        }
+        let store = store()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let creating = Task {
+            try await store.create(
+                NewTripRequest(scope: TripWire.alice, title: "New"), using: client.handle,
+                baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the create never reached the wire")
+        let before = store.revision
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.revision > before, "control: the list read moved the revision")
+        release.open()
+        let trip = try await creating.value
+
+        #expect(trip.uid == "t1")
+        #expect(store.trips.map(\.uid) == ["t0", "t1"])
+    }
+
     @Test("the scope key is a stable SHA-256 of server and subject")
     func scopeKeyIsStable() {
         let alice = TimelineSnapshotIdentity(
@@ -441,7 +473,7 @@ struct TripStoreTests {
     }
 
     @Test(
-        "each legacy file is removed on first load and never read",
+        "each legacy file is removed when its scope is entered, and never read",
         arguments: TripStore.legacyFileNames)
     func legacyFileIsRemoved(name: String) throws {
         // The pilot's trips file as 2.2 wrote it, and the composer pin's file (MEMNG-781): one
@@ -464,5 +496,36 @@ struct TripStoreTests {
         store.sessionIdentityChanged(to: TripWire.bob)
         #expect(!FileManager.default.fileExists(atPath: file(TripWire.bob)))
         #expect(store.trips.isEmpty)
+    }
+
+    /// Every entry into a scope removes what is there, with nothing remembered between entries
+    /// (MEMNG-781): a removal that failed is tried again on the next entry, and a file written
+    /// back while the store was elsewhere goes on the way back. Neither is ever read.
+    @Test(
+        "re-entering a scope retries a failed removal and removes a file written back since",
+        arguments: TripStore.legacyFileNames)
+    func legacyFileOnEveryEntry(name: String) throws {
+        let directory = root.appending(path: TripStore.scopeKey(for: TripWire.alice))
+        let file = directory.appending(path: name)
+        let legacy = Data(#"{"formatVersion":1,"records":[{"title":"Old trip"}]}"#.utf8)
+        let manager = FileManager.default
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try legacy.write(to: file)
+        // The first entry cannot remove it: the scope's directory takes no change.
+        try manager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+        let store = store()
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        #expect(manager.fileExists(atPath: file.path), "control: the first removal failed")
+        #expect(store.trips.isEmpty, "a file that stayed was read")
+        // A -> B -> A: the way back tries again.
+        store.sessionIdentityChanged(to: TripWire.bob)
+        store.sessionIdentityChanged(to: TripWire.alice)
+        #expect(!manager.fileExists(atPath: file.path), "the failed removal was not retried")
+        // Written back while the store is in B (an older build, say): A's next entry removes it.
+        store.sessionIdentityChanged(to: TripWire.bob)
+        try legacy.write(to: file)
+        store.sessionIdentityChanged(to: TripWire.alice)
+        #expect(!manager.fileExists(atPath: file.path), "the file written back was kept")
+        #expect(store.trips.isEmpty, "a legacy file was read")
     }
 }
