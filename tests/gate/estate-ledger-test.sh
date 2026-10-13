@@ -69,7 +69,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh; do
     cat > "$work/tests/gate/$stub" <<STUB_EOF
 #!/usr/bin/env bash
 echo "selftest" >> "\${STUB_DIR:-/nonexistent}/calls"
@@ -336,7 +336,7 @@ MAC_GATE_REMOTE_SUMMARY: xcodegen=0 xcodebuild=0 wall=77 | exit=0
 EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR"
 summary="$(printf '%s\n' "$OUT" | grep '^mac-gate SUMMARY:')"
-if [ "$RC" -eq 0 ] && printf '%s\n' "$summary" | grep -Eq "$SUMMARY_RE" && printf '%s\n' "$summary" | grep -q ' slot_wait=42 | exit=0$'; then
+if [ "$RC" -eq 0 ] && printf '%s\n' "$summary" | grep -Eq "$SUMMARY_RE" && printf '%s\n' "$summary" | grep -q ' slot_wait=42 locallint=- | exit=0$'; then
   ok "full pass: exit 0, and the verdict line still ends '| exit=0' with t= and wall= in the remote's text"
 else
   bad "full pass: exit $RC or a verdict line that does not parse: [$summary]"; show "$OUT"
@@ -438,7 +438,7 @@ MAC_GATE_QUICK_REMOTE: lint=0 build=0 tests=0
 MAC_GATE_REMOTE_CLOCK end=$((T0 + 203))
 EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR" --quick
-if [ "$RC" -eq 0 ] && has "MAC_GATE_QUICK: lint=0 build=0 tests=0 | exit=0"; then
+if [ "$RC" -eq 0 ] && has "MAC_GATE_QUICK: lint=0 build=0 tests=0 locallint=- | exit=0"; then
   ok "quick: exit 0, and the quick line still reads its three numbers through t="
 else
   bad "quick: exit $RC or the quick line changed"; show "$OUT"

@@ -61,7 +61,7 @@
 # a run safe to start: the selftests, the release-version check, the classification, this branch's
 # lane lock, the run admission, the simulator slot and the private simulator — and the lint, which costs seconds and which
 # the full gate would fail on anyway. It prints one line of its own,
-# MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>, which is deliberately NOT the gate's
+# MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> locallint=<rc|-> | exit=<rc>, which is deliberately NOT the gate's
 # summary line — a quick run can never be read, or pasted, as a verdict. The verdict is the full
 # gate.
 # It reuses the lane's DerivedData, which is why it is quick and why it takes the same lock: the
@@ -100,7 +100,7 @@
 #                        two runs cannot write over each other and a caller's redirect cannot
 #                        truncate either (default: <repo>/.gate-artifacts)
 #   MAC_GATE_ESTATE_LOCK  a lock file this run takes itself (flock, blocking) before anything else
-#                        it does, and holds until it ends; the wait is stamped into the run log and
+#                        it does but the local lint, and holds until it ends; the wait is stamped into the run log and
 #                        the run ledger. Unset: no lock is taken. A lock it cannot open or take
 #                        refuses the run (exit 15). Never set it under an outside `flock` on the
 #                        same path: the gate's own open is a second lock on that file, and it waits
@@ -150,6 +150,10 @@
 #                 merkur_build image (the guard refused, or its answer could not be read), and no
 #                 valid pending marker allowed the refusal to be reported instead; nothing was
 #                 written on the host, no slot was claimed and no device was created;
+#             1 = also locallint=1: `swift format lint` failed on the calling machine before the
+#                 estate lock was requested (the lint's own code; locallint=1 on the summary and
+#                 mode=refused in the run ledger tell it from a build-host step's 1); nothing
+#                 was copied, no lock was taken and the build host was never contacted;
 #             otherwise the exit code of the first failing step.
 
 set -uo pipefail
@@ -201,6 +205,15 @@ gate_run_copy_is_own() {
 # the one launch that keeps it. tests/gate/estate-ledger-test.sh (case 21) kills a run mid-child.
 GATE_ESTATE_LOCK_REQUESTED=""
 GATE_ESTATE_LOCK_ACQUIRED=""
+# The build host's swift-format, read on merkur with `swift format --version` on 2026-10-13. The
+# live value reaches a run only with the build host's own lint step (its MAC_GATE_SWIFTFORMAT
+# line), long after the local lint has spoken, so the local verdict line names this pin; compare
+# the two lines in one run log to see whether the pin is still true.
+GATE_SWIFTFORMAT_MAC="6.3.0 (pinned, read 2026-10-13)"
+GATE_SWIFTFORMAT_MAC_MAJOR=6
+GATE_LOCALLINT_RC=""
+GATE_LOCALLINT_TEXT=""
+GATE_LOCALLINT_SECS="?"
 die_estate_lock() {
   printf 'mac-gate: REFUSED: %s\n' "$1" >&2
   exit 15
@@ -211,10 +224,51 @@ if gate_run_copy_is_own; then
     GATE_ESTATE_LOCK_REQUESTED="${MAC_GATE_ESTATE_LOCK_STAMPS%% *}"
     GATE_ESTATE_LOCK_ACQUIRED="${MAC_GATE_ESTATE_LOCK_STAMPS#* }"
   fi
+  # The bootstrap's lint verdict, which the candidate removal below needs before the copy's own
+  # locallint step reads it again.
+  { read -r GATE_LOCALLINT_RC _ < "$MAC_GATE_RUN_COPY/locallint.rc"; } 2>/dev/null || GATE_LOCALLINT_RC=""
   unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS
 else
   unset MAC_GATE_ESTATE_LOCK_STAMPS
-  if [ -n "${MAC_GATE_ESTATE_LOCK:-}" ]; then
+  # The local lint (MEMNG-807, scripts/local-lint.sh) comes before the estate lock is requested,
+  # or it saves nothing: a formatting error used to wait out the whole queue only to fail the
+  # build host's first step (41 minutes, 2026-10-13). It runs here, in the original text, because
+  # the private copy is made after the lock; the helper's text is read once and evaluated, so an
+  # edit to the tree during the lint cannot change what runs. --help and --classify-only build
+  # nothing and lint nothing, and neither does a run without MAC_GATE_HOST, which the copy refuses
+  # before it does anything. A failure (rc 1) skips the lock; the copy refuses the run.
+  gate_lint_wanted=1
+  [ -n "${MAC_GATE_HOST:-}" ] || gate_lint_wanted=0
+  for gate_arg in "$@"; do
+    case "$gate_arg" in --help|-h|--classify-only) gate_lint_wanted=0 ;; esac
+  done
+  if [ "$gate_lint_wanted" -eq 1 ]; then
+    gate_lint_none="MAC_GATE_LOCALLINT rc=- local=none version=- mac=$GATE_SWIFTFORMAT_MAC"
+    gate_lint_t0="$(date +%s)"
+    gate_lint_root="$(git rev-parse --show-toplevel 2>/dev/null)" || gate_lint_root=""
+    if [ -z "$gate_lint_root" ]; then
+      GATE_LOCALLINT_RC=100
+      GATE_LOCALLINT_TEXT="locallint   : fell through — not inside a git working tree
+$gate_lint_none"
+    elif ! gate_lint_src="$(cat "$gate_lint_root/scripts/local-lint.sh" 2>/dev/null)"; then
+      GATE_LOCALLINT_RC=100
+      GATE_LOCALLINT_TEXT="locallint   : fell through — $gate_lint_root/scripts/local-lint.sh is not in this tree; the build host lints this run as before
+$gate_lint_none"
+    elif ! eval "$gate_lint_src" || ! declare -F local_lint_report >/dev/null; then
+      GATE_LOCALLINT_RC=100
+      GATE_LOCALLINT_TEXT="locallint   : fell through — $gate_lint_root/scripts/local-lint.sh did not load; the build host lints this run as before
+$gate_lint_none"
+    else
+      printf 'mac-gate: linting %s on this machine before the estate lock is requested\n' "$gate_lint_root" >&2
+      GATE_LOCALLINT_TEXT="$(local_lint_report "$gate_lint_root" "$GATE_SWIFTFORMAT_MAC" "$GATE_SWIFTFORMAT_MAC_MAJOR" 2>&1)"
+      GATE_LOCALLINT_RC=$?
+    fi
+    gate_lint_t1="$(date +%s)"
+    case "$gate_lint_t0:$gate_lint_t1" in
+      [0-9]*:[0-9]*) GATE_LOCALLINT_SECS=$((gate_lint_t1 - gate_lint_t0)) ;;
+    esac
+  fi
+  if [ -n "${MAC_GATE_ESTATE_LOCK:-}" ] && [ "$GATE_LOCALLINT_RC" != 1 ]; then
     GATE_ESTATE_LOCK_REQUESTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || GATE_ESTATE_LOCK_REQUESTED="?"
     [ -n "$GATE_ESTATE_LOCK_REQUESTED" ] || GATE_ESTATE_LOCK_REQUESTED="?"
     { exec 9>>"$MAC_GATE_ESTATE_LOCK"; } 2>/dev/null \
@@ -242,14 +296,18 @@ fi
 # folder is resolved the way the rest of the run resolves it (a relative override is relative to
 # the repository root); a run that can resolve neither an override nor a root has no documented path
 # and clears nothing, and is refused below as it always was. A removal that fails refuses the run:
-# the refusal names the file, and nothing after it runs.
+# the refusal names the file, and nothing after it runs. The one run that clears nothing is one the
+# local lint refused (rc 1): it never took the estate lock, and the estate lock is what kept this
+# removal from taking the candidate a run of the same worktree is still promoting in its
+# copyback; the lane lock comes too late to cover it. Such a run builds nothing and promotes
+# nothing, so a candidate beside a locallint=1 run is never that run's.
 early_root="$(git rev-parse --show-toplevel 2>/dev/null)" || early_root=""
 case "${MAC_GATE_ARTIFACTS:-}" in
   /*) artifacts="$MAC_GATE_ARTIFACTS" ;;
   "") artifacts="${early_root:+$early_root/.gate-artifacts}" ;;
   *) artifacts="${early_root:+$early_root/$MAC_GATE_ARTIFACTS}" ;;
 esac
-if [ -n "$artifacts" ]; then
+if [ -n "$artifacts" ] && [ "$GATE_LOCALLINT_RC" != 1 ]; then
   rm -f "$artifacts/testcount-baseline.tsv" \
     || die_refuse "cannot remove $artifacts/testcount-baseline.tsv: stale candidate left in place — not this run's"
 fi
@@ -296,6 +354,11 @@ else
       cp -p "$gate_caller_root/scripts/$gate_helper" "$gate_run_dir/scripts/$gate_helper" \
         || { rm -rf "$gate_run_dir"; die_refuse "cannot copy scripts/$gate_helper into $gate_run_dir"; }
     done
+  fi
+  if [ -n "$GATE_LOCALLINT_RC" ]; then
+    { printf '%s\n' "$GATE_LOCALLINT_TEXT" > "$gate_run_dir/locallint.txt" \
+        && printf '%s %s\n' "$GATE_LOCALLINT_RC" "$GATE_LOCALLINT_SECS" > "$gate_run_dir/locallint.rc"; } \
+      || { rm -rf "$gate_run_dir"; die_refuse "cannot hand the local lint's verdict to $gate_run_dir"; }
   fi
   printf '%s\n' "$gate_run_dir" > "$gate_run_dir/.mac-gate-run-copy" \
     || { rm -rf "$gate_run_dir"; die_refuse "cannot mark $gate_run_dir as this run's copy"; }
@@ -705,7 +768,7 @@ die_locked() {
   # A quick run that never got the lock built nothing, so it reports nothing built — but it still
   # reports, on its own line, because that line is what the caller reads.
   [ "${QUICK:-0}" -eq 0 ] \
-    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- | exit=3\n' | tee -a "$log"
+    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- locallint=%s | exit=3\n' "${GATE_LOCALLINT_FIELD:--}" | tee -a "$log"
   exit 3
 }
 
@@ -738,6 +801,8 @@ GATE_RUNS_LOGS="${MAC_GATE_RUNS_LOGS:-$(dirname "$GATE_RUNS_LEDGER")/gate-logs}"
 GATE_LEDGER_LOG_COPY=""
 GATE_LEDGER_LOG_PATH=""
 GATE_LEDGER_FASTPATH=0
+# Set by the local lint's refusal, whose exit code (1) is not one the table calls a refusal.
+GATE_LEDGER_REFUSED=0
 GATE_REMOTE_LOG_OFFSET=""
 gate_ledger_skip() {
   printf 'LEDGER-SKIPPED %s\n' "$1"
@@ -788,8 +853,8 @@ gate_ledger_field() { printf '%s' "${1:--}" | tr '\t\n' '  '; }
 gate_ledger_append() { # $1 = the run's exit code
   local rc="$1" mode remote_text="" clock="" start="" end="" start_utc="-" end_utc="-" wall="-" slot_wait="-"
   local row t=$'\t' value
-  case "$rc" in
-    2|3|4|11|12|13|14|15|16) mode=refused ;;
+  case "$GATE_LEDGER_REFUSED:$rc" in
+    1:*|*:2|*:3|*:4|*:11|*:12|*:13|*:14|*:15|*:16) mode=refused ;;
     *)
       if [ "$GATE_LEDGER_FASTPATH" -eq 1 ]; then mode=fastpath
       elif [ "${QUICK:-0}" -eq 1 ]; then mode=quick
@@ -937,7 +1002,7 @@ record() {
 summary_and_exit() {
   local line="mac-gate SUMMARY:" i
   for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
-  line="$line$SUMMARY_INFO | exit=$first_fail"
+  line="$line$SUMMARY_INFO locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
   say "run log     : $log"
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   say "$line"
@@ -957,7 +1022,7 @@ quick_summary_and_exit() {
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   # The iteration count is part of what the line claims, so it rides on the line itself: a pasted
   # "tests=0" is then never mistaken for N runs when it was one, or for one when it was N.
-  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS} | exit=$first_fail"
+  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS} locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
 }
@@ -965,6 +1030,28 @@ end_run() {
   if [ "$QUICK" -eq 1 ]; then quick_summary_and_exit; fi
   summary_and_exit
 }
+
+# --- the local lint's verdict --------------------------------------------------------------------
+# Reached by the bootstrap before the estate lock was requested (see there); written into this
+# run's copy beside the script, so only this run's own bootstrap can have put it there. The lint's
+# lines go into the log whole. A failure ends the run here, before the lane lock and before any
+# ssh: no estate lock was taken for it, and the run ledger records it as refused.
+say "--- step: locallint ---"
+GATE_LOCALLINT_FIELD=-
+if [ -r "$GATE_RUN_COPY/locallint.rc" ]; then
+  read -r gate_lint_rc gate_lint_secs < "$GATE_RUN_COPY/locallint.rc"
+  tee -a "$log" < "$GATE_RUN_COPY/locallint.txt" 9>&-
+  case "${gate_lint_rc:-}" in 0|1) GATE_LOCALLINT_FIELD="$gate_lint_rc" ;; esac
+  say "locallint   : locallint=$GATE_LOCALLINT_FIELD — ran on $(hostname -s) before the estate lock was requested (${gate_lint_secs:-?}s)"
+  if [ "$GATE_LOCALLINT_FIELD" = 1 ]; then
+    say "locallint   : REFUSED — swift format lint failed on this machine; no estate lock was requested, no lane lock taken and nothing was sent to $host"
+    GATE_LEDGER_REFUSED=1
+    first_fail=1
+    end_run
+  fi
+else
+  say "locallint   : locallint=- — this run was handed no local verdict"
+fi
 
 # --- the gate's own integrity check --------------------------------------------------------------
 # The classifier decides whether anything gets built at all, which makes it the one part of this
@@ -974,11 +1061,12 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These nine must be there: the main-bar freeze's (ADR-0008 is the owner's, and a freeze
+# directory. These eleven must be there (the local lint's two among them: a lint that stopped
+# refusing would only cost the queue time it exists to save, and nothing else would notice): the main-bar freeze's (ADR-0008 is the owner's, and a freeze
 # whose test can vanish unnoticed is not one), the mount guard's two (a run on the wrong disk looks
 # exactly like a green one), the TestFlight cut's (the one other write path to the Mac) and the
 # release-notes rule's (the one file both the cut and the What's new screen read, MEMNG-497).
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh; do
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -991,7 +1079,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
@@ -1984,7 +2072,12 @@ sys.exit(rc)
 PY
 }
 
-s_format() { swift format lint --strict --recursive . ; }
+# The version first, so one run log holds both sides' swift-format (MAC_GATE_LOCALLINT is the
+# local one) and the pin in bin/mac-gate.sh can be checked against the live value.
+s_format() {
+  printf 'MAC_GATE_SWIFTFORMAT version=%s\n' "$(swift format --version 2>&1 | head -1)"
+  swift format lint --strict --recursive .
+}
 
 s_entitlements() {
   # The privilege boundary this app rests on is not in the Swift: it is two generated plists. The

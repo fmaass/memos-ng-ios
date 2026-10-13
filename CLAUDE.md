@@ -102,7 +102,10 @@ merges, headroom at a merge is zero. Every run that obtained the counts writes t
 recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
 never by hand. A candidate at that path was put there by the run you are reading — pass or fail —
 through its validated copyback and nothing else: the run's first act, before it reads its
-arguments or refuses anything, removes any candidate at that path; the copyback first discards
+arguments or refuses anything, removes any candidate at that path — with one exception: a run the
+local lint refused never took the estate lock that serialises that removal against a run of the
+same worktree still promoting its own, so it leaves any earlier candidate in place, which is why a
+candidate beside a `locallint=1` run is never that run's; the copyback first discards
 every staging folder present, which at that point can only be one an earlier run abandoned,
 because the lane lock serialises runs of a branch (a shared explicit `MAC_GATE_ARTIFACTS` across
 branches is outside that promise), and then lands in `.gate-artifacts/incoming-<run token>/`, never
@@ -122,8 +125,36 @@ gate accepts or rejects a baseline change on its own. It ends with one summary l
 returns the first non-zero one. The `.xcresult` and any screenshots come back to
 `MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
 
-Two steps run before any of that, on the machine you are working from. The classifier test
-(`tests/gate/fastpath-classify-test.sh`) checks the gate's own docs-only classifier against
+Three steps run before any of that, on the machine you are working from. The first is the local
+lint (`scripts/local-lint.sh`, MEMNG-807): the same `swift format lint --strict --recursive .` over
+the caller's repository root, in the bootstrap, before the estate lock is even requested and so
+before the lane lock — a formatting error used to wait out the whole queue only to fail the build
+host's first step. It takes a native `swift format` on PATH first, then the docker image
+`swift:6.3` when it is already on the machine (`docker run --rm --pull never --network none -v
+<tree>:/src:ro`, never pulled); every one of its calls, the version probes included, is bounded by
+`timeout -k 10`, which sends KILL ten seconds after a TERM that was ignored; either must report
+the build host's major, and neither is ever asked to rewrite. A failure refuses the run there with
+the lint's own exit code, 1: no estate lock taken, no ssh, no test-count candidate cleared, the
+lint's lines and its verdict in the run log, `locallint=1` on the summary (or the quick line) and
+`mode=refused` in the run ledger. No such tool — the pfadfinder-lane
+container has neither — falls through to the build host's lint alone and says why in the log, as
+does a tool that ended without a verdict (any code but 0 or 1); the field is then `locallint=-`.
+Both lines carry `locallint=` just before `| exit=`; the quick line's `lint=` is still the build
+host's. A run's output is what it was plus the bootstrap's start notice (`mac-gate: linting …
+before the estate lock is requested`), the `--- step: locallint ---` heading with the lint's
+lines, its verdict and status lines, and the build host's version line. It runs on the docs-only
+fast path too (a clean tree lints in about a minute), and never
+on `--help`, `--classify-only` or a run without `MAC_GATE_HOST`. Its verdict line,
+`MAC_GATE_LOCALLINT rc=… local=… version=… mac=…`, names the local swift-format and the build
+host's as pinned in the script (6.3.0, read 2026-10-13); the build host's own lint step prints
+`MAC_GATE_SWIFTFORMAT version=…`, so one run log holds both for comparison. An implementer that
+cannot build can still lint, with the docker form from the worktree root — `docker run --rm -v
+"$PWD":/src:ro -w /src swift:6.3 swift format lint --strict --recursive .` — so no review round
+reaches the Mac with a formatting error. Its selftests are `tests/gate/local-lint-test.sh` (the
+helper against fake tools, and the real image where it is present) and
+`tests/gate/local-lint-refusal-path-test.sh` (the refusal before the estate lock, while another
+process holds it); both are named selftests. The second step is the classifier test
+(`tests/gate/fastpath-classify-test.sh`), which checks the gate's own docs-only classifier against
 throwaway repositories it builds itself — it is the gate's integrity check and runs on every gate.
 Then the change set is classified: what this branch changed against `origin/main` (merge-base,
 renames not followed, so a rename is judged by both of its names) plus everything staged, edited or
@@ -151,7 +182,7 @@ a lint error stops the run there: generate, build and tests are not invoked and 
 lint's own code. `--iterations <N>` (1 to 1000, refused without `--only-testing`) repeats that one
 scope with `-test-iterations N -run-tests-until-failure`, fails when any run fails or the result
 bundle shows a case run fewer than N times, and adds `iterations=N` to the quick line. It prints its own
-`MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> | exit=<rc>` and is never a verdict, because only
+`MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> locallint=<rc|-> | exit=<rc>` and is never a verdict, because only
 the full gate writes `mac-gate SUMMARY`.
 
 Each branch has its own lane on the build host — `~/build/memos-ng-ios/gate/<branch>` for the

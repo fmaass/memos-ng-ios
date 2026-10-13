@@ -193,7 +193,7 @@ expect_refused() { # $1 = label, $2 = the verdict line pattern (ERE) the run mus
 
 # --- 1: the guard refuses (no valid marker) -------------------------------------------------------
 STUB_MOUNT_OUT="$tmp/refuse.txt" STUB_MOUNT_RC=16 run_gate refuse "$w"
-expect_refused "guard REFUSE, full run" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+expect_refused "guard REFUSE, full run" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 if printf '%s\n' "$OUT" | grep -qF "$REFUSE_LINE"; then ok "guard REFUSE: the guard's own reason and recovery command reach the output"
 else bad "guard REFUSE: the guard's refusal line is not in the output"; show "$OUT"; fi
 s="$(summary)"
@@ -219,22 +219,22 @@ fi
 
 # --- 2: the same refusal on a quick run --------------------------------------------------------------
 STUB_MOUNT_OUT="$tmp/refuse.txt" STUB_MOUNT_RC=16 run_gate refuse-quick "$w" --quick
-expect_refused "guard REFUSE, quick run" '^MAC_GATE_QUICK: lint=- build=- tests=- \| exit=16$'
+expect_refused "guard REFUSE, quick run" '^MAC_GATE_QUICK: lint=- build=- tests=- locallint=- \| exit=16$'
 
 # --- 3: answers that are not a well-formed verdict are refusals ---------------------------------------
 STUB_MOUNT_OUT="$tmp/garbage.txt" STUB_MOUNT_RC=0 run_gate garbage "$w"
-expect_refused "rc 0 without a verdict" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+expect_refused "rc 0 without a verdict" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 STUB_MOUNT_OUT="$tmp/mismatch.txt" STUB_MOUNT_RC=0 run_gate mismatch "$w"
-expect_refused "rc 0 with MOUNT REFUSE and an enforced state" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+expect_refused "rc 0 with MOUNT REFUSE and an enforced state" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 STUB_MOUNT_OUT="$tmp/two-states.txt" STUB_MOUNT_RC=0 run_gate two-states "$w"
-expect_refused "rc 0 with two state lines" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+expect_refused "rc 0 with two state lines" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 STUB_MOUNT_OUT="$tmp/quoted.txt" STUB_MOUNT_RC=0 run_gate quoted "$w"
-expect_refused "rc 0 with the verdict quoted inside another line" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+expect_refused "rc 0 with the verdict quoted inside another line" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 STUB_MOUNT_OUT="$tmp/pending.txt" STUB_MOUNT_RC=255 run_gate ssh-failed "$w"
-expect_refused "a pending answer behind a failed ssh (rc 255)" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+expect_refused "a pending answer behind a failed ssh (rc 255)" '^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 
 # --- 3b: only the COMPLETE answer counts: two lines, agreeing, pending only with a valid marker -----
-R16='^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced \| exit=16$'
+R16='^mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- \| exit=16$'
 STUB_MOUNT_OUT="$tmp/pending-missing.txt" STUB_MOUNT_RC=0 run_gate pending-missing "$w"
 expect_refused "rc 0, REFUSE + pending with marker=missing" "$R16"
 STUB_MOUNT_OUT="$tmp/pending-expired.txt" STUB_MOUNT_RC=0 run_gate pending-expired "$w"
@@ -255,7 +255,7 @@ if printf '%s\n' "$OUT" | grep -qF "Permanently added 'stub-host'"; then ok "the
 else bad "the refused answer was not quoted in the output"; show "$OUT"; fi
 STUB_MOUNT_OUT="$tmp/healthy.txt" STUB_MOUNT_RC=0 STUB_REMOTE_OUT="$tmp/remote.txt" run_gate healthy "$w"
 case "$(summary)" in
-  "mac-gate SUMMARY: selftest=0 classify=0 mount=0 admit=0 "*" mountguard=enforced disk="*" | exit=0")
+  "mac-gate SUMMARY: selftest=0 classify=0 mount=0 admit=0 "*" mountguard=enforced disk="*" locallint=- | exit=0")
     [ "$RC" -eq 0 ] && ok "the exact healthy pair (MOUNT OK + enforced, not-read) -> mount=0, exit 0" \
       || { bad "the exact healthy pair: exit $RC"; show "$OUT"; } ;;
   *) bad "the exact healthy pair: SUMMARY [$(summary)]"; show "$OUT" ;;
@@ -286,7 +286,7 @@ fi
 w2="$(new_repo unguarded noguard)" || { echo "FAIL: cannot build the unguarded fixture"; exit 1; }
 STUB_MOUNT_OUT="$tmp/pending.txt" STUB_MOUNT_RC=0 run_gate unguarded "$w2"
 if [ "$RC" -eq 16 ] && [ -z "$CALLS" ] \
-   && [ "$(summary)" = "mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced | exit=16" ]; then
+   && [ "$(summary)" = "mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=- | exit=16" ]; then
   ok "no guard in the run's copy: mount=16, exit 16, and the build host was never called"
 else
   bad "no guard in the run's copy: exit $RC, calls [$(printf '%s' "$CALLS" | tr '\n' ',')]"; show "$OUT"
@@ -297,7 +297,7 @@ STUB_MOUNT_OUT="$tmp/pending.txt" STUB_MOUNT_RC=0 STUB_REMOTE_OUT="$tmp/remote.t
 s="$(summary)"
 if [ "$RC" -eq 0 ]; then ok "pending:REFUSE: the run goes on and exits 0"; else bad "pending:REFUSE: exit $RC, expected 0"; show "$OUT"; fi
 case "$s" in
-  "mac-gate SUMMARY: selftest=0 classify=0 mount=0 admit=0 rsync=0 "*" mountguard=pending:REFUSE disk="*" | exit=0")
+  "mac-gate SUMMARY: selftest=0 classify=0 mount=0 admit=0 rsync=0 "*" mountguard=pending:REFUSE disk="*" locallint=- | exit=0")
     ok "pending:REFUSE: mount=0 and mountguard=pending:REFUSE beside the admission's disk= ($s)" ;;
   *) bad "pending:REFUSE: the SUMMARY is [$s]"; show "$OUT" ;;
 esac
