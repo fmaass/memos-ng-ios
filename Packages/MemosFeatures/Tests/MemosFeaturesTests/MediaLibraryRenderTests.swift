@@ -397,17 +397,31 @@ struct MediaLibraryRenderTests {
             .compactMap(\.accessibilityLabel)
     }
 
-    /// How many separate bands of ink, one under another, the glyph inside `frame` draws, read
-    /// from the window as drawn (its middle half, clear of the glass's rim): the filter glyph is
-    /// three lines stacked, an ellipsis one row of dots.
-    private static func inkBands(in frame: CGRect, of window: UIWindow) -> Int {
-        let inner = frame.insetBy(dx: frame.width / 4, dy: frame.height / 4)
+    /// The bands of ink, one under another, that the glyph inside `frame` draws, read from the
+    /// hosting view as drawn over its middle half of columns and the button's whole height (the
+    /// glass sets its glyph below the centre), with the darkest value of each row as the evidence:
+    /// the filter glyph is three lines stacked, an ellipsis one row of dots. Ink is measured
+    /// against the lightest row, not a fixed grey, because the glass draws its symbol softened.
+    private static func inkBands(
+        in frame: CGRect, of view: UIView
+    ) -> (bands: Int, profile: String) {
+        let scale: CGFloat = 3
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 3
-        let image = UIGraphicsImageRenderer(bounds: inner, format: format).image { _ in
-            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        format.scale = scale
+        format.opaque = true
+        var drew = false
+        let image = UIGraphicsImageRenderer(bounds: view.bounds, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(view.bounds)
+            drew = view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
         }
-        guard let drawn = image.cgImage else { return -1 }
+        guard drew, let whole = image.cgImage else { return (-1, "drew \(drew)") }
+        let inner = view.convert(frame, from: nil).insetBy(dx: frame.width / 4, dy: 0)
+        let pixels = CGRect(
+            x: inner.minX * scale, y: inner.minY * scale, width: inner.width * scale,
+            height: inner.height * scale
+        ).integral
+        guard let drawn = whole.cropping(to: pixels) else { return (-1, "no crop \(pixels)") }
         let width = drawn.width
         let height = drawn.height
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
@@ -418,20 +432,25 @@ struct MediaLibraryRenderTests {
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             context?.draw(drawn, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
-        var bands = 0
-        var inBand = false
-        for y in 0..<height {
-            let inked = (0..<width).contains { x in
+        let darkest: [Double] = (0..<height).map { y in
+            (0..<width).map { x in
                 let at = (y * width + x) * 4
-                let luminance =
+                let weighted =
                     0.299 * Double(bytes[at]) + 0.587 * Double(bytes[at + 1])
                     + 0.114 * Double(bytes[at + 2])
-                return luminance < 0.4 * 255
-            }
+                return weighted / 255
+            }.min() ?? 1
+        }
+        let background = darkest.max() ?? 1
+        var bands = 0
+        var inBand = false
+        for value in darkest {
+            let inked = value < background - 0.2
             if inked && !inBand { bands += 1 }
             inBand = inked
         }
-        return bands
+        let profile = darkest.map { String(Int(($0 * 9).rounded())) }.joined()
+        return (bands, "frame \(frame) \(width)x\(height) darkest-by-row \(profile)")
     }
 
     /// MEMNG-779 (WPN-12 phase 1): browsing, the header holds exactly the round filter button and
@@ -466,8 +485,10 @@ struct MediaLibraryRenderTests {
             Self.controls(in: browsing) == ["Filter", "Select"],
             "browsing controls: \(Self.controls(in: browsing))")
         let filter = try #require(browsing.first { $0.accessibilityLabel == "Filter" })
-        let bands = Self.inkBands(in: filter.accessibilityFrame, of: window)
-        #expect(bands == 3, "the round button draws \(bands) band(s) of ink, not the filter glyph")
+        let hosted = try #require(window.rootViewController?.view)
+        let ink = Self.inkBands(in: filter.accessibilityFrame, of: hosted)
+        #expect(
+            ink.bands == 3, "the round button draws \(ink.bands) band(s) of ink: \(ink.profile)")
 
         let selecting = try await Self.elements(
             of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
