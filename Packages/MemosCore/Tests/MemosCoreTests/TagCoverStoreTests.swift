@@ -11,7 +11,7 @@ import Testing
 /// The server is a script under the REAL generated client, so the query the store builds and the
 /// decoding of the one row are both exercised.
 @MainActor
-@Suite("Tag covers")
+@Suite("Tag covers", .timeLimit(.minutes(1)))
 struct TagCoverStoreTests {
     private static let operation = "list_attachments_api_attachments_get"
 
@@ -95,11 +95,14 @@ struct TagCoverStoreTests {
     @Test("a lookup in flight when the account changes lands nowhere, and the tag is asked again")
     func anIdentityChangeDropsTheLookup() async {
         let calls = LockedValue<Int>(0)
+        let holding = LockedValue<Bool>(false)
         let entered = CoverSignal()
         let release = CoverSignal()
+        // Only the lookup asked for while `holding` is set is held; every other answers at once.
         let client = Stub.client { _, _, _ in
             calls.set(calls.get() + 1)
-            if calls.get() == 1 {
+            if holding.get() {
+                holding.set(false)
                 entered.signal()
                 await release.wait()
                 return Self.one("theirs")
@@ -110,6 +113,7 @@ struct TagCoverStoreTests {
         await store.load(tag: "seen", using: client.handle, baseURL: Stub.baseURL)
         #expect(store.cover(for: "seen") != nil, "precondition: a cover was held")
         calls.set(0)
+        holding.set(true)
         let inFlight = Task {
             await store.load(tag: "garden", using: client.handle, baseURL: Stub.baseURL)
         }

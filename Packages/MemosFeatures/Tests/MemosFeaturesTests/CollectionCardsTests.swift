@@ -10,7 +10,7 @@ import UIKit
 /// most; Tags, Months and Years as cards; a trip's tag not listed as a tag; a tag card's cover
 /// looked up once.
 @MainActor
-@Suite("Collection cards", .serialized, .mediaGlobals)
+@Suite("Collection cards", .serialized, .mediaGlobals, .timeLimit(.minutes(2)))
 struct CollectionCardsTests {
     private let root = FileManager.default.temporaryDirectory
         .appending(path: "collection-cards").appending(path: UUID().uuidString)
