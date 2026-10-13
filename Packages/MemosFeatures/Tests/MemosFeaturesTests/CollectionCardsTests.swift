@@ -74,12 +74,13 @@ struct CollectionCardsTests {
 
     // MARK: - RED 1: the title wraps inside the cover
 
-    /// The title's line height at the size a test host lays it out in.
-    private static var lineHeight: CGFloat {
-        UIFont.preferredFont(
-            forTextStyle: .headline,
-            compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)
-        ).lineHeight
+    /// The height of `lines` lines of headline text, measured the way the title is: a font's
+    /// line height alone leaves out the spacing SwiftUI puts between two lines.
+    private static func referenceHeight(lines: Int) -> CGFloat {
+        let text = Array(repeating: "Lighthouse", count: lines).joined(separator: "\n")
+        return LayoutProbe.size(
+            Text(text).font(.headline), width: LayoutProbe.unbounded, typeSize: .large
+        ).height
     }
 
     @Test("a long title wraps to exactly two lines on a 160-point card, one word to one line")
@@ -94,8 +95,11 @@ struct CollectionCardsTests {
         let one = LayoutProbe.size(
             CollectionCard.title("Lisbon"), width: LayoutProbe.unbounded, typeSize: .large
         ).height
-        #expect(abs(two - 2 * Self.lineHeight) < 1, "the long title is \(two) tall")
-        #expect(abs(one - Self.lineHeight) < 1, "one word is \(one) tall")
+        let twoLines = Self.referenceHeight(lines: 2)
+        let oneLine = Self.referenceHeight(lines: 1)
+        #expect(twoLines > oneLine + 10, "control: the reference did not break its line")
+        #expect(abs(two - twoLines) < 1, "the long title is \(two) tall, two lines \(twoLines)")
+        #expect(abs(one - oneLine) < 1, "one word is \(one) tall, one line \(oneLine)")
     }
 
     // MARK: - RED 2: a trip's tag is not a tag card, nor a New trip choice
@@ -169,13 +173,13 @@ struct CollectionCardsTests {
         let covers = TagCoverStore()
         await CollectionsHost.with(tagCard("garden", covers: covers, wire: wire)) { screen in
             let drawn = await screen.until {
-                CollectionsHost.identified(CollectionCard.coverIdentifier("p0"), in: screen.window)
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p2"), in: screen.window)
             }
             #expect(drawn, "the card never drew its cover: \(wire.transport.sent)")
         }
         await CollectionsHost.with(tagCard("garden", covers: covers, wire: wire)) { screen in
             let drawn = await screen.until {
-                CollectionsHost.identified(CollectionCard.coverIdentifier("p0"), in: screen.window)
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p2"), in: screen.window)
             }
             #expect(drawn, "the second appearance drew no cover")
         }
@@ -403,19 +407,23 @@ struct CollectionCardsTests {
         await CollectionsHost.with(tabs) { screen in
             let card = await screen.until { screen.element(labelled: "Mar 2026") != nil }
             #expect(card, "the Months row never appeared: \(transport.sent)")
-            #expect(!Self.monthsChosen(screen), "control: the Library already showed Months")
+            let library = MainTab.library.title
+            let resting = ScopeBarProbe.selectedTitle(in: screen.window)
+            #expect(resting != library, "control: the tabs already stood on the Library")
             #expect(screen.press("Mar 2026"), "the card took no press")
-            let reached = await screen.until(seconds: 10) { Self.monthsChosen(screen) }
-            #expect(reached, "the Library never showed Months")
+            let moved = await screen.until(seconds: 10) {
+                ScopeBarProbe.selectedTitle(in: screen.window) == library
+            }
+            #expect(moved, "the tabs never moved to the Library")
+            // The scope row stands in the bar's place once the Library's item is pressed
+            // (MEMNG-604); it shows the scope the jump left, and choosing nothing itself.
+            #expect(ScopeBarProbe.pressTab(.library, in: screen.window), "no Library item")
+            let months = await screen.until(seconds: 10) {
+                let control = ScopeBarProbe.control(in: screen.window)
+                return control.flatMap(ScopeBarProbe.chosen(in:)) == "Months"
+            }
+            #expect(months, "not Months: \(ScopeBarProbe.describe(screen.window))")
         }
-    }
-
-    /// Whether the Library's scope control is drawn with Months chosen.
-    private static func monthsChosen(_ screen: PressProbe.Screen) -> Bool {
-        guard let found = PressProbe.segment(titled: "Months", in: screen.window) else {
-            return false
-        }
-        return found.0.selectedSegmentIndex == found.1
     }
 
     /// The verification gate's count: a root open with 3 trips, 6 tags, 12 months and 3 years.
