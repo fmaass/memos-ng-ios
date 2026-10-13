@@ -242,7 +242,8 @@ struct LibraryFilterMenuRenderTests {
 
         // A kind other than the default ticks its own row and no other: a picker that drew its
         // tick on All Items whatever the kind would pass the case above.
-        for (kind, row) in [(MediaLibraryFilter.videos, "Videos"), (.photos, "Photos")] {
+        let kinds: [(MediaLibraryFilter, String)] = [(.videos, "Videos"), (.images, "Photos")]
+        for (kind, row) in kinds {
             let other = Self.host(FilterHarness(filter: kind, order: .oldestFirst))
             let under = await Self.settle(other) { rows in
                 rows.contains { $0.selected && $0.label == row }
