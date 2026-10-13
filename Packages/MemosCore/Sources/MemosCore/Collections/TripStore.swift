@@ -68,6 +68,10 @@ public final class TripStore {
     /// re-drain of the trip's members (decision 7).
     @ObservationIgnored var onReconcile: [@MainActor (String, SessionHandle, URL) async -> Void] =
         []
+    /// Told of each exclusion or add-back the server acknowledged — its kind, the trip and the
+    /// picture — as it is acknowledged, while the scope that sent it is still this store's:
+    /// `TripMemberStore`'s record of the exclusions the app wrote (MEMNG-793).
+    @ObservationIgnored var onAcknowledged: [@MainActor (BatchKind, String, String) -> Void] = []
 
     enum Operation: Hashable {
         case update(TripPatch)
@@ -415,6 +419,9 @@ public final class TripStore {
                 }
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
                 done.append(attachment)
+                if writeStillOwned(authority) {
+                    for note in onAcknowledged { note(kind, authority.uid, attachment) }
+                }
             } catch {
                 stopped = await failure(error, scope: authority.scope, handle: handle)
                 break

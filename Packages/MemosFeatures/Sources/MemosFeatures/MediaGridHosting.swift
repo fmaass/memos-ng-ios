@@ -40,7 +40,8 @@ extension View {
     /// tile it matches in `zoom`. `source` is the host's: where the viewer's pages come from, read
     /// for the selection that was opened. `transport` is what the viewer fetches its stills through
     /// — the image layer's own session unless a test is watching it. `action` is the host's one
-    /// extra control on a page, nil everywhere but a trip (`MediaViewerHostAction`).
+    /// extra control on a page, nil everywhere but a trip (`MediaViewerHostAction`). `gone` is
+    /// the pictures deleted elsewhere, which leave a viewer open over them (`MediaViewerView.gone`).
     ///
     /// Declared outside the host's stack and apart from any sheet of its own, for the reason the
     /// timeline's cover is: two presentations on one view is how one of them silently stops
@@ -51,12 +52,13 @@ extension View {
         zoom: Namespace.ID,
         transport: any MediaTransport = MediaSession.shared,
         action: MediaViewerHostAction? = nil,
+        gone: Set<String> = [],
         source: @escaping (MediaViewerSelection) -> MediaViewerSource
     ) -> some View {
         fullScreenCover(item: viewing) { selection in
             MediaViewerView(
                 selection: selection, source: source(selection), hostAction: action,
-                transport: transport
+                gone: gone, transport: transport
             )
             .environment(\.signedURLRefresher, refresher)
             .mediaZoomTransition(sourceID: selection.id, in: zoom)

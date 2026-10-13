@@ -43,6 +43,11 @@ struct MediaViewerView: View {
     /// which is every viewer but a trip's ("Use as Cover", MEMNG-720). Passed in, as `delete` is:
     /// the viewer knows nothing of trips, only that a host handed it an action.
     let hostAction: MediaViewerHostAction?
+    /// The pages deleted elsewhere while this viewer is open, handed in by a screen that holds the
+    /// pictures Delete took. Each leaves as a page this viewer deleted itself does (`remove`): the
+    /// reader moves on to the next page, and the last one closes the viewer. Never merely left out
+    /// of the source: the pager keeps a page its source drops (`MediaViewerPager.extended`).
+    let gone: Set<MediaPage.ID>
     /// What every page's still is fetched through. The app's own session everywhere but a test
     /// that watches a page's next request go out.
     let transport: any MediaTransport
@@ -89,12 +94,14 @@ struct MediaViewerView: View {
         source: MediaViewerSource,
         delete: (@MainActor (String) async -> Bool)? = nil,
         hostAction: MediaViewerHostAction? = nil,
+        gone: Set<MediaPage.ID> = [],
         transport: any MediaTransport = MediaSession.shared
     ) {
         self.selection = selection
         self.source = source
         self.delete = delete
         self.hostAction = hostAction
+        self.gone = gone
         self.transport = transport
         _currentPage = State(initialValue: selection.startPage.id)
         _shown = State(initialValue: selection.pages)
@@ -157,6 +164,8 @@ struct MediaViewerView: View {
         // job, not this view's: a page of documents changes nothing here, so no modifier on this
         // screen could observe it (`MediaViewerSource.loadMore`).
         .onChange(of: source.pages) { _, _ in adoptFromSource() }
+        // A page deleted elsewhere, from the first frame on.
+        .onChange(of: gone, initial: true) { _, now in drop(now) }
         // The way out is not only the close button: the zoom transition dismisses on a drag, and
         // a video that went on playing behind a dismissed viewer would be a voice in an empty
         // room. Every exit lands here.
@@ -325,6 +334,14 @@ struct MediaViewerView: View {
         }
         currentPage = next
         playback.adopt(pages: shown, startingAt: next)
+    }
+
+    /// Takes the pages deleted elsewhere off the screen, each the way `remove` takes one.
+    private func drop(_ gone: Set<MediaPage.ID>) {
+        for id in shown.map(\.id) where gone.contains(id) && !removed.contains(id) {
+            remove(id)
+            if shown.isEmpty { return }
+        }
     }
 
     /// Fetches the named file of the picture or clip on screen and offers it to the share sheet.

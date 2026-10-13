@@ -22,8 +22,8 @@ nonisolated final class TripRows: @unchecked Sendable {
     static let routes: Set<String> = [list, create, get, patch, delete, members, exclude, include]
 
     /// A trip's member listing, asked as the transport's own attachment list is: `tag`,
-    /// `spanStart` and `spanEnd` as the row holds them, the request's `cursor` and `limit`, and
-    /// `order` as query items.
+    /// `spanStart` and `spanEnd` as the row holds them, and the request's own `cursor`, `limit`,
+    /// `order` and `type` — each only when the request carried it — as query items.
     typealias Listing = @Sendable ([String: String]) async throws -> (HTTPResponse, HTTPBody?)
 
     nonisolated struct Row: Sendable {
@@ -198,13 +198,15 @@ nonisolated final class TripRows: @unchecked Sendable {
                 return Self.missing
             }
             // The tag's pictures and the span's, as the listing answers either; a trip with
-            // neither has no member.
+            // neither has no member. The row's criteria are the server's own; the request's
+            // `order` and `type` travel as the app sent them, never supplied here, so a listing
+            // that honours them answers what the app asked for.
             guard row.tag != nil || row.spanStart != nil else { return Self.json("[]") }
-            var query = ["order": "taken_asc"]
+            var query: [String: String] = [:]
             query["tag"] = row.tag
             query["spanStart"] = row.spanStart
             query["spanEnd"] = row.spanEnd
-            for name in ["cursor", "limit"] {
+            for name in ["cursor", "limit", "order", "type"] {
                 if let value = Self.query(path, name) { query[name] = value }
             }
             let listed = try await listing(query)

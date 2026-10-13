@@ -420,7 +420,8 @@ struct TripView: View {
             }
             .gridViewer(
                 $viewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
-                action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access)
+                action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access),
+                gone: memberStore.deleted
             ) {
                 Self.viewerSource(for: $0, members: members, loaded: loaded)
             }
@@ -573,7 +574,8 @@ struct TripView: View {
         // re-presents them with its copies.
         .gridViewer(
             $journalViewing, refresher: journalRefresher, zoom: zoom, transport: viewerTransport,
-            action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access)
+            action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access),
+            gone: memberStore.deleted
         ) { Self.journalViewerSource(for: $0, memos: memos) }
     }
 
@@ -694,13 +696,29 @@ struct TripView: View {
         shownMembers.rows
     }
 
-    /// What the screen shows: the store's settled members, else the last settled ones of this
-    /// trip and this account while a re-read is on the wire, else none.
+    /// What the screen shows (`shown`).
     private var shownMembers: TripSettledMembers {
         let shown = live ?? trip
-        if let fresh = freshMembers(of: shown) { return fresh }
-        let kept = settled.uid == shown.uid && settled.identity == identity
-        return kept ? settled : TripSettledMembers(uid: shown.uid, identity: identity)
+        return Self.shown(
+            shown, fresh: freshMembers(of: shown), settled: settled, identity: identity,
+            in: memberStore)
+    }
+
+    /// What the screen shows: the store's settled members, else the last settled ones of this
+    /// trip and this account while a re-read is on the wire, else none. The ones kept are read
+    /// through the store's `stillMembers`, so a removal the server acknowledged, or a Delete,
+    /// leaves the screen and the toolbar's reach though no read after it ever lands.
+    static func shown(
+        _ trip: Trip, fresh: TripSettledMembers?, settled: TripSettledMembers,
+        identity: TimelineSnapshotIdentity?, in store: TripMemberStore
+    ) -> TripSettledMembers {
+        if let fresh { return fresh }
+        guard settled.uid == trip.uid, settled.identity == identity else {
+            return TripSettledMembers(uid: trip.uid, identity: identity)
+        }
+        var kept = settled
+        kept.rows = store.stillMembers(settled.rows, of: trip)
+        return kept
     }
 
     /// The store's settled members, only while the trip store holds this screen's account: one

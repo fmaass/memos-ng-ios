@@ -350,7 +350,7 @@ struct TripScreenRenderTests {
         }
     }
 
-    @Test("the drain's requests carry the tag and order=taken_asc and no type, page after page")
+    @Test("the drain's requests name the trip, order=taken_asc and no tag or type, page after page")
     func theDrainsRequests() async {
         let wire = TripWire()
         let stores = stores()
@@ -359,14 +359,16 @@ struct TripScreenRenderTests {
             _ = await screen.until { wire.transport.listReads.count >= 3 }
             await screen.settle(turns: 4)
         }
-        let reads = wire.transport.listReads
-        #expect(reads.count == 3, "one read per page, \(reads)")
-        for query in reads {
-            #expect(query["tag"] == "portugal2026")
-            #expect(query["type"] == nil, "a kind was named: \(query)")
-            #expect(query["order"] == "taken_asc")
+        // What the app put on the wire, read from the member requests themselves.
+        let sent = wire.transport.trips.calls(TripRows.members).map(\.path)
+        #expect(sent.count == 3, "one read per page, \(sent)")
+        for path in sent {
+            #expect(path.hasPrefix("/api/collections/\(record.uid)/attachments?"), "\(path)")
+            #expect(TripRows.query(path, "tag") == nil, "the member route named a tag: \(path)")
+            #expect(TripRows.query(path, "type") == nil, "a kind was named: \(path)")
+            #expect(TripRows.query(path, "order") == "taken_asc", "\(path)")
         }
-        #expect(reads.map { $0["cursor"] } == [nil, "c1", "c2"])
+        #expect(sent.map { TripRows.query($0, "cursor") } == [nil, "c1", "c2"])
     }
 
     /// The owner's rule (MEMNG-740): a trip is the Library's All without its days — every member
@@ -410,7 +412,7 @@ struct TripScreenRenderTests {
         }
     }
 
-    @Test("a tag holding the query's own syntax travels as one value, the order untouched")
+    @Test("a tag holding the query's own syntax stays off the member route, the order untouched")
     func aTagWithQuerySyntax() async {
         let wire = TripWire()
         let stores = stores()
@@ -418,9 +420,14 @@ struct TripScreenRenderTests {
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             _ = await screen.until { !wire.transport.listReads.isEmpty }
         }
-        let first = wire.transport.listReads.first
-        #expect(first?["tag"] == "a&order=taken_desc")
-        #expect(first?["order"] == "taken_asc")
+        // The member route names the trip, not its tag: the tag never reaches the query, and
+        // the one `order` is the app's own.
+        let first = wire.transport.trips.calls(TripRows.members).first?.path ?? ""
+        let items = URLComponents(string: first)?.queryItems ?? []
+        #expect(first.hasPrefix("/api/collections/\(record.uid)/attachments?"), "\(first)")
+        #expect(items.filter { $0.name == "order" }.map(\.value) == ["taken_asc"], "\(first)")
+        #expect(!items.contains { $0.name == "tag" }, "the tag reached the query: \(first)")
+        #expect(!first.contains("taken_desc"), "the tag's text reached the query: \(first)")
     }
 
     @Test("the hero shows the trip's chosen cover")
@@ -1950,8 +1957,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
                 uid, taken: day.element, sig: sig, bare: bare, mine: !theirs.contains(uid),
                 mime: film ? "video/mp4" : "image/jpeg")
         }
+        // The server's order: oldest taken first only when the read asks for it, newest first
+        // under `taken_desc` and the member route's default alike.
+        let ordered = query["order"] == "taken_asc" ? rows : Array(rows.reversed())
         func list(_ picks: Int...) -> String {
-            "[" + picks.compactMap { rows[$0] }.joined(separator: ",") + "]"
+            "[" + picks.compactMap { ordered[$0] }.joined(separator: ",") + "]"
         }
         switch query["cursor"] {
         case nil: return json(list(0, 1), next: "c1")
@@ -2496,6 +2506,108 @@ extension TripScreenRenderTests {
                 await media.asked("p1", "mobile", sig: "v2") >= 1
             }
             #expect(renewed, "the removed photo p1 never took its new signature")
+        }
+    }
+
+    /// A removal the server acknowledged leaves the screen even when no read of the members lands
+    /// after it: the members the screen holds while it waits for one are the store's truth too,
+    /// not a copy that keeps the picture on screen and in reach of the toolbar (MEMNG-793).
+    @Test("an acknowledged removal leaves the grid though every read after it fails")
+    func anAcknowledgedRemovalLeavesTheHeldGrid() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let gridded = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(gridded, "precondition: the trip was not drawn")
+            wire.transport.trips.fail([TripRows.members])
+
+            let outcome = try? await stores.1.remove(
+                ["p0"], from: record, using: wire.access.handle, baseURL: TripWire.baseURL)
+
+            #expect(outcome?.done == ["p0"], "control: the server took p0 out")
+            #expect(stores.1.state(for: record) != .complete, "control: no read landed after it")
+            let left = await screen.until { TripProbe.photos(in: screen.window).count == 4 }
+            let shown = TripProbe.photos(in: screen.window).count
+            #expect(left, "the screen still shows the removed picture: \(shown) photos")
+            wire.transport.trips.fail([])
+        }
+    }
+
+    /// The Journal's viewer open over j1's two pictures, through its card's Open photo.
+    private func journalViewer(
+        _ stores: (TripStore, TripMemberStore), _ wire: TripWire, _ record: Trip,
+        _ media: TripMediaServer, _ body: (PressProbe.Screen) async -> Void
+    ) async {
+        let second = TripTransport.journal[1]
+        let view = trip(stores, wire, record, viewer: media).environment(MemoJump())
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let gridded = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(gridded, "precondition: the trip was not drawn")
+            let chosen = await screen.until { TripProbe.pressAtOnce("Journal", on: screen) }
+            #expect(chosen, "precondition: the Journal chip took no press")
+            let drawn = await screen.until {
+                TripProbe.card(saying: second.text, in: screen.window) != nil
+            }
+            #expect(drawn, "precondition: no card says \(second.text)")
+            let card = TripProbe.card(saying: second.text, in: screen.window)
+            let ran = card.map { TripProbe.runAction("Open photo", of: $0) } ?? false
+            #expect(ran, "precondition: no Open photo ran: \(TripProbe.actionNames(of: card))")
+            let opened = await screen.until(seconds: 10) {
+                TripProbe.pager(over: screen.host).map(TripProbe.pageCount) == 2
+            }
+            #expect(opened, "precondition: the viewer never opened over two pages")
+            await body(screen)
+        }
+    }
+
+    /// A picture deleted while the Journal's viewer is open over it leaves the viewer, as it
+    /// leaves the grid's: the pager drops its page and stays open over the other (MEMNG-794).
+    @Test("a picture deleted under an open journal viewer leaves its pages")
+    func aDeletedPictureLeavesTheJournalViewer() async {
+        let wire = TripWire()
+        wire.transport.pictureJournal()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        await journalViewer(stores, wire, record, media) { screen in
+            let outcome = await stores.1.delete(
+                ["p3"], using: wire.access.handle, baseURL: TripWire.baseURL)
+            #expect(outcome?.deleted == ["p3"], "control: p3 was deleted")
+            let dropped = await screen.until(seconds: 10) {
+                screen.host.presentedViewController != nil
+                    && TripProbe.pager(over: screen.host) == nil
+            }
+            let pages = TripProbe.pager(over: screen.host).map(TripProbe.pageCount) ?? 1
+            #expect(dropped, "the viewer still pages to the deleted picture: \(pages) pages")
+            #expect(screen.host.presentedViewController != nil, "the viewer closed over p1")
+        }
+    }
+
+    /// When the deleted picture was the only page left, the viewer closes, as it does after a
+    /// delete of its own: an empty pager is a black screen with a close button on it (MEMNG-794).
+    @Test("a journal viewer whose only page is deleted under it closes")
+    func aJournalViewerOfADeletedPictureCloses() async {
+        let wire = TripWire()
+        wire.transport.pictureJournal()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let media = TripMediaServer(payload: MediaFixture.png(.red))
+        MediaImageLoader.transport = media
+        defer { MediaImageLoader.transport = MediaSession.shared }
+        await journalViewer(stores, wire, record, media) { screen in
+            let first = await stores.1.delete(
+                ["p3"], using: wire.access.handle, baseURL: TripWire.baseURL)
+            #expect(first?.deleted == ["p3"], "control: p3 was deleted")
+            let second = await stores.1.delete(
+                ["p1"], using: wire.access.handle, baseURL: TripWire.baseURL)
+            #expect(second?.deleted == ["p1"], "control: p1 was deleted")
+            let closed = await screen.until(seconds: 10) {
+                screen.host.presentedViewController == nil
+            }
+            #expect(closed, "the viewer stayed open over its deleted pictures")
         }
     }
 
