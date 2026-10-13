@@ -24,12 +24,13 @@ repo_root="$(cd "$here/../.." && pwd)"
 VERDICT="${PRIVACY_VERDICT:-$repo_root/scripts/privacy-manifest-verdict.py}"
 GATE="${MAC_GATE_SCRIPT:-$repo_root/bin/mac-gate.sh}"
 APP_MANIFEST="$repo_root/Support/MemosNG/PrivacyInfo.xcprivacy"
+APP_PANE="$repo_root/Support/MemosNG/Settings.bundle/Root.plist"
 EXT_MANIFEST="$repo_root/Support/MemosShare/PrivacyInfo.xcprivacy"
 UD=NSPrivacyAccessedAPICategoryUserDefaults
 FT=NSPrivacyAccessedAPICategoryFileTimestamp
 
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is not on PATH"; exit 1; }
-for f in "$VERDICT" "$GATE" "$APP_MANIFEST" "$EXT_MANIFEST"; do
+for f in "$VERDICT" "$GATE" "$APP_MANIFEST" "$EXT_MANIFEST" "$APP_PANE"; do
   [ -f "$f" ] || { echo "FAIL: $f is missing"; exit 1; }
 done
 
@@ -144,9 +145,13 @@ if [ -s "$step_py" ] && grep -q 'PRIVACY_VERDICT' "$step_py"; then
 else
   bad "cannot find the read-back script that hands \$privacy_verdict to python in $GATE"
 fi
-fake_bundle() { # $1 = dir, $2 = bundle id, $3 = manifest
+fake_bundle() { # $1 = dir, $2 = bundle id, $3 = manifest, $4 = Settings pane (the app's only)
   mkdir -p "$1"
   cp "$3" "$1/PrivacyInfo.xcprivacy"
+  if [ -n "${4:-}" ]; then
+    mkdir -p "$1/Settings.bundle"
+    cp "$4" "$1/Settings.bundle/Root.plist"
+  fi
   python3 - "$1/Info.plist" "$2" <<'PY'
 import plistlib, sys
 with open(sys.argv[1], "wb") as handle:
@@ -155,7 +160,7 @@ with open(sys.argv[1], "wb") as handle:
 PY
 }
 app_dir="$tmp/good/MemosNG.app"
-fake_bundle "$app_dir" live.discomarder.memosng "$APP_MANIFEST"
+fake_bundle "$app_dir" live.discomarder.memosng "$APP_MANIFEST" "$APP_PANE"
 fake_bundle "$app_dir/PlugIns/MemosShare.appex" live.discomarder.memosng.share "$EXT_MANIFEST"
 out="$(python3 "$step_py" "$app_dir" "$app_dir/PlugIns/MemosShare.appex" 9.9.9 "$VERDICT" 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q 'BUNDLE FAIL'; then
@@ -164,7 +169,7 @@ else
   bad "the gate's read-back refused the tracked manifests (exit $rc)"; show "$out"
 fi
 bad_dir="$tmp/bad/MemosNG.app"
-fake_bundle "$bad_dir" live.discomarder.memosng "$tmp/app-no-ud.plist"
+fake_bundle "$bad_dir" live.discomarder.memosng "$tmp/app-no-ud.plist" "$APP_PANE"
 fake_bundle "$bad_dir/PlugIns/MemosShare.appex" live.discomarder.memosng.share "$EXT_MANIFEST"
 out="$(python3 "$step_py" "$bad_dir" "$bad_dir/PlugIns/MemosShare.appex" 9.9.9 "$VERDICT" 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "BUNDLE FAIL: app declares no user-defaults entry"; then
@@ -173,7 +178,7 @@ else
   bad "the gate's read-back let an app bundle without the user-defaults entry through (exit $rc)"; show "$out"
 fi
 ext_bad_dir="$tmp/bad-ext/MemosNG.app"
-fake_bundle "$ext_bad_dir" live.discomarder.memosng "$APP_MANIFEST"
+fake_bundle "$ext_bad_dir" live.discomarder.memosng "$APP_MANIFEST" "$APP_PANE"
 fake_bundle "$ext_bad_dir/PlugIns/MemosShare.appex" live.discomarder.memosng.share "$tmp/extension-no-ud.plist"
 out="$(python3 "$step_py" "$ext_bad_dir" "$ext_bad_dir/PlugIns/MemosShare.appex" 9.9.9 "$VERDICT" 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "BUNDLE FAIL: extension declares no user-defaults entry"; then
@@ -181,6 +186,36 @@ if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "BUNDLE FAIL: extension dec
 else
   bad "the gate's read-back let an extension bundle without the user-defaults entry through (exit $rc)"; show "$out"
 fi
+# The Settings pane the built app carries (MEMNG-781): the tracked pane passes above; a pane whose
+# Storage rows are gone, and one whose rows stand under another group, are each refused by name.
+python3 - "$APP_PANE" "$tmp/pane-no-storage.plist" "$tmp/pane-wrong-group.plist" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], "rb") as handle:
+    pane = plistlib.load(handle)
+rows = pane["PreferenceSpecifiers"]
+storage = ("settings.mediaCacheSize", "settings.clearMediaCacheOnLaunch")
+gone = [row for row in rows if row.get("Key") not in storage and row.get("Title") != "Storage"]
+with open(sys.argv[2], "wb") as handle:
+    plistlib.dump(dict(pane, PreferenceSpecifiers=gone), handle)
+moved = [row for row in rows if row.get("Title") != "Storage"]
+with open(sys.argv[3], "wb") as handle:
+    plistlib.dump(dict(pane, PreferenceSpecifiers=moved), handle)
+PY
+for pane in no-storage wrong-group; do
+  pane_dir="$tmp/pane-$pane/MemosNG.app"
+  fake_bundle "$pane_dir" live.discomarder.memosng "$APP_MANIFEST" "$tmp/pane-$pane.plist"
+  fake_bundle "$pane_dir/PlugIns/MemosShare.appex" live.discomarder.memosng.share "$EXT_MANIFEST"
+  out="$(python3 "$step_py" "$pane_dir" "$pane_dir/PlugIns/MemosShare.appex" 9.9.9 "$VERDICT" 2>&1)"; rc=$?
+  case "$pane" in
+    no-storage) says="BUNDLE FAIL: Settings.bundle keys are" ;;
+    wrong-group) says="BUNDLE FAIL: Settings.bundle settings.mediaCacheSize stands under 'Uploads'" ;;
+  esac
+  if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -qF "$says"; then
+    ok "the gate's read-back fails a Settings pane ($pane), naming it"
+  else
+    bad "the gate's read-back let a Settings pane ($pane) through (exit $rc)"; show "$out"
+  fi
+done
 
 echo "gate privacy manifest: $((cases - fails)) of $cases checks passed"
 [ "$fails" -eq 0 ]
