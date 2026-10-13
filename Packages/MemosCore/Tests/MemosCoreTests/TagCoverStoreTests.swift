@@ -92,6 +92,41 @@ struct TagCoverStoreTests {
         #expect(!store.isLoading("garden"))
     }
 
+    @Test("a renewal while a lookup is out: a second appearance joins it, one request on the wire")
+    func aRenewalJoinsTheLookupInFlight() async {
+        let calls = LockedValue<Int>(0)
+        let entered = CoverSignal()
+        let release = CoverSignal()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.signal()
+                await release.wait()
+            }
+            return Self.one("p1")
+        }
+        let issued = SessionHandle(client: client, generation: 1)
+        let renewed = SessionHandle(client: client, generation: 2)
+        let session = TripTestSession(for: issued)
+        let store = TagCoverStore()
+        store.reports(to: session)
+        let first = Task { await store.load(tag: "garden", using: issued, baseURL: Stub.baseURL) }
+        await entered.wait()
+        session.activeHandle = renewed
+        let second = Task {
+            await store.load(tag: "garden", using: renewed, baseURL: Stub.baseURL)
+            return store.cover(for: "garden")?.uid
+        }
+        for _ in 0..<50 { await Task.yield() }
+        release.signal()
+        await first.value
+        let joined = await second.value
+        #expect(calls.get() == 1, "the renewed appearance sent a second lookup of the tag")
+        // The one answer was issued under the credential the renewal replaced: it is not kept.
+        #expect(joined == nil, "an answer issued under the replaced credential was kept")
+        #expect(store.covers["garden"] == nil)
+    }
+
     @Test("a lookup in flight when the account changes lands nowhere, and the tag is asked again")
     func anIdentityChangeDropsTheLookup() async {
         let calls = LockedValue<Int>(0)

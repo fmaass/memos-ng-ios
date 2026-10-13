@@ -344,6 +344,26 @@ struct CollectionCardsTests {
         #expect(flow.title == "My own", "a typed title went with the tag")
     }
 
+    @Test("a tag that becomes a trip's while a Create is out is dropped once that Create fails")
+    func aTagExcludedDuringAFailedCreateIsDropped() async {
+        let wire = CollectionsWire()
+        wire.transport.trips.fail([TripRows.create])
+        wire.transport.trips.hold(TripRows.create)
+        let store = TripStore(identity: alice, root: root)
+        let flow = NewTripFlow()
+        flow.choose("garden")
+        flow.endDatesRead(of: "garden")
+        let creating = Task { await flow.create(in: store, using: wire.access) }
+        for _ in 0..<1000 where !flow.isCreating { await Task.yield() }
+        #expect(flow.isCreating, "precondition: the Create is out")
+        flow.drop(["garden"])
+        #expect(flow.chosenTag == "garden", "control: a Create out keeps its tag")
+        wire.transport.trips.release(TripRows.create)
+        #expect(await creating.value == nil, "precondition: the Create failed")
+        #expect(flow.chosenTag == nil, "the tag that became a trip's is still chosen")
+        #expect(!flow.canCreate, "the tag that became a trip's can be sent again")
+    }
+
     @Test("a month card asks for its month, a year card for its year")
     func monthAndYearCardsAsk() async {
         let wire = CollectionsWire()
