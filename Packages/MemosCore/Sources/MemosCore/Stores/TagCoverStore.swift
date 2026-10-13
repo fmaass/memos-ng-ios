@@ -8,17 +8,21 @@ import MemosAPI
 /// Its fences are the Library's, for the Library's reasons:
 ///
 /// * one lookup per tag at a time — the slot is taken synchronously, before anything is awaited,
-///   and a second `load` of a tag already on the wire for the same session JOINS that lookup and
-///   returns when it ends, so two appearances of one card are one request;
+///   and a second `load` of a tag already on the wire JOINS that lookup and returns when it ends,
+///   whatever credential the joiner holds: a renewal while a lookup is out is still one request
+///   for the tag, and only a change of account (`sessionIdentityChanged`) abandons a slot;
 /// * a tag answered — a picture, no picture, or a failure — is not asked again for the life of
 ///   the store: a failed lookup is the plain tile, never an error, until the account changes or
 ///   the root reads its tags again (`forgetMissing`);
 /// * an answer is judged against the lineage that ISSUED it — the store's generation, moved by
-///   `sessionIdentityChanged`, and the session generation of the handle — so a lookup that
-///   outlived its account lands nowhere, success or failure;
+///   `sessionIdentityChanged`, and the session generation of the handle that sent it — so a
+///   lookup that outlived its account or its credential lands nowhere and leaves the tag to be
+///   asked again; a joiner of such a lookup gets no cover;
 /// * a slot is cleared only by the lookup that owns it;
 /// * a refused credential goes to `onUnauthorized` as the one typed `CredentialRefusal`, through
-///   the shared `StoreFailure` funnel, and is not remembered as an answer.
+///   the shared `StoreFailure` funnel, even when the session has renewed since — the refusal
+///   carries the credential it was earned with, and the session's rule judges it by that — and
+///   is not remembered as an answer.
 @MainActor
 @Observable
 public final class TagCoverStore {
@@ -48,16 +52,13 @@ public final class TagCoverStore {
     /// Names the session this store's transport failures belong to. Idempotent.
     public func reports(to session: any SessionReporting) { self.session = session }
 
-    private struct Lineage: Equatable {
-        var generation: Int
-        /// The session generation of the handle that issued the lookup.
-        var session: Int
-    }
-
     private struct Slot {
         let token: Int
-        let lineage: Lineage
+        /// The store generation the lookup was issued under.
+        let generation: Int
         let task: Task<Void, Never>
+        /// The loads waiting on this lookup besides the one that issued it.
+        var joiners = 0
     }
 
     /// The picture a tag's card draws, or nil for the plain tile.
@@ -69,43 +70,49 @@ public final class TagCoverStore {
     /// Whether a lookup of `tag` is on the wire.
     public func isLoading(_ tag: String) -> Bool { slots[tag] != nil }
 
-    /// Looks up the cover of `tag`, unless it has been answered; a lookup of it already on the
-    /// wire for the same session is joined. A caller whose session has been replaced sends nothing.
+    /// How many loads are waiting on the lookup of `tag` on the wire, besides its own.
+    func joiners(of tag: String) -> Int { slots[tag]?.joiners ?? 0 }
+
+    /// Looks up the cover of `tag`, unless it has been answered. A lookup of it already on the
+    /// wire is joined, whatever credential this caller holds; otherwise a caller whose session
+    /// has been replaced sends nothing.
     public func load(tag: String, using handle: SessionHandle, baseURL: URL) async {
         guard covers[tag] == nil else { return }
-        let lineage = Lineage(generation: generation, session: handle.generation)
-        if let running = slots[tag], running.lineage == lineage {
+        if var running = slots[tag], running.generation == generation {
+            running.joiners += 1
+            slots[tag] = running
             await running.task.value
             return
         }
         guard sessionStillCurrent(handle) else { return }
         nextToken += 1
         let token = nextToken
-        let task = Task { await self.run(tag, lineage: lineage, token: token, handle, baseURL) }
-        slots[tag] = Slot(token: token, lineage: lineage, task: task)
+        let issued = generation
+        let task = Task { await self.run(tag, generation: issued, token: token, handle, baseURL) }
+        slots[tag] = Slot(token: token, generation: issued, task: task)
         await task.value
     }
 
     private func run(
-        _ tag: String, lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
+        _ tag: String, generation issued: Int, token: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
         defer { if slots[tag]?.token == token { slots[tag] = nil } }
         do {
             let page = try await MediaLibraryStore.page(
                 handle.client, filter: .images, order: .newestFirst, tag: tag, cursor: nil,
                 limit: 1, baseURL: baseURL)
-            guard lineage.generation == generation, sessionStillCurrent(handle) else {
-                MemosLog.api.info("a tag cover answered for an account that has gone; dropped")
+            guard issued == generation, sessionStillCurrent(handle) else {
+                MemosLog.api.info("a tag cover answered for a credential that has gone; dropped")
                 return
             }
             covers[tag] = page.items.first.map { .picture($0.attachment) } ?? Cover.none
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
-            guard lineage.generation == generation, sessionStillCurrent(handle) else {
+            guard issued == generation else {
                 MemosLog.api.info("a tag cover failed for an account that has gone; dropped")
                 return
             }
-            await report(error, tag: tag, lineage: lineage, issuedUnder: handle)
+            await report(error, tag: tag, issuedUnder: handle)
         }
     }
 
@@ -123,18 +130,22 @@ public final class TagCoverStore {
         covers = covers.filter { $0.value != Cover.none }
     }
 
-    /// The Library's funnel, in its order. Whatever is not a refusal or a cancellation is
-    /// remembered as no cover — the plain tile, never a sentence.
-    private func report(
-        _ error: any Error, tag: String, lineage: Lineage, issuedUnder handle: SessionHandle
-    ) async {
+    /// The Library's funnel, in its order. A refusal goes to the session's rule even when the
+    /// session has renewed since, the rule judging it by the credential it names; anything else
+    /// is said only for the credential still current. Whatever is not a refusal or a
+    /// cancellation is remembered as no cover — the plain tile, never a sentence.
+    private func report(_ error: any Error, tag: String, issuedUnder handle: SessionHandle) async {
+        if let refusal = StoreFailure.refusal(error) {
+            _ = await onUnauthorized(refusal)
+            return
+        }
+        guard sessionStillCurrent(handle) else {
+            MemosLog.api.info("a tag cover failed for a credential that has gone; dropped")
+            return
+        }
         if let failure = StoreFailure.transportFailure(error) {
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             covers[tag] = Cover.none
-            return
-        }
-        if let refusal = StoreFailure.refusal(error) {
-            _ = await onUnauthorized(refusal)
             return
         }
         guard StoreFailure.reportable(error) != nil else {
