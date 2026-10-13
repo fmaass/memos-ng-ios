@@ -277,6 +277,17 @@ struct CollectionCardsTests {
         #expect(CollectionsPresentation.tripTags([], listFailed: false).isEmpty)
     }
 
+    @Test("a tag is left out only by its whole name: a longer or differently cased one stays")
+    func aTagIsLeftOutByItsWholeName() {
+        let excluded = CollectionsPresentation.tripTags(
+            [trip("gaggiano"), trip("lisbon")], listFailed: false)
+        let tags = ["gaggianos", "gaggi", "Lisbon", "lisbon"].map {
+            LibraryTag(name: $0, count: 1)
+        }
+        let kept = CollectionsPresentation.tags(tags, excluding: excluded)
+        #expect(kept.map(\.name) == ["gaggianos", "gaggi", "Lisbon"])
+    }
+
     @Test("with every tag a trip's, the root draws no Tags row")
     func noTagLeftNoRow() async {
         let wire = CollectionsWire()
