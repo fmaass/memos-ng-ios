@@ -1666,6 +1666,9 @@ public final class TimelineStore {
             case .noContent:
                 guard sessionStillCurrent(handle) else {
                     mutationOutcomeUnknown(claim, on: uid)
+                    // Gone from the server all the same: the listener judges it by the identity
+                    // the delete was issued under, as it does a Library run a renewal stopped.
+                    if let landed { await landed(pictures ?? [], handle) }
                     return .failed(.authorization)
                 }
                 // A memo that is gone owes nothing: there is no row for a read to repair, and a
@@ -1783,7 +1786,11 @@ public final class TimelineStore {
                 // over a picture that has indeed stopped existing, which is what was asked for.
                 guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
             }
-            guard sessionStillCurrent(handle) else { return false }
+            guard sessionStillCurrent(handle) else {
+                // Gone from the server all the same: see the memo delete's twin of this branch.
+                await landed?([uid], handle)
+                return false
+            }
             // Before the forget, which awaits its way to the disk: see `setPinned`.
             lastError = nil
             await forget(uid, from: memoUID, under: authority)

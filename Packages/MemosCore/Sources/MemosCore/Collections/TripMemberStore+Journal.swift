@@ -381,7 +381,13 @@ extension TripMemberStore {
             succeeded: { session?.noteTransportSuccess(issuedUnder: handle.generation) },
             failed: { await say($0, issuedUnder: handle, lane: .silent) }
         )
-        guard !outcome.stoppedForSessionChange else { return outcome }
+        if outcome.stoppedForSessionChange {
+            // What landed is gone from the server, but nothing the run learned is applied: no
+            // tombstone, no reload. The sheet's counts and spans counted it, so they still retire
+            // — while the identity that issued the run is still this store's (MEMNG-809).
+            if !outcome.deleted.isEmpty, issued == generation { retireSheet() }
+            return outcome
+        }
         await forget(pictures: outcome.deleted, issued: issued, handle, baseURL)
         return outcome
     }
@@ -434,16 +440,21 @@ extension TripMemberStore {
             members(for: trip).contains { gone.contains($0.id) }
         }
         deleted.formUnion(gone)
-        deletionRevision += 1
-        // Neither aggregate identifies every contributing picture, so no cached answer can be
-        // repaired here; a later read must establish the new count or extrema.
-        tagCounts = []
-        tagCountsLoaded = false
-        spans = [:]
+        retireSheet()
         for trip in touched {
             guard issued == generation, credentialCurrent(handle) else { return }
             _ = try? await trips.reload(uid: trip.uid, using: handle, baseURL: baseURL)
         }
+    }
+
+    /// Moves the deletion fence and drops every cached count and span. Neither aggregate
+    /// identifies every contributing picture, so no cached answer can be repaired; a later read
+    /// must establish the new count or extrema, and an answer issued before is dropped.
+    private func retireSheet() {
+        deletionRevision += 1
+        tagCounts = []
+        tagCountsLoaded = false
+        spans = [:]
     }
 
     // MARK: - Session

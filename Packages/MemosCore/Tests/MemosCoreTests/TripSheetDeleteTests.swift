@@ -348,10 +348,12 @@ struct TripSheetInvalidationTests {
     }
 
     private func timeline(
-        reportingTo members: TripMemberStore, _ handle: SessionHandle
+        reportingTo members: TripMemberStore, _ handle: SessionHandle,
+        session: (any SessionReporting)? = nil
     ) async -> TimelineStore {
         let timeline = TimelineStore()
         timeline.onPicturesDeleted = members.picturesDeletedHook(baseURL: { Stub.baseURL })
+        if let session { timeline.reports(to: session) }
         await timeline.refresh(using: handle, baseURL: Stub.baseURL)
         #expect(timeline.memos.map(\.uid) == [Self.memo], "control: the memo was read")
         return timeline
@@ -545,5 +547,91 @@ struct TripSheetInvalidationTests {
         #expect(members.tagCountsLoaded, "an old identity's delete retired the new count")
         #expect(members.tagCounts == counts)
         #expect(members.spans[Self.tag] == Self.after, "an old identity's delete retired the span")
+    }
+
+    @Test("a trip delete a renewal stopped retires the sheet for what landed, with no tombstone")
+    func aStoppedTripDeleteRetiresTheSheet() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = server(hold: { operation, count in
+            guard operation == TripServer.deleteAttachment, count == 1 else { return }
+            entered.open()
+            await release.wait(seconds: 30)
+        })
+        let (_, members) = await TripSeeder(server: server).members()
+        let client = server.client
+        let issued = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: issued)
+        members.reports(to: session)
+        await loadSheet(members, issued)
+        let revision = members.deletionRevision
+
+        let run = Task {
+            await members.delete(
+                [TripWire.uid(0), TripWire.uid(1)], using: issued, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the first DELETE never went out")
+        let renewed = SessionHandle(client: client, generation: 2)
+        session.activeHandle = renewed
+        release.open()
+        let outcome = await run.value
+
+        #expect(outcome?.stoppedForSessionChange == true, "control: the renewal stopped the run")
+        #expect(outcome?.deleted == [TripWire.uid(0)], "control: one picture landed")
+        #expect(members.deleted.isEmpty, "a stopped trip delete wrote the tombstone")
+        #expect(members.deletionRevision == revision + 1, "the stopped run did not move the fence")
+        await expectRetired(members, server, renewed)
+    }
+
+    @Test("a Timeline memo delete answered after a renewal still retires the sheet")
+    func aTimelineMemoDeleteAfterARenewalInvalidates() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = server(hold: { operation, count in
+            guard operation == Self.deleteMemo, count == 1 else { return }
+            entered.open()
+            await release.wait(seconds: 30)
+        })
+        let (_, members) = await TripSeeder(server: server).members()
+        let client = server.client
+        let issued = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: issued)
+        let timeline = await timeline(reportingTo: members, issued, session: session)
+        await loadSheet(members, issued)
+
+        let run = Task { await timeline.delete(uid: Self.memo, using: issued) }
+        #expect(await entered.wait(), "the DELETE never went out")
+        session.activeHandle = SessionHandle(client: client, generation: 2)
+        release.open()
+        #expect(await run.value == false, "control: the answer landed after the renewal")
+        #expect(members.deleted == [TripWire.uid(0)], "the landed memo's picture was not reported")
+        await expectRetired(members, server, issued)
+    }
+
+    @Test("a Timeline attachment delete answered after a renewal still retires the sheet")
+    func aTimelineAttachmentDeleteAfterARenewalInvalidates() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let server = server(hold: { operation, count in
+            guard operation == TripServer.deleteAttachment, count == 1 else { return }
+            entered.open()
+            await release.wait(seconds: 30)
+        })
+        let (_, members) = await TripSeeder(server: server).members()
+        let client = server.client
+        let issued = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: issued)
+        let timeline = await timeline(reportingTo: members, issued, session: session)
+        await loadSheet(members, issued)
+
+        let run = Task {
+            await timeline.deleteAttachment(uid: TripWire.uid(0), from: Self.memo, using: issued)
+        }
+        #expect(await entered.wait(), "the DELETE never went out")
+        session.activeHandle = SessionHandle(client: client, generation: 2)
+        release.open()
+        #expect(await run.value == false, "control: the answer landed after the renewal")
+        #expect(members.deleted == [TripWire.uid(0)], "the landed picture was not reported")
+        await expectRetired(members, server, issued)
     }
 }
