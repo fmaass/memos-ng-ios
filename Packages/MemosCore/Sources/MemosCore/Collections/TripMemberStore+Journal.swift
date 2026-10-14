@@ -255,14 +255,18 @@ extension TripMemberStore {
     // revision. Counts carry no picture ids and extrema name no successor, so stale answers are
     // dropped whole rather than reconciled (MEMNG-795).
 
-    /// Reads every tag's count, videos included. Refused, not sent, while the same read is in
-    /// flight.
+    /// Reads every tag's count, videos included. Refused, not sent, while a read issued under the
+    /// same deletion revision is in flight. A read issued after a delete takes a slot of its own,
+    /// as a span read does: the older read's answer is dropped, and its end leaves the new slot
+    /// alone (MEMNG-809).
     public func loadTagCounts(using handle: SessionHandle) async {
-        guard !countsInFlight else { return }
-        countsInFlight = true
+        if let flight = countsInFlight, flight.deletionRevision == deletionRevision { return }
+        journalToken += 1
+        let token = journalToken
+        countsInFlight = (deletionRevision, token)
         let issued = generation
         let issuedDeletion = deletionRevision
-        defer { if issued == generation { countsInFlight = false } }
+        defer { if countsInFlight?.token == token { countsInFlight = nil } }
         do {
             let rows = try await LibraryTagStore.tags(handle.client, filter: .all)
             guard issued == generation, issuedDeletion == deletionRevision,
@@ -382,13 +386,50 @@ extension TripMemberStore {
         return outcome
     }
 
+    /// What the Library's and the Timeline's deletes report to (MEMNG-809). Asked when a delete
+    /// is ISSUED, it takes this store's identity generation then; what it returns runs
+    /// `picturesDeleted` for the uids that landed only while that generation is still this
+    /// store's, so a delete answered after the session became somebody else's changes nothing
+    /// here. A credential renewal moves no generation: what landed before it is still forgotten.
+    /// `baseURL` is read when the pictures land, for the trips read again.
+    public func picturesDeletedHook(baseURL: @escaping @MainActor () -> URL?)
+        -> PicturesDeletedHook
+    {
+        { [weak self] in
+            let issued = self?.generation
+            return { [weak self] uids, handle in
+                guard let self, let issued, let baseURL = baseURL() else { return }
+                await self.picturesDeleted(uids, issued: issued, handle, baseURL)
+            }
+        }
+    }
+
     /// The deleted pictures leave every trip, and stay gone; each trip they were drained as
     /// members of has its record read again.
     private func forget(
         pictures uids: [String], issued: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
         guard !uids.isEmpty else { return }
-        let gone = Set(uids)
+        await picturesDeleted(Set(uids), issued: issued, handle, baseURL)
+    }
+
+    /// A delete from anywhere, in three steps. Nothing is applied once the identity generation the
+    /// delete was issued under has moved: `sessionIdentityChanged()` already forgot everything
+    /// that identity held, and the store is the next one's.
+    ///
+    /// (a) The trips the pictures were drained as members of, read BEFORE the tombstone, since
+    /// `members(for:)` hides every uid in `deleted`. (b) The tombstone, the deletion fence, and
+    /// every cached count and span — a count read already in flight keeps its slot only for its
+    /// own deletion revision (`loadTagCounts`). (c) Each touched trip's record read again, while
+    /// the identity and the credential still hold. An empty `gone` — a memo whose pictures were
+    /// not known — still retires every count and span; it reads no trip.
+    func picturesDeleted(
+        _ gone: Set<String>, issued: Int, _ handle: SessionHandle, _ baseURL: URL
+    ) async {
+        guard issued == generation else {
+            MemosLog.api.info("a delete landed for an identity that has moved on; nothing applied")
+            return
+        }
         let touched = trips.trips.filter { trip in
             members(for: trip).contains { gone.contains($0.id) }
         }
@@ -415,7 +456,7 @@ extension TripMemberStore {
         tagCounts = []
         tagCountsLoaded = false
         spans = [:]
-        countsInFlight = false
+        countsInFlight = nil
         spansInFlight = [:]
         let joiners = spanJoiners.values.joined()
         spanJoiners = [:]
