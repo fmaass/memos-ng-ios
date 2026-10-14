@@ -220,6 +220,7 @@ public struct TimelineView: View {
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this list (`SessionReporting`).
             timeline?.reports(to: session)
+            reportPictureDeletes()
             await load()
             // What "Default" resolves to is the account's setting, not something the app can
             // guess. It is fetched here rather than during sign-in so a slow or missing
@@ -237,6 +238,7 @@ public struct TimelineView: View {
             CollectionsSession.identityChanged(
                 to: identity, trips: trips, members: tripMembers)
         }
+        .onChange(of: tripMembers.map(ObjectIdentifier.init)) { reportPictureDeletes() }
         // The live media channel, and its single owner.
         //
         // One channel for the whole signed-in app: this view is the app's first tab, so it exists
@@ -674,6 +676,14 @@ public struct TimelineView: View {
         if await timeline.delete(uid: memo.uid, using: handle) {
             feedback.fire(.deleted)
         }
+    }
+
+    /// A picture this store deletes retires the New trip sheet's counts and spans, and reads
+    /// again the trips that held it (MEMNG-809): its deletes report to the member store built
+    /// beside the tabs. Wired whenever either store arrives, whichever comes first.
+    private func reportPictureDeletes() {
+        let baseURL: @MainActor () -> URL? = { [session] in session.serverBaseURL }
+        timeline?.onPicturesDeleted = tripMembers?.picturesDeletedHook(baseURL: baseURL)
     }
 
     /// The request the edit sheet's Delete sends. WHEN it runs — once, for the memo whose sheet

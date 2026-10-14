@@ -72,7 +72,9 @@ public final class TripMemberStore {
     /// What the last journal load of each trip could not do, by uid.
     var journalErrors: [String: String] = [:]
     var journalFlights: [String: TripJournalFlight] = [:]
-    var countsInFlight = false
+    /// The count read in flight: a read joins none, and is refused only beside one issued under
+    /// the same deletion revision; its token keeps an old read's end from clearing a newer slot.
+    var countsInFlight: (deletionRevision: Int, token: Int)?
     /// A span joins only reads issued before the same deletes; its token keeps an old read's end
     /// from clearing a newer read's slot.
     var spansInFlight:

@@ -104,6 +104,10 @@ public final class TimelineStore {
     /// Named by the owner rather than taken at construction, because the timeline builds its own
     /// from a `.task` and names the session to it there.
     private var session: (any SessionReporting)?
+    /// Told of the pictures a delete took — a memo's attachments, or one attachment — for the New
+    /// trip sheet's counts and spans (MEMNG-809). Asked when the delete is issued; what it returns
+    /// is called once the server has confirmed the pictures gone.
+    @ObservationIgnored public var onPicturesDeleted: PicturesDeletedHook?
     /// Where the last-seen list is kept between launches, or nil for a store that keeps none —
     /// which is every list that is not THE timeline: any other list is an answer to a question
     /// nobody asked again on the next launch.
@@ -1649,6 +1653,11 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        // Before the send, while the row may still be held: the pictures the listener is told
+        // went with the memo. A memo this list does not hold — a detail opened from elsewhere —
+        // reports none, which still retires every count and span (MEMNG-809).
+        let pictures = memos.first(where: { $0.uid == uid }).map { Set($0.attachments.map(\.uid)) }
+        let landed = pictures == [] ? nil : onPicturesDeleted?()
         do {
             let response = try await client.deleteMemoApiMemosUidDelete(
                 .init(path: .init(uid: uid))
@@ -1657,6 +1666,9 @@ public final class TimelineStore {
             case .noContent:
                 guard sessionStillCurrent(handle) else {
                     mutationOutcomeUnknown(claim, on: uid)
+                    // Gone from the server all the same: the listener judges it by the identity
+                    // the delete was issued under, as it does a Library run a renewal stopped.
+                    if let landed { await landed(pictures ?? [], handle) }
                     return .failed(.authorization)
                 }
                 // A memo that is gone owes nothing: there is no row for a read to repair, and a
@@ -1676,6 +1688,7 @@ public final class TimelineStore {
                 timelineGeneration += 1
                 lastError = nil
                 await commit(memos.filter { $0.uid != uid }, under: authority)
+                if let landed { await landed(pictures ?? [], handle) }
                 return .saved
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
             // is thrown exactly as it was: a memo that is already gone is a fact about the server,
@@ -1752,6 +1765,8 @@ public final class TimelineStore {
         // between the handle being captured and this body starting — and a DELETE is not a read:
         // an answer discarded afterwards does not put the file back.
         guard sessionStillCurrent(handle) else { return false }
+        // Asked before the send, for the reason the memo delete asks it (MEMNG-809).
+        let landed = onPicturesDeleted?()
         do {
             let response = try await client.deleteAttachmentApiAttachmentsUidDelete(
                 .init(path: .init(uid: uid))
@@ -1771,10 +1786,15 @@ public final class TimelineStore {
                 // over a picture that has indeed stopped existing, which is what was asked for.
                 guard statusCode == 404 else { throw APIError.fromStatus(statusCode) }
             }
-            guard sessionStillCurrent(handle) else { return false }
+            guard sessionStillCurrent(handle) else {
+                // Gone from the server all the same: see the memo delete's twin of this branch.
+                await landed?([uid], handle)
+                return false
+            }
             // Before the forget, which awaits its way to the disk: see `setPinned`.
             lastError = nil
             await forget(uid, from: memoUID, under: authority)
+            await landed?([uid], handle)
             return true
         } catch {
             await report(error, issuedUnder: handle)

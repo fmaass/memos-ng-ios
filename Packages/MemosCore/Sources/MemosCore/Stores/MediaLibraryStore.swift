@@ -72,6 +72,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// this store reads the session's incarnation from — its twin's, for its twin's reason
     /// (`TimelineStore`).
     private var session: (any SessionReporting)?
+    /// Told of the pictures a delete took — the New trip sheet's counts and spans (MEMNG-809).
+    /// Asked when the delete is issued; what it returns is called with the uids that landed,
+    /// a partial run's included, whether or not the session moved meanwhile.
+    @ObservationIgnored public var onPicturesDeleted: PicturesDeletedHook?
 
     /// Which page of the list each held row was read on, and how many pages are held: the map a
     /// reissue walks back through (`reissue(uids:using:baseURL:)`). Kept beside the rows rather
@@ -397,6 +401,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         }
         isDeleting = true
         defer { isDeleting = false }
+        // Asked before anything is sent, so the listener judges what lands against the identity
+        // that issued the run (MEMNG-809).
+        let landed = onPicturesDeleted?()
         let outcome = await Self.deleteRun(
             uids,
             using: handle,
@@ -404,8 +411,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             succeeded: { session?.noteTransportSuccess(issuedUnder: handle.generation) },
             failed: { await report($0, issuedUnder: handle, writesSentence: false) }
         )
-        guard !outcome.stoppedForSessionChange else { return outcome }
-        forget(outcome.deleted)
+        if !outcome.stoppedForSessionChange { forget(outcome.deleted) }
+        // What landed is gone from the server whether or not the session moved meanwhile — a run
+        // a failure or a renewal stopped included — so the listener hears of it either way.
+        if let landed, !outcome.deleted.isEmpty { await landed(Set(outcome.deleted), handle) }
         return outcome
     }
 

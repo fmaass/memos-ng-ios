@@ -36,6 +36,8 @@ struct MediaLibraryView: View {
     /// A year asked for from the Collections root, shown in Months (MEMNG-720).
     @Environment(LibraryYearJump.self) private var yearJump: LibraryYearJump?
     @Environment(LibraryMonthJump.self) private var monthJump: LibraryMonthJump?
+    /// The trips' member store, which this grid's deletes report to (MEMNG-809).
+    @Environment(TripMemberStore.self) private var tripMembers: TripMemberStore?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -195,6 +197,7 @@ struct MediaLibraryView: View {
             library?.reports(to: session)
             tags?.reports(to: session)
             buckets?.reports(to: session)
+            reportPictureDeletes()
             // The outgoing rows go BEFORE the read is issued, whichever of this and the
             // `onChange` below heard of the new account first: a read issued first would be
             // answered for a generation the emptying has already moved past, and dropped.
@@ -254,6 +257,7 @@ struct MediaLibraryView: View {
             tags?.sessionIdentityChanged()
             buckets?.sessionIdentityChanged()
         }
+        .onChange(of: tripMembers.map(ObjectIdentifier.init)) { reportPictureDeletes() }
         // The server is answering again, and this grid was read while it was not.
         .reloadsOnRecovery(session.reachabilityRecoveries) {
             await load()
@@ -599,6 +603,14 @@ struct MediaLibraryView: View {
             }
             await loadBuckets(refreshing: true)
         }
+    }
+
+    /// A picture this grid deletes retires the New trip sheet's counts and spans, and reads again
+    /// the trips that held it (MEMNG-809): its deletes report to the member store built beside
+    /// the tabs. Wired whenever either store arrives, whichever comes first.
+    private func reportPictureDeletes() {
+        let baseURL: @MainActor () -> URL? = { [session] in session.serverBaseURL }
+        library?.onPicturesDeleted = tripMembers?.picturesDeletedHook(baseURL: baseURL)
     }
 
     /// Empties the grid when the account its rows were read as is no longer `subject` — once per
