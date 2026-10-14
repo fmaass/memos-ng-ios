@@ -362,7 +362,7 @@ enum Stub {
             {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
             "width":1000,"height":1000,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
             "webReady":true,\
-            "renditions":[],"tags":[],"orphan":true,"memoUid":null,\
+            "renditions":[],"tags":[],"orphan":true,"memoUid":null,"visibility":null,\
             "takenAt":"2026-09-26T10:00:00Z","filename":"\(uid).jpg",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
             "previewUrl":"/api/attachments/\(uid)/mobile",\

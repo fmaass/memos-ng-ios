@@ -55,6 +55,7 @@ filter:
     - get_settings_api_settings_get
     - health_health_get
     - include_attachment_api_collections__uid__exclusions__attachment_uid__delete
+    - include_attachments_api_collections__uid__attachments_post
     - list_attachments_api_attachments_get
     - list_collections_api_collections_get
     - list_digest_recipients_api_admin_digest_recipients_get

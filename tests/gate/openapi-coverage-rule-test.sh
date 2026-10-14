@@ -392,7 +392,7 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8", newline="").read()
 open(path, "w", encoding="utf-8", newline="").write(text.replace("\n", "\r\n"))
 PY
-check "the config with CRLF line endings" 0 "$w" "75 operationIds named by filter.operations"
+check "the config with CRLF line endings" 0 "$w" "76 operationIds named by filter.operations"
 
 # And the repository this suite ships in, which is the point of the whole exercise. With the copied
 # pair at the top of this file it is also the positive control on every refusal above: the real
