@@ -3938,3 +3938,259 @@ struct WholeLastAnswerCreatesTests {
         #expect(rig.completion.idempotencyKeys.count == 1)
     }
 }
+
+/// MEMNG-731: a whole-lane capture whose own `nextAttemptAt` lies in the future — a create or an
+/// owed edit spacing out its retry — is drained when that instant passes, with nothing else to
+/// wake it. Every file is on the server, so no per-file deadline exists to arm the timer instead.
+@Suite("Whole lane: a job-level deadline arms the timer (MEMNG-731)")
+struct WholeJobDeadlineTimerTests {
+    /// Every file on the server, on the whole lane, waiting: nothing is left for a per-file
+    /// deadline to wait on.
+    private static func allUploaded(_ job: UploadJob) -> UploadJob {
+        var done = job
+        done.transport = .whole
+        done.state = .waiting
+        for index in done.files.indices {
+            done.files[index].uploadUID = "u\(index)"
+            done.files[index].bytesConfirmed = done.files[index].byteSize
+        }
+        return done
+    }
+
+    /// A second capture in the same queue whose one file waits out its own deadline at `due`:
+    /// the positive control that the timer WAS armed from the manifests just read.
+    private func queueSibling(in rig: WholeRig, fileDue due: Date) async throws {
+        let source = StagedSource(
+            url: try Fixture.file(in: rig.root, named: "sibling.heic", bytes: 500),
+            filename: "sibling.heic", mime: "image/heic"
+        )
+        var sibling = try await rig.repository.enqueue(
+            content: "a sibling", visibility: "PRIVATE", capturedAt: rig.clock.now,
+            binding: Fixture.binding(), sources: [source]
+        )
+        sibling.transport = .whole
+        sibling.files[0].attemptCount = 1
+        sibling.files[0].nextAttemptAt = due
+        try await rig.repository.save(sibling)
+    }
+
+    @Test("a create backing off is sent again at its own deadline, with no drain from the test")
+    func createBackoffArmsTheTimer() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            completion: [.retry("503"), .created(uid: "m1")],
+            prepare: { Self.allUploaded($0) },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+        // The deadline is the manifest's: the create's own backoff, and no file carries one.
+        let backingOff = try await rig.reload()
+        let deadline = backingOff.nextAttemptAt
+        #expect(deadline > rig.clock.now)
+        #expect(backingOff.files.allSatisfy { $0.isComplete && $0.nextAttemptAt == nil })
+
+        // Exactly to the instant, not past it: the deadline itself is when the create is due.
+        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
+        sleeper.advance(to: rig.clock.now)
+        let sent = try await rig.eventually { rig.completion.idempotencyKeys.count == 2 }
+        #expect(sent, "the create's own deadline armed no timer")
+        try await settled(rig.engine)
+        #expect(rig.completion.idempotencyKeys.count == 2)
+        #expect(Set(rig.completion.idempotencyKeys).count == 1)
+        #expect(await rig.repository.job(rig.job.id) == nil)
+        #expect(rig.uploadPosts == 0)
+        #expect(sleeper.mostArmedAtOnce == 1)
+    }
+
+    @Test("an owed edit backing off is sent again at its own deadline, with no other trigger")
+    func editBackoffArmsTheTimer() async throws {
+        let sleeper = ControlledSleeper()
+        // The rig's completion answers every PATCH `.retry` — the default a completion that
+        // cannot send an edit gives — so each transmission is one claim and one backoff.
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var owing = Self.allUploaded(job)
+                for index in owing.files.indices {
+                    owing.files[index].attachmentUID = "a\(index)"
+                }
+                owing.resolvedMemoUID = "m1"
+                owing.editKey = "k1"
+                owing.pendingEdit = PendingEdit(
+                    content: "edited", visibility: "PRIVATE", capturedAt: job.capturedAt,
+                    fileIDs: job.files.map(\.id)
+                )
+                return owing
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        let backingOff = try await rig.reload()
+        #expect(backingOff.patchAttempt == 1)
+        #expect(backingOff.editUnansweredSince != nil)
+        let deadline = backingOff.nextAttemptAt
+        #expect(deadline > rig.clock.now)
+        #expect(backingOff.files.allSatisfy { $0.isComplete && $0.nextAttemptAt == nil })
+
+        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
+        sleeper.advance(to: rig.clock.now)
+        let sent = try await rig.eventually { try await rig.reload().patchAttempt == 2 }
+        #expect(sent, "the edit's own deadline armed no timer")
+        try await settled(rig.engine)
+        let after = try await rig.reload()
+        #expect(after.patchAttempt == 2)
+        #expect(after.editKey == "k1")
+        // The dispatch itself, not only the claim: two PATCHes reached the completion, both
+        // under the key the edit was minted with.
+        #expect(rig.completion.patchedEditKeys == ["k1", "k1"])
+        #expect(rig.completion.idempotencyKeys.isEmpty)
+        #expect(sleeper.mostArmedAtOnce == 1)
+    }
+
+    @Test("control: an incomplete file's earlier deadline is armed before the job's own")
+    func earlierFileDeadlineArmsFirst() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var waiting = job
+                waiting.transport = .whole
+                waiting.state = .waiting
+                waiting.files[0].uploadUID = "u0"
+                waiting.files[0].bytesConfirmed = waiting.files[0].byteSize
+                waiting.files[1].attemptCount = 1
+                waiting.files[1].nextAttemptAt = job.capturedAt.addingTimeInterval(30)
+                waiting.attemptCount = 1
+                waiting.nextAttemptAt = job.capturedAt.addingTimeInterval(60)
+                return waiting
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        #expect(try await rig.reload().file(rig.video.id)?.isComplete == false)
+        try await rig.engine.reconcile()
+        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(30)] }
+        #expect(armed)
+        try await settled(rig.engine)
+        #expect(sleeper.history == [start.addingTimeInterval(30)])
+    }
+
+    @Test("a job deadline behind a file's wakes the capture by itself once the file's has passed")
+    func jobDeadlineAfterFileDeadlineWakes() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var waiting = job
+                waiting.transport = .whole
+                waiting.state = .waiting
+                waiting.files[0].uploadUID = "u0"
+                waiting.files[0].bytesConfirmed = waiting.files[0].byteSize
+                waiting.files[1].attemptCount = 1
+                waiting.files[1].nextAttemptAt = job.capturedAt.addingTimeInterval(30)
+                waiting.attemptCount = 1
+                waiting.nextAttemptAt = job.capturedAt.addingTimeInterval(60)
+                return waiting
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        try await rig.engine.reconcile()
+        #expect(try await rig.eventually { sleeper.armed == [start.addingTimeInterval(30)] })
+
+        // At +30 the file is due and the capture is not: the pass meets the job's backoff and
+        // writes nothing, so only the timer itself can carry the +60 forward.
+        rig.clock.advance(30)
+        sleeper.advance(to: rig.clock.now)
+        let rearmed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(60)] }
+        #expect(rearmed, "the timer that fired armed nothing after it")
+        try await settled(rig.engine)
+        #expect(rig.uploadPosts == 0)
+
+        rig.clock.advance(30)
+        sleeper.advance(to: rig.clock.now)
+        let sent = try await rig.eventually { rig.uploadPosts == 1 }
+        #expect(sent, "the capture's own deadline never woke it")
+        try await settled(rig.engine)
+        #expect(rig.attempts(of: rig.video.id).count == 1)
+        // Each deadline armed once: the one that fired, at exactly its instant, was not armed
+        // again into a timer that would fire at once.
+        let firstTwo = Array(sleeper.history.prefix(2))
+        #expect(firstTwo == [start.addingTimeInterval(30), start.addingTimeInterval(60)])
+    }
+
+    @Test("a cancelled capture's future deadline arms no timer")
+    func cancelledJobArmsNothing() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var cancelled = Self.allUploaded(job)
+                cancelled.cancelledAt = job.capturedAt
+                cancelled.attemptCount = 1
+                cancelled.nextAttemptAt = job.capturedAt.addingTimeInterval(60)
+                return cancelled
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        try await queueSibling(in: rig, fileDue: start.addingTimeInterval(90))
+        try await rig.engine.reconcile()
+        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(90)] }
+        #expect(armed)
+        try await settled(rig.engine)
+        #expect(sleeper.history == [start.addingTimeInterval(90)])
+    }
+
+    @Test("a held capture's future deadline arms no timer")
+    func heldJobArmsNothing() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var held = Self.allUploaded(job)
+                held.state = .held
+                held.holdReason = .serverRefused
+                held.attemptCount = 1
+                held.nextAttemptAt = job.capturedAt.addingTimeInterval(60)
+                return held
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        try await queueSibling(in: rig, fileDue: start.addingTimeInterval(90))
+        try await rig.engine.reconcile()
+        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(90)] }
+        #expect(armed)
+        try await settled(rig.engine)
+        #expect(sleeper.history == [start.addingTimeInterval(90)])
+    }
+
+    @Test("a chunk-lane capture's future deadline arms no timer: the timer is the whole lane's")
+    func chunkJobArmsNothing() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            prepare: { job in
+                var chunked = job
+                chunked.transport = .chunk
+                chunked.state = .waiting
+                chunked.attemptCount = 1
+                chunked.nextAttemptAt = job.capturedAt.addingTimeInterval(60)
+                return chunked
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        try await queueSibling(in: rig, fileDue: start.addingTimeInterval(90))
+        try await rig.engine.reconcile()
+        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(90)] }
+        #expect(armed)
+        try await settled(rig.engine)
+        #expect(sleeper.history == [start.addingTimeInterval(90)])
+    }
+}

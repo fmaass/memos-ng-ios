@@ -297,6 +297,24 @@ final class ScriptedCompletion: MemoCompleting, @unchecked Sendable {
     }
 
     var idempotencyKeys: [UUID] { lock.withLock { attempts } }
+
+    private var patches: [String?] = []
+
+    /// Answers every edit as a completion that cannot send one does — `.retry`, the protocol's
+    /// own default — and records the key each one carried, so a test counts the PATCHes actually
+    /// handed to the completion rather than the claims written before them.
+    func patch(
+        job: UploadJob,
+        request: URLRequest,
+        credentials: OutboxCredentials,
+        under authority: SendAuthority
+    ) async -> MemoPatchOutcome {
+        lock.withLock { patches.append(job.editKey) }
+        return .retry("This device cannot send the edit.")
+    }
+
+    /// The edit key of every PATCH handed over, in order.
+    var patchedEditKeys: [String?] { lock.withLock { patches } }
 }
 
 /// The real queue on disk, with a set number of its writes refused.

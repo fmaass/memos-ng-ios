@@ -107,11 +107,12 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// reservation count: only the conversion of that task removes it, or a reconciliation's
     /// reseed while no conversion is outstanding. Recorded only while a reservation is.
     private var endedUncounted: Set<Int> = []
-    /// Every per-file deadline of each whole-lane capture's unfinished files, as this engine last
-    /// read or wrote them. Replaced by every reconciliation, so a row that left the queue is
-    /// forgotten there. Per file, not the capture's minimum: a file in flight keeps a deadline that
-    /// has passed, and as the capture's minimum that past one would hide a sibling's still ahead.
-    private var fileDeadlines: [UUID: [Date]] = [:]
+    /// Every per-file deadline of each whole-lane capture's unfinished files, and the capture's own
+    /// next attempt beside them, as this engine last read or wrote them. Replaced by every
+    /// reconciliation, so a row that left the queue is forgotten there. Per file, not the
+    /// capture's minimum: a file in flight keeps a deadline that has passed, and as the capture's
+    /// minimum that past one would hide a sibling's still ahead.
+    private var wakeDeadlines: [UUID: [Date]] = [:]
     /// The ONE deadline timer: armed while the gate is open at the earliest future deadline, and a
     /// token that tells its callback whether it is still the timer this engine means.
     private var deadlineTimer: Task<Void, Never>?
@@ -192,7 +193,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             handOffsInProgress == 0
         else { return }
         seedBudget(from: tasks)
-        fileDeadlines = [:]
+        wakeDeadlines = [:]
         for job in jobs { noteDeadlines(of: job) }
         rearmDeadlineTimer()
         let plan = WholeReconciliation.plan(
@@ -1521,11 +1522,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     private func noteDeadlines(of job: UploadJob) {
         guard job.lane == .whole, job.cancelledAt == nil, job.state != .held else {
-            fileDeadlines[job.id] = nil
+            wakeDeadlines[job.id] = nil
             return
         }
-        let deadlines = job.files.filter { !$0.isComplete }.compactMap(\.nextAttemptAt)
-        fileDeadlines[job.id] = deadlines.isEmpty ? nil : deadlines
+        // The capture's own next attempt too (MEMNG-731): a create or an owed edit spacing out its
+        // retry has every file on the server, so no file's deadline would ever wake it.
+        let deadlines =
+            job.files.filter { !$0.isComplete }.compactMap(\.nextAttemptAt) + [job.nextAttemptAt]
+        wakeDeadlines[job.id] = deadlines
     }
 
     /// Records what a write left and re-arms the timer on it.
@@ -1534,9 +1538,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         rearmDeadlineTimer()
     }
 
-    /// Arms the ONE timer at the earliest future per-file deadline, while the gate is open. A
-    /// deadline already past is a pass's to meet, not the timer's: armed, it would fire at once
-    /// into a pass that may again do nothing, and again.
+    /// Arms the ONE timer at the earliest future deadline, a file's or a capture's, while the gate
+    /// is open. A deadline already past is a pass's to meet, not the timer's: armed, it would fire
+    /// at once into a pass that may again do nothing, and again.
     private func rearmDeadlineTimer() {
         if !observingGate {
             observingGate = true
@@ -1547,7 +1551,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
         let now = clock()
         let next =
-            schedulingGate.isOpen ? fileDeadlines.values.joined().filter { $0 > now }.min() : nil
+            schedulingGate.isOpen ? wakeDeadlines.values.joined().filter { $0 > now }.min() : nil
         if next == armedDeadline, next == nil || deadlineTimer != nil { return }
         deadlineTimer?.cancel()
         deadlineTimer = nil
